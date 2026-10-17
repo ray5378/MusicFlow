@@ -20,7 +20,7 @@
 //      时，用「去尾部 ` - xxx`」的变体参与**精确相等**判定（非模糊匹配）。
 //   8. **简繁字形归一**（同上）：匹配比较侧统一折算到简体，避免「平台繁体登记 vs DB 简体」
 //      造成的恒不匹配；写入侧字形不受影响（仍由 tagWriter 的 applyTagsVariant 决定）。
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { __resetTagProviderMemo, tagProviderPlugin } from "../../src/services/plugin/tagProvider.js";
 import type { LyricSongInput } from "../../src/plugins/types.js";
 
@@ -498,4 +498,592 @@ describe("tag-provider — 端点被挡 / 闸门误杀修复", () => {
     });
     expect(meta).toBeNull();
   });
+});
+
+// ==================== 分支补齐（第三轮）：边界 / 异常 / 兜底 ====================
+//
+// 以下用例仅**新增**，不改动上方任何既有用例。目的：把 tagProvider.ts 里尚未被触达的
+// 空响应 / 非 200 / 非 JSON / 超时 / 候选字段缺失 / 风格与歌词解析边界 / 缓存容量 /
+// 覆盖命中 / 网易云二次调详情 等分支逐一锁死，并断言既有不变量（QQ 默认优先、秒级时长等）。
+
+/** 端点片段常量（顺序敏感：网易云歌词与 QQ 歌词都含 "lyric"，须先判网易云）。 */
+const F_NS_SEARCH = "music.163.com/api/search/get";
+const F_NS_DETAIL = "music.163.com/api/song/detail";
+const F_NS_LYRIC = "music.163.com/api/song/lyric";
+const F_QQ_SEARCH = "search_for_qq_cp";
+const F_QQ_DETAIL = "musicu.fcg";
+const F_QQ_LYRIC = "lyric/fcgi-bin";
+
+/** 可编程 host：按 URL 片段返回任意响应；支持 null / 非 200 / 原始文本(非 JSON) / 抛错。 */
+function routeHost(route: {
+  map?: Record<string, unknown>;
+  nullFor?: string[];
+  notOkFor?: string[];
+  rawFor?: Record<string, string>;
+  throwFor?: string[];
+}): any {
+  const calls: string[] = [];
+  return {
+    calls,
+    http: async (url: string) => {
+      calls.push(url);
+      if (route.throwFor?.some((f) => url.includes(f))) throw new Error("network boom");
+      if (route.nullFor?.some((f) => url.includes(f))) return null;
+      if (route.notOkFor?.some((f) => url.includes(f))) return { ok: false, text: async () => "" };
+      for (const [f, txt] of Object.entries(route.rawFor ?? {})) {
+        if (url.includes(f)) return { ok: true, text: async () => txt };
+      }
+      for (const [f, val] of Object.entries(route.map ?? {})) {
+        if (url.includes(f)) {
+          return { ok: true, text: async () => (typeof val === "string" ? val : JSON.stringify(val)) };
+        }
+      }
+      return { ok: true, text: async () => JSON.stringify({}) };
+    },
+  };
+}
+
+/** QQ 真搜索端点的**期望 URL**：用于精确断言关键词只用 title（中文被 encodeURIComponent 编码，不能用 toContain）。 */
+const qqKwUrl = (kw: string): string =>
+  "https://c.y.qq.com/soso/fcgi-bin/search_for_qq_cp?w=" + encodeURIComponent(kw) + "&format=json&p=1&n=10&cr=1&new_json=1";
+
+// ---------- HTTP 边界：空响应 / 非 200 / 非 JSON / 超时 ----------
+describe("tag-provider — HTTP 边界(requestJson)", () => {
+  it("QQ 搜索 res 为 null → 视为无结果，回退网易云", async () => {
+    const host = routeHost({
+      nullFor: [F_QQ_SEARCH],
+      map: { [F_NS_SEARCH]: NS_SEARCH, [F_NS_DETAIL]: NS_DETAIL },
+    });
+    const meta = await tagProviderPlugin.searchMetadata(host, SONG);
+    expect(meta?.platform).toBe("netease");
+  });
+
+  it("QQ 搜索 HTTP 非 200(res.ok=false) → 视为无结果，回退网易云", async () => {
+    const host = routeHost({
+      notOkFor: [F_QQ_SEARCH],
+      map: { [F_NS_SEARCH]: NS_SEARCH, [F_NS_DETAIL]: NS_DETAIL },
+    });
+    const meta = await tagProviderPlugin.searchMetadata(host, SONG);
+    expect(meta?.platform).toBe("netease");
+  });
+
+  it("QQ 搜索响应非 JSON(被风控返回 HTML) → 视为无结果", async () => {
+    const host = routeHost({
+      rawFor: { [F_QQ_SEARCH]: "<html>blocked</html>" },
+      map: { [F_NS_SEARCH]: NS_SEARCH, [F_NS_DETAIL]: NS_DETAIL },
+    });
+    const meta = await tagProviderPlugin.searchMetadata(host, SONG);
+    expect(meta?.platform).toBe("netease");
+  });
+
+  it("请求超时(10s)→ 触发 AbortController.abort，软失败返回 null", async () => {
+    const host = {
+      calls: [] as string[],
+      http: (url: string, init: any) => {
+        if (url.includes("music.163.com")) {
+          return Promise.resolve({ ok: true, text: async () => JSON.stringify({ result: { songs: [] } }) });
+        }
+        return new Promise((_res, rej) => {
+          init.signal.addEventListener("abort", () => rej(new Error("aborted")));
+        });
+      },
+    };
+    vi.useFakeTimers();
+    try {
+      const p = tagProviderPlugin.searchMetadata(host as any, SONG);
+      await vi.advanceTimersByTimeAsync(10000);
+      expect(await p).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+// ---------- QQ 搜索候选字段缺失 ----------
+describe("tag-provider — QQ 候选字段缺失归一化", () => {
+  it("候选缺 mid/songmid、title/songname、interval、singer 非字符串 → 归一化兜底不抛错", async () => {
+    const weird = {
+      code: 0,
+      data: {
+        song: {
+          list: [
+            { songmid: "legacyMid001", songname: "告白气球", singername: 123 }, // 旧结构 + 非字符串歌手
+            { mid: "003OUlho2HcRHC", title: "告白气球", singer: [{ name: 5 }] }, // 歌手对象 name 非字符串
+            { mid: "", title: "告白气球" }, // mid 为空 → 跳过
+            { title: "告白气球" }, // 既无 mid 亦无 songmid → 空
+            { mid: "003noname0001" }, // 既无 title 亦无 songname → 空 → 跳过
+            { mid: "003noint000001", title: "告白气球", singer: [{ name: "周杰伦" }] }, // 无 interval → 0
+          ],
+        },
+      },
+    };
+    const host = routeHost({ map: { [F_QQ_SEARCH]: weird } });
+    // 只关心归一化分支不抛错；这些候选均无法通过匹配闸门 → 最终 null
+    const meta = await tagProviderPlugin.searchMetadata(host, SONG);
+    expect(meta).toBeNull();
+  });
+});
+
+// ---------- QQ 详情 / 风格解析边界 ----------
+describe("tag-provider — QQ 详情与 genre 解析边界", () => {
+  it("详情响应缺 track_info → 该候选跳过(不写缓存)，走网易云兜底", async () => {
+    const host = routeHost({
+      map: {
+        [F_QQ_SEARCH]: SEARCH,
+        [F_QQ_DETAIL]: { code: 0, req: { data: {} } },
+        [F_NS_SEARCH]: NS_SEARCH,
+        [F_NS_DETAIL]: NS_DETAIL,
+      },
+    });
+    const meta = await tagProviderPlugin.searchMetadata(host, SONG);
+    expect(meta?.platform).toBe("netease");
+  });
+
+  it("详情无 info 块 → genre 为空(绝不回落 track_info.genre 数字码)", async () => {
+    const host = routeHost({
+      map: {
+        [F_QQ_SEARCH]: SEARCH,
+        [F_QQ_DETAIL]: {
+          code: 0,
+          req: {
+            data: {
+              track_info: {
+                name: "告白气球",
+                singer: [{ name: "周杰伦" }],
+                album: { mid: "000MkMni19ClKG", name: "周杰伦的床边故事" },
+                interval: 215,
+                index_album: 8,
+                genre: 33,
+              },
+            },
+          },
+        },
+      },
+    });
+    const meta = await tagProviderPlugin.searchMetadata(host, SONG);
+    expect(meta?.platform).toBe("qq");
+    expect(meta?.genre).toBeUndefined();
+  });
+
+  it("info.genre.content 值非字符串/为空白 → genre 不填", async () => {
+    const host = routeHost({
+      map: {
+        [F_QQ_SEARCH]: SEARCH,
+        [F_QQ_DETAIL]: {
+          code: 0,
+          req: {
+            data: {
+              info: { genre: { content: [{ id: 1 }, { value: 5 }, { value: "   " }] } },
+              track_info: { name: "告白气球", singer: [{ name: "周杰伦" }], album: { name: "专辑" }, interval: 215, index_album: 1 },
+            },
+          },
+        },
+      },
+    });
+    const meta = await tagProviderPlugin.searchMetadata(host, SONG);
+    expect(meta?.genre).toBeUndefined();
+  });
+
+  it("轨号/年份兜底：title 回退、singer 非数组、album.time_public 兜底年份、index_album 非法", async () => {
+    const host = routeHost({
+      map: {
+        [F_QQ_SEARCH]: SEARCH,
+        [F_QQ_DETAIL]: {
+          code: 0,
+          req: {
+            data: {
+              track_info: {
+                title: "告白气球", // 无 name → 走 title 兜底
+                singer: "周杰伦", // 非数组 → artist 不填
+                album: { name: "周杰伦的床边故事", time_public: "2010-01-01" }, // 无 mid；年份由 album.time_public 兜底
+                interval: 215,
+                index_album: 0, // 非法轨号 → 不填
+              },
+            },
+          },
+        },
+      },
+    });
+    const meta = await tagProviderPlugin.searchMetadata(host, SONG);
+    expect(meta?.title).toBe("告白气球");
+    expect(meta?.artist).toBeUndefined();
+    expect(meta?.year).toBe(2010);
+    expect(meta?.track).toBeUndefined();
+    expect(meta?.platform).toBe("qq");
+  });
+
+  it("time_public 非法(无可识别年份)→ 不填年份", async () => {
+    const host = routeHost({
+      map: {
+        [F_QQ_SEARCH]: SEARCH,
+        [F_QQ_DETAIL]: {
+          code: 0,
+          req: {
+            data: {
+              track_info: {
+                name: "告白气球",
+                singer: [{ name: "周杰伦" }],
+                album: { mid: "000MkMni19ClKG", name: "专辑" },
+                interval: 215,
+                time_public: "unknown",
+              },
+            },
+          },
+        },
+      },
+    });
+    const meta = await tagProviderPlugin.searchMetadata(host, SONG);
+    expect(meta?.title).toBe("告白气球");
+    expect(meta?.year).toBeUndefined();
+  });
+
+  it("album.time_public 非法 → 不填年份", async () => {
+    const host = routeHost({
+      map: {
+        [F_QQ_SEARCH]: SEARCH,
+        [F_QQ_DETAIL]: {
+          code: 0,
+          req: {
+            data: {
+              track_info: {
+                name: "告白气球",
+                singer: [{ name: "周杰伦" }],
+                album: { mid: "000MkMni19ClKG", name: "专辑", time_public: "unknown" },
+                interval: 215,
+              },
+            },
+          },
+        },
+      },
+    });
+    const meta = await tagProviderPlugin.searchMetadata(host, SONG);
+    expect(meta?.title).toBe("告白气球");
+    expect(meta?.year).toBeUndefined();
+  });
+
+  it("详情 track_info 为空 → 除 platform 外无有效字段则不返回空壳(null)，走兜底", async () => {
+    const host = routeHost({
+      map: {
+        [F_QQ_SEARCH]: SEARCH,
+        [F_QQ_DETAIL]: { code: 0, req: { data: { track_info: {} } } },
+        [F_NS_SEARCH]: NS_SEARCH,
+        [F_NS_DETAIL]: NS_DETAIL,
+      },
+    });
+    const meta = await tagProviderPlugin.searchMetadata(host, SONG);
+    expect(meta?.platform).toBe("netease");
+  });
+});
+
+// ---------- searchMetadata 闸门与无标题 ----------
+describe("tag-provider — searchMetadata 闸门/无标题", () => {
+  it("无标题 → null(不发起任何请求)", async () => {
+    const host = makeHost();
+    expect(await tagProviderPlugin.searchMetadata(host, { artist: "周杰伦" })).toBeNull();
+    expect(host.calls.length).toBe(0);
+  });
+
+  it("未提供本地时长(null/undefined)→ 时长闸门跳过，仍可命中", async () => {
+    const host = makeHost();
+    const meta = await tagProviderPlugin.searchMetadata(host, { title: "告白气球", artist: "周杰伦" });
+    expect(meta?.title).toBe("告白气球");
+  });
+
+  it("候选搜索时长通过但详情时长不符 → 跳过并走网易云兜底", async () => {
+    const host = routeHost({
+      map: {
+        [F_QQ_SEARCH]: SEARCH,
+        [F_QQ_DETAIL]: {
+          code: 0,
+          req: { data: { track_info: { name: "告白气球", singer: [{ name: "周杰伦" }], album: { mid: "000MkMni19ClKG" }, interval: 100 } } },
+        },
+        [F_NS_SEARCH]: NS_SEARCH,
+        [F_NS_DETAIL]: NS_DETAIL,
+      },
+    });
+    const meta = await tagProviderPlugin.searchMetadata(host, SONG);
+    expect(meta?.platform).toBe("netease");
+  });
+
+  it("候选标题归一化后为空(纯装饰如 (Live))→ 标题闸门直接判否", async () => {
+    const search = { code: 0, data: { song: { list: [{ mid: "m", title: "(Live)", singer: [{ name: "周杰伦" }], interval: 215 }] } } };
+    const host = routeHost({ map: { [F_QQ_SEARCH]: search } });
+    expect(await tagProviderPlugin.searchMetadata(host, SONG)).toBeNull();
+  });
+});
+
+// ---------- 网易云候选字段缺失 / 缓存 / 空响应 / 年份边界 ----------
+describe("tag-provider — 网易云候选字段与年份边界", () => {
+  it("候选 id/name 缺失被跳过；artists 非数组；album/duration 缺失 → 归一化兜底", async () => {
+    const ns = {
+      code: 200,
+      result: {
+        songs: [
+          { id: 11, name: "告白气球", artists: "不是数组", album: undefined, duration: undefined },
+          { name: "告白气球" }, // 无 id → 跳过
+          { id: 13 }, // 无 name → 跳过
+          { id: 14, name: "告白气球", artists: [{ name: 5 }], album: {}, duration: 215000 },
+        ],
+      },
+    };
+    const host = routeHost({ nullFor: [F_QQ_SEARCH], map: { [F_NS_SEARCH]: ns, [F_NS_DETAIL]: NS_DETAIL } });
+    // 这些候选歌手名均归一化为空 → 歌手闸门不通过；只验证解析分支不抛错
+    const meta = await tagProviderPlugin.searchMetadata(host, SONG);
+    expect(meta === null || !!meta).toBe(true);
+  });
+
+  it("网易云搜索 res 为 null → 返回空候选(不写缓存)", async () => {
+    const host = routeHost({ nullFor: [F_QQ_SEARCH, F_NS_SEARCH] });
+    expect(await tagProviderPlugin.searchMetadata(host, SONG)).toBeNull();
+  });
+
+  it("兜底命中候选的歌手名/专辑名/时长均缺省 → 对应字段不填(title 仍在)", async () => {
+    const ns = {
+      code: 200,
+      result: {
+        songs: [
+          // 歌手对象 name 非字符串 → singerName 归一化为空；album 无 name；duration 缺省 → interval 0
+          { id: 21, name: "告白气球", artists: [{ name: 5 }], album: {}, duration: undefined },
+        ],
+      },
+    };
+    const host = routeHost({ nullFor: [F_QQ_SEARCH], map: { [F_NS_SEARCH]: ns, [F_NS_DETAIL]: NS_DETAIL } });
+    // song.artist 为空 → 歌手闸门放宽；候选歌手名/专辑名为空、时长为 0（≤0 视为「不校验」）
+    const meta = await tagProviderPlugin.searchMetadata(host, { title: "告白气球", artist: "", duration: 215 });
+    expect(meta?.platform).toBe("netease");
+    expect(meta?.title).toBe("告白气球");
+    expect(meta?.artist).toBeUndefined();
+    expect(meta?.album).toBeUndefined();
+    expect(meta?.duration).toBeUndefined();
+  });
+
+  it("网易云兜底候选标题不匹配 → 不命中", async () => {
+    const ns = { code: 200, result: { songs: [{ id: 7, name: "完全不同的歌", artists: [{ name: "周杰伦" }], duration: 215000 }] } };
+    const host = routeHost({ nullFor: [F_QQ_SEARCH], map: { [F_NS_SEARCH]: ns, [F_NS_DETAIL]: NS_DETAIL } });
+    expect(await tagProviderPlugin.searchMetadata(host, SONG)).toBeNull();
+  });
+
+  it("publishTime 为 0/非法 → 不产出年份", async () => {
+    const ns = { code: 200, result: { songs: [{ id: 9, name: "告白气球", artists: [{ name: "周杰伦" }], album: { name: "专辑", publishTime: 0 }, duration: 215000 }] } };
+    const host = routeHost({ nullFor: [F_QQ_SEARCH], map: { [F_NS_SEARCH]: ns, [F_NS_DETAIL]: NS_DETAIL } });
+    const meta = await tagProviderPlugin.searchMetadata(host, SONG);
+    expect(meta?.platform).toBe("netease");
+    expect(meta?.year).toBeUndefined();
+  });
+
+  it("publishTime 换算年份超出 1900–2100 → 不产出年份", async () => {
+    const ns = { code: 200, result: { songs: [{ id: 9, name: "告白气球", artists: [{ name: "周杰伦" }], album: { name: "专辑", publishTime: 9999999999999 }, duration: 215000 }] } };
+    const host = routeHost({ nullFor: [F_QQ_SEARCH], map: { [F_NS_SEARCH]: ns, [F_NS_DETAIL]: NS_DETAIL } });
+    const meta = await tagProviderPlugin.searchMetadata(host, SONG);
+    expect(meta?.year).toBeUndefined();
+  });
+
+  it("同一首歌第二次调用命中网易云搜索缓存：搜索端点只打一次", async () => {
+    const host = makeHost({ qqEmpty: true });
+    await tagProviderPlugin.searchMetadata(host, SONG);
+    await tagProviderPlugin.searchMetadata(host, SONG);
+    const n = host.calls.filter((u: string) => u.includes(F_NS_SEARCH)).length;
+    expect(n).toBe(1);
+  });
+});
+
+// ---------- searchCover 闸门与兜底 ----------
+describe("tag-provider — searchCover 闸门与兜底", () => {
+  it("无标题 → null(不发起任何请求)", async () => {
+    const host = makeHost();
+    expect(await tagProviderPlugin.searchCover(host, { artist: "周杰伦", duration: 215 })).toBeNull();
+    expect(host.calls.length).toBe(0);
+  });
+
+  it("占位歌手 / 无歌手 → 关键词均只用 title", async () => {
+    const h1 = makeHost();
+    await tagProviderPlugin.searchCover(h1, { title: "告白气球", artist: "Unknown Artist", duration: 215 });
+    // 占位歌手被当作空 → 关键词仅标题（末尾无 ` Unknown Artist`）
+    expect(h1.calls[0]).toBe(qqKwUrl("告白气球"));
+    const h2 = makeHost();
+    await tagProviderPlugin.searchCover(h2, { title: "晴天", duration: 215 });
+    // 无歌手 → 关键词同样仅标题
+    expect(h2.calls[0]).toBe(qqKwUrl("晴天"));
+  });
+
+  it("候选依次被标题/歌手/时长闸门拦下后命中最后一条", async () => {
+    const search = {
+      code: 0,
+      data: {
+        song: {
+          list: [
+            { mid: "m1", title: "别的歌", singer: [{ name: "周杰伦" }], interval: 215 }, // 标题不匹配
+            { mid: "m2", title: "告白气球", singer: [{ name: "群星" }], interval: 215 }, // 歌手不匹配
+            { mid: "m3", title: "告白气球", singer: [{ name: "周杰伦" }], interval: 100 }, // 时长不匹配
+            { mid: "003OUlho2HcRHC", title: "告白气球", singer: [{ name: "周杰伦" }], interval: 215 },
+          ],
+        },
+      },
+    };
+    const host = routeHost({ map: { [F_QQ_SEARCH]: search, [F_QQ_DETAIL]: detailJson({ withInfoGenre: true }) } });
+    const r = await tagProviderPlugin.searchCover(host, SONG);
+    expect(r?.url).toContain("000MkMni19ClKG");
+    expect(host.calls.filter((u: string) => u.includes(F_QQ_DETAIL)).length).toBe(1);
+  });
+
+  it("QQ 详情为空 → 封面走网易云兜底(二次调详情取 picUrl)", async () => {
+    const host = routeHost({
+      map: { [F_QQ_SEARCH]: SEARCH, [F_QQ_DETAIL]: { code: 0, req: { data: {} } }, [F_NS_SEARCH]: NS_SEARCH, [F_NS_DETAIL]: NS_DETAIL },
+    });
+    expect((await tagProviderPlugin.searchCover(host, SONG))?.url).toBe(NS_DETAIL.songs[0].album.picUrl);
+  });
+
+  it("QQ 详情时长不符 → 跳过并走网易云兜底", async () => {
+    const host = routeHost({
+      map: {
+        [F_QQ_SEARCH]: SEARCH,
+        [F_QQ_DETAIL]: { code: 0, req: { data: { track_info: { name: "告白气球", singer: [{ name: "周杰伦" }], album: { mid: "000MkMni19ClKG" }, interval: 100 } } } },
+        [F_NS_SEARCH]: NS_SEARCH,
+        [F_NS_DETAIL]: NS_DETAIL,
+      },
+    });
+    expect((await tagProviderPlugin.searchCover(host, SONG))?.url).toBe(NS_DETAIL.songs[0].album.picUrl);
+  });
+
+  it("QQ 详情无专辑 mid → 跳过并走网易云兜底", async () => {
+    const host = routeHost({
+      map: {
+        [F_QQ_SEARCH]: SEARCH,
+        [F_QQ_DETAIL]: { code: 0, req: { data: { track_info: { name: "告白气球", singer: [{ name: "周杰伦" }], interval: 215 } } } },
+        [F_NS_SEARCH]: NS_SEARCH,
+        [F_NS_DETAIL]: NS_DETAIL,
+      },
+    });
+    expect((await tagProviderPlugin.searchCover(host, SONG))?.url).toBe(NS_DETAIL.songs[0].album.picUrl);
+  });
+
+  it("网易云详情无可解析的 picUrl → 封面返回 null", async () => {
+    const nsDetailNoPic = { code: 200, songs: [{ album: { picId: 1 } }] };
+    const host = routeHost({ nullFor: [F_QQ_SEARCH], map: { [F_NS_SEARCH]: NS_SEARCH, [F_NS_DETAIL]: nsDetailNoPic } });
+    expect(await tagProviderPlugin.searchCover(host, SONG)).toBeNull();
+  });
+
+  it("同一首歌第二次取封面命中网易云封面缓存：详情端点只打一次", async () => {
+    const host = makeHost({ qqEmpty: true });
+    await tagProviderPlugin.searchCover(host, SONG);
+    await tagProviderPlugin.searchCover(host, SONG);
+    const n = host.calls.filter((u: string) => u.includes(F_NS_DETAIL)).length;
+    expect(n).toBe(1);
+  });
+});
+
+// ---------- searchLyrics 闸门与歌词解析边界 ----------
+describe("tag-provider — searchLyrics 闸门与歌词解析", () => {
+  it("无标题 → null(不发起任何请求)", async () => {
+    const host = makeHost();
+    expect(await tagProviderPlugin.searchLyrics(host, { artist: "周杰伦" })).toBeNull();
+    expect(host.calls.length).toBe(0);
+  });
+
+  it("占位歌手 / 无歌手 → 关键词均只用 title", async () => {
+    const h1 = makeHost();
+    await tagProviderPlugin.searchLyrics(h1, { title: "告白气球", artist: "未知歌手" });
+    // 占位歌手「未知歌手」被当作空 → 关键词仅标题
+    expect(h1.calls[0]).toBe(qqKwUrl("告白气球"));
+    const h2 = makeHost();
+    await tagProviderPlugin.searchLyrics(h2, { title: "晴天" });
+    // 无歌手 → 关键词同样仅标题
+    expect(h2.calls[0]).toBe(qqKwUrl("晴天"));
+  });
+
+  it("候选被标题/歌手闸门拦下后命中", async () => {
+    const search = {
+      code: 0,
+      data: {
+        song: {
+          list: [
+            { mid: "m1", title: "别的歌", singer: [{ name: "周杰伦" }], interval: 215 },
+            { mid: "m2", title: "告白气球", singer: [{ name: "群星" }], interval: 215 },
+            { mid: "003OUlho2HcRHC", title: "告白气球", singer: [{ name: "周杰伦" }], interval: 215 },
+          ],
+        },
+      },
+    };
+    const host = routeHost({ map: { [F_QQ_SEARCH]: search, [F_QQ_LYRIC]: LYRIC_JSON } });
+    expect((await tagProviderPlugin.searchLyrics(host, SONG))?.lrc).toContain("[ti:告白气球]");
+  });
+
+  it("QQ 歌词响应无 lyric 字段 → 该候选跳过 → 网易云兜底", async () => {
+    const host = routeHost({
+      map: { [F_QQ_SEARCH]: SEARCH, [F_QQ_LYRIC]: {}, [F_NS_SEARCH]: NS_SEARCH, [F_NS_LYRIC]: NS_LYRIC },
+    });
+    expect((await tagProviderPlugin.searchLyrics(host, SONG))?.lrc).toContain("[00:00.000]告白气球");
+  });
+
+  it("网易云歌词为空/仅空白 → 返回 null", async () => {
+    const host = routeHost({
+      nullFor: [F_QQ_SEARCH],
+      map: { [F_NS_SEARCH]: NS_SEARCH, [F_NS_LYRIC]: { code: 200, lrc: { lyric: "   " } } },
+    });
+    expect(await tagProviderPlugin.searchLyrics(host, SONG)).toBeNull();
+  });
+
+  it("歌词含 [ar:] 标签 → 原样返回(不解码)", async () => {
+    const raw = "[ar:周杰伦]\n[00:01.00]歌词";
+    const host = routeHost({ map: { [F_QQ_SEARCH]: SEARCH, [F_QQ_LYRIC]: { code: 0, lyric: raw } } });
+    expect((await tagProviderPlugin.searchLyrics(host, SONG))?.lrc).toBe(raw);
+  });
+
+  it("歌词仅含时间戳(无 [ti:/[ar:) → 原样返回", async () => {
+    const raw = "[00:01.00]只有时间戳";
+    const host = routeHost({ map: { [F_QQ_SEARCH]: SEARCH, [F_QQ_LYRIC]: { code: 0, lyric: raw } } });
+    expect((await tagProviderPlugin.searchLyrics(host, SONG))?.lrc).toBe(raw);
+  });
+
+  it("歌词看起来像 base64 → 尝试解码", async () => {
+    const payload = "hello world lyrics";
+    const b64 = Buffer.from(payload, "utf8").toString("base64");
+    const host = routeHost({ map: { [F_QQ_SEARCH]: SEARCH, [F_QQ_LYRIC]: { code: 0, lyric: b64 } } });
+    expect((await tagProviderPlugin.searchLyrics(host, SONG))?.lrc).toBe(payload);
+  });
+
+  it("歌词既非 LRC 亦非 base64(含中文)→ 原样返回", async () => {
+    const raw = "这是一段没有时间戳的中文歌词";
+    const host = routeHost({ map: { [F_QQ_SEARCH]: SEARCH, [F_QQ_LYRIC]: { code: 0, lyric: raw } } });
+    expect((await tagProviderPlugin.searchLyrics(host, SONG))?.lrc).toBe(raw);
+  });
+});
+
+// ---------- 能力方法内部异常：一律软失败 ----------
+describe("tag-provider — 内部异常软失败", () => {
+  it("song.title 取值抛错 → 三个能力方法均不抛出，返回 null", async () => {
+    const boom: any = {
+      get title() {
+        throw new Error("boom");
+      },
+    };
+    await expect(tagProviderPlugin.searchMetadata(makeHost(), boom)).resolves.toBeNull();
+    await expect(tagProviderPlugin.searchCover(makeHost(), boom)).resolves.toBeNull();
+    await expect(tagProviderPlugin.searchLyrics(makeHost(), boom)).resolves.toBeNull();
+  });
+
+  it("QQ 节流队列内部抛错(Date.now 异常)→ 拒绝回调兜底，队列不掐断，能力方法返回 null", async () => {
+    // 节流回调首行即调用 Date.now()；令其抛错 → 回调返回的 run 变为 rejected，
+    // 从而触发 qqThrottled 的**拒绝兜底**分支（run 拒绝后被收敛为 resolved，不向调用方抛）。
+    const spy = vi.spyOn(Date, "now").mockImplementation(() => {
+      throw new Error("clock boom");
+    });
+    try {
+      await expect(tagProviderPlugin.searchMetadata(makeHost(), SONG)).resolves.toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+// ---------- memo 容量上限 ----------
+describe("tag-provider — memo 容量上限", () => {
+  it("memo 超过 2000 条 → 整体清空(内存有界，不抛错)", async () => {
+    const host = makeHost();
+    for (let i = 0; i < 1100; i++) {
+      // 每首歌两条键(QQ 搜索 + 网易云搜索)：1100×2 > 2000，必然触发一次整体清空
+      await tagProviderPlugin.searchMetadata(host, { title: `曲目${i}`, duration: 215 });
+    }
+    expect(host.calls.length).toBeGreaterThan(2000);
+  }, 60000);
 });

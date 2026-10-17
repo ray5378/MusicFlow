@@ -24,17 +24,17 @@ const cfg = mergeConfig(
           // 下载 + 标签修复核心目录（src/services/fetch/**）：整体下限。
           // 防止整条链路在一次重构后覆盖率塌方而无人察觉。
           "src/services/fetch/**/*.ts": {
-            lines: 85,
-            statements: 85,
-            functions: 90,
-            branches: 72,
+            lines: 93,
+            statements: 93,
+            functions: 95,
+            branches: 84,
           },
           // 内置标签来源（QQ 音乐 / 网易云）：链路最前端，候选与元数据都出自这里。
           "src/services/plugin/tagProvider.ts": {
-            lines: 85,
-            statements: 80,
-            functions: 90,
-            branches: 60,
+            lines: 95,
+            statements: 95,
+            functions: 96,
+            branches: 90,
           },
         },
       },

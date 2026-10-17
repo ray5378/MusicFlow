@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_CANDIDATE_TIMEOUT_MS,
   DEFAULT_INSPECT_TIMEOUT_MS,
@@ -679,5 +679,382 @@ describe("collectCandidates 分支 C：跨源桥接", () => {
     const lxC = out.find((c) => c.pluginId === "lx-source")!;
     expect(lxC.url).toBe("https://cdn.example.com/kw/5566.flac");
     expect(resolveCalls).toBe(1); // 只有分支 B 那一次，桥接未发生
+  });
+});
+
+// ==================== 覆盖率补充：解析/归一化与合并边界 ====================
+
+/** 一个只实现 search+streamUrl、可自定义直链的 go-music-dl 桩（用于驱动 URL 解析分支）。 */
+function rawSearchStub(songs: any[], urlOf: (s: any) => string): CandidateSource {
+  return src("go-music-dl", ["stream", "search"], {
+    async search() {
+      return { songs };
+    },
+    streamUrl(_cfg: any, s: any) {
+      return urlOf(s);
+    },
+  });
+}
+
+/** 一条最小的 search 结果（字段可覆盖）。 */
+function songOf(over: Record<string, any> = {}): Record<string, any> {
+  return { id: "1", source: "qq", name: "歌", artist: "人", album: "专", duration: 200, cover: "", ...over };
+}
+
+describe("collectCandidates 边界分支补充", () => {
+  it("无可用音源 → 直接返回空数组", async () => {
+    await expect(collectCandidates({ target, sources: [] })).resolves.toEqual([]);
+  });
+
+  it("无有效直链（非空但非法 URL）的候选被丢弃", () => {
+    const bad = cand({ id: "p:qq:9", url: "not a url" });
+    expect(dedupeCandidates([bad])).toEqual([]);
+  });
+
+  it("搜索结果缺 id → 用 URL 哈希兜底生成候选 id;cover 透传", async () => {
+    const source = rawSearchStub(
+      [{ source: "qq", name: "歌", artist: "人", album: "专", duration: 200, cover: "https://img.example.com/c.jpg" }],
+      () => "https://cdn.example.com/qq/x.mp3",
+    );
+    const out = await collectCandidates({ target, sources: [source] });
+    expect(out).toHaveLength(1);
+    expect(out[0].id).toMatch(/^go-music-dl:qq:[0-9a-f]{12}$/); // shortHash 兜底
+    expect(out[0].coverUrl).toBe("https://img.example.com/c.jpg");
+  });
+
+  it("直链无音频后缀（.php / 末尾点）→ 容器未知,不误判", async () => {
+    const php = rawSearchStub([songOf({ id: "1", source: "kugou" })], () => "https://xxx.kugou.com/yy/index.php?cmd=1");
+    const outA = await collectCandidates({ target, sources: [php] });
+    expect(outA[0].declared?.container).toBeUndefined();
+
+    const dots = rawSearchStub([songOf({ id: "2", source: "kugou" })], () => "https://cdn.example.com/a.");
+    const outB = await collectCandidates({ target, sources: [dots] });
+    expect(outB[0].declared?.container).toBeUndefined();
+  });
+
+  it("码率/体积解析:数字、无单位、0、Mbps、GB 等边界", async () => {
+    const cases: Array<[any, any, any]> = [
+      [320, 104857600, { bitrateKbps: 320, bytes: 104857600 }], // 数字直接采用
+      ["256", "8", { bitrateKbps: 256, bytes: 8 }], // 无单位字符串
+      ["512k", "512kb", { bitrateKbps: 512, bytes: 512 * 1024 }], // k / kb
+      ["1.5Mbps", "2GB", { bitrateKbps: 1500, bytes: 2 * 1024 ** 3 }], // Mbps / GB
+      ["0k", "0", { bitrateKbps: undefined, bytes: undefined }], // 0 值不采用
+      ["xx", "abc", { bitrateKbps: undefined, bytes: undefined }], // 不可解析
+    ];
+    for (const [bitrate, size, expected] of cases) {
+      const out = await collectCandidates({
+        target,
+        sources: [src("go-music-dl", ["stream", "search"], searchStub([{ id: "1", source: "qq", bitrate, size }]))],
+      });
+      expect(out[0].declared?.bitrateKbps).toBe(expected.bitrateKbps);
+      expect(out[0].declared?.bytes).toBe(expected.bytes);
+    }
+  });
+
+  it("sourceData 非法/非对象 → 分支 B 不参与", async () => {
+    for (const sd of ["not-json", "[1,2]", "null", "123"]) {
+      const t: FetchTarget = { id: "s", title: "歌", artist: "人", sourceData: sd };
+      const out = await collectCandidates({
+        target: t,
+        sources: [src("lx-source", ["stream"], resolveStub("https://cdn.example.com/kw/1.flac"))],
+      });
+      expect(out).toEqual([]);
+    }
+  });
+
+  it("sourceData 的键别名与类型兜底（remoteSource/platformId/provider/id）", async () => {
+    const lx = src("lx-source", ["stream"], resolveStub("https://cdn.example.com/kw/1.flac"));
+    const t1: FetchTarget = { id: "s", title: "歌", sourceData: JSON.stringify({ remoteSource: "kw", platformId: "77" }) };
+    const o1 = await collectCandidates({ target: t1, sources: [lx] });
+    expect(o1).toHaveLength(1);
+    expect(o1[0].id.endsWith(":77")).toBe(true);
+
+    const t2: FetchTarget = { id: "s", title: "歌", sourceData: JSON.stringify({ provider: "kw", id: 99 }) };
+    const o2 = await collectCandidates({ target: t2, sources: [lx] });
+    expect(o2).toHaveLength(1);
+    expect(o2[0].id.endsWith(":99")).toBe(true);
+
+    const t3: FetchTarget = { id: "s", title: "歌", sourceData: JSON.stringify({ remoteSource: 123, platformId: null }) };
+    const o3 = await collectCandidates({ target: t3, sources: [lx] });
+    expect(o3).toEqual([]);
+  });
+
+  it("streamUrl 抛错 → 跳过该搜索结果,不阻塞整源", async () => {
+    const source = src("go-music-dl", ["stream", "search"], {
+      async search() {
+        return { songs: [songOf({ id: "1" }), songOf({ id: "2" })] };
+      },
+      streamUrl(_c: any, s: any) {
+        if (s.id === "1") throw new Error("boom");
+        return `https://cdn.example.com/${s.id}.mp3`;
+      },
+    });
+    const out = await collectCandidates({ target, sources: [source] });
+    expect(out).toHaveLength(1);
+    expect(out[0].id).toBe("go-music-dl:qq:2");
+  });
+
+  it("多个 search 源参与桥接排序（分支 C 选最靠前的桥接源）", async () => {
+    const lx = src("lx-source", ["stream"], resolveStub("https://cdn.example.com/lx/1.flac"));
+    const gmdlA = src("go-music-dl", ["stream", "search"], bridgeSearchStub([
+      { id: "1", source: "netease", name: "爱在西元前", artist: "周杰伦" },
+    ]));
+    const gmdlB = src("go-music-dl-b", ["stream", "search"], bridgeSearchStub([
+      { id: "2", source: "netease", name: "爱在西元前", artist: "周杰伦" },
+    ]));
+    const out = await collectCandidates({
+      target: bridgeTarget,
+      sourcePriority: ["go-music-dl-b", "go-music-dl"],
+      sources: [gmdlA, gmdlB, lx],
+    });
+    expect(out.some((c) => c.pluginId === "lx-source" && c.id === "lx-source:wy:2")).toBe(true);
+  });
+});
+
+describe("分支 C 桥接命中过滤与失败边界", () => {
+  it("桥接命中:无标题 / 名称不符 被过滤,命中无歌手时标题对上即放行", async () => {
+    const lx = src("lx-source", ["stream"], resolveStub("https://cdn.example.com/lx/1.flac"));
+    const gmdl = src("go-music-dl", ["stream", "search"], {
+      async search() {
+        return {
+          songs: [
+            { id: "1", source: "netease", name: "", artist: "周杰伦", album: "专", duration: 240, cover: "" }, // 无标题
+            { id: "2", source: "netease", name: "完全不同的歌", artist: "周杰伦", album: "专", duration: 240, cover: "" }, // 名称不符
+            { id: "3", source: "netease", name: "爱在西元前", artist: "", album: "专", duration: 240, cover: "" }, // 无歌手
+          ],
+        };
+      },
+      streamUrl(_cfg: any, s: any) {
+        return `https://cdn.example.com/${s.id}.mp3`;
+      },
+    });
+    const out = await collectCandidates({ target: bridgeTarget, sources: [gmdl, lx] });
+    const lxOut = out.filter((c) => c.pluginId === "lx-source");
+    expect(lxOut).toHaveLength(1);
+    expect(lxOut[0].id).toBe("lx-source:wy:3");
+  });
+
+  it("桥接搜索抛错 → 分支 C 本源跳过,不抛异常", async () => {
+    const lx = src("lx-source", ["stream"], resolveStub("https://cdn.example.com/lx/1.flac"));
+    const gmdl = src("go-music-dl", ["stream", "search"], {
+      async search() {
+        throw new Error("bridge boom");
+      },
+      streamUrl(_c: any) {
+        return "https://cdn.example.com/x.mp3";
+      },
+    });
+    await expect(collectCandidates({ target: bridgeTarget, sources: [gmdl, lx] })).resolves.toEqual([]);
+  });
+
+  it("桥接命中缺平台 ID → 跳过该命中（不传空 ID）", async () => {
+    const lx = src("lx-source", ["stream"], resolveStub("https://cdn.example.com/lx/1.flac"));
+    const gmdl = src("go-music-dl", ["stream", "search"], {
+      async search() {
+        return { songs: [{ source: "netease", name: "爱在西元前", artist: "周杰伦", album: "专", duration: 240, cover: "" }] };
+      },
+      streamUrl(_c: any) {
+        return "https://cdn.example.com/x.mp3";
+      },
+    });
+    const out = await collectCandidates({ target: bridgeTarget, sources: [gmdl, lx] });
+    expect(out.some((c) => c.pluginId === "lx-source")).toBe(false);
+  });
+
+  it("桥接 resolveStream 抛错 → 单命中失败,不影响桥接源自身候选", async () => {
+    const lx = src("lx-source", ["stream"], {
+      async resolveStream() {
+        throw new Error("resolve boom");
+      },
+    });
+    const gmdl = src("go-music-dl", ["stream", "search"], bridgeSearchStub([
+      { id: "1", source: "netease", name: "爱在西元前", artist: "周杰伦" },
+    ]));
+    const out = await collectCandidates({ target: bridgeTarget, sources: [gmdl, lx] });
+    expect(out.every((c) => c.pluginId !== "lx-source")).toBe(true);
+  });
+
+  it("桥接搜索返回非数组 songs → 视为无命中", async () => {
+    const lx = src("lx-source", ["stream"], resolveStub("https://cdn.example.com/lx/1.flac"));
+    const gmdl = src("go-music-dl", ["stream", "search"], {
+      async search() {
+        return { songs: null };
+      },
+      streamUrl(_c: any) {
+        return "https://cdn.example.com/x.mp3";
+      },
+    });
+    const out = await collectCandidates({ target: bridgeTarget, sources: [gmdl, lx] });
+    expect(out.some((c) => c.pluginId === "lx-source")).toBe(false);
+  });
+});
+
+describe("listCandidateSources（注册表枚举）", () => {
+  it("只保留声明 stream 且能拿到 provider 的插件", async () => {
+    vi.resetModules();
+    vi.doMock("../../src/plugins/registry.js", () => ({
+      getEnabledSourcePlugins: () => [
+        { manifest: { id: "no-stream", capabilities: ["search"] } },
+        { manifest: { id: "stream-no-provider", capabilities: ["stream"] } },
+        { manifest: { id: "ok", capabilities: ["stream"] } },
+      ],
+    }));
+    vi.doMock("../../src/services/source/online/index.js", () => ({
+      getConfiguredProvider: (id: string) =>
+        id === "ok" ? { provider: { resolveStream() {} }, config: { a: 1 } } : null,
+    }));
+    const mod = await import("../../src/services/fetch/candidates.js");
+    const list = mod.listCandidateSources();
+    expect(list.map((s) => s.pluginId)).toEqual(["ok"]);
+    expect(list[0].config).toEqual({ a: 1 });
+    // 不传 sources 时由注册表枚举兜底（走 listCandidateSources）
+    await expect(mod.collectCandidates({ target })).resolves.toEqual([]);
+    vi.doUnmock("../../src/plugins/registry.js");
+    vi.doUnmock("../../src/services/source/online/index.js");
+    vi.resetModules();
+  });
+});
+
+describe("nextCandidate / 合并边界补充", () => {
+  it("候选数组含空元素时跳过", () => {
+    const c = cand({ id: "p:qq:1" });
+    expect(nextCandidate([null as any, c], new Set())?.id).toBe("p:qq:1");
+  });
+
+  it("id 非本模块格式 / 缺平台歌曲 ID / pluginId 不符 时不参与身份合并", () => {
+    const noColon = cand({ id: "plainid", pluginId: "p", platform: "qq", url: "https://cdn.example.com/a.mp3" });
+    const emptySong = cand({ id: "p:qq:", pluginId: "p", platform: "qq", url: "https://cdn.example.com/b.mp3" });
+    const mismatch = cand({ id: "x:qq:1", pluginId: "p", platform: "qq", url: "https://cdn.example.com/c.mp3" });
+    const out = dedupeCandidates([noColon, emptySong, mismatch]);
+    expect(out.map((x) => x.id).sort()).toEqual(["p:qq:", "plainid", "x:qq:1"]);
+  });
+
+  it("合并时用另一条补齐 base 全部缺失字段（含 encoder）", () => {
+    // base 先入池：信息完整度与 rich 并列，但缺 title/artist/album/genre/extra/cover/lyric
+    const base = cand({
+      id: "p:qq:1",
+      url: "https://cdn.example.com/a.mp3",
+      sourceRank: 5,
+      probed: true,
+      declared: {
+        container: "mp3",
+        bitrateKbps: 320,
+        sampleRateHz: 44100,
+        bitDepth: 16,
+        channels: 2,
+        durationSec: 240,
+        bytes: 1000000,
+      },
+    });
+    const rich = cand({
+      id: "p:qq:1",
+      url: "https://cdn.example.com/b.mp3",
+      sourceRank: 1,
+      title: "歌",
+      artist: "人",
+      album: "专辑",
+      genre: "摇滚",
+      extra: { k: "v" },
+      coverUrl: "https://img.example.com/c.jpg",
+      lyricUrl: "https://lrc.example.com/l.lrc",
+      headers: { "User-Agent": "x" },
+      declared: { encoder: "reference" },
+    });
+    const out = dedupeCandidates([base, rich]);
+    expect(out).toHaveLength(1);
+    const m = out[0];
+    expect(m.title).toBe("歌");
+    expect(m.artist).toBe("人");
+    expect(m.album).toBe("专辑");
+    expect(m.genre).toBe("摇滚");
+    expect(m.extra).toEqual({ k: "v" });
+    expect(m.coverUrl).toBe("https://img.example.com/c.jpg");
+    expect(m.lyricUrl).toBe("https://lrc.example.com/l.lrc");
+    expect(m.sourceRank).toBe(1);
+    expect(m.declared?.container).toBe("mp3");
+    expect(m.declared?.encoder).toBe("reference");
+  });
+
+  it("inspectUnavailable 的候选绝不做 base（合并时让位给可用候选）", () => {
+    const good = cand({ id: "p:qq:1", url: "https://cdn.example.com/g.mp3", title: "可用" });
+    const un = cand({
+      id: "p:qq:1",
+      url: "https://cdn.example.com/u.mp3",
+      inspectUnavailable: true,
+      declared: { bitrateKbps: 999 },
+    });
+    const out = dedupeCandidates([un, good]);
+    expect(out).toHaveLength(1);
+    expect(out[0].inspectUnavailable).not.toBe(true);
+    expect(out[0].title).toBe("可用");
+  });
+});
+
+describe("覆盖率补充:inspect/排序/身份边界", () => {
+  it("inspect 只返回 bitrateKbps(无 bytes) → 只采纳码率", async () => {
+    const source = inspectStub(() => ({ valid: true, bitrateKbps: 700 }));
+    const out = await collectCandidates({ target, sources: [source] });
+    expect(out.length).toBeGreaterThan(0);
+    expect(out.every((c) => c.declared?.bitrateKbps === 700)).toBe(true);
+    expect(out.every((c) => c.declared?.bytes === undefined)).toBe(true);
+  });
+
+  it("候选无任何声明(缺 duration)时 hintRank 归 unknown,排序不抛", async () => {
+    const source = src("go-music-dl", ["stream", "search"], {
+      async search() {
+        return { songs: [{ id: "1", source: "qq", name: "歌", artist: "人", album: "专", cover: "" }] }; // 无 duration
+      },
+      streamUrl(_c: any) {
+        return "https://cdn.example.com/1.mp3";
+      },
+      inspectSong: async () => ({ valid: true, bitrateKbps: 500 }),
+    });
+    const out = await collectCandidates({ target, sources: [source] });
+    expect(out).toHaveLength(1);
+    expect(out[0].declared?.bitrateKbps).toBe(500);
+  });
+
+  it("直链无音频后缀且无曲目时长 → 声明质量整体为空(compactQuality → undefined)", async () => {
+    const source = rawSearchStub(
+      [{ id: "1", source: "qq", name: "歌", artist: "人", album: "专", cover: "" }], // 无 duration
+      () => "https://cdn.example.com/dl/stream",
+    );
+    const out = await collectCandidates({ target, sources: [source] });
+    expect(out).toHaveLength(1);
+    expect(out[0].declared).toBeUndefined();
+  });
+
+  it("extra 的 genre 为空串 → 不臆造 genre", async () => {
+    const source = rawSearchStub([songOf({ extra: { genre: "" } })], () => "https://cdn.example.com/1.mp3");
+    const out = await collectCandidates({ target, sources: [source] });
+    expect(out[0].genre).toBeUndefined();
+  });
+
+  it("streamUrl 返回非法 URL → 该搜索结果被跳过", async () => {
+    const source = src("go-music-dl", ["stream", "search"], {
+      async search() {
+        return { songs: [songOf({ id: "1" }), songOf({ id: "2" })] };
+      },
+      streamUrl(_c: any, s: any) {
+        return s.id === "1" ? "not-a-url" : "https://cdn.example.com/2.mp3";
+      },
+    });
+    const out = await collectCandidates({ target, sources: [source] });
+    expect(out).toHaveLength(1);
+    expect(out[0].id).toBe("go-music-dl:qq:2");
+  });
+
+  it("合并时双方 sourceRank 都缺失 → 按 0 处理且不误判", () => {
+    const a = cand({ id: "p:qq:1", url: "https://cdn.example.com/a.mp3", sourceRank: undefined as any });
+    const b = cand({ id: "p:qq:1", url: "https://cdn.example.com/b.mp3", sourceRank: undefined as any });
+    const out = dedupeCandidates([a, b]);
+    expect(out).toHaveLength(1);
+  });
+
+  it("候选 id 缺失时不参与身份键合并", () => {
+    const a = { ...cand({ url: "https://cdn.example.com/a.mp3" }), id: undefined as any };
+    const b = cand({ id: "p:qq:1", url: "https://cdn.example.com/b.mp3" });
+    const out = dedupeCandidates([a, b]);
+    expect(out).toHaveLength(2);
   });
 });

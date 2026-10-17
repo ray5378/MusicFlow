@@ -1,261 +1,267 @@
-// ==================== 音乐下载链回归守卫：入库即入队触发器(importTrigger) ====================
+// importTrigger.ts 专项测试：入库触发链的活跃间隔防抖、下载总开关、空集/无待下项早退，
+// 以及各层异常兜底（落库失败 / 计划器抛错 / 监听器内异常）。
 //
-// 锚定「网络歌曲入库 → 自动过一轮下载」这条产品定调(2026-10-11)不被回归破坏。
-// 全部用例纯内存、不联网、不碰 /MUSIC：
-//   - 去重合并(同首歌跨批导入只下 1 次)；
-//   - 空白/trim 归一化(空串/纯空白/前后空格不入队)；
-//   - 活跃间隔防抖(广播只并入待处理集合、不直接建任务)；
-//   - 下载总开关关闭 → 不建任务；
-//   - 本地/WebDAV 已有实体(计划器返回 0 项) → 不建任务；
-//   - 待处理为空 flush → 直接返回不建任务；
-//   - 触发器挂载点仍在(registerFetchImportTrigger 把钩子接到 enqueue)；
-//   - 跨批累计并集只建一个任务(去重生效)；
-//   - 内部异常/监听器异常一律兜底,绝不拖垮导入流程(2026-10-11 契约)。
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+// 依赖全部为叶子模块，直接 vi.mock（无真实网络 / 无子进程 / 无 DB）：
+//   settings / importTriggerHook / configStore / library / jobStore / jobRunner。
+// 防抖与计时器一律走 fake timers（vi.useFakeTimers + advanceTimersByTime）。
+//
+// 注意：本模块持有模块级单例（pending 集合 / 计时器），每个用例前后用
+// _resetImportTriggerForTest() 清掉，避免 base 配置的 shuffle 导致顺序耦合。
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// 用 vi.hoisted 承载 mock 之间的共享状态（vi.mock 工厂会被提升到 import 之前）。
 const h = vi.hoisted(() => ({
-  settings: new Map<string, string>(),
-  throwOnGet: false,
-  throwOnSet: false,
-  cfgEnabled: true,
-  planItems: [] as any[],
-  buildLibraryPlan: vi.fn(),
-  buildLibraryTargets: vi.fn((items: any[]) => items.map((i) => ({ target: i.id }))),
-  buildLibraryJobConfig: vi.fn(() => ({ noAutoContinue: true })),
-  createFetchJob: vi.fn(() => ({ id: "job-x" })),
-  startFetchJob: vi.fn(),
-  setImportedSongsListener: vi.fn(),
+  store: new Map<string, string>(),
+  /** 非 null 时 setSetting 抛该值（可传 Error 或任意值，覆盖两种日志形态）。 */
+  setError: null as unknown,
+  /** 生效配置（currentFetchConfig 的返回）。 */
+  cfg: { enabled: true } as Record<string, unknown>,
+  /** buildLibraryPlan 返回的 items。 */
+  planItems: [] as Array<{ songId: string }>,
+  /** 非 null 时 buildLibraryPlan 抛该值。 */
+  planThrow: null as unknown,
+  /** 非 null 时 createFetchJob 抛该值。 */
+  jobThrow: null as unknown,
+  created: [] as Array<Record<string, unknown>>,
+  started: [] as string[],
+  listener: null as null | ((songIds: string[], ctx: { providerId: string }) => void),
 }));
 
+const PENDING_KEY = "fetch.import.pending";
+
 vi.mock("../../src/services/settings.js", () => ({
-  getSetting: (k: string, d = "") => {
-    if (h.throwOnGet) throw new Error("injected settings failure");
-    return h.settings.has(k) ? h.settings.get(k)! : d;
+  getSetting: (k: string, d = ""): string => (h.store.has(k) ? h.store.get(k)! : d),
+  setSetting: (k: string, v: string): void => {
+    if (h.setError) throw h.setError;
+    h.store.set(k, v);
   },
-  setSetting: (k: string, v: string) => {
-    if (h.throwOnSet) throw new Error("injected settings write failure");
-    h.settings.set(k, v);
+}));
+
+vi.mock("../../src/services/source/online/importTriggerHook.js", () => ({
+  setImportedSongsListener: (fn: typeof h.listener): void => {
+    h.listener = fn;
   },
 }));
 
 vi.mock("../../src/services/fetch/configStore.js", () => ({
-  currentFetchConfig: () => ({ enabled: h.cfgEnabled }) as any,
+  currentFetchConfig: () => h.cfg,
 }));
 
 vi.mock("../../src/services/fetch/library.js", () => ({
-  buildLibraryPlan: (...args: any[]) => h.buildLibraryPlan(...args),
-  buildLibraryTargets: (...args: any[]) => h.buildLibraryTargets(...args),
-  buildLibraryJobConfig: (...args: any[]) => h.buildLibraryJobConfig(...args),
+  buildLibraryPlan: () => {
+    if (h.planThrow) throw h.planThrow;
+    return { items: h.planItems };
+  },
+  buildLibraryTargets: (items: Array<{ songId: string }>) =>
+    items.map((i) => ({ id: `library:${i.songId}` })),
+  buildLibraryJobConfig: (_cfg: unknown, opts?: { noAutoContinue?: boolean }) => ({
+    __library: { migrateRowOnly: true, ...(opts?.noAutoContinue ? { noAutoContinue: true } : {}) },
+  }),
 }));
 
 vi.mock("../../src/services/fetch/jobStore.js", () => ({
-  createFetchJob: (...args: any[]) => h.createFetchJob(...args),
+  createFetchJob: (input: Record<string, unknown>) => {
+    if (h.jobThrow) throw h.jobThrow;
+    h.created.push(input);
+    return { id: "job-x" };
+  },
 }));
 
 vi.mock("../../src/services/fetch/jobRunner.js", () => ({
-  startFetchJob: (...args: any[]) => h.startFetchJob(...args),
-}));
-
-vi.mock("../../src/services/source/online/importTriggerHook.js", () => ({
-  setImportedSongsListener: (...args: any[]) => h.setImportedSongsListener(...args),
-  hasImportedSongsListener: vi.fn(() => false),
-  emitImportedSongs: vi.fn(),
+  startFetchJob: (id: string): void => {
+    h.started.push(id);
+  },
 }));
 
 import {
   IMPORT_TRIGGER_IDLE_MS,
+  _resetImportTriggerForTest,
   enqueueImportedSongs,
   flushImportedSongs,
-  triggerFetchForImportedSongs,
   registerFetchImportTrigger,
-  _resetImportTriggerForTest,
+  triggerFetchForImportedSongs,
 } from "../../src/services/fetch/importTrigger.js";
 
-const PENDING_KEY = "fetch.import.pending";
-
-function pendingIds(): string[] {
-  const raw = h.settings.get(PENDING_KEY);
-  if (!raw) return [];
-  try {
-    const arr = JSON.parse(raw);
-    return Array.isArray(arr) ? arr.map(String) : [];
-  } catch {
-    return [];
-  }
-}
-
 beforeEach(() => {
-  h.settings.clear();
-  h.throwOnGet = false;
-  h.throwOnSet = false;
-  h.cfgEnabled = true;
-  h.planItems = [];
-  h.buildLibraryPlan.mockReset();
-  h.buildLibraryTargets.mockReset();
-  h.buildLibraryJobConfig.mockReset();
-  h.createFetchJob.mockReset();
-  h.startFetchJob.mockReset();
-  h.setImportedSongsListener.mockReset();
-  h.buildLibraryTargets.mockImplementation((items: any[]) => items.map((i) => ({ target: i.id })));
-  h.buildLibraryJobConfig.mockReturnValue({ noAutoContinue: true });
-  h.createFetchJob.mockReturnValue({ id: "job-x" });
+  vi.useFakeTimers();
+  h.store.clear();
+  h.setError = null;
+  h.cfg = { enabled: true };
+  h.planItems = [{ songId: "s1" }];
+  h.planThrow = null;
+  h.jobThrow = null;
+  h.created = [];
+  h.started = [];
+  h.listener = null;
   _resetImportTriggerForTest();
 });
 
 afterEach(() => {
+  vi.clearAllTimers();
+  vi.useRealTimers();
   _resetImportTriggerForTest();
 });
 
-describe("入库即入队：去重与归一化", () => {
-  it("跨批导入同首歌只合并一次(Set 去重,累计并集)", () => {
-    const n1 = enqueueImportedSongs(["a", "b"]);
-    const n2 = enqueueImportedSongs(["b", "c"]);
-    expect(n1).toBe(2);
-    expect(n2).toBe(3); // a,b,c
-    expect(pendingIds().sort()).toEqual(["a", "b", "c"]);
-  });
-
-  it("空白/纯空白/前后空格被归一化丢弃", () => {
-    const n = enqueueImportedSongs([" a ", "", "   ", "b"]);
+describe("importTrigger 归一化与防抖", () => {
+  it("归一化：去空白 / 去空串 / 去重，null 与 undefined 一并跳过", () => {
+    const n = enqueueImportedSongs([" a ", "a", "", null as unknown as string, undefined as unknown as string, "b"]);
     expect(n).toBe(2);
-    expect(pendingIds().sort()).toEqual(["a", "b"]);
+    // 空数组与 undefined：ids.length===0 分支 → 直接返回当前总数
+    expect(enqueueImportedSongs([] as unknown as string[])).toBe(2);
+    expect(enqueueImportedSongs(undefined as unknown as string[])).toBe(2);
   });
 
-  it("空输入不入队、返回当前集合大小、不动 settings", () => {
-    enqueueImportedSongs(["x"]);
-    const before = pendingIds();
-    const n = enqueueImportedSongs([]);
-    expect(n).toBe(1);
-    expect(pendingIds()).toEqual(before); // 空输入未改写待处理集合
+  it("活跃间隔防抖：持续入库不断推后，静默满 5 分钟才下发一次", () => {
+    enqueueImportedSongs(["a"]);
+    vi.advanceTimersByTime(IMPORT_TRIGGER_IDLE_MS - 1);
+    expect(h.created.length).toBe(0);
+    // 再次入库 → 重置计时器（覆盖 clearTimeout 已有计时器分支）
+    enqueueImportedSongs(["b"]);
+    vi.advanceTimersByTime(IMPORT_TRIGGER_IDLE_MS - 1);
+    expect(h.created.length).toBe(0);
+    vi.advanceTimersByTime(1);
+    expect(h.created.length).toBe(1);
+    expect(h.started).toEqual(["job-x"]);
+    expect(h.created[0]).toMatchObject({ kind: "import" });
+    // 下发后待处理集合并集已清空
+    expect(h.store.get(PENDING_KEY)).toBe("[]");
   });
 
-  it("PENDING_KEY 脏数据(非 JSON)被当作空集合,绝不抛错影响导入", () => {
-    h.settings.set(PENDING_KEY, "this-is-not-json");
-    const n = enqueueImportedSongs(["x"]);
-    expect(n).toBe(1);
-    expect(pendingIds()).toEqual(["x"]);
-  });
-
-  it("settings 落库失败时内存集合仍正确,不抛错", () => {
-    h.throwOnSet = true;
-    const n = enqueueImportedSongs(["x"]);
-    expect(n).toBe(1); // 落库失败只记日志,返回仍正确
-    // 恢复落库后,内存里仍保留了 x(再次入队正确累加)
-    h.throwOnSet = false;
-    const n2 = enqueueImportedSongs(["y"]);
-    expect(n2).toBe(2);
-    expect(pendingIds().sort()).toEqual(["x", "y"]);
+  it("重复入库：added=0 时不落库但仍续期", () => {
+    expect(enqueueImportedSongs(["a"])).toBe(1);
+    expect(enqueueImportedSongs(["a"])).toBe(1); // 已在集合内 → added 为 0
+    vi.advanceTimersByTime(IMPORT_TRIGGER_IDLE_MS);
+    expect(h.created.length).toBe(1);
   });
 });
 
-describe("活跃间隔防抖与下发", () => {
-  it("IMPORT_TRIGGER_IDLE_MS 为 5 分钟(活跃间隔窗口常量)", () => {
-    expect(IMPORT_TRIGGER_IDLE_MS).toBe(5 * 60_000);
+describe("importTrigger flush 与触发", () => {
+  it("flush：集合为空 → reason empty（idleTimer 为 null 分支）", () => {
+    expect(flushImportedSongs()).toEqual({ enqueued: 0, reason: "empty" });
   });
 
-  it("广播只并入集合、不直接建任务(返回并入后的待处理总数)", () => {
-    const n = enqueueImportedSongs(["s1", "s2"]);
-    expect(n).toBe(2);
-    expect(h.buildLibraryPlan).not.toHaveBeenCalled();
-    expect(h.createFetchJob).not.toHaveBeenCalled();
-  });
-
-  it("下载总开关关闭 → flush 不建任务(reason=disabled)", () => {
-    enqueueImportedSongs(["s1"]);
-    h.cfgEnabled = false;
-    const r = flushImportedSongs();
-    expect(r).toEqual({ enqueued: 0, reason: "disabled" });
-    expect(h.buildLibraryPlan).not.toHaveBeenCalled();
-  });
-
-  it("计划器返回 0 项(本地/WebDAV 已有实体) → flush 不建任务(reason=nothing-to-do)", () => {
-    enqueueImportedSongs(["s1"]);
-    h.buildLibraryPlan.mockReturnValue({ items: [] });
+  it("flush：手动直接调用（清已有计时器），无待下项时 jobId 缺省", () => {
+    h.planItems = [];
+    enqueueImportedSongs(["a"]); // 装上计时器 → flush 里 clearTimeout 分支为真
     const r = flushImportedSongs();
     expect(r).toEqual({ enqueued: 0, reason: "nothing-to-do" });
-    expect(h.createFetchJob).not.toHaveBeenCalled();
+    expect(h.created.length).toBe(0);
   });
 
-  it("待处理为空 → flush 直接返回(reason=empty)", () => {
-    const r = flushImportedSongs();
-    expect(r).toEqual({ enqueued: 0, reason: "empty" });
+  it("下载总开关关闭：不建任务", () => {
+    h.cfg = { enabled: false };
+    expect(triggerFetchForImportedSongs(["a"])).toEqual({ enqueued: 0, reason: "disabled" });
+    expect(h.created.length).toBe(0);
   });
 
-  it("活跃间隔到期(flush)→ 用累计并集只建一个任务(去重生效)", () => {
-    enqueueImportedSongs(["a", "b"]);
-    enqueueImportedSongs(["b", "c"]); // 累计 {a,b,c}
-    h.buildLibraryPlan.mockReturnValue({ items: [{ id: "a" }, { id: "b" }, { id: "c" }] });
-    const r = flushImportedSongs();
-    expect(r.enqueued).toBe(3);
-    expect(r.jobId).toBe("job-x");
-    expect(h.buildLibraryPlan).toHaveBeenCalledWith(
-      expect.any(Object),
-      expect.objectContaining({ songIds: ["a", "b", "c"] }),
-    );
-    expect(h.createFetchJob).toHaveBeenCalledTimes(1);
-    expect(h.startFetchJob).toHaveBeenCalledWith("job-x");
-    expect(pendingIds()).toEqual([]); // flush 后并集清空
-  });
-});
-
-describe("triggerFetchForImportedSongs 直测(边角)", () => {
-  it("空列表直接返回 empty,不碰计划器", () => {
+  it("点名列表为空（空串 / null / undefined）：reason empty", () => {
     expect(triggerFetchForImportedSongs([])).toEqual({ enqueued: 0, reason: "empty" });
-    expect(h.buildLibraryPlan).not.toHaveBeenCalled();
-  });
-
-  it("开关关闭直接返回 disabled,不碰计划器", () => {
-    h.cfgEnabled = false;
-    expect(triggerFetchForImportedSongs(["s1"])).toEqual({ enqueued: 0, reason: "disabled" });
-    expect(h.buildLibraryPlan).not.toHaveBeenCalled();
-  });
-
-  it("内部异常被兜底(导入不受影响),返回 nothing-to-do", () => {
-    h.buildLibraryPlan.mockImplementation(() => {
-      throw new Error("plan exploded");
+    expect(triggerFetchForImportedSongs([" ", "", null as unknown as string])).toEqual({
+      enqueued: 0,
+      reason: "empty",
     });
-    const r = triggerFetchForImportedSongs(["s1"]);
-    expect(r).toEqual({ enqueued: 0, reason: "nothing-to-do" });
-    expect(h.createFetchJob).not.toHaveBeenCalled();
+    expect(triggerFetchForImportedSongs(undefined as unknown as string[])).toEqual({
+      enqueued: 0,
+      reason: "empty",
+    });
+  });
+
+  it("成功：去重后入队并启动任务，返回 enqueued 与 jobId", () => {
+    h.planItems = [{ songId: "a" }, { songId: "b" }];
+    const r = triggerFetchForImportedSongs(["a", "b", "a"]);
+    expect(r).toEqual({ enqueued: 2, jobId: "job-x" });
+    expect(h.started).toEqual(["job-x"]);
+    expect(h.created[0]).toBeDefined();
+  });
+
+  it("内部异常（Error / 非 Error / 非法入参）：兜底返回，绝不外抛", () => {
+    h.planThrow = new Error("plan boom");
+    expect(triggerFetchForImportedSongs(["a"])).toEqual({ enqueued: 0, reason: "nothing-to-do" });
+
+    h.planThrow = "raw-fail"; // 非 Error 抛出 → String(e) 分支
+    expect(triggerFetchForImportedSongs(["a"])).toEqual({ enqueued: 0, reason: "nothing-to-do" });
+
+    // songIds 不是数组 → normalizeIds 抛错；catch 里 Array.isArray 为假
+    expect(triggerFetchForImportedSongs({} as unknown as string[])).toEqual({
+      enqueued: 0,
+      reason: "nothing-to-do",
+    });
+  });
+
+  it("createFetchJob 抛错也走兜底", () => {
+    h.jobThrow = new Error("create boom");
+    expect(triggerFetchForImportedSongs(["a"])).toEqual({ enqueued: 0, reason: "nothing-to-do" });
+    expect(h.created.length).toBe(0);
   });
 });
 
-describe("挂载点契约(registerFetchImportTrigger 把钩子接到 enqueue)", () => {
-  it("启动时把入库监听器挂上,且监听器调用即并入待下载集合(跨批去重)", () => {
-    registerFetchImportTrigger();
-    expect(h.setImportedSongsListener).toHaveBeenCalledTimes(1);
-    const listener = h.setImportedSongsListener.mock.calls[0][0] as (
-      ids: string[],
-      ctx: { providerId: string },
-    ) => void;
-    // 模拟 importOnlineSongs 广播「本轮新入库」
-    listener(["n1", "n2"], { providerId: "netease" });
-    expect(pendingIds().sort()).toEqual(["n1", "n2"]);
-    // 再广播一轮,与首轮重叠 → 去重
-    listener(["n2", "n3"], { providerId: "netease" });
-    expect(pendingIds().sort()).toEqual(["n1", "n2", "n3"]);
+describe("importTrigger 持久化与恢复", () => {
+  it("恢复脏数据：非法 JSON 与非数组都当空集合", () => {
+    h.store.set(PENDING_KEY, "{not json"); // JSON.parse 抛错 → catch
+    _resetImportTriggerForTest();
+    expect(flushImportedSongs()).toEqual({ enqueued: 0, reason: "empty" });
+
+    h.store.set(PENDING_KEY, "42"); // 合法 JSON 但非数组 → Array.isArray 为假
+    _resetImportTriggerForTest();
+    expect(flushImportedSongs()).toEqual({ enqueued: 0, reason: "empty" });
   });
 
-  it("进程重启恢复:待处理非空时继续计时,flush 时仍能下发", () => {
-    // 模拟上次退出时还没满活跃间隔的待处理集合
-    h.settings.set(PENDING_KEY, JSON.stringify(["r1"]));
-    registerFetchImportTrigger();
-    expect(h.setImportedSongsListener).toHaveBeenCalledTimes(1);
-    // 活跃间隔到期的 flush 把恢复出来的 r1 正常下发
-    h.buildLibraryPlan.mockReturnValue({ items: [{ id: "r1" }] });
-    const r = flushImportedSongs();
-    expect(r.enqueued).toBe(1);
-    expect(r.jobId).toBe("job-x");
+  it("落库失败仅告警：内存集合仍有效、计时器照常触发（Error / 非 Error 两种形态）", () => {
+    h.setError = new Error("db down");
+    expect(enqueueImportedSongs(["a"])).toBe(1);
+    vi.advanceTimersByTime(IMPORT_TRIGGER_IDLE_MS);
+    expect(h.created.length).toBe(1);
+
+    h.setError = "raw-db-err";
+    expect(enqueueImportedSongs(["z"])).toBe(1);
   });
 
-  it("监听器异常被吞(下载钩子崩了也不影响导入)", () => {
+  it("armIdleTimer：计时器具 unref 时调用，不具备时跳过", () => {
+    const real = globalThis.setTimeout;
+    try {
+      (globalThis as unknown as { setTimeout: unknown }).setTimeout = () => ({ unref: vi.fn() });
+      expect(enqueueImportedSongs(["u1"])).toBe(1);
+      (globalThis as unknown as { setTimeout: unknown }).setTimeout = () => ({});
+      expect(enqueueImportedSongs(["u2"])).toBe(2);
+    } finally {
+      globalThis.setTimeout = real;
+    }
+  });
+});
+
+describe("importTrigger 挂载与监听器兜底", () => {
+  it("register：挂载监听器，入库广播累积待下载（挂载时无待处理分支）", () => {
     registerFetchImportTrigger();
-    const listener = h.setImportedSongsListener.mock.calls[0][0] as (
-      ids: string[],
-      ctx: { providerId: string },
-    ) => void;
-    // 制造 enqueue 内部异常(getSetting 抛错)→ 必须被监听器 catch 吞掉
-    h.throwOnGet = true;
-    expect(() => listener(["x"], { providerId: "netease" })).not.toThrow();
+    expect(h.listener).toBeTypeOf("function");
+    h.listener!(["r1", "r2"], { providerId: "p" });
+    expect(h.store.get(PENDING_KEY)).toBe('["r1","r2"]');
+    vi.advanceTimersByTime(IMPORT_TRIGGER_IDLE_MS);
+    expect(h.created.length).toBe(1);
+  });
+
+  it("register：重启恢复待处理集合继续计时（有待处理分支）", () => {
+    h.store.set(PENDING_KEY, '["k1"]');
+    registerFetchImportTrigger();
+    expect(h.created.length).toBe(0);
+    vi.advanceTimersByTime(IMPORT_TRIGGER_IDLE_MS);
+    expect(h.created.length).toBe(1);
+  });
+
+  it("监听器内异常被吞：Error / 非 Error / ctx 缺省", () => {
+    registerFetchImportTrigger();
+    const real = globalThis.setTimeout;
+    try {
+      (globalThis as unknown as { setTimeout: unknown }).setTimeout = () => {
+        throw new Error("timer boom");
+      };
+      h.listener!(["x"], { providerId: "p" }); // Error 形态 + providerId 有值
+      (globalThis as unknown as { setTimeout: unknown }).setTimeout = () => {
+        throw "timer raw";
+      };
+      h.listener!(["y"], {} as unknown as { providerId: string }); // 非 Error + providerId 缺省
+      h.listener!(["z"], undefined as unknown as { providerId: string }); // ctx 整体缺省
+    } finally {
+      globalThis.setTimeout = real;
+    }
   });
 });

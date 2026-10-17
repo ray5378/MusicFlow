@@ -14,7 +14,7 @@
 // MUST be the first import。
 import "../plugins/_env.js";
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { sqlite } from "../../src/db/index.js";
 import {
@@ -24,6 +24,65 @@ import {
 } from "../../src/services/fetch/attempts.js";
 import { DEFAULT_FETCH_CONFIG } from "../../src/services/fetch/config.js";
 import { MAX_PURGE_PER_RUN, purgeDeadSongs } from "../../src/services/fetch/deadSongPurge.js";
+
+// 异常 / 降级分支（原用例只覆盖主路径）。四处副作用全是叶子模块，用「包装真实实现」
+// 的方式 mock：默认透传真实行为（用例 6 仍要真删 audio_analysis），仅在 dm 标记置位时抛错。
+const dm = vi.hoisted(() => ({
+  analysisErr: null as unknown,
+  coverErr: null as unknown,
+  lyricErr: null as unknown,
+  orphansErr: null as unknown,
+}));
+
+vi.mock("../../src/services/audio/analysisStore.js", async (importOriginal) => {
+  const actual = await importOriginal<
+    typeof import("../../src/services/audio/analysisStore.js")
+  >();
+  return {
+    ...actual,
+    deleteAnalysis: (rowId: string) => {
+      if (dm.analysisErr !== null) throw dm.analysisErr;
+      return actual.deleteAnalysis(rowId);
+    },
+  };
+});
+
+vi.mock("../../src/services/playlistCover.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/services/playlistCover.js")>();
+  return {
+    ...actual,
+    deleteSongCover: (songId: string) => {
+      if (dm.coverErr !== null) throw dm.coverErr;
+      return actual.deleteSongCover(songId);
+    },
+  };
+});
+
+vi.mock("../../src/services/lyricsStore.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/services/lyricsStore.js")>();
+  return {
+    ...actual,
+    deleteSongLyric: (songId: string) => {
+      if (dm.lyricErr !== null) throw dm.lyricErr;
+      return actual.deleteSongLyric(songId);
+    },
+  };
+});
+
+// scanner 仅用到 cleanupOrphans，且不在本门禁覆盖率范围内，直接以桩替换（避免加载重模块）。
+vi.mock("../../src/services/source/scanner.js", () => ({
+  cleanupOrphans: () => {
+    if (dm.orphansErr !== null) throw dm.orphansErr;
+  },
+}));
+
+// 顶层 beforeEach：每个用例前复位异常标记，避免 shuffle 下顺序耦合。
+beforeEach(() => {
+  dm.analysisErr = null;
+  dm.coverErr = null;
+  dm.lyricErr = null;
+  dm.orphansErr = null;
+});
 
 let seq = 0;
 const uid = (p: string) => `${p}-${++seq}`;
@@ -325,4 +384,83 @@ describe("PATCH21 死链清理 — 边界与早退分支", () => {
     expect(r.purged).toBe(MAX_PURGE_PER_RUN);
     expect(r.deferred).toBe(1);
   }, 120_000);
+});
+
+// 异常与降级分支：删音频分析 / 封面 / 歌词文件失败、事务删行失败、清理孤立失败。
+// 均只记日志、不中断整轮（安全边界：清理失败不得回滚已完成的移除）。
+describe("PATCH21 死链清理 — 异常与降级分支", () => {
+  beforeEach(() => {
+    ensureDownloadAttemptsTable();
+    sqlite.prepare(`DELETE FROM fetch_download_attempts`).run();
+  });
+
+  it("13. 删音频分析抛错（Error）：忽略并继续移除", () => {
+    const s = uid("eanalysis");
+    seedSong(s);
+    failTimes(s, 1);
+    dm.analysisErr = new Error("analysis boom");
+
+    const r = purgeDeadSongs(cfgWith(1));
+    expect(r.purged).toBe(1);
+    expect(songExists(s)).toBe(false);
+  });
+
+  it("14. 删音频分析抛错（非 Error）：err 归一化为字符串", () => {
+    const s = uid("eanalysisraw");
+    seedSong(s);
+    failTimes(s, 1);
+    dm.analysisErr = "raw-analysis";
+
+    expect(purgeDeadSongs(cfgWith(1)).purged).toBe(1);
+  });
+
+  it("15. 删封面抛错：忽略，移除照常", () => {
+    const s = uid("ecover");
+    seedSong(s);
+    failTimes(s, 1);
+    dm.coverErr = new Error("cover boom");
+
+    const r = purgeDeadSongs(cfgWith(1));
+    expect(r.purged).toBe(1);
+    expect(r.lyrics).toBe(0); // 封面抛错后歌词清理被短路
+  });
+
+  it("16. 删歌词抛错：忽略，移除照常", () => {
+    const s = uid("elyric");
+    seedSong(s);
+    failTimes(s, 1);
+    dm.lyricErr = new Error("lyric boom");
+
+    expect(purgeDeadSongs(cfgWith(1)).purged).toBe(1);
+  });
+
+  it("17. 事务删行失败：计入 errors，不中断整轮", () => {
+    const s = uid("eouter");
+    seedSong(s);
+    failTimes(s, 1);
+    // 临时触发器拦截 songs 删除，制造事务内异常 → 走外层 catch（随后必须清理触发器）。
+    sqlite
+      .prepare(
+        `CREATE TRIGGER tmp_block_song_del BEFORE DELETE ON songs
+           BEGIN SELECT RAISE(ABORT, 'blocked'); END`,
+      )
+      .run();
+    try {
+      const r = purgeDeadSongs(cfgWith(1));
+      expect(r.errors).toBe(1);
+      expect(r.purged).toBe(0);
+      expect(songExists(s)).toBe(true);
+    } finally {
+      sqlite.prepare(`DROP TRIGGER IF EXISTS tmp_block_song_del`).run();
+    }
+  });
+
+  it("18. 清理孤立专辑/艺人失败：已完成的移除不被掩盖", () => {
+    const s = uid("eorphans");
+    seedSong(s);
+    failTimes(s, 1);
+    dm.orphansErr = new Error("orphans boom");
+
+    expect(purgeDeadSongs(cfgWith(1)).purged).toBe(1);
+  });
 });

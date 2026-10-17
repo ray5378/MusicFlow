@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   existsSync,
   mkdirSync,
@@ -15,12 +15,42 @@ import { DEFAULT_NAMING_CONFIG } from "../../src/services/fetch/naming.js";
 import { resolveFetchConfig, type FetchConfig } from "../../src/services/fetch/config.js";
 import { finalizeFile } from "../../src/services/fetch/finalize.js";
 
+// 叶子 fs 调用打桩：用可控开关制造 EXDEV / 非 EXDEV 改名失败、readdir 失败、chmod 失败，
+// 其余 fs 调用一律透传真实实现（保证落盘行为逐字节不变）。
+const fsCtl = vi.hoisted(() => ({
+  renameErr: null as null | { code?: string },
+  readdirErr: false,
+  chmodErr: false,
+}));
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    renameSync: (...args: unknown[]) => {
+      if (fsCtl.renameErr) throw Object.assign(new Error("rename boom"), fsCtl.renameErr);
+      return (actual.renameSync as (...a: unknown[]) => void)(...args);
+    },
+    readdirSync: (...args: unknown[]) => {
+      if (fsCtl.readdirErr) throw new Error("readdir boom");
+      return (actual.readdirSync as (...a: unknown[]) => string[])(...args);
+    },
+    chmodSync: (...args: unknown[]) => {
+      if (fsCtl.chmodErr) throw new Error("chmod boom");
+      return (actual.chmodSync as (...a: unknown[]) => void)(...args);
+    },
+  };
+});
+
 let DL = "";
 let CA = "";
 
 beforeEach(() => {
   DL = mkdtempSync(join(tmpdir(), "mf-fin-dl-"));
   CA = mkdtempSync(join(tmpdir(), "mf-fin-ca-"));
+  fsCtl.renameErr = null;
+  fsCtl.readdirErr = false;
+  fsCtl.chmodErr = false;
 });
 
 afterEach(() => {
@@ -328,5 +358,62 @@ describe("finalizeFile — 边界分支", () => {
     expect(r.action).toBe("write");
     expect(r.reusedExisting).toBeUndefined();
     expect(readFileSync(target, "utf8")).toBe("NEW");
+  });
+});
+
+// 补充：落盘 fs 边角分支（EXDEV 跨卷降级 / 非 EXDEV 上抛 / readdir 失败 / chmod 失败）。
+describe("finalizeFile — 落盘 fs 边角", () => {
+  it("rename 抛 EXDEV → 降级为 copy+unlink，记跨卷警告，成品内容一致", () => {
+    fsCtl.renameErr = { code: "EXDEV" };
+    const cache = makeCache("x.mp3", "AUDIO-BYTES");
+    const r = finalizeFile({
+      cachePath: cache,
+      target: TARGET,
+      probed: { container: "mp3" },
+      config: cfg(),
+    });
+    expect(r.action).toBe("write");
+    expect(r.warnings.some((w) => w.includes("跨卷"))).toBe(true);
+    expect(readFileSync(r.finalPath as string, "utf8")).toBe("AUDIO-BYTES");
+    expect(existsSync(cache)).toBe(false); // 源已被 unlink
+  });
+
+  it("rename 抛非 EXDEV → 原样上抛", () => {
+    fsCtl.renameErr = { code: "EPERM" };
+    const cache = makeCache("y.mp3", "X");
+    expect(() =>
+      finalizeFile({ cachePath: cache, target: TARGET, probed: { container: "mp3" }, config: cfg() }),
+    ).toThrow(/rename boom/);
+  });
+
+  it("rename 策略下 readdir 失败 → usedNames 缺失仍能落到 (1)", () => {
+    const target = join(DL, REL);
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, "OLD");
+    fsCtl.readdirErr = true;
+
+    const cache = makeCache("z.mp3", "NEW");
+    const r = finalizeFile({
+      cachePath: cache,
+      target: TARGET,
+      probed: { container: "mp3" },
+      config: cfg({ fileConflictPolicy: "rename" }),
+    });
+    expect(r.action).toBe("write");
+    expect(r.finalPath?.endsWith("T - A (1).mp3")).toBe(true);
+    expect(readFileSync(r.finalPath as string, "utf8")).toBe("NEW");
+  });
+
+  it("chmod 失败 → 仍落盘成功但记警告", () => {
+    fsCtl.chmodErr = true;
+    const cache = makeCache("w.mp3", "X");
+    const r = finalizeFile({
+      cachePath: cache,
+      target: TARGET,
+      probed: { container: "mp3" },
+      config: cfg(),
+    });
+    expect(r.action).toBe("write");
+    expect(r.warnings.some((w) => w.includes("chmod 0644 失败"))).toBe(true);
   });
 });
