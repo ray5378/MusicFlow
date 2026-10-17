@@ -23,6 +23,10 @@
 
 - **「已修复」统计取错数据源（前端一直停在旧值）**：前端「已修复」此前读 settings 的 `repairedTotal`，它只在**一轮跑完**时累加「本轮 fixed+skipped」——全量扫动辄数千首、单轮可跑数小时，期间计数恒定不动；一旦中途容器重启 / 任务被杀，本轮已真实修复的数百首的计数**全部丢失**（实测 `tag_repair_done` 已 **184** 行，前端仍显示 **20**）。现改为直读完成标记行数（`getTagRepairMarkedCount()`）：每首真正修复 / 探针确认齐备即写标记，计数**实时**上升且跨重启保留；并让「探针确认标签齐备」的歌也登记标记（与下载期标记同义），前端不再叠加本轮 progress（避免同一首被计两次）。
 
+- **标签写入瞬时失败重试不足（`/MUSIC/LOSSLESS` 实测 Permission denied）**：生产实测 8 条 `ffmpeg 写标签失败(exit=243) Permission denied`（EACCES），集中在一个 11 分钟短窗内（判为 NAS 存储层瞬时权限抖动）；原策略仅「2s 后重试 1 次」，不足以吸收这类持续数分钟的抖动。现改为**指数退避重试 3 次**（3s → 6s → 12s），仍失败才上抛并打印错误与文件路径（便于区分「瞬时抖动（重试可愈）」与「永久权限问题（需运维介入）」）；`TIMEOUT` 仍不重试，其他错误原样上抛。退避窗口可用环境变量 `MF_TAG_RETRY_DELAYS_MS`（逗号分隔毫秒）覆盖，测试置 0 加速。
+
+- **多身份共享音乐库导致标签修复 `Permission denied`（根治：运行身份可配置化）**：`/MUSIC/LOSSLESS` 实测有 **315 个目录**属主不是应用身份（uid 100），而「写标签」是**同目录建 `.tagtmp` 再 rename**、需要的是**目录写权限** → 报 `ffmpeg 写标签失败(exit=243) … Permission denied`（指数退避重试 3 次仍失败）。先验证 ACL 路线**不可行**：本机 `/vol3` 为 btrfs 且挂载选项含厂商自定义的 `trimacl`，`setfacl` 能写入 xattr、`getfacl` 可回读，但**不参与权限判定**（受控实验：把单个目录 `chown` 给 uid 100 后立刻可写，随后还原；同目录以 100 身份 `touch` 仍 EACCES）。故改为**从结构上消除矛盾**：`backend/entrypoint.sh` 新增 `PUID` / `PGID` 支持 —— 未设置时行为与历史**完全一致**（仍以镜像内 `musicflow` 100:101 运行，保留原有「按需 chown data / plugins」逻辑，向后兼容）；生产 `compose.yaml` 传 `PUID=0` / `PGID=0` 时应用以 **root** 运行。root 可写任意属主条目，chown / cron / ACL 等治标手段**全部不再需要**，此类 `Permission denied` 从此结构性不复现。
+
 ### 测试
 
 - `tagProvider.test.ts` 新增网易云兜底用例：QQ 有命中时**不调用**网易云；QQ 零候选时网易云兜底且**毫秒时长换算成秒**；封面走二次详情接口；歌词取 `lrc.lyric`。
@@ -30,6 +34,8 @@
 - 门禁：`npx tsc --noEmit`（backend）= 0、`npx vue-tsc --noEmit`（frontend）= 0；`tests/fetch/tagRepair.test.ts`（26 例）、`tests/plugins/tagProvider.test.ts`（16 例）全绿；全量门禁由 CI 复核。
 - `tagProvider.test.ts` 新增 QQ 限流用例：相邻两次 QQ 请求间隔 ≥1.5s（跨调用的全局串行队列同样生效）、网易云链路不受限（紧随发起无需再等 1.2s）。
 - `tagRepair.test.ts` 新增修正 4 回归用例：`repaired` 直读完成标记表 —— 未跑任何一轮修复也能实时反映已标记歌数（锁定「一直停旧值」不再复现）。
+
+- `tagRepair.test.ts` 新增加固回归用例：`TAG_FAILED` 连续失败 → 退避重试用尽（共 3 次重试 = 4 次写入）后上抛；原「第二次成功即修复」用例更名为「指数退避重试」，覆盖首重试即愈的场景。
 
 ### 实测（真实数据 · 真实链路 · 240 生产容器 musicflow）
 
@@ -42,6 +48,8 @@
 - 落地前、落地后各做一次审查（方向正确性 + 改动覆盖性）。
 - **QQ 限流真机实测（240 生产容器 · 真实网络）**：一次 `searchMetadata` 内的相邻两次 QQ 往返实测间隔 **3071ms**（≥ 1.2s + 抖动下限；因串行队列在「上一请求完成」后才放行，实际间隔会更长），限流生效；同一次调用命中 `platform=qq`、`genre=R&B`、`track=8`、`year=2016`。
 - **「已修复」计数实测（修正 4）**：修正前 DB `tag_repair_done` = **184** 行而前端计数恒为 **20**；修正后 `getTagRepairStats().repaired` 直读标记表 = **184**，并自建一条临时标记后立刻 +1、删除后回退（活性验证通过，全程未触碰任何音乐文件）。
+
+- **标签修复权限根治（PUID/PGID）真机取证（240 生产容器 · 真实链路）**：落地前 PID1 为 `Uid=100/Gid=101`；`compose.yaml` 注入 `PUID=0`/`PGID=0` 并部署新版 entrypoint 后 PID1 变为 `Uid=0/Gid=0`，健康检查 `GET /` → **200**，插件加载 / DLNA 注册 / WS 升级日志均正常。在**原失败目录** `/MUSIC/LOSSLESS/Darius/Romance`（属主 `root:root`、模式 755，改前必然失败）以真实 `ffmpeg-static` 复刻 `tagWriter` 语义（同目录写 `.tagtmp.flac` → `rename`）→ **写入成功 + 改名成功 + 清理成功**；交叉对照以旧身份 `uid 100` 在同一目录 `touch` → **`Permission denied`**（证明差异来自运行身份，而非目录属性被改动）。落地前 / 落地后各做一次审查。
 
 ## [4.6.24] - 2026-10-17
 

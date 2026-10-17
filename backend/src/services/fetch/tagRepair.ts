@@ -93,12 +93,20 @@ const QUEUE_BATCH = 10;
 const POLL_MS = 60_000;
 const BOOT_DELAY_MS = 15_000;
 /**
- * TAG_FAILED 单次重试延迟。加固（2026-10-11）：首修全量扫 40 起写失败全部集中在
- * 一个 11 分钟窗口，实证为 NAS 存储层瞬时抖动（绿联 trimacl 短窗内 EACCES /
- * 新建条目不可见 / 条目闪没），事后同命令复跑全部成功——2s 后重试 1 次即可吸收。
+ * TAG_FAILED 重试退避（加固 2026-10-17：单次 2s → 3 次指数退避）。
+ * 背景：首修全量扫 40 起写失败集中在 11 分钟窗口（NAS 存储层瞬时抖动，绿联 trimacl
+ * 短窗内 EACCES / 新建条目不可见 / 条目闪没）；后续生产 `/MUSIC/LOSSLESS` 又实测 8 条
+ * `ffmpeg 写标签失败(exit=243) Permission denied`（EACCES，同处一个短窗），
+ * 单次 2s 重试不足以吸收 —— 改为 3s → 6s → 12s 共 3 次，仍失败才上抛并打印 errno，
+ * 便于区分「瞬时抖动（重试可愈）」与「永久权限问题（需运维介入）」。
  * 仅 TAG_FAILED 重试；TIMEOUT 不重试（可能真慢/真卡），其他错误原样上抛。
+ * 可用 `MF_TAG_RETRY_DELAYS_MS`（逗号分隔毫秒）覆盖，测试置 0 以加速。
  */
-const TAG_WRITE_RETRY_DELAY_MS = 2_000;
+function tagRetryDelaysMs(): number[] {
+  const raw = process.env.MF_TAG_RETRY_DELAYS_MS;
+  if (raw !== undefined) return raw.split(",").map((s) => Math.max(0, Number(s) || 0));
+  return [3_000, 6_000, 12_000];
+}
 
 interface QueueEntry {
   count: number;
@@ -625,16 +633,31 @@ export async function repairSongTags(songId: string, cfg: FetchConfig): Promise<
   applyTagsVariant(tags, currentFetchConfig().chineseVariant);
 
   // 只在真拿到值时才写 —— tagWriter 原子写（tagtmp+rename），失败抛 FetchTagError。
-  // TAG_FAILED 短延迟重试 1 次，吸收 NAS 存储层瞬时抖动；原文件保证未被破坏，重试安全。
-  try {
-    // keepSourceCover：本次不换封面（needCover=false）时必须保留源文件已有封面，
-    // 否则「补 genre/track 等缺失标签」的重写会把已有封面一并丢掉（2026-10-17 实测）。
-    await writeTags(fsPath, tags, { keepSourceCover: true });
-  } catch (e) {
-    if (!(e instanceof FetchTagError) || e.code !== "TAG_FAILED") throw e;
-    log.warn(`写标签失败，${TAG_WRITE_RETRY_DELAY_MS}ms 后重试一次: song=${songId}`);
-    await new Promise((resolve) => setTimeout(resolve, TAG_WRITE_RETRY_DELAY_MS));
-    await writeTags(fsPath, tags, { keepSourceCover: true });
+  // TAG_FAILED 指数退避重试（3s→6s→12s 共 3 次），吸收 NAS 存储层瞬时权限抖动；
+  // 原文件保证未被破坏（原子写），重试安全；3 次仍失败才上抛（附路径便于排查）。
+  const retryDelays = tagRetryDelaysMs();
+  for (let attempt = 0; ; attempt++) {
+    try {
+      // keepSourceCover：本次不换封面（needCover=false）时必须保留源文件已有封面，
+      // 否则「补 genre/track 等缺失标签」的重写会把已有封面一并丢掉（2026-10-17 实测）。
+      await writeTags(fsPath, tags, { keepSourceCover: true });
+      break;
+    } catch (e) {
+      if (!(e instanceof FetchTagError) || e.code !== "TAG_FAILED") throw e;
+      const delay = retryDelays[attempt];
+      if (delay === undefined) {
+        log.error(
+          `写标签重试 ${retryDelays.length} 次仍失败（疑存储层权限/抖动）: ` +
+            `song=${songId} file=${fsPath} err=${e.message}`,
+        );
+        throw e;
+      }
+      log.warn(
+        `写标签失败，${delay}ms 后重试(第 ${attempt + 1}/${retryDelays.length} 次): ` +
+          `song=${songId} file=${fsPath} err=${e.message}`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
   }
 
   if (gotLyric) {

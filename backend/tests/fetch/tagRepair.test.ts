@@ -44,6 +44,10 @@ import {
 import { markTagRepairDone, isTagRepairMarked } from "../../src/services/fetch/tagRepairMarker.js";
 import type { FetchConfig } from "../../src/services/fetch/config.js";
 
+// 退避重试测试加速：单元测试无需真等 3s / 6s / 12s（见 tagRepair.ts 的 tagRetryDelaysMs）。
+// 必须是 3 个值，与生产退避次数一致（否则重试次数会少于 3 次）。
+process.env.MF_TAG_RETRY_DELAYS_MS = "0,0,0";
+
 // ---- mocks（Vitest5：工厂必须带出被依赖方用到的每个导出） --------------------
 
 const parseFileMock = vi.hoisted(() => vi.fn());
@@ -378,7 +382,7 @@ describe("repairSongTags", () => {
     expect(isTagRepairMarked(p)).toBe(false);
   });
 
-  it("TAG_FAILED → 2s 后重试一次，第二次成功即修复（吸收 NAS 存储层瞬时抖动）", async () => {
+  it("TAG_FAILED → 指数退避重试，第 2 次成功即修复（吸收 NAS 存储层瞬时抖动）", async () => {
     const p = join(root, "retry.flac");
     insertSong("s-retry", p);
     parseFileMock.mockResolvedValueOnce(probe({ album: false }));
@@ -387,6 +391,18 @@ describe("repairSongTags", () => {
     const r = await repairSongTags("s-retry", cfg());
     expect(r.outcome).toBe("fixed");
     expect(writeTagsMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("加固：TAG_FAILED 连续失败 → 指数退避重试用尽（共 3 次重试=4 次写入）后上抛", async () => {
+    const p = join(root, "retry-exhaust.flac");
+    insertSong("s-rex", p);
+    parseFileMock.mockResolvedValueOnce(probe({ album: false }));
+    // 模拟存储层持续 EACCES（如 /MUSIC/LOSSLESS 实测的 Permission denied）。
+    writeTagsMock.mockRejectedValue(new MockFetchTagError("TAG_FAILED", "EACCES", p));
+
+    await expect(repairSongTags("s-rex", cfg())).rejects.toThrow();
+    // 首次 + 退避 3 次（3s→6s→12s，测试用 MF_TAG_RETRY_DELAYS_MS=0 置零） = 4 次
+    expect(writeTagsMock).toHaveBeenCalledTimes(4);
   });
 
   it("TIMEOUT 不重试直接上抛（由调用方记异常计数）", async () => {
