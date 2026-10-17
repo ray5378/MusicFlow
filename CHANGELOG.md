@@ -8,6 +8,10 @@
 
 - **管理端「待修复」数字随池子收敛（口径剔除已落标记）**：`GET /v1/fetch/tag-repair` 的 `stats.pending` 取 `selectMediaMissingRows()`（纯 DB 预筛），**不剔除已落完成标记的歌** → 池子实际在收敛（扫描阶段 `isTagRepairMarked` 会跳过已标记的歌），但界面「待修复」随修复 / 标记推进长期停在原位（240 生产实测：`待修复` 恒 3447 不动，而 `终态不可得` 随标记写入上升，两张卡并列时数字自相矛盾）。现改为 `pending` = 预筛集合 **减去**「已落完成标记的 `fs_path`」集合（新增 `getTagRepairMarkedPaths()`，纯 DB 读取、**不 stat**；含 `outcome='fixed'` 与 `'unobtainable'` 两类，与扫描阶段的跳过口径对齐）。失效判定（size / mtime 变化）仍由扫描阶段 `isTagRepairMarked` 负责，故本次**只改展示口径、不动修复行为与写盘逻辑**。
 
+### Docs
+
+- **补齐随仓库分发的运行身份开关（`PUID` / `PGID`）**：`entrypoint.sh` 自 α 方案起已支持 `PUID` / `PGID`（默认镜像内 `musicflow` 用户 `uid=100` / `gid=101`，传 `0` 以 root 运行，不传则与历史完全一致），但 `docker-compose.yml` 与 `README.md` 内嵌的 compose 示例**均未列出这两个变量**，用户无从得知该开关存在。现于两处 `environment:` 段补齐 `- PUID=${PUID:-}` / `- PGID=${PGID:-}`（附成因注释），并新增 README「运行身份（PUID / PGID）」小节：说明默认身份、触发场景（多身份共享写入的库 + 写标签需目录写权限 → `ffmpeg 写标签失败(exit=243) Permission denied`）、为何 chown / ACL 只是治标（btrfs `trimacl` 挂载使 ACL 只存 xattr、不参与权限判定），以及 `PUID=0 / PGID=0` 解法。
+
 ### 测试
 
 - `tagRepair.test.ts`（34 例）新增 1 例：某歌 DB 缺歌词 / 封面但已登记完成标记 → `stats.pending` 不计入（`total=1` / `pending=0` / `unobtainableTotal=1`）。

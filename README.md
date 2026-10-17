@@ -34,6 +34,17 @@ services:
       - PLAY_HISTORY_RETENTION_DAYS=${PLAY_HISTORY_RETENTION_DAYS:-3}
       - TZ=Asia/Shanghai
       - UV_USE_IO_URING=0
+      # 运行身份(容器内 uid/gid)。留空 = 镜像内 musicflow 用户(uid=100 / gid=101),
+      # 与历史行为完全一致;填 0 = 以 root 运行。
+      # 何时需要:音乐库常是「多身份共享写入」的目录树(qBittorrent / 迅雷 / 手动 root 操作
+      # 都往同一棵树写),库里会出现「属主不是应用 uid」的目录;而写标签要在同目录建临时文件
+      # 再 rename,依赖的是**目录写权限**,于是这类目录一出现,标签修复就会报
+      # `ffmpeg 写标签失败(exit=243) ... Permission denied`。
+      # 若宿主 ACL 不参与权限判定(如 btrfs 挂载带厂商自定义 trimacl 参数:setfacl 能写、
+      # getfacl 能读,但 uid=100 实测仍 EACCES),chown / ACL 都只是治标;此时设 0 / 0
+      # 让应用以 root 运行即可根治(root 可写任何属主的条目)。详见 README「运行身份(PUID / PGID)」。
+      - PUID=${PUID:-}
+      - PGID=${PGID:-}
       # 可选:V8 堆上限(MB)。默认不设;内存紧张的机器可设 256 及时压堆。
       # - NODE_OPTIONS=--max-old-space-size=256
       # 可选:覆盖 DLNA 渲染器回拉流地址的基地址。默认从请求 Host 头自动探测;
@@ -79,6 +90,29 @@ services:
 
 networks: {}
 ```
+
+### 运行身份（PUID / PGID）
+
+容器内应用默认以镜像内的 `musicflow` 用户（`uid=100` / `gid=101`）运行，与历史行为一致。两个环境变量可覆盖该身份：
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `PUID` | 镜像内 `musicflow` 用户的 uid（`100`） | 容器内运行应用的 uid；填 `0` 即以 root 运行 |
+| `PGID` | 镜像内 `musicflow` 用户的 gid（`101`） | 容器内运行应用的 gid；填 `0` 即以 root 运行 |
+
+**何时需要改**：音乐库常是「多身份共享写入」的目录树（qBittorrent / 迅雷 / 手动 root 操作都往同一棵树里写），库里必然出现「属主不是应用 uid」的目录；而写标签要在同目录建临时文件再 rename，依赖的是**目录写权限**，于是这类目录一出现，标签修复就会报 `ffmpeg 写标签失败(exit=243) ... Permission denied`。
+
+**为什么 chown / ACL 只是治标**：只要「应用 uid」与「库内条目属主」可能不一致，问题就会复发。若宿主 ACL 也不参与权限判定（如 btrfs 挂载带厂商自定义 `trimacl` 参数：`setfacl` 能写、`getfacl` 能读，但 `uid=100` 实测仍 `EACCES`），ACL 细化授权这条路也不通。
+
+**解法**：让应用以 root 运行即可根治（root 可写任何属主的条目），在 compose 中设：
+
+```yaml
+    environment:
+      - PUID=0
+      - PGID=0
+```
+
+不设置这两项时行为与历史完全一致（**向后兼容**）。注意：以 root 运行时 `entrypoint.sh` 会跳过启动期的全量 `chown` 探测与降权，启动更快。
 
 ## 功能概览
 
