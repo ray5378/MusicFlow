@@ -48,7 +48,15 @@ import {
   getTagRepairQueueSize,
   isTagRepairRunning,
   startTagRepairScheduler,
+  ACTIVE_RUN_KEY,
+  TAG_REPAIR_RESUME_DELAY_MS,
+  getTagRepairActiveRun,
+  hasResumableActiveRun,
+  isTagRepairStopping,
+  stopTagRepair,
+  resumeInterruptedTagRepair,
 } from "../../src/services/fetch/tagRepair.js";
+import type { TagRepairRunSnapshot } from "../../src/services/fetch/tagRepair.js";
 import { markTagRepairDone, isTagRepairMarked, getTagRepairPlatformCounts } from "../../src/services/fetch/tagRepairMarker.js";
 import type { FetchConfig } from "../../src/services/fetch/config.js";
 
@@ -92,6 +100,9 @@ vi.mock("../../src/services/fetch/tagWriter.js", () => ({
   // 让断言看到 provider 原文（字形转换本身由 chineseConv 单测覆盖）。
   applyTagsVariant: applyVariantMock,
   FetchTagError: MockFetchTagError,
+  // stopTagRepair/resumeInterruptedTagRepair 会调 cleanupTagTmp 拼临时文件路径；
+  // 这里给出等价实现（测试不必真造 tagtmp 文件），让停止/续跑路径不因缺导出报错。
+  tmpPathFor: (target: string, marker: string) => `${target}.${marker}`,
 }));
 
 const cacheRemoteCoverMock = vi.hoisted(() => vi.fn());
@@ -1161,3 +1172,303 @@ import { eq } from "drizzle-orm";
 function eqId(id: string) {
   return eq(songs.id, id);
 }
+
+// ---- 18. 续跑快照 / 立刻停止 ------------------------------------------------------
+//
+// 覆盖 tagRepair.ts 的「断点续跑 + 立刻停止」能力：ACTIVE_RUN_KEY 快照持久化、
+// getTagRepairActiveRun / hasResumableActiveRun 判定、stopTagRepair 协作式停止、
+// resumeInterruptedTagRepair boot 续跑。
+// 复用本文件既有 mock：parseFileMock（文件头探针）、searchCover/searchLyrics/searchMetadataMock
+// （provider）、settings 真实读写（setSetting/getSetting）与隔离 DATA_DIR 的真实 DB。
+
+describe("续跑快照 / 立刻停止", () => {
+  /** 构造一份运行快照（默认 all/repair），用于手工落盘或作为 resume 入参。 */
+  function makeSnapshot(over: Partial<TagRepairRunSnapshot> = {}): TagRepairRunSnapshot {
+    const now = Date.now();
+    return {
+      version: 1,
+      mode: "all",
+      dirScope: "both",
+      phase: "repair",
+      startedAt: now,
+      updatedAt: now,
+      checked: 0,
+      fixed: 0,
+      skipped: 0,
+      unobtainable: 0,
+      pendingIds: [],
+      candidateIds: [],
+      currentFsPath: null,
+      stopped: false,
+      ...over,
+    };
+  }
+
+  it("全新一轮 media：过程中 ACTIVE_RUN_KEY 写入合法快照，正常结束后被清空", async () => {
+    // 验证：media 一轮运行中快照被持久化（version/mode/dirScope/phase 正确）；正常跑完后清空。
+    insertSong("snap-media", join(root, "snap-media.flac"), { hasLyrics: 0 });
+    parseFileMock.mockResolvedValue(probe({ cover: false })); // 缺封面 → repair 阶段会走 provider
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    searchCoverMock.mockImplementation(async () => {
+      await gate;
+      return null;
+    });
+    const p = runTagRepairOnce("media", cfg());
+    await vi.waitFor(() => expect(getSetting(ACTIVE_RUN_KEY, "")).not.toBe(""));
+    const parsed = JSON.parse(String(getSetting(ACTIVE_RUN_KEY, ""))) as TagRepairRunSnapshot;
+    expect(parsed.version).toBe(1);
+    expect(parsed.mode).toBe("media");
+    expect(parsed.dirScope).toBe("both"); // cfg() 未覆盖 tagRepairScope → 默认 both
+    expect(parsed.phase).toBe("repair");
+    release();
+    expect((await p).busy).toBe(false);
+    // 正常跑完 → clearActiveRun：settings 该 key 为空串，读取回落 null
+    expect(getSetting(ACTIVE_RUN_KEY, "")).toBe("");
+    expect(getTagRepairActiveRun()).toBeNull();
+  });
+
+  it("全新一轮 all：过程中快照 phase=repair，正常结束后被清空", async () => {
+    // 验证：all 全量扫在 scan 结束进入 repair 前落盘候选，期间快照合法；结束后清空。
+    insertSong("snap-all", join(root, "snap-all.flac"), { hasLyrics: 0 });
+    parseFileMock.mockResolvedValue(probe({ cover: false }));
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    searchCoverMock.mockImplementation(async () => {
+      await gate;
+      return null;
+    });
+    const p = runTagRepairOnce("all", cfg());
+    await vi.waitFor(() => expect(getSetting(ACTIVE_RUN_KEY, "")).not.toBe(""));
+    const parsed = JSON.parse(String(getSetting(ACTIVE_RUN_KEY, ""))) as TagRepairRunSnapshot;
+    expect(parsed.version).toBe(1);
+    expect(parsed.mode).toBe("all");
+    expect(parsed.dirScope).toBe("both");
+    expect(parsed.phase).toBe("repair");
+    release();
+    await p;
+    expect(getSetting(ACTIVE_RUN_KEY, "")).toBe("");
+    expect(getTagRepairActiveRun()).toBeNull();
+  });
+
+  it("getTagRepairActiveRun / hasResumableActiveRun 语义：无→null/false，未停止→快照/true，已停止→false", () => {
+    // 验证：空闲时从持久化快照读取；stopped 的快照不可续跑但仍可读。
+    expect(getTagRepairActiveRun()).toBeNull();
+    expect(hasResumableActiveRun()).toBe(false);
+
+    const live = makeSnapshot({ mode: "media", dirScope: "download", phase: "scan", checked: 2, pendingIds: ["a"] });
+    setSetting(ACTIVE_RUN_KEY, JSON.stringify(live));
+    expect(hasResumableActiveRun()).toBe(true);
+    const got = getTagRepairActiveRun();
+    expect(got).not.toBeNull();
+    expect(got!.mode).toBe("media");
+    expect(got!.pendingIds).toEqual(["a"]);
+
+    setSetting(ACTIVE_RUN_KEY, JSON.stringify(makeSnapshot({ stopped: true })));
+    expect(hasResumableActiveRun()).toBe(false); // 主动停止的快照不自动复活
+    expect(getTagRepairActiveRun()).not.toBeNull(); // 但快照本身仍可读（尚未被清除）
+  });
+
+  it("stopTagRepair 未运行：返回 {requested:false,running:false} 且无副作用", () => {
+    // 验证：无进行中一轮时停止是 no-op，不推进 lastRunAt、不置停止标志。
+    expect(isTagRepairRunning()).toBe(false);
+    expect(stopTagRepair()).toEqual({ requested: false, running: false });
+    expect(isTagRepairStopping()).toBe(false);
+    expect(getSetting("fetch.tagrepair.lastRunAt", "0")).toBe("0");
+  });
+
+  it("stopTagRepair 运行中：置停止标志、快照 stopped=true 落盘、推进 lastRunAt；本轮结束后标志复位", async () => {
+    // 验证：运行中停止返回 {requested:true,running:true}；isTagRepairStopping=true；
+    //      持久化快照被标 stopped=true；D2 语义顺延 lastRunAt；本轮 finally 复位停止标志。
+    insertSong("s-stop", join(root, "stop.flac"), { hasLyrics: 0 });
+    parseFileMock.mockResolvedValue(probe({ cover: false }));
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    searchCoverMock.mockImplementation(async () => {
+      await gate;
+      return null;
+    });
+    const p = runTagRepairOnce("media", cfg());
+    await vi.waitFor(() => expect(getSetting(ACTIVE_RUN_KEY, "")).not.toBe(""));
+
+    expect(stopTagRepair()).toEqual({ requested: true, running: true });
+    expect(isTagRepairStopping()).toBe(true);
+    const persisted = JSON.parse(String(getSetting(ACTIVE_RUN_KEY, ""))) as TagRepairRunSnapshot;
+    expect(persisted.stopped).toBe(true);
+    expect(Number(getSetting("fetch.tagrepair.lastRunAt", "0"))).toBeGreaterThan(0);
+
+    release();
+    const { busy, stopped } = await p;
+    expect(busy).toBe(false);
+    expect(stopped).toBe(true); // 走 runTagRepairOnce 的停止分支
+    expect(isTagRepairStopping()).toBe(false); // finally 复位
+  });
+
+  it("协作式停止中断 sweep：provider 回调里触发停止 → 本轮提前结束、返回 stopped:true、不写 lastResult", async () => {
+    // 验证：多首候选中途停止 → 只处理到触发点那一首；返回 stopped:true；半轮不写 lastResult。
+    insertSong("s-c1", join(root, "c1.flac"), { hasLyrics: 0 });
+    insertSong("s-c2", join(root, "c2.flac"), { hasLyrics: 0 });
+    insertSong("s-c3", join(root, "c3.flac"), { hasLyrics: 0 });
+    parseFileMock.mockResolvedValue(probe({ cover: false }));
+    // 首个候选的 provider 回调里触发停止：sweep 循环头随即拦下后续候选。
+    searchCoverMock.mockImplementation(async () => {
+      stopTagRepair();
+      return null;
+    });
+    const { busy, result, stopped } = await runTagRepairOnce("media", cfg());
+    expect(busy).toBe(false);
+    expect(stopped).toBe(true);
+    expect(result?.checked).toBe(1); // 仅第一首被处理，其余提前终止
+    expect(result?.checked).toBeLessThan(3);
+    expect(getSetting("fetch.tagrepair.lastResult", "")).toBe(""); // 停止分支不写 lastResult
+  });
+
+  it("停止轮不再因正常完成推进 lastRunAt（停止时已推一次，完成后不应再推）", async () => {
+    // 验证（按真实实现 D2 语义）：stopTagRepair 本身会推进 lastRunAt；停止分支在 runTagRepairOnce
+    // 里提前 return（不写 lastResult / 不再次 setSetting lastRunAt）。故完成时刻 == 停止时刻。
+    insertSong("s-adv", join(root, "adv.flac"), { hasLyrics: 0 });
+    parseFileMock.mockResolvedValue(probe({ cover: false }));
+    let atStop = 0;
+    searchCoverMock.mockImplementation(async () => {
+      stopTagRepair();
+      atStop = Number(getSetting("fetch.tagrepair.lastRunAt", "0"));
+      // 拖过数十毫秒：若「正常完成」路径又推一次，时间戳必然不同（毫秒级）。
+      await new Promise((r) => setTimeout(r, 30));
+      return null;
+    });
+    const { stopped } = await runTagRepairOnce("media", cfg());
+    expect(stopped).toBe(true);
+    expect(atStop).toBeGreaterThan(0);
+    expect(Number(getSetting("fetch.tagrepair.lastRunAt", "0"))).toBe(atStop);
+  });
+
+  it("续跑恢复计数：从快照 checked/fixed 起步（不清零），只处理 pendingIds、不重跑全量精探", async () => {
+    // 验证：phase=repair 快照续跑时，progress/result 以快照计数为起点；候选只取 pendingIds。
+    insertSong("r1", join(root, "r1.flac"), { hasLyrics: 0 });
+    insertSong("r2", join(root, "r2.flac"), { hasLyrics: 0 });
+    insertSong("r3", join(root, "r3.flac"), { hasLyrics: 0 });
+    cfg();
+    const base = makeSnapshot({
+      mode: "all",
+      dirScope: "both",
+      phase: "repair",
+      checked: 5,
+      fixed: 3,
+      skipped: 1,
+      unobtainable: 1,
+      pendingIds: ["r1"],
+      candidateIds: [],
+    });
+    parseFileMock.mockClear();
+    parseFileMock.mockResolvedValue(probe({ lyric: false }));
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    searchLyricsMock.mockImplementation(async () => {
+      await gate;
+      return "[00:01]词";
+    });
+    const p = runTagRepairOnce("all", undefined, "both", base);
+    await vi.waitFor(() => expect(getTagRepairProgress()).not.toBeNull());
+    const live = getTagRepairProgress()!;
+    expect(live.phase).toBe("repair");
+    expect(live.checked).toBe(5); // 从快照起步，而非 0
+    expect(live.fixed).toBe(3);
+    release();
+    const { result } = await p;
+    expect(result?.checked).toBe(6); // 快照 5 + 本首 1
+    expect(result?.fixed).toBe(4); // 快照 3 + 本首真写入 1
+    // 未重跑全量精探：仅 pending 那首被文件头探针一次（库里另有 r2/r3，未被扫）
+    expect(parseFileMock.mock.calls.length).toBe(1);
+  });
+
+  it("resumeInterruptedTagRepair：无快照 → {resumed:false}", () => {
+    // 验证：无遗留快照时不续跑。
+    expect(getSetting(ACTIVE_RUN_KEY, "")).toBe("");
+    expect(resumeInterruptedTagRepair()).toEqual({ resumed: false });
+  });
+
+  it("resumeInterruptedTagRepair：stopped:true 的快照 → 不复活且清除快照", () => {
+    // 验证：用户主动停止留下的快照被消费清除，不自动复活。
+    setSetting(ACTIVE_RUN_KEY, JSON.stringify(makeSnapshot({ mode: "all", stopped: true, pendingIds: ["x"] })));
+    expect(resumeInterruptedTagRepair()).toEqual({ resumed: false });
+    expect(getSetting(ACTIVE_RUN_KEY, "")).toBe(""); // 快照已被清除
+  });
+
+  it("resumeInterruptedTagRepair：未停止快照 → {resumed:true,mode} 并异步续跑（快照终被消费）", async () => {
+    // 验证：未停止快照返回 resumed:true 且 mode 正确；fire-and-forget 续跑本轮真正结束、快照清空。
+    insertSong("s-res", join(root, "res.flac"), { hasLyrics: 0 });
+    cfg();
+    parseFileMock.mockResolvedValue(probe({ cover: false }));
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    searchCoverMock.mockImplementation(async () => {
+      await gate;
+      return null;
+    });
+    setSetting(
+      ACTIVE_RUN_KEY,
+      JSON.stringify(makeSnapshot({ mode: "media", dirScope: "both", phase: "repair", pendingIds: ["s-res"] })),
+    );
+    expect(resumeInterruptedTagRepair()).toEqual({ resumed: true, mode: "media" });
+    // 异步续跑：等本轮起来（progress 非空）后再放行，避免测试间泄漏
+    await vi.waitFor(() => expect(getTagRepairProgress()).not.toBeNull());
+    expect(isTagRepairRunning()).toBe(true);
+    release();
+    await vi.waitFor(() => expect(isTagRepairRunning()).toBe(false));
+    expect(getSetting(ACTIVE_RUN_KEY, "")).toBe(""); // 正常跑完 → 快照被消费
+  });
+
+  it("boot 防抢跑判定（降级）：hasResumableActiveRun 快照存在 true / 清除后 false", () => {
+    // 调度器 tick 以 hasResumableActiveRun() 决定「跳过定时兜底」。
+    // 降级原因：startTagRepairScheduler 内部的 started 是一次性模块级标志，_resetTagRepairForTest
+    // 未复位它，且本文件上方「运行中标志与调度器」用例已挂载过一次 → 此处无法低成本复现 tick，
+    // 故直接断言该判定函数语义（与 tick 中的用法一致）。
+    // 常量健壮性顺带校验：boot 恢复延迟为 60s。
+    expect(TAG_REPAIR_RESUME_DELAY_MS).toBe(60_000);
+    expect(hasResumableActiveRun()).toBe(false);
+    setSetting(ACTIVE_RUN_KEY, JSON.stringify(makeSnapshot({ mode: "media", stopped: false })));
+    expect(hasResumableActiveRun()).toBe(true); // tick 据此跳过定时兜底，不抢跑续跑
+    setSetting(ACTIVE_RUN_KEY, "");
+    expect(hasResumableActiveRun()).toBe(false); // 快照清除后恢复定时兜底
+  });
+
+  it("进程内抛异常：残留快照被清掉（避免永久阻塞调度器）", async () => {
+    // 验证：一轮因「进程内异常」中断退出（非正常完成、非主动停止）时，finally 会清掉残留的
+    // 未停止快照，使其不再顶住调度器 tick 的 hasResumableActiveRun() 判定（否则定时常规修复
+    // 会被无限期跳过，直到容器重启）。对照：正常跑完一轮同样不可续跑。
+    insertSong("boom", join(root, "boom.flac"), { hasLyrics: 0 });
+    cfg();
+    // 预置一份「boot 恢复用」的持久化快照（未停止、phase=repair、含待处理 id）模拟重启遗留，
+    // 并以同一快照作为 resume 传入（等价 resumeInterruptedTagRepair 的续跑入参）。
+    const leftover = makeSnapshot({ mode: "media", dirScope: "both", phase: "repair", pendingIds: ["boom"] });
+    setSetting(ACTIVE_RUN_KEY, JSON.stringify(leftover));
+    expect(getSetting(ACTIVE_RUN_KEY, "")).not.toBe(""); // 残留快照确实存在
+
+    // 让续跑的候选查找（loadRow 的 `FROM songs WHERE id =` 查询）抛错 → sweep 抛出 → 本轮异常退出。
+    const orig = sqlite.prepare.bind(sqlite);
+    const spy = vi
+      .spyOn(sqlite as unknown as { prepare: (sql: string) => unknown }, "prepare")
+      .mockImplementation(((sql: string) => {
+        if (String(sql).includes("FROM songs WHERE id =")) throw new Error("db boom");
+        return orig(sql);
+      }) as unknown as typeof sqlite.prepare);
+    try {
+      await expect(runTagRepairOnce("media", undefined, "both", leftover)).rejects.toThrow("db boom");
+    } finally {
+      spy.mockRestore();
+    }
+
+    // 异常退出后：内存态与持久化残留均被 clearActiveRun 清掉，不再可续跑。
+    expect(getTagRepairActiveRun()).toBeNull();
+    expect(hasResumableActiveRun()).toBe(false);
+    expect(getSetting(ACTIVE_RUN_KEY, "")).toBe("");
+
+    // 对照：正常跑完一轮后同样不可续跑（殊途同归）。
+    parseFileMock.mockResolvedValue(probe({ cover: false }));
+    searchCoverMock.mockResolvedValue(null);
+    const { busy } = await runTagRepairOnce("media", cfg());
+    expect(busy).toBe(false);
+    expect(hasResumableActiveRun()).toBe(false);
+    expect(getSetting(ACTIVE_RUN_KEY, "")).toBe("");
+  });
+});

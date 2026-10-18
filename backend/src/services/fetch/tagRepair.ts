@@ -67,7 +67,7 @@
 // tagWriter 重写容器后重扫只会 UPDATE 该行并从文件头刷新 hasLyrics/album picture，
 // 不会产生重复条目——本模块写完顺带自更新 DB has_lyrics，让 UI 立即生效。
 
-import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseFile } from "music-metadata";
 import { sqlite } from "../../db/index.js";
@@ -77,7 +77,7 @@ import { getSetting, setSetting } from "../settings.js";
 import { searchCover, searchLyrics, searchMetadata } from "../../plugins/providers.js";
 import { cacheRemoteCover, resolveCoverFile } from "../playlistCover.js";
 import { withCoverLimit } from "../covers.js";
-import { FetchTagError, writeTags, applyTagsVariant, type SongTags } from "./tagWriter.js";
+import { FetchTagError, writeTags, applyTagsVariant, tmpPathFor, type SongTags } from "./tagWriter.js";
 import { currentFetchConfig } from "./configStore.js";
 import type { FetchConfig, TagRepairScope } from "./config.js";
 import {
@@ -96,6 +96,21 @@ const QUEUE_KEY = "fetch.tagrepair.queue";
 const LAST_RUN_KEY = "fetch.tagrepair.lastRunAt";
 const LAST_RESULT_KEY = "fetch.tagrepair.lastResult";
 const LAST_RESULTS_KEY = "fetch.tagrepair.lastResults";
+
+/**
+ * 进行中一轮标签修复的快照持久化 key（断点续跑 / 立刻停止的数据源）。
+ * 存 settings（进程重启不丢）：一轮被打断（进程被杀 / 用户主动停止）后，
+ * 全量扫动辄数千首、单轮可跑数小时，若只靠内存态，重启即丢进度、候选池重头再扫一遍。
+ */
+export const ACTIVE_RUN_KEY = "fetch.tagrepair.activeRun";
+/** boot 恢复续跑的延迟：与 jobRunner.BOOT_RESUME_DELAY_MS 同款，避开启动瞬间的 CPU/IO 抢跑。 */
+export const TAG_REPAIR_RESUME_DELAY_MS = 60_000;
+
+/** 快照落盘节流：每处理 CHECKPOINT_EVERY 首、或距上次落盘 ≥CHECKPOINT_MS 即落一次（force 立即落）。 */
+const CHECKPOINT_EVERY = 100;
+const CHECKPOINT_MS = 30_000;
+/** 快照里 pendingIds/candidateIds 的容量上限：兜住极端超大库，避免 settings 行无限膨胀。 */
+const MAX_SNAPSHOT_IDS = 20_000;
 
 /** 事件队列重试退避（第 1/2/3 次失败的下次重试间隔）。 */
 const BACKOFF_MS = [3_600_000, 6 * 3_600_000, 24 * 3_600_000] as const;
@@ -226,6 +241,34 @@ export interface TagRepairStats {
   platforms: Array<{ platform: string; count: number }>;
 }
 
+/**
+ * 进行中一轮标签修复的运行快照（存 settings 的 ACTIVE_RUN_KEY，进程重启不丢）。
+ * 支持「立刻停止 + 断点续跑」：候选/待探清单与已完成的计数随 checkpoint 落盘；
+ * 进程被杀/主动停止后续跑从快照接着跑，不重头计数、不重跑已完成的候选。
+ */
+export interface TagRepairRunSnapshot {
+  version: 1;
+  mode: "media" | "all";
+  dirScope: TagRepairScope;
+  phase: "scan" | "repair";
+  startedAt: number;
+  updatedAt: number;
+  checked: number;
+  fixed: number;
+  skipped: number;
+  unobtainable: number;
+  /** 当前阶段仍待处理的 songId 清单：scan 阶段=待精探、repair 阶段=待修复候选。 */
+  pendingIds: string[];
+  /** scan 阶段累计命中（缺标签）的候选 id：scan 结束即整体转入 pendingIds。 */
+  candidateIds: string[];
+  /** 正在处理的文件本地路径（供停止/启动清理遗留的半成品 tagtmp）。 */
+  currentFsPath: string | null;
+  /** 是否被用户主动停止：主动停止的快照不自动复活（boot 恢复会清除并跳过）。 */
+  stopped: boolean;
+  /** 预留：断点游标回退（当前未使用）。 */
+  cursorFallback?: { path: string };
+}
+
 /** 运行中进度（仅 running 时非 null）：scan=全量精探阶段 / repair=逐首修复阶段。 */
 export interface TagRepairProgress {
   mode: TagRepairMode;
@@ -244,6 +287,15 @@ export interface TagRepairProgress {
 }
 
 let progress: TagRepairProgress | null = null;
+
+// —— 断点续跑 / 立刻停止的模块级运行态（仅在单飞锁 repairing 期间有值）——
+// activeSnapshot：进行中一轮的快照（media/all 才有）；进程被杀也已在 settings 里有对应持久行。
+// stopRequested：用户点了停止；sweep 的循环头会检查并立刻退出（不等这首跑完网络请求）。
+// lastCheckpointAt/sinceCheckpoint：落盘节流计数（见 checkpoint）。
+let activeSnapshot: TagRepairRunSnapshot | null = null;
+let stopRequested = false;
+let lastCheckpointAt = 0;
+let sinceCheckpoint = 0;
 
 /** 运行中进度（供 API/UI 展示）；空闲返回 null。 */
 export function getTagRepairProgress(): TagRepairProgress | null {
@@ -303,7 +355,27 @@ export function getTagRepairStats(): TagRepairStats {
 
 // —— 进度写入（仅在一轮运行期间由 sweep/queue 调用；progress 为 null 时全部为 no-op）——
 
-function progressStart(mode: TagRepairMode): void {
+/**
+ * 初始化运行中进度。传 resume（续跑）时从快照恢复阶段与计数，避免界面进度跳回 0：
+ *  - phase：沿用快照阶段；
+ *  - total：repair 阶段快照存不下总候选数 → 用「剩余待处理 + 已处理」近似（进入 repair 后
+ *    progressPhase 会用真实候选数覆盖它）；scan 阶段同理近似。
+ *  - checked/fixed/skipped/unobtainable：直接取快照值（上一段已完成计数）。
+ */
+function progressStart(mode: TagRepairMode, resume?: TagRepairRunSnapshot | null): void {
+  if (resume) {
+    progress = {
+      mode,
+      phase: resume.phase,
+      total: resume.pendingIds.length + resume.checked,
+      checked: resume.checked,
+      fixed: resume.fixed,
+      skipped: resume.skipped,
+      unobtainable: resume.unobtainable,
+      startedAt: resume.startedAt,
+    };
+    return;
+  }
   progress = {
     mode,
     phase: "scan",
@@ -316,11 +388,14 @@ function progressStart(mode: TagRepairMode): void {
   };
 }
 
-/** 切换/重置当前阶段（进入修复阶段或切挡位时重置计数）。 */
-function progressPhase(phase: "scan" | "repair", total: number): void {
+/** 切换/重置当前阶段（进入修复阶段或切挡位时重置计数）。
+ *  preserve=true（续跑且阶段与快照一致）时**不清零**已恢复的计数，只更新阶段与总数，
+ *  否则界面进度会在续跑进入同阶段时跳回 0。 */
+function progressPhase(phase: "scan" | "repair", total: number, preserve = false): void {
   if (!progress) return;
   progress.phase = phase;
   progress.total = total;
+  if (preserve) return;
   progress.checked = 0;
   progress.fixed = 0;
   progress.skipped = 0;
@@ -345,6 +420,105 @@ function progressSetChecked(checked: number): void {
 
 function progressEnd(): void {
   progress = null;
+}
+
+// ---------------------------------------------------------------------------
+// 断点续跑快照（ACTIVE_RUN_KEY）：读写 / 节流落盘 / 停止 / 清理半成品
+// ---------------------------------------------------------------------------
+
+/** 读取进行中的修复快照；读不到 / JSON 异常 / 版本不符 → null。 */
+function loadActiveRun(): TagRepairRunSnapshot | null {
+  try {
+    const raw = getSetting(ACTIVE_RUN_KEY, "");
+    if (!raw) return null;
+    const parsed = JSON.parse(String(raw)) as TagRepairRunSnapshot;
+    if (!parsed || typeof parsed !== "object" || parsed.version !== 1) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+/** 落盘快照（JSON）并刷新 updatedAt。 */
+function saveActiveRun(snap: TagRepairRunSnapshot): void {
+  snap.updatedAt = Date.now();
+  setSetting(ACTIVE_RUN_KEY, JSON.stringify(snap));
+}
+
+/** 清除快照（一轮正常跑完 / 主动停止的快照已被 boot 恢复消费时调用）。 */
+function clearActiveRun(): void {
+  setSetting(ACTIVE_RUN_KEY, "");
+}
+
+/** 立即落盘当前快照并重置落盘节流计数（force / 停止 / 阶段切换时用）。 */
+function flushActiveRun(): void {
+  if (!activeSnapshot) return;
+  saveActiveRun(activeSnapshot);
+  sinceCheckpoint = 0;
+  lastCheckpointAt = Date.now();
+}
+
+/**
+ * 快照落盘节流：距上次落盘 ≥CHECKPOINT_EVERY 首 **或** ≥CHECKPOINT_MS ms，或 force 时落盘。
+ * activeSnapshot 非 null 才落盘（快照只在 media/all 挡位建立），避免高频写 settings；
+ * 落盘后更新 updatedAt（供 API 展示与续跑判定）。
+ */
+function checkpoint(force = false): void {
+  if (!activeSnapshot) return;
+  if (!force) {
+    const now = Date.now();
+    if (sinceCheckpoint < CHECKPOINT_EVERY && now - lastCheckpointAt < CHECKPOINT_MS) return;
+  }
+  flushActiveRun();
+}
+
+/** 是否已收到停止请求（sweep 的循环头据此立刻退出）。 */
+function shouldStop(): boolean {
+  return stopRequested;
+}
+
+/**
+ * 清理某文件对应的半成品临时文件（`<stem>.tagtmp<ext>`）。
+ * 为什么必须清：停止/启动恢复时，上一首可能正写到 tagtmp（进程被杀留下残片），
+ * 留在下载目录会被下一次扫描当成「多出来的文件」；这里按当前对象路径精确清掉。
+ * 清理失败不影响主流程（写标签成功路径本身也会在 finally 里删 tagtmp）。
+ */
+function cleanupTagTmp(fsPath: string | null): void {
+  if (!fsPath) return;
+  try {
+    const tmp = tmpPathFor(fsPath, "tagtmp");
+    if (existsSync(tmp)) rmSync(tmp, { force: true });
+  } catch {
+    /* 清理失败不影响主流程 */
+  }
+}
+
+/** 新建一轮媒体/全量修复的空快照（queue 挡位不建快照）。 */
+function newSnapshot(mode: "media" | "all", dirScope: TagRepairScope): TagRepairRunSnapshot {
+  const now = Date.now();
+  return {
+    version: 1,
+    mode,
+    dirScope,
+    phase: "scan",
+    startedAt: now,
+    updatedAt: now,
+    checked: 0,
+    fixed: 0,
+    skipped: 0,
+    unobtainable: 0,
+    pendingIds: [],
+    candidateIds: [],
+    currentFsPath: null,
+    stopped: false,
+  };
+}
+
+/** 取某首歌的本地 fsPath（`l:<src>:<fsPath>`）；不存在 / 非本地 → null。
+ *  用于续跑：快照只存了候选 id，repair 阶段需要 fsPath 来记录 currentFsPath（清理半成品）。 */
+function fsPathForSongId(songId: string): string | null {
+  const row = loadRow(songId);
+  return row && row.path ? fsPathOf(row.path) : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -868,11 +1042,50 @@ export async function sweepTagRepair(
   dirScope: TagRepairScope = cfg.tagRepairScope ?? "both",
 ): Promise<TagRepairResult> {
   const result = emptyResult();
+  const snap = activeSnapshot;
+  // 续跑判定（仅供「从快照接着跑」时启用新逻辑）：
+  //   快照里还留着未处理清单（pendingIds/candidateIds 非空）或已进入 repair 阶段 → 续跑。
+  //   全新一轮刚建的快照三项皆空 → resuming=false，下面所有新逻辑短路，
+  //   行为与改动前**逐字一致**（不传 resume 时既有测试/既有调用点不受影响）。
+  const resuming = Boolean(
+    snap && (snap.pendingIds.length > 0 || snap.candidateIds.length > 0 || snap.phase === "repair"),
+  );
+  const resumedRepair = Boolean(resuming && snap && snap.phase === "repair");
+  const resumedScan = Boolean(resuming && snap && snap.phase === "scan");
+  if (snap && resuming) {
+    // 用快照计数预填 result：上一段已完成的固定/跳过/拿不到不再从 0 重头计。
+    result.checked = snap.checked;
+    result.fixed = snap.fixed;
+    result.skipped = snap.skipped;
+    result.unobtainable = snap.unobtainable;
+  }
+
   const candidates: Array<{ id: string; fsPath: string }> = [];
   // 命中「下载期内置插件已打好且文件未变」标记而跳过的歌数：计入「已修复·跳过」。
   let markedSkipped = 0;
+  /** 把 result 计数同步进快照后按节流落盘；skipped 计入本阶段标记跳过数，续跑计数才对得上。 */
+  const syncAndCheckpoint = (force = false): void => {
+    if (!snap) return;
+    snap.checked = result.checked;
+    snap.fixed = result.fixed;
+    snap.skipped = result.skipped + markedSkipped;
+    snap.unobtainable = result.unobtainable;
+    checkpoint(force);
+  };
 
-  if (scope === "media") {
+  if (resumedRepair) {
+    // 续跑·修复阶段：候选直接取快照剩余清单（不再重跑 DB 预筛 / 全量精探），
+    // 避免「已落标记 / DB 已变」把剩余候选从预筛结果里挤掉、丢剩余待修歌。
+    for (const id of snap!.pendingIds) {
+      const fsPath = fsPathForSongId(id);
+      if (fsPath) candidates.push({ id, fsPath });
+    }
+    // 顺便剔除已无法解析 fsPath 的脏 id（如已从库中删除/非本地路径），避免每轮续跑重复尝试。
+    snap!.pendingIds = candidates.map((c) => c.id);
+    log.info(
+      `[TAG-REPAIR] ${scope === "media" ? "常规" : "全量"}续跑（范围 ${dirScope}）：从快照恢复剩余候选 ${candidates.length} 首`,
+    );
+  } else if (scope === "media") {
     // 第一档·常规，纯 DB 判定，不读文件头，成本远低于全量。
     const rows = selectMediaMissingRows();
     for (const r of rows) {
@@ -885,6 +1098,12 @@ export async function sweepTagRepair(
       candidates.push({ id: r.id, fsPath });
     }
     log.info(`[TAG-REPAIR] 常规扫描完成（范围 ${dirScope}）：候选中 DB 缺歌词/封面/专辑 ${candidates.length} 首`);
+    // 进入 repair 前把候选清单写进快照：中断后续跑可直接取用，不再重跑本次预筛。
+    if (snap) {
+      snap.phase = "repair";
+      snap.pendingIds = candidates.map((c) => c.id).slice(0, MAX_SNAPSHOT_IDS);
+      syncAndCheckpoint(true);
+    }
   } else {
     const rows = sqlite
       .prepare("SELECT id, path, has_lyrics, album FROM songs WHERE path LIKE 'l:%'")
@@ -896,44 +1115,93 @@ export async function sweepTagRepair(
       if (fsPath && inScopeRoots(fsPath, cfg, dirScope)) inRoot.push({ id: r.id, fsPath });
     }
 
+    // 待精探清单：续跑（scan 阶段）只保留快照里的剩余项、并按快照顺序遍历（已探过的跳过）；
+    // 全新一轮则把全部范围内 id 写进快照，供进程被杀/停止后续跑。
+    let probeList = inRoot;
+    if (resumedScan) {
+      const byId = new Map(inRoot.map((r) => [r.id, r] as const));
+      const remain = snap!.pendingIds.filter((id) => byId.has(id));
+      snap!.pendingIds = remain; // 丢弃已从库中消失的 id（不必再探）
+      probeList = remain.map((id) => byId.get(id)!);
+    } else if (snap) {
+      snap.pendingIds = inRoot.map((r) => r.id).slice(0, MAX_SNAPSHOT_IDS);
+      snap.phase = "scan";
+    }
+
     // ① 文件头精探（只读）：封面/歌词/专辑/专辑艺术家/轨/年/流派任一缺失即候选
     //    （album 有 DB 值兜底、无需网络也能修；其余缺失回落 searchMetadata）。
     //    碟号不参与缺失判定（成品本就不带碟号）。
-    progressPhase("scan", inRoot.length);
+    //    续跑时不把进度计数清零（resumedScan），已处理进度接着上次显示。
+    progressPhase("scan", probeList.length, resumedScan);
     let probed = 0;
-    for (const { id, fsPath } of inRoot) {
+    for (const { id, fsPath } of probeList) {
+      // 循环头检查停止请求：本轮立刻退出（不等这一首探完），未探项留在快照里供续跑。
+      if (stopRequested) break;
       probed++;
       progressSetChecked(probed);
       // 下载期已由内置标签来源插件打好、且文件未变 → 不探针直接跳过（算「已修复·跳过」）。
       if (isTagRepairMarked(fsPath)) {
         markedSkipped++;
-        continue;
+      } else {
+        const embedded = await probeEmbedded(fsPath);
+        if (
+          embedded &&
+          (!embedded.cover ||
+            !embedded.lyric ||
+            !embedded.album ||
+            !embedded.albumArtist ||
+            !embedded.track ||
+            !embedded.year ||
+            !embedded.genre)
+        ) {
+          candidates.push({ id, fsPath });
+          // 命中候选登记进快照：scan 结束后整体转入 pendingIds，供修复阶段续跑。
+          if (snap && snap.candidateIds.length < MAX_SNAPSHOT_IDS) snap.candidateIds.push(id);
+        }
       }
-      const embedded = await probeEmbedded(fsPath);
-      if (
-        embedded &&
-        (!embedded.cover ||
-          !embedded.lyric ||
-          !embedded.album ||
-          !embedded.albumArtist ||
-          !embedded.track ||
-          !embedded.year ||
-          !embedded.genre)
-      ) {
-        candidates.push({ id, fsPath });
+      if (probed % 1000 === 0) log.info(`[TAG-REPAIR] 全量探针进度 ${probed}/${probeList.length}，候选 ${candidates.length}`);
+      // 断点：这一首已处理完 → 从快照待探清单移除该 id（顺序与遍历一致，正常即 shift）。
+      if (snap) {
+        if (snap.pendingIds[0] === id) snap.pendingIds.shift();
+        else {
+          const i = snap.pendingIds.indexOf(id);
+          if (i >= 0) snap.pendingIds.splice(i, 1);
+        }
       }
-      if (probed % 1000 === 0) log.info(`[TAG-REPAIR] 全量探针进度 ${probed}/${inRoot.length}，候选 ${candidates.length}`);
+      sinceCheckpoint++;
+      syncAndCheckpoint();
     }
     log.info(
-      `[TAG-REPAIR] 全量扫描完成（范围 ${dirScope}）：范围 ${probed} 首，` +
+      `[TAG-REPAIR] 全量扫描${resumedScan ? "续跑" : ""}完成（范围 ${dirScope}）：范围 ${probed} 首，` +
         `标记跳过 ${markedSkipped} 首，待修复候选 ${candidates.length} 首`,
     );
+    // scan 结束（未停止）→ 进入 repair：候选清单转 pendingIds、清空 candidateIds 并立即落盘。
+    if (snap && !stopRequested) {
+      snap.phase = "repair";
+      snap.pendingIds = snap.candidateIds.slice(0, MAX_SNAPSHOT_IDS);
+      snap.candidateIds = [];
+      syncAndCheckpoint(true);
+    }
   }
+  // 把扫描阶段的标记跳过数并入 result.skipped 后清零 markedSkipped：
+  // 之前 syncAndCheckpoint 用「result.skipped + markedSkipped」拼快照（那时 result.skipped 尚未含
+  // markedSkipped）；此处并入后若不清零，后续 repair 阶段的 syncAndCheckpoint 会把它重复计入。
   result.skipped += markedSkipped;
+  markedSkipped = 0;
+
+  // 停止请求 → 直接返回：未跑完的候选留在快照 pendingIds 里，供下次续跑。
+  if (shouldStop()) return result;
 
   // ② 逐首修复（repairSongTags 内部再探一次拿得到才写）。
-  progressPhase("repair", candidates.length);
-  for (const { id } of candidates) {
+  progressPhase("repair", candidates.length, resumedRepair);
+  for (const { id, fsPath } of candidates) {
+    // 循环头检查停止请求：本轮立刻退出，未修复候选留在快照 pendingIds 里供续跑。
+    if (stopRequested) break;
+    // 处理前记录当前对象路径：进程被杀/主动停止时据此清理半成品 tagtmp。
+    if (snap) {
+      snap.currentFsPath = fsPath;
+      syncAndCheckpoint();
+    }
     result.checked++;
     let o: RepairSongOutcome;
     try {
@@ -944,6 +1212,16 @@ export async function sweepTagRepair(
     }
     accumulate(result, o);
     progressTick(o.outcome);
+    // 断点：这一首已修复完 → 从快照剩余清单移除该 id（顺序与候选一致，正常即 shift）。
+    if (snap) {
+      if (snap.pendingIds[0] === id) snap.pendingIds.shift();
+      else {
+        const i = snap.pendingIds.indexOf(id);
+        if (i >= 0) snap.pendingIds.splice(i, 1);
+      }
+    }
+    sinceCheckpoint++;
+    syncAndCheckpoint();
   }
   return result;
 }
@@ -959,45 +1237,70 @@ let repairing = false;
  * mode "queue"=只处理到期队列项；"media"=第一档常规（仅 DB 预筛，不读文件头）；
  * "all"=第二档全量（先全量兜底扫、再清队列）。
  * dirScope 为本次扫描的目录范围（download/lossless/both），缺省取 cfg.tagRepairScope。
+ * resume（可选）为断点续跑快照：传入即从该快照接着跑（boot 恢复用）；不传则为全新一轮。
  * 单飞：进行中返回 { busy: true }。
  */
 export async function runTagRepairOnce(
   mode: TagRepairMode,
   cfgOver?: FetchConfig,
   dirScopeOver?: TagRepairScope,
-): Promise<{ busy: boolean; result?: TagRepairResult }> {
+  resume: TagRepairRunSnapshot | null = null,
+): Promise<{ busy: boolean; result?: TagRepairResult; stopped?: boolean }> {
   if (repairing) return { busy: true };
   repairing = true;
-  progressStart(mode);
+  stopRequested = false;
+  // 续跑沿用传入快照；queue 挡位不落快照（activeSnapshot 保持 null）。
+  activeSnapshot = resume;
+  progressStart(mode, activeSnapshot);
+  // 是否走完全程（正常完成）。供 finally 判断：进程内异常退出的残留快照必须清掉，
+  // 否则它会把调度器定时兜底永久顶住（见 finally 注释）。
+  let completedNormally = false;
   try {
     const cfg = cfgOver ?? currentFetchConfig();
     const dirScope: TagRepairScope = dirScopeOver ?? cfg.tagRepairScope ?? "both";
+    // media/all 且非续跑 → 新建快照（供本轮断点续跑/停止用）。
+    if (!activeSnapshot && (mode === "media" || mode === "all")) {
+      activeSnapshot = newSnapshot(mode, dirScope);
+    }
     let result: TagRepairResult;
     if (mode === "all") {
       const sweep = await sweepTagRepair(cfg, "all", dirScope);
       result = sweep;
-      // 全量后队列里遗留的到期项一并清一轮（3 败弃权的不再重试）。
-      const qr = await processTagRepairQueue(cfg);
-      result.checked += qr.checked;
-      result.fixed += qr.fixed;
-      result.coverFixed += qr.coverFixed;
-      result.lyricFixed += qr.lyricFixed;
-      result.albumFixed += qr.albumFixed;
-      result.metaFixed += qr.metaFixed;
-      result.unobtainable += qr.unobtainable;
-      result.skipped += qr.skipped;
+      // 收到停止请求则不再清队列（半轮不再叠加额外工作）。
+      if (!stopRequested) {
+        // 全量后队列里遗留的到期项一并清一轮（3 败弃权的不再重试）。
+        const qr = await processTagRepairQueue(cfg);
+        result.checked += qr.checked;
+        result.fixed += qr.fixed;
+        result.coverFixed += qr.coverFixed;
+        result.lyricFixed += qr.lyricFixed;
+        result.albumFixed += qr.albumFixed;
+        result.metaFixed += qr.metaFixed;
+        result.unobtainable += qr.unobtainable;
+        result.skipped += qr.skipped;
+      }
     } else if (mode === "media") {
       // 第一档常规：仅 DB 预筛，不清队列。
       result = await sweepTagRepair(cfg, "media", dirScope);
     } else {
       result = await processTagRepairQueue(cfg);
     }
+    // 停止分支：本轮被 stopTagRepair 提前中断。
+    // 半轮不得冒充「一轮完成」—— 不写 lastResult、不推进 lastRunAt（到点标记）；
+    // 快照已在 stopTagRepair 里落盘（stopped=true），保留供 boot/下次续跑判定。
+    if (stopRequested && (mode === "media" || mode === "all")) {
+      log.info(`[TAG-REPAIR] ${mode} 一轮已按请求停止（快照标记已停止，不会自动续跑）`);
+      return { busy: false, result, stopped: true };
+    }
+    completedNormally = true; // 走完全程（非停止/非异常）→ 允许 finally 正常收尾
     // lastRunAt 是定时兜底扫的到点标记：定时兜底现在跑「第一档·常规修复」（见
     // startTagRepairScheduler），故由 all / media 两个挡位推进 —— 手动点这两个按钮同样推进，
     // 避免刚手动跑完又被定时立刻重跑同一轮。队列挡位是非穷尽操作，不推进。
     if (mode === "all" || mode === "media") setSetting(LAST_RUN_KEY, String(Date.now()));
     statsCache = null; // 待修候选数变了，下次查询重算
     saveLastResult(mode, result);
+    // 正常跑完 → 清快照（本轮无剩余，无需续跑）。
+    clearActiveRun();
     log.info(
       `[TAG-REPAIR] ${mode} 一轮完成（范围 ${dirScope}）：检查 ${result.checked}，修复 ${result.fixed} 首` +
         `（封面 ${result.coverFixed} / 歌词 ${result.lyricFixed} / 专辑 ${result.albumFixed} / 元数据 ${result.metaFixed}），` +
@@ -1005,6 +1308,14 @@ export async function runTagRepairOnce(
     );
     return { busy: false, result };
   } finally {
+    // 进程内异常退出（非正常完成、非用户主动停止）→ 清掉残留的未停止快照。
+    // 否则调度器 tick 的 hasResumableActiveRun() 会被它永久顶住，定时常规修复被无限期跳过。
+    // 真·崩溃（进程被杀）不会执行到这里，快照保留 → 由 boot 续跑。
+    if (!completedNormally && !stopRequested) clearActiveRun();
+    activeSnapshot = null;
+    // 停止标志随本轮结束复位：否则 UI 的「停止中…」会在一轮已结束后永久挂着
+    // （isTagRepairStopping 读的正是它）。
+    stopRequested = false;
     repairing = false;
     progressEnd();
   }
@@ -1012,6 +1323,66 @@ export async function runTagRepairOnce(
 
 export function isTagRepairRunning(): boolean {
   return repairing;
+}
+
+/** 是否已收到停止请求（UI 可据此显示「停止中…」）。 */
+export function isTagRepairStopping(): boolean {
+  return stopRequested;
+}
+
+/** 进行中的修复快照（供 API 展示；运行中取内存态，空闲时回落到持久化快照）；无则 null。 */
+export function getTagRepairActiveRun(): TagRepairRunSnapshot | null {
+  return activeSnapshot ?? loadActiveRun();
+}
+
+/** 是否存在「可续跑」的进行中快照（未主动停止）。供调度器 tick 防抢跑判定。 */
+export function hasResumableActiveRun(): boolean {
+  const snap = activeSnapshot ?? loadActiveRun();
+  return Boolean(snap && !snap.stopped);
+}
+
+/**
+ * 立刻停止当前一轮标签修复。
+ * - 未在跑 → 返回 { requested:false, running:false }（无事可停）；
+ * - 在跑 → 置停止标志（sweep 循环头检查会立刻退出）、把快照落盘并标 stopped=true
+ *   （供 boot 恢复识别为「主动停止」不复活）、清掉在写的半成品 tagtmp；
+ * - 顺延 lastRunAt（D2=A）：把定时兜底扫往后推，避免停止后立刻又被定时拉起重扫同一轮。
+ * 注意：仅置标志、不等本轮真正结束；真正收尾在 runTagRepairOnce 的停止分支。
+ */
+export function stopTagRepair(): { requested: boolean; running: boolean } {
+  if (!repairing) return { requested: false, running: false };
+  stopRequested = true;
+  if (activeSnapshot) {
+    activeSnapshot.stopped = true;
+    saveActiveRun(activeSnapshot); // 立即落盘，不等节流
+  }
+  setSetting(LAST_RUN_KEY, String(Date.now()));
+  cleanupTagTmp(activeSnapshot?.currentFsPath ?? null);
+  return { requested: true, running: true };
+}
+
+/**
+ * boot 恢复：上一进程遗留的进行中一轮修复按快照自动续跑。
+ * - 无快照 → 不续；
+ * - 快照标记 stopped（用户主动停止）→ 清快照、不复活；
+ * - 已在跑 → 不重复起；
+ * - 否则清掉遗留半成品 tagtmp 后，从快照断点续跑（单飞锁保护，重复调用安全）。
+ */
+export function resumeInterruptedTagRepair(): { resumed: boolean; mode?: TagRepairMode } {
+  const snap = loadActiveRun();
+  if (!snap) return { resumed: false };
+  if (snap.stopped) {
+    clearActiveRun();
+    return { resumed: false };
+  }
+  if (isTagRepairRunning()) return { resumed: false };
+  cleanupTagTmp(snap.currentFsPath);
+  // 异步续跑：这里不 await（boot 接线用 setTimeout 触发，不该阻塞启动）。必须挂 catch，
+  // 否则 runTagRepairOnce 抛错（如本轮 cfg 读取失败）会变成 unhandled rejection 打挂进程。
+  void runTagRepairOnce(snap.mode, undefined, snap.dirScope, snap).catch((e: any) => {
+    log.error(`[TAG-REPAIR] boot 续跑失败: ${e?.message || e}`);
+  });
+  return { resumed: true, mode: snap.mode };
 }
 
 let started = false;
@@ -1030,6 +1401,9 @@ export function startTagRepairScheduler(): void {
         if (!cfg.tagRepairEnabled) return;
         // ① 事件队列：始终处理（主路径，治 DNS 风暴类瞬时故障）。
         await processTagRepairQueue(cfg);
+        // 若存在「可续跑」的进行中快照（进程重启遗留/刚被 boot 恢复接管），跳过定时兜底：
+        // 否则 15s 的首个 tick 会抢在 60s 续跑之前把同一轮又拉起来重跑一遍（重复劳动+抢占网络）。
+        if (hasResumableActiveRun()) return;
         // ② 定时兜底：到点才跑「第一档·常规修复」(media，仅 DB 预筛、成本低)，给下载期因网络
         //    波动漏打标签的歌补标签（lastRunAt 持久化，重启不重复触发）。第二档全量修复改为仅手动触发。
         const last = Number(getSetting(LAST_RUN_KEY, "0")) || 0;
@@ -1048,16 +1422,22 @@ export function startTagRepairScheduler(): void {
   setInterval(tick, POLL_MS);
 }
 
-/** 测试复位（清全部状态 + 单飞锁）。 */
+/** 测试复位（清全部状态 + 单飞锁 + 断点续跑态）。 */
 export function _resetTagRepairForTest(): void {
   saveQueue({});
   setSetting(LAST_RUN_KEY, "0");
   setSetting(LAST_RESULT_KEY, "");
   setSetting(LAST_RESULTS_KEY, "");
+  setSetting(ACTIVE_RUN_KEY, "");
   repairing = false;
   ticking = false;
   progress = null;
   statsCache = null;
+  // 断点续跑/停止的模块级运行态一并清干净，避免用例间顺序耦合。
+  activeSnapshot = null;
+  stopRequested = false;
+  sinceCheckpoint = 0;
+  lastCheckpointAt = 0;
   _resetTagRepairMarkersForTest();
 }
 

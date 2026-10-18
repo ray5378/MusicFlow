@@ -313,11 +313,19 @@
       <el-tab-pane :label="t('admin.fetch.tabTagRepair')" name="tagRepair">
         <div class="tag-repair-wrap">
           <div class="tag-repair-status">
-            <el-tag :type="tagRepairStatus.running ? 'warning' : 'info'">
-              {{ tagRepairStatus.running ? t('admin.fetch.tagRepair.running') : t('admin.fetch.tagRepair.idle') }}
-            </el-tag>
+            <el-tag :type="tagRepairTagType">{{ tagRepairStateLabel }}</el-tag>
+            <el-button
+              v-if="tagRepairStatus.running"
+              type="danger"
+              size="small"
+              :disabled="tagRepairStatus.stopping"
+              :loading="tagRepairBusyStop"
+              @click="onTagRepairStop"
+            >{{ t('admin.fetch.tagRepair.stopBtn') }}</el-button>
             <el-button size="small" @click="loadTagRepairStatus"><MfIcon name="RefreshCw" />{{ t('admin.fetch.tagRepair.reload') }}</el-button>
           </div>
+          <div v-if="!tagRepairStatus.running && tagRepairStatus.resumable" class="hint tag-repair-hint">{{ t('admin.fetch.tagRepair.resumableLabel') }}</div>
+          <div v-else-if="!tagRepairStatus.running && tagRepairStatus.stopped" class="hint tag-repair-hint">{{ t('admin.fetch.tagRepair.stoppedHint') }}</div>
 
           <!-- 实时统计：已修复 / 待修复 / 全部 / 终态不可得 -->
           <div class="tag-repair-stats">
@@ -456,6 +464,7 @@ import {
   resetUpgradeAttempts,
   getTagRepairStatus,
   runTagRepair,
+  stopTagRepair,
 } from "@/api/fetch";
 import type {
   FetchConfig,
@@ -533,6 +542,7 @@ const tagRepairStatus = ref<TagRepairStatus>({ enabled: false, intervalHours: 16
 const tagRepairSaving = ref(false);
 const tagRepairBusyMedia = ref(false);
 const tagRepairBusyAll = ref(false);
+const tagRepairBusyStop = ref(false);
 let tagRepairPoll: ReturnType<typeof setInterval> | null = null;
 // 组件是否已卸载：卸载瞬间仍在途的 loadTagRepairStatus 落地后不得再写状态或重建轮询定时器
 // （2026-10-16 修正：否则会产生一个无人清理的 5s 定时器）。
@@ -560,6 +570,20 @@ const tagRepairStatTotal = computed(() => tagRepairStatus.value.stats?.total ?? 
 // 终态不可得（累计）：真缺标签但各来源都拿不到、已被标记跳过不再重扫的歌数（= 后端统计
 // stats.unobtainableTotal，即 outcome='unobtainable' 的完成标记行数；带 30 天 TTL）。
 const tagRepairStatUnobtainable = computed(() => tagRepairStatus.value.stats?.unobtainableTotal ?? 0);
+
+// 三态文案：运行中 / 停止中… / 已停止（有被停止的遗留快照）/ 空闲
+const tagRepairStateLabel = computed(() => {
+  const s = tagRepairStatus.value;
+  if (s.running) return s.stopping ? t("admin.fetch.tagRepair.stopping") : t("admin.fetch.tagRepair.running");
+  if (s.stopped && !s.resumable) return t("admin.fetch.tagRepair.stoppedLabel");
+  return t("admin.fetch.tagRepair.idle");
+});
+// 标签配色：停止中=danger，运行中=warning，其余=info
+const tagRepairTagType = computed<'primary' | 'success' | 'info' | 'warning' | 'danger'>(() => {
+  const s = tagRepairStatus.value;
+  if (s.running) return s.stopping ? 'danger' : 'warning';
+  return 'info';
+});
 
 // 标签来源分布（按完成标记行的 platform 聚合，后端 DB 聚合、无实时探测）：
 // 把 platform 码映射为可读名并算占比；"" = 历史（未记录来源，旧行 platform 为 NULL）。
@@ -643,7 +667,7 @@ async function loadTagRepairStatus() {
     } else if (!tagRepairStatus.value.running && tagRepairPoll) {
       clearInterval(tagRepairPoll);
       tagRepairPoll = null;
-      if (wasRunning && tagRepairStatus.value.lastResult) {
+      if (wasRunning && tagRepairStatus.value.lastResult && !tagRepairStatus.value.stopped) {
         ElMessage.success(formatTagRepairResult(tagRepairStatus.value.lastResult));
       }
     }
@@ -675,6 +699,34 @@ function onTagRepairMedia(): void {
 }
 function onTagRepairAll(): void {
   void runTagRepairMode("all", tagRepairBusyAll);
+}
+
+async function onTagRepairStop(): Promise<void> {
+  if (tagRepairBusyStop.value) return;
+  try {
+    await ElMessageBox.confirm(
+      [
+        t('admin.fetch.tagRepair.stopConsequence1'),
+        t('admin.fetch.tagRepair.stopConsequence2'),
+        t('admin.fetch.tagRepair.stopConsequence3'),
+        t('admin.fetch.tagRepair.stopConsequence4'),
+      ].join('\n'),
+      t('admin.fetch.tagRepair.stopConfirm'),
+      { type: 'warning', confirmButtonText: t('common.confirm'), cancelButtonText: t('common.cancel'), confirmButtonClass: 'el-button--danger' },
+    );
+  } catch {
+    return; // 用户取消，什么都不做
+  }
+  tagRepairBusyStop.value = true;
+  try {
+    const r = await stopTagRepair();
+    if (r.stopped) ElMessage.success(t('admin.fetch.tagRepair.stopRequested'));
+  } catch (e: any) {
+    ElMessage.error(apiErrorText(e, t('admin.fetch.tagRepair.saveFailed')));
+  } finally {
+    tagRepairBusyStop.value = false;
+    loadTagRepairStatus();
+  }
 }
 
 // 「保存设置」与配置页签共用同一份覆盖项存储，后端 PUT /config 为**整体替换**语义，

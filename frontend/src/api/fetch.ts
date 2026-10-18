@@ -400,6 +400,24 @@ export interface TagRepairProgress {
   startedAt: number;
 }
 
+/** 当前一轮修复的活动快照（进度快照，进程重启后可续跑）：phase=scan 精探 / repair 修复。 */
+export interface TagRepairActiveRun {
+  version: number;
+  mode: TagRepairMode;
+  dirScope: TagRepairScope;
+  phase: "scan" | "repair";
+  startedAt: number;
+  updatedAt: number;
+  checked: number;
+  fixed: number;
+  skipped: number;
+  unobtainable: number;
+  pendingIds: string[];
+  candidateIds: string[];
+  currentFsPath: string | null;
+  stopped: boolean;
+}
+
 export interface TagRepairStatus {
   enabled: boolean;
   intervalHours: number;
@@ -414,6 +432,14 @@ export interface TagRepairStatus {
   stats: TagRepairStats;
   /** 运行中进度；空闲为 null。 */
   progress: TagRepairProgress | null;
+  /** 正在运行且已收到停止请求（协作式停止：当前这首跑完后不再开始下一首）。 */
+  stopping?: boolean;
+  /** 存在被主动停止的遗留快照。 */
+  stopped?: boolean;
+  /** 存在可续跑的进行中快照（进程重启后 60s 内由 boot 自动续跑）。 */
+  resumable?: boolean;
+  /** 当前一轮活动快照；空闲/无快照为 null。 */
+  activeRun?: TagRepairActiveRun | null;
 }
 
 const EMPTY_TAG_REPAIR_STATUS: TagRepairStatus = {
@@ -426,6 +452,10 @@ const EMPTY_TAG_REPAIR_STATUS: TagRepairStatus = {
   lastResults: {},
   stats: { total: 0, pending: 0, repaired: 0, unobtainableTotal: 0, platforms: [] },
   progress: null,
+  stopping: false,
+  stopped: false,
+  resumable: false,
+  activeRun: null,
 };
 
 export async function getTagRepairStatus(): Promise<TagRepairStatus> {
@@ -440,4 +470,10 @@ export async function runTagRepair(
 ): Promise<{ success: boolean; busy?: boolean; mode?: string; scope?: TagRepairScope }> {
   const res = await api.post(`${BASE}/tag-repair/run`, scope ? { mode, scope } : { mode });
   return res.data ?? { success: false };
+}
+
+/** 立刻停止当前一轮标签修复（协作式：当前这首跑完后不再开始下一首，可重启续跑）。 */
+export async function stopTagRepair(): Promise<{ stopped: boolean; running: boolean }> {
+  const res = await api.post(`${BASE}/tag-repair/stop`);
+  return { stopped: Boolean(res.data?.stopped), running: Boolean(res.data?.running) };
 }

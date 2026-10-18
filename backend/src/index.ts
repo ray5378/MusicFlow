@@ -345,7 +345,7 @@ import { DLNA_SCAN_INTERVAL_MS } from "./services/dlna/scanPolicy.js";
 import { startUpgradeScheduler } from "./services/fetch/upgradeScheduler.js";
 import { startLibraryScheduler } from "./services/fetch/libraryScheduler.js";
 import { registerFetchImportTrigger } from "./services/fetch/importTrigger.js";
-import { startTagRepairScheduler } from "./services/fetch/tagRepair.js";
+import { startTagRepairScheduler, resumeInterruptedTagRepair, TAG_REPAIR_RESUME_DELAY_MS } from "./services/fetch/tagRepair.js";
 import { startScanScheduler } from "./services/source/scanScheduler.js";
 import { startStreamProbeScheduler } from "./services/source/streamProbe.js";
 import { ensureDownloadSource } from "./services/fetch/source.js";
@@ -423,6 +423,17 @@ setTimeout(() => {
     log.error(`[FETCH] boot 恢复失败: ${e?.message || e}`);
   }
 }, BOOT_RESUME_DELAY_MS);
+
+// 标签修复启动恢复（2026-10-18）：上一进程遗留的「进行中一轮标签修复」按快照断点续跑
+// （全量扫动辄数千首、单轮可跑数小时；进程被杀/重启时半轮的 pendingIds 与计数已随
+// checkpoint 落盘，这里从断点接着跑，不重头再扫一遍）。同样延后 TAG_REPAIR_RESUME_DELAY_MS
+// 避开启动瞬间的 CPU 抢跑；被用户主动停止（stopped=true）的快照不复活。
+setTimeout(() => {
+  try {
+    const r = resumeInterruptedTagRepair();
+    if (r.resumed) log.info(`[TAG-REPAIR] boot 恢复：续跑进行中的${r.mode}一轮标签修复`);
+  } catch (e: any) { log.error(`[TAG-REPAIR] boot 恢复失败: ${e?.message || e}`); }
+}, TAG_REPAIR_RESUME_DELAY_MS);
 
 // 写目录启动探针 + 缓存清空：挂载权限配错第一时间在日志给出修复指引；
 // 缓存目录内容（上次进程遗留的下载子目录 / .part 半成品）整目录清空（不碰成品目录）。

@@ -64,13 +64,17 @@ import {
 import { ensureBaseBatchLimit } from "../../services/plugin/batchPacer.js";
 import type { TaskStatus } from "../../services/fetch/types.js";
 import {
+  getTagRepairActiveRun,
   getTagRepairLastResult,
   getTagRepairLastResults,
   getTagRepairProgress,
   getTagRepairQueueSize,
   getTagRepairStats,
+  hasResumableActiveRun,
   isTagRepairRunning,
+  isTagRepairStopping,
   runTagRepairOnce,
+  stopTagRepair,
   type TagRepairMode,
 } from "../../services/fetch/tagRepair.js";
 
@@ -702,6 +706,11 @@ export function registerFetch(app: Hono): void {
       // 实时统计（已修复/待修复/全部）与运行中进度（空闲时 progress=null）。
       stats: getTagRepairStats(),
       progress: getTagRepairProgress(),
+      // 停止进程 / 断点续跑状态（供前端「立刻停止」按钮与三态展示）：
+      stopping: isTagRepairRunning() && isTagRepairStopping(),
+      stopped: getTagRepairActiveRun()?.stopped === true,
+      resumable: hasResumableActiveRun(),
+      activeRun: getTagRepairActiveRun(),
     });
   });
   // 手动触发一轮：body { mode?: TagRepairMode; full?: boolean; scope?: TagRepairScope }。
@@ -727,9 +736,20 @@ export function registerFetch(app: Hono): void {
     const scope: TagRepairScope =
       body.scope === "download" || body.scope === "lossless" || body.scope === "both" ? body.scope : "both";
     if (isTagRepairRunning()) return c.json({ success: false, busy: true }, 409);
-    // 不 await：后台跑，前端轮询状态。
-    void runTagRepairOnce(mode, undefined, scope);
+    // 不 await：后台跑，前端轮询状态。挂 catch：runTagRepairOnce 抛错（DB/settings 异常等）
+    // 否则会变成 unhandled rejection（Node 默认会终止进程），与「重启后续跑」的可用性目标相悖。
+    void runTagRepairOnce(mode, undefined, scope).catch((e: any) => {
+      log.error(`标签修复一轮（${mode}）触发失败: ${e?.message || e}`);
+    });
     return c.json({ success: true, started: true, mode, scope });
+  });
+  // 立刻停止一轮标签修复（协作式）：置停止标志，正在处理的那首跑完后不再开始下一首。
+  // 未完成的候选保留在快照里，但该快照会被标记为「已停止」，重启容器后**不会**自动续跑
+  // （可稍后手动重新发起）；同时顺延定时常规修复一个周期，避免刚停又被定时拉起重扫。
+  // 未在跑时返回 stopped:false（无事可停，不报错）；success 恒为 true。
+  app.post("/v1/fetch/tag-repair/stop", adminMiddleware, (c) => {
+    const r = stopTagRepair();
+    return c.json({ success: true, stopped: r.requested, running: r.running });
   });
 }
 

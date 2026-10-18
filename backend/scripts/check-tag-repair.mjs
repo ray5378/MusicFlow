@@ -6,7 +6,7 @@
 // 丢数据或让候选池永不收敛 —— 只有在用户发现「封面没了 / 碟号是垃圾值 / 待修复永远不降」
 // 时才暴露。故逐条用源码级断言钉死。
 //
-// 十条规则：
+// 十二条规则：
 //   R1 碟号纪律：成品文件**不写也不留** DISCNUMBER/DISCTOTAL。tagWriter 必须显式
 //       清空继承来的碟号（`-metadata disc=`），且**不得**写入任何碟号值。
 //   R2 保留内嵌封面：标签修复路径 keepSourceCover **恒为 true**；下载路径按 embedCover 判定。
@@ -22,6 +22,11 @@
 //   R8 QQ 限流：基础间隔 1.2s + 300~800ms 随机抖动（防同出口 IP 高频被封）。
 //   R9 风格来源：genre 必须取自 info.genre.content[].value（可读名），不得取 track_info.genre（数字码）。
 //   R10 时长单位：统一为**秒**；网易云给毫秒必须 /1000 换算，否则时长闸门恒失败、拿不到封面/元数据。
+//   R11 断点续跑：一轮全量扫可跑数小时，快照必须落 settings（ACTIVE_RUN_KEY）——含 pendingIds/
+//       candidateIds/stopped/phase/currentFsPath；进程被杀/主动停止后从快照接着跑（不重头扫），
+//       正常跑完清快照；sweep 的 scan/repair 两个循环头都要有停止检查，且**不得**把待处理清单整段清空。
+//   R12 立刻停止：stopTagRepair 只置 stopRequested 标志、把快照 stopped 落盘、清半成品 tagtmp、
+//       顺延 LAST_RUN_KEY（D2），**不等**本轮真正结束（不得 async/await 整轮）；另暴露 isTagRepairStopping。
 //
 // 零依赖 node 脚本（与 check-dead-song-purge.mjs 同款，共用 strip-comments），挂 ci.yml 守卫 job。
 import { existsSync, readFileSync } from "node:fs";
@@ -261,8 +266,165 @@ mustMatch(
   "平台优先级必须 QQ 在前、网易云兜底",
 );
 
+// ---------- R11 断点续跑（快照落盘 + 停止/被杀后接着跑） ----------
+// 一轮全量扫动辄数千首、可跑数小时：若只靠内存态，进程被杀/用户点停止就丢全部进度，
+// 候选池只能重头再扫一遍。故快照必须持久化到 settings（ACTIVE_RUN_KEY），正常跑完再清掉。
+mustMatch(
+  TAGREPAIR,
+  /export const ACTIVE_RUN_KEY = "fetch\.tagrepair\.activeRun";/,
+  "必须有进行中一轮的快照 key ACTIVE_RUN_KEY=fetch.tagrepair.activeRun（进程重启不丢进度）",
+);
+mustMatch(
+  TAGREPAIR,
+  /export const TAG_REPAIR_RESUME_DELAY_MS = 60_000;/,
+  "必须有 boot 恢复续跑的延迟常量 TAG_REPAIR_RESUME_DELAY_MS（避开启动瞬间 CPU/IO 抢跑）",
+);
+mustMatch(
+  TAGREPAIR,
+  /export interface TagRepairRunSnapshot \{/,
+  "必须有快照结构 TagRepairRunSnapshot（断点续跑的数据载体）",
+);
+mustMatch(
+  TAGREPAIR,
+  /phase: "scan" \| "repair";/,
+  "快照必须记录 phase（scan/repair），续跑才知道从哪一阶段接着跑",
+);
+mustMatch(
+  TAGREPAIR,
+  /pendingIds: string\[\];/,
+  "快照必须记录 pendingIds（当前阶段待处理清单，缺了就没法续跑）",
+);
+mustMatch(
+  TAGREPAIR,
+  /candidateIds: string\[\];/,
+  "快照必须记录 candidateIds（scan 命中候选，scan 结束才整体转入 pendingIds）",
+);
+mustMatch(
+  TAGREPAIR,
+  /currentFsPath: string \| null;/,
+  "快照必须记录 currentFsPath（停止/启动时据此清理遗留的半成品 tagtmp）",
+);
+mustMatch(
+  TAGREPAIR,
+  /stopped: boolean;/,
+  "快照必须记录 stopped（区分「主动停止」不自动复活 / 进程被杀可续跑）",
+);
+mustMatch(
+  TAGREPAIR,
+  /function loadActiveRun\(\): TagRepairRunSnapshot \| null \{/,
+  "必须有快照读取 loadActiveRun（boot 恢复与查询空闲时从 settings 回读）",
+);
+mustMatch(
+  TAGREPAIR,
+  /function saveActiveRun\(snap: TagRepairRunSnapshot\): void \{/,
+  "必须有快照落盘 saveActiveRun（checkpoint 的唯一写入口）",
+);
+mustMatch(
+  TAGREPAIR,
+  /function clearActiveRun\(\): void \{/,
+  "必须有快照清除 clearActiveRun（正常跑完/主动停止复活判定后清）",
+);
+mustMatch(
+  TAGREPAIR,
+  /function checkpoint\(force = false\): void \{/,
+  "必须有 checkpoint（每 N 首/每 30s 节流落盘，force 立即落），否则进度只在内存、被杀即丢",
+);
+mustMatch(
+  TAGREPAIR,
+  /export function resumeInterruptedTagRepair\(\): \{ resumed: boolean; mode\?: TagRepairMode \} \{/,
+  "必须有 boot 续跑入口 resumeInterruptedTagRepair（进程重启后从快照接着跑，不重头扫）",
+);
+mustMatch(
+  TAGREPAIR,
+  /export function getTagRepairActiveRun\(\): TagRepairRunSnapshot \| null \{/,
+  "必须暴露进行中快照 getTagRepairActiveRun（供 API/UI 展示中途进度）",
+);
+mustMatch(
+  TAGREPAIR,
+  /export function hasResumableActiveRun\(\): boolean \{/,
+  "必须暴露 hasResumableActiveRun（调度 tick 防抢跑：有可续跑快照就跳过定时兜底、避免重复劳动）",
+);
+mustMatch(
+  TAGREPAIR,
+  /clearActiveRun\(\);/,
+  "正常跑完必须清快照（clearActiveRun()），否则下次 boot/查询会误判为「有一轮可续跑」并重复起跑",
+);
+mustMatch(
+  TAGREPAIR,
+  /stopRequested = false;/,
+  "runTagRepairOnce 的 finally 必须复位 stopRequested，否则一轮结束后 UI 的「停止中…」永久挂着",
+);
+// 停止检查必须覆盖 scan/repair 两个循环头（至少两处 `if (stopRequested) break;`）。
+// mustMatch 只能断言「至少一处」，此处显式计数：漏掉任一循环 → 点停止后仍要把整段扫/修跑完。
+{
+  checks += 1;
+  const text = textOf(TAGREPAIR);
+  if (text) {
+    const hits = liveLines(text).filter((l) => /if \(stopRequested\) break;/.test(l)).length;
+    if (hits < 2) {
+      errors.push(
+        `${TAGREPAIR}: sweep 的 scan/repair 两个循环头都要有停止检查 \`if (stopRequested) break;\`（至少 2 处），实测 ${hits} 处`,
+      );
+    }
+  }
+}
+mustNotMatch(
+  TAGREPAIR,
+  /\.pendingIds = \[\];/,
+  "不得把待处理清单整段清空（如停止/sweep 返回前 `pendingIds = []`）—— 那会丢弃未处理候选、让续跑变成重头再扫",
+);
+
+// ---------- R12 立刻停止（仅置标志，不等整轮结束） ----------
+mustMatch(
+  TAGREPAIR,
+  /export function stopTagRepair\(\): \{ requested: boolean; running: boolean \} \{/,
+  "必须有立刻停止入口 stopTagRepair（返回 { requested, running }）",
+);
+mustMatch(
+  TAGREPAIR,
+  /if \(!repairing\) return \{ requested: false, running: false \};/,
+  "stopTagRepair 未在跑时必须直接返回 { requested:false, running:false }（无事可停）",
+);
+mustMatch(
+  TAGREPAIR,
+  /stopRequested = true;/,
+  "stopTagRepair 必须置 stopRequested=true（sweep 的循环头据此立刻退出）",
+);
+mustMatch(
+  TAGREPAIR,
+  /activeSnapshot\.stopped = true;/,
+  "stopTagRepair 必须把快照 stopped 置真（供 boot 识别为「主动停止」不复活）",
+);
+mustMatch(
+  TAGREPAIR,
+  /saveActiveRun\(activeSnapshot\);/,
+  "stopTagRepair 必须立刻落盘快照（不等 checkpoint 节流），否则停止态可能没落盘",
+);
+mustMatch(
+  TAGREPAIR,
+  /setSetting\(LAST_RUN_KEY, String\(Date\.now\(\)\)\);/,
+  "stopTagRepair 必须推进 LAST_RUN_KEY（D2：顺延定时兜底扫，避免刚停又被定时拉起重扫同一轮）",
+);
+mustMatch(
+  TAGREPAIR,
+  /cleanupTagTmp\(activeSnapshot\?\.currentFsPath/,
+  "stopTagRepair 必须清理在写的半成品 tagtmp（cleanupTagTmp），否则留下坏文件",
+);
+mustMatch(
+  TAGREPAIR,
+  /export function isTagRepairStopping\(\): boolean \{/,
+  "必须暴露 isTagRepairStopping（UI 据此显示「停止中…」）",
+);
+// 反向断言：stopTagRepair 是「仅置标志、不等本轮结束」的同步函数 —— 故不得被改成 async。
+// （不能直接反断言 `await runTagRepairOnce`：调度器 tick 里合法地 await 了它。）
+mustNotMatch(
+  TAGREPAIR,
+  /export async function stopTagRepair/,
+  "stopTagRepair 必须同步返回（仅置标志、不等整轮结束）；改成 async 去 await 本轮跑完会让「停止」按钮卡到整轮结束",
+);
+
 // ---------- 自检：守卫必须真的扫到了东西 ----------
-if (checks < 25) {
+if (checks < 62) {
   console.error(`✗ 守卫自身失效：只执行了 ${checks} 条检查 —— 扫描逻辑或文件路径约定已变，请先修守卫本身`);
   process.exit(1);
 }
@@ -272,4 +434,4 @@ if (errors.length > 0) {
   for (const e of errors) console.error("  ✗ " + e);
   process.exit(1);
 }
-console.log(`✅ 标签写入/修复链路守卫通过：${checks} 条检查（只认非注释行）—— 碟号纪律 / 保留内嵌封面 / 简繁统一 / 终态不可得 / 待修口径 / 原子写 / QQ 端点与限流 / 风格与时长单位 全部在位`);
+console.log(`✅ 标签写入/修复链路守卫通过：${checks} 条检查（只认非注释行）—— 碟号纪律 / 保留内嵌封面 / 简繁统一 / 终态不可得 / 待修口径 / 原子写 / QQ 端点与限流 / 风格与时长单位 / 断点续跑 / 立刻停止 全部在位`);

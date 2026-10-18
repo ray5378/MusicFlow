@@ -2,6 +2,20 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.31] - 2026-10-18
+
+### Feat
+
+- **标签修复支持「断点续跑」（容器重启后自动接着当前进度继续）**：新增进行中一轮的运行快照，持久化到 settings 的 `fetch.tagrepair.activeRun`（`version:1`；`mode` / `dirScope` / `phase`（scan|repair）/ `startedAt` / `updatedAt` / `checked` / `fixed` / `skipped` / `unobtainable` / `pendingIds`（当前阶段剩余待处理清单）/ `candidateIds`（scan 阶段累计命中）/ `currentFsPath` / `stopped`）。media / all 两个挡位在跑动过程中按节流落盘（每 100 首或距上次 30s，阶段切换 / 停止 / 正常收尾强制落盘；`pendingIds`/`candidateIds` 容量上限 20000 兜住超大库）。进程被杀 / 容器重启后，`src/index.ts` 启动 `TAG_REPAIR_RESUME_DELAY_MS`（60s）后调用 `resumeInterruptedTagRepair()`：无快照不续、标记 `stopped` 的快照（用户主动停止）清除后不复活、已在跑不重复起，否则从快照剩余候选断点续跑——**不重头计数、不重跑已完成的候选**（repair 阶段直接取快照 `pendingIds`，不再重跑 DB 预筛 / 全量精探）。调度器 tick 在 `hasResumableActiveRun()` 为真时跳过定时兜底，避免首个 15s tick 抢在 60s 续跑前把同一轮重跑。
+- **管理端新增「立刻停止」标签修复按钮（协作式停止）**：新增 `POST /v1/fetch/tag-repair/stop`（`adminMiddleware`，未在跑时返回 `stopped:false`，不报错）。`stopTagRepair()` 置停止标志后，sweep 的循环头（探针循环与逐首修复循环）立刻退出——正在处理的**那一首**跑完后不再开始下一首（`tagtmp`→`rename` 原子写保证已写盘的那首不损坏，未写的半成品 `tagtmp` 在停止时按 `currentFsPath` 精确清理）；并把快照落盘标 `stopped=true`（boot 恢复识别为「主动停止」不复活），同时顺延 `fetch.tagrepair.lastRunAt` 一个周期（避免刚停 ≤60s 又被定时常规扫拉起）。`GET /v1/fetch/tag-repair` 新增 `stopping`（停止中）/ `stopped`（快照已标停止）/ `resumable`（存在可续跑快照）/ `activeRun`（进行中快照）四个字段供前端三态展示。
+- **前端（admin/Fetch 标签修复卡片）**：状态行改三态标签（修复中 / 停止中… / 已停止）+ 新增「立刻停止」按钮（`v-if` 仅在运行中显示、停止中禁用、带 loading），点击弹**二次确认**（`ElMessageBox.confirm`，逐条说明四条后果：本首跑完后退出、已完成的不重跑、标记为已停止重启不自动续跑、定时常规修复顺延一个周期）；新增 resumable / stopped 提示行；zh-CN / en-US 双语新增 11 个 key（`stopBtn` / `stopConfirm` / `stopConsequence1..4` / `stopRequested` / `stopping` / `stoppedLabel` / `stoppedHint` / `resumableLabel`），简繁统一。
+
+### Test / 回归守卫
+
+- **守卫 `backend/scripts/check-tag-repair.mjs` 新增两组契约断言**：R11「断点续跑」（19 条：快照键与 `version:1` 结构、`saveActiveRun`/`loadActiveRun`/`clearActiveRun`/`checkpoint` 节流、`MAX_SNAPSHOT_IDS` 上限、boot `resumeInterruptedTagRepair` 的「无快照不续 / `stopped` 不复活 / 已在跑不重起」、续跑直接取 `pendingIds` 不重跑预筛、调度器 `hasResumableActiveRun` 防抢跑、`finally` 异常清残留快照不顶住调度器）；R12「立刻停止」（9 条：`stopTagRepair` 非运行时 `requested:false`、置 `stopRequested` + 快照标 `stopped` 并立即落盘、顺延 `lastRunAt`、`cleanupTagTmp(currentFsPath)`、探针与修复两个循环头均检查停止标志、`POST /tag-repair/stop` 接线）。守卫检查数由 25 条升至 **62 条**（只认非注释行，内联计数自检；R12 反断言用 `/export async function stopTagRepair/` 而非泛匹配 `runTagRepairOnce`，避免误报源码里合法存在的续跑调用）。
+- **`backend/tests/fetch/tagRepair.test.ts` 新增 `describe("续跑快照 / 立刻停止")` 13 例**（57 → **70 例**）：快照落盘 / 读回、版本不符或 JSON 异常回落 null、boot 续跑从快照剩余候选接续（不重头计数）、`stopped` 快照不复活、已在跑不重复起、正常跑完清快照、进程内异常退出清残留快照（避免永久顶住调度器）、`stopTagRepair` 未运行 / 运行中两分支、停止后未完成候选留在快照 `pendingIds`、续跑剔除已从库中消失的脏 id。
+- 门禁：`npx tsc --noEmit`（backend）= 0；`npx vue-tsc --noEmit`（frontend）= 0；`node scripts/check-tag-repair.mjs` = 0（62 条）；`backend/scripts/check-*.mjs` 全部守卫通过；`tests/fetch/tagRepair.test.ts` **70 例全绿**；`npx vitest run --config vitest.coverage.config.ts` 全绿且阈值达标（fetch 95.98 / 88.01 / 98.04 / 97.66，tagProvider 99.02 / 96.98 / 100 / 99.58）。
+
 ## [4.6.30] - 2026-10-18
 
 ### Test / 回归守卫
