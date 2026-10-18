@@ -13,8 +13,6 @@ services:
       - PLAY_HISTORY_RETENTION_DAYS=${PLAY_HISTORY_RETENTION_DAYS:-3}
       - TZ=Asia/Shanghai
       - UV_USE_IO_URING=0
-      - PUID=${PUID:-0}
-      - PGID=${PGID:-0}
       # 可选:V8 堆上限(MB)。默认不设;内存紧张的机器可设 256 及时压堆。
       # - NODE_OPTIONS=--max-old-space-size=256
       # 可选:覆盖 DLNA 渲染器回拉流地址的基地址。默认从请求 Host 头自动探测;

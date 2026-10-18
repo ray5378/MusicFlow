@@ -34,8 +34,6 @@ services:
       - PLAY_HISTORY_RETENTION_DAYS=${PLAY_HISTORY_RETENTION_DAYS:-3}
       - TZ=Asia/Shanghai
       - UV_USE_IO_URING=0
-      - PUID=${PUID:-0}
-      - PGID=${PGID:-0}
       # 可选:V8 堆上限(MB)。默认不设;内存紧张的机器可设 256 及时压堆。
       # - NODE_OPTIONS=--max-old-space-size=256
       # 可选:覆盖 DLNA 渲染器回拉流地址的基地址。默认从请求 Host 头自动探测;
@@ -82,9 +80,9 @@ services:
 networks: {}
 ```
 
-### 运行身份（PUID / PGID）
+### 运行身份（默认 root）
 
-容器内应用默认以 **root**（`uid=0` / `gid=0`）运行。音乐库常是多身份共享写入的目录树，写标签依赖目录写权限，以 root 运行可避免因条目属主不一致导致的写入失败。如需以其他身份运行，用环境变量 `PUID` / `PGID` 指定即可。
+容器内应用默认以**当前容器身份**运行：镜像不指定 `user:` 时即为 **root**（`uid=0` / `gid=0`）。音乐库常是多身份共享写入的目录树，写标签依赖目录写权限，以 root 运行可避免因条目属主不一致导致的写入失败。如需以其他身份运行，在 compose 里加 `user: "1000:1000"`（应用会自动跟随该身份），也可用环境变量 `PUID` / `PGID` 显式覆盖。
 
 ## 功能概览
 

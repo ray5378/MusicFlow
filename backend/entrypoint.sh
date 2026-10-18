@@ -2,8 +2,9 @@
 set -e
 
 # ---------- 运行身份（PUID / PGID）----------
-# 默认完全维持历史行为：以镜像内 musicflow 用户（uid=100 / gid=101）运行。
-# 传入 PUID=0 / PGID=0 时，应用以 root 运行。
+# 默认以「当前进程身份」运行：镜像不设 user: 时即 root（uid=0 / gid=0）。
+# 需要换身份时，在 compose 里写 `user: "1000:1000"`，默认值会自动跟随该身份；
+# 也可显式传 PUID / PGID 覆盖。
 #
 # 为什么需要这个开关（2026-10-17 生产实证）：
 #   音乐库是**多身份共享写入**的目录树（qBittorrent / 迅雷 / 手动 root 操作 / 应用
@@ -15,9 +16,9 @@ set -e
 #   因此「用 ACL 精细授权」这条上游方案也不通。
 #   结论：只要「应用 uid」与「库内条目属主」可能不一致，chown / cron / ACL 都只是治标；
 #   让应用以 root 运行才能真正消除这个结构性矛盾（root 可写任何属主的条目，永不复发）。
-#   不传 PUID/PGID 时行为与历史完全一致（向后兼容）。
-PUID="${PUID:-$(id -u musicflow 2>/dev/null || echo 100)}"
-PGID="${PGID:-$(id -g musicflow 2>/dev/null || echo 101)}"
+#   显式传 PUID/PGID 时语义与历史完全一致（向后兼容）；不传时默认取当前进程身份。
+PUID="${PUID:-$(id -u)}"
+PGID="${PGID:-$(id -g)}"
 
 # Bind-mounted data dirs come from the host with arbitrary ownership. Ensure the
 # runtime user can write before dropping privileges —— 但只在**确实有错属主条目**时
@@ -28,10 +29,11 @@ PGID="${PGID:-$(id -g musicflow 2>/dev/null || echo 101)}"
 # 完全无法服务的头号原因（2026-10-15 实测）。data 目录里的内容都是运行时用户自己
 # 写的，属主不会漂移，所以只探 data 根 + 一级子项就足以发现「绑定挂载属主配错」；
 # 更深层的文件即便属主不对也只影响读权限位，不影响启动。
-# 探测失败（stat 不可用 / musicflow 用户查不到等）会退化为 old 行为（仍做全量
+# 探测失败（stat 不可用等）会退化为 old 行为（仍做全量
 # chown），不会漏修——探测本身不做任何「跳过 chown」之外的事。
-# root 运行（PUID=0）无需这一步：root 可写任何属主的条目，直接跳过以缩短启动时间。
-if [ "$PUID" != "0" ] && [ -d /app/backend/data ]; then
+# 仅当目标是「非 root 且当前身份是 root」时才做这步：非 root 启动时目标身份即当前身份、
+# 既无必要、权限也不足（chown 失败会配合 set -e 直接终止容器）。
+if [ "$(id -u)" = "0" ] && [ "$PUID" != "0" ] && [ -d /app/backend/data ]; then
   want_uid="$PUID"
   misowned=0
   for p in /app/backend/data /app/backend/data/*; do
@@ -67,13 +69,17 @@ if [ -d /app/backend/preloaded-plugins ] && [ ! -f "$PRELOAD_FLAG" ]; then
     fi
   done
   touch "$PRELOAD_FLAG"
-  if [ "$PUID" != "0" ]; then
+  if [ "$(id -u)" = "0" ] && [ "$PUID" != "0" ]; then
     chown -R "$PUID:$PGID" /app/backend/data/plugins
   fi
 fi
 
-# root 运行时不降权；否则切到 PUID/PGID 再执行。
-if [ "$PUID" = "0" ]; then
+# 目标身份与「当前进程身份」一致时直接运行（默认即如此，无需降权）；
+# 仅当显式指定了不同的 PUID / PGID 时才用 su-exec 切换身份——避免非 root 启动下
+# su-exec 的 `setgroups: Operation not permitted` 报错（music-dl 同款问题的成因）。
+cur_uid="$(id -u)"
+cur_gid="$(id -g)"
+if [ "$PUID" = "$cur_uid" ] && [ "$PGID" = "$cur_gid" ]; then
   exec node dist/index.js
 fi
 exec su-exec "$PUID:$PGID" node dist/index.js

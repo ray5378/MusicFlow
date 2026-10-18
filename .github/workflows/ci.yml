@@ -50,6 +50,10 @@ name: ci
 #      封面 v-lazy-cover 懒加载(rootMargin 200 且不退回原生 loading=lazy/size=300)、
 #      收藏 loadFavorites 在途去重。破坏全是静默的:首页又会退回冷启动硬等 2500ms、
 #      4 个预热请求争用 6 条 HTTP/1.1 连接、130 张封面全量预取、getStarred2 并发两次。
+#  17. 运行身份守卫(scripts/check-runtime-identity.mjs)——entrypoint 默认身份必须取「当前
+#      进程身份」(即默认 root)、两处 chown 必须带「当前身份为 root」前置、降权段必须有
+#      「身份一致直接 exec」分支、compose/README 模板不得再出现 PUID/PGID 行。破坏是静默的:
+#      容器又会以非 root 启动 → 标签修复复发 ffmpeg 写标签 Permission denied。
 # 镜像发布仍由 build.yml(v* tag)负责,与本 CI 互不影响。
 
 on:
@@ -151,6 +155,19 @@ jobs:
       - uses: actions/checkout@v4
       - name: 校验预热器接线/TTL 过滤/单飞共享、聚合接口复用与权限、懒加载与尺寸、在途去重
         run: node backend/scripts/check-home-perf.mjs
+
+  # 运行身份守卫(2026-10-18)。「默认以当前进程身份(即 root)运行」这条链的破坏同样是
+  # **静默退化**:entrypoint 若把默认值改回镜像内 musicflow(100/101),容器会改以非 root
+  # 身份启动 → 标签修复又退回 ffmpeg 写标签 `Permission denied`,全程不报任何错;compose
+  # 模板若又冒出 PUID/PGID 两行,用户会困惑「为什么非得手写 PUID=0 才能跑」。
+  # 零依赖 node 脚本,秒级完成;每条断言都做过双向变异验证(改坏必红)。
+  runtime-identity-guard:
+    name: 运行身份守卫(entrypoint 默认身份 + compose 模板无 PUID/PGID)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 校验默认身份取当前进程 / 两处 chown 需 root / 身份一致不降权 / 模板无 PUID-PGID
+        run: node backend/scripts/check-runtime-identity.mjs
 
   # DLNA 实时发现守卫:设备「实际已在线且在播」必须尽快出现在 `/v1/peers`。
   # 2026-09-26 事故:主卧已播放很久,播放器列表里却没有它。根因是 alive 通告抓取

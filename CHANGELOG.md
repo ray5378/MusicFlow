@@ -2,6 +2,24 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.35] - 2026-10-18
+
+### Fix / 运行身份（compose 模板不再出现 PUID / PGID）
+
+本版把「应用以 root 运行」从**需要用户手动配置**变为**默认行为**，于是 compose 模板里那两行 `PUID` / `PGID` 得以彻底删掉（它们的默认值本就是 0/0，写在那里只会让人困惑「为什么非得手写一个 PUID=0 才能跑」）。
+
+- **`backend/entrypoint.sh`：默认身份改为「当前进程身份」**（`$(id -u)` / `$(id -g)`，不再回退到镜像内 `musicflow` 用户的 100/101）。镜像不设 `user:` 时 entrypoint 由 root 调用，故默认即 root —— 与历史生产配置（`PUID=0` / `PGID=0`）逐字等价。
+  - 绑定挂载错属主探测里的 `chown -R` 追加「当前身份为 root」前置条件：非 root 启动时目标身份即当前身份、既无必要、权限也不足，加条件避免被 `set -e` 打死（预装插件的 `chown -R` 同理）。
+  - 末段降权逻辑由「`PUID=0` 不降权 / 否则 `su-exec`」改为「目标身份 == 当前身份则直接 `exec`，仅身份确实不同才走 `su-exec`」——顺带消除非 root 启动下 `su-exec` 的 `setgroups: Operation not permitted` 隐患（music-dl 同款问题的成因）。
+- **`docker-compose.yml` / `README.md`**：移除模板中的 `- PUID=${PUID:-0}` / `- PGID=${PGID:-0}` 两行；README「运行身份」小节改写为「默认跟随当前容器身份（默认即 root）；需换身份用 `user: "1000:1000"`；`PUID` / `PGID` 仍可显式覆盖」。
+- **向后兼容**：显式传入的 `PUID` / `PGID` 语义与历史完全一致；不传时对「以 root 启动」的既有部署行为不变（仍为 root），对「用非 root 的 `user:` 启动」的部署则由 100/101 变为跟随该身份（更符合直觉，且不再触发 chown / su-exec 报错）。
+
+### Test / 回归守卫
+
+- 新增守卫 `backend/scripts/check-runtime-identity.mjs`（零依赖 node）：钉死 entrypoint 默认值必须是 `$(id -u)` / `$(id -g)`（且不得退回 `echo 100` / `echo 101` 旧回退）、两处 `chown -R` 必须带「当前身份为 root」前置、降权段必须存在「身份一致直接 `exec`」分支、`docker-compose.yml` / `README.md` 模板不得再出现 `PUID` / `PGID` 环境变量行、README 必须给出 `user:` 换身份写法。
+- `.github/workflows/ci.yml` 新增 `runtime-identity-guard` 作业（零依赖、秒级）。
+
+
 ## [4.6.34] - 2026-10-18
 
 ### Perf / 首页打开速度
