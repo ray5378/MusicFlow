@@ -2,6 +2,17 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.33] - 2026-10-18
+
+### Test / 回归守卫
+
+- 本版为**纯测试 / 守卫改动**（无运行时变更、源码逻辑不变，故无需热补丁或更新生产镜像），用于给 4.6.32 的「修正 8 续跑进度口径」补上反向守卫与覆盖率证据。
+- **`backend/tests/fetch/tagRepair.test.ts` 补 1 例（70 → 71 例）**：新增「续跑·scan 阶段」用例，覆盖 `resumedScan` 分支与 scan 侧的 `progressPhase(preserve=true)` 路径——构造 `phase="scan"` 快照（`pendingIds` 仅留 3 首、库里另有 2 首视作已探完），断言续跑只对快照剩余项做文件头精探（`parseFileMock` 调用数 = 3，另 2 首不重探）、scan 进度分母 = 本段已处理(0) + 本阶段剩余(3) 且未提前冲到 100%、0 候选顺入 repair 收尾后快照被消费清空。
+- **续跑用例补「界面待修复」不变量断言**：在「续跑恢复计数」用例中新增 `expect(live.total - live.checked).toBe(1)`，钉死前端「待修复」＝ `total − checked` ＝真实剩余候选数（修正 8 的症状就是该值提前归零）。
+- **`backend/scripts/check-tag-repair.mjs` 新增 1 条反向守卫（63 → 64 条）**：`mustNotMatch(/progress\.total = total;/)` —— 与既有 `mustMatch(progress.total = preserve ? progress.checked + total : total;)` 形成**双向锁定**。上一版只在位断言「正确写法存在」，钉不死「别处又冒出一处裸覆盖」（例如另起一条 resuming 分支）时被静默改回旧语义。
+- 覆盖率门禁复跑（`npx vitest run --config vitest.coverage.config.ts`，rc=0，阈值全部达标）：`src/services/fetch/**` 语句 96.16 / 分支 88.08 / 函数 98.63 / 行 97.78（上版 95.98 / 88.01 / 98.04 / 97.66）；`tagRepair.ts` 96.13 / 84.64 / 98.59 / 98.63；`tagProvider.ts` 99.02 / 96.98 / 100 / 99.58。
+- 门禁：`npx tsc --noEmit`（backend）= 0；`node scripts/check-tag-repair.mjs` = 0（64 条）；`backend/scripts/check-*.mjs` 全部守卫通过；`tests/fetch/tagRepair.test.ts` **71 例全绿**。
+
 ## [4.6.32] - 2026-10-18
 
 ### Fix

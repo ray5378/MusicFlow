@@ -378,6 +378,14 @@ mustMatch(
   /progress\.total = preserve \? progress\.checked \+ total : total;/,
   "续跑（preserve=true）时进度分母必须是「本段已处理 + 本阶段剩余」（progress.total = checked + total）——直接覆盖会让分母小于已处理数，进度提前冲到 100%、界面「待修复」（= total - checked）提前归零，而实际仍有候选在跑",
 );
+// 上一条件只保证「正确写法在位」，钉不死「又冒出一处错误覆盖」：若有人在别处补一句
+// `progress.total = total;`（例如另起一条 resuming 分支），分母仍会被改成剩余数而不被察觉。
+// 故用反向断言把旧实现本身钉死为非法（与上面的 mustMatch 形成双向锁定）。
+mustNotMatch(
+  TAGREPAIR,
+  /progress\.total = total;/,
+  "不得出现 `progress.total = total;` 的裸覆盖（续跑时 progress.checked 仍保留本段已处理计数，直接覆盖会让分母小于已处理数 → 进度提前 100%、「待修复」提前归零）",
+);
 
 // ---------- R12 立刻停止（仅置标志，不等整轮结束） ----------
 mustMatch(

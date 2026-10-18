@@ -1376,12 +1376,54 @@ describe("续跑快照 / 立刻停止", () => {
     // 修正8：续跑进度分母 = 本段已处理(5) + 本阶段剩余候选(1) = 6（此前直接覆盖成 1，
     // 分母小于已处理数 → 界面进度提前 100%、「待修复」(total-checked) 提前归零）。
     expect(live.total).toBe(6);
+    // 界面「待修复」不变量：前端取 total − checked，必须等于真实剩余候选数（不得提前归零）。
+    expect(live.total - live.checked).toBe(1);
     release();
     const { result } = await p;
     expect(result?.checked).toBe(6); // 快照 5 + 本首 1
     expect(result?.fixed).toBe(4); // 快照 3 + 本首真写入 1
     // 未重跑全量精探：仅 pending 那首被文件头探针一次（库里另有 r2/r3，未被扫）
     expect(parseFileMock.mock.calls.length).toBe(1);
+  });
+
+  it("续跑·scan 阶段：只精探快照剩余项（不重探已完成），进度分母 = 已处理 + 剩余", async () => {
+    // 验证（修正 8 的 scan 侧分支 + resumedScan 分支）：phase=scan 快照续跑时 probeList 只取快照
+    // 剩余 pendingIds（库里另外 2 首视为已探完、不得重探）；观测时 scan 进度分母 = 本段已处理 +
+    // 本阶段剩余，未提前冲到 100%。scan 无候选 → 顺入 0 候选的 repair 收尾，快照被消费清空。
+    for (const id of ["sc1", "sc2", "sc3", "sc4", "sc5"]) {
+      insertSong(id, join(root, `${id}.flac`), { hasLyrics: 0 });
+    }
+    cfg();
+    // 快照只留 3 首未探：sc1/sc2 视为上一段已探完。
+    const base = makeSnapshot({
+      mode: "all",
+      dirScope: "both",
+      phase: "scan",
+      checked: 0,
+      pendingIds: ["sc3", "sc4", "sc5"],
+      candidateIds: [],
+    });
+    parseFileMock.mockClear();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let calls = 0;
+    parseFileMock.mockImplementation(async () => {
+      calls++;
+      if (calls === 1) await gate; // 挂住第一首，好在 scan 阶段观测 progress
+      return probe(); // 默认六维全齐 → scan 不产生候选
+    });
+    const p = runTagRepairOnce("all", undefined, "both", base);
+    // 等第一首精探真的发起（mock 调用即刻登记，此时循环已 probed++/progressSetChecked），再读进度。
+    await vi.waitFor(() => expect(parseFileMock.mock.calls.length).toBeGreaterThanOrEqual(1));
+    const live = getTagRepairProgress()!;
+    expect(live.phase).toBe("scan");
+    expect(live.total).toBe(3); // 分母 = 本段已处理(0) + 本阶段剩余(3)，而非被覆盖成剩余数
+    expect(live.checked).toBeLessThan(live.total); // 未提前冲到 100%、「待修复」未提前归零
+    release();
+    const { result } = await p;
+    expect(parseFileMock.mock.calls.length).toBe(3); // 只精探快照剩余 3 首，库里另 2 首不重探
+    expect(result?.checked).toBe(0); // scan 阶段不动 result.checked（进 repair 才累加），且 0 候选
+    expect(getSetting(ACTIVE_RUN_KEY, "")).toBe(""); // 正常跑完 → 快照被消费清空
   });
 
   it("resumeInterruptedTagRepair：无快照 → {resumed:false}", () => {
