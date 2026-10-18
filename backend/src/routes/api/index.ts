@@ -5,6 +5,7 @@ import { onlineRoutes } from "./online.js";
 import { playlistSearchRoutes } from "./playlistSearch.js";
 import { entitySearchRoutes } from "./entitySearch.js";
 import { registerRecommend } from "./recommend.js";
+import { registerHomePreload } from "./homePreload.js";
 import { registerRecommendPool } from "./recommendPool.js";
 import { registerLibrary } from "./library.js";
 import { registerStream } from "./stream.js";
@@ -40,6 +41,7 @@ export const apiRoutes = new Hono();
 // 注意:必须注册在子路由(route)之前,才能先于子路由处理器执行。
 
 registerRecommend(apiRoutes);
+registerHomePreload(apiRoutes);
 registerRecommendPool(apiRoutes);
 registerLibrary(apiRoutes);
 registerStream(apiRoutes);

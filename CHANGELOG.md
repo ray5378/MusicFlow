@@ -2,6 +2,30 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.34] - 2026-10-18
+
+### Perf / 首页打开速度
+
+本版针对 2026-10-18 首页真实打开实测（`nav.responseEnd 28ms / DCL 91ms / load 93ms / FCP 132ms`）定位到的两处真实卡点做优化：① 浏览器 HTTP/1.1 每域名 6 连接争用（175 个资源中 img **130 张**，同源封面平均 1397ms、最坏 2442ms，第二批 XHR 全部排队到 ~810ms 才拿到连接，q=177~689ms）；② `/v1/local-recommend` 冷缓存时硬等 `LOCAL_PROVIDER_DEADLINE_MS=2500ms` 软截止（生产日志 `[HTTP] WARN 慢请求 route=/rest/api/v1/local-recommend ms=2582/2484/1756/1521/1208`）。服务端本身不慢（封面 39 并发 wall 0.38s / avg 93ms、`getStarred2` ~200ms），故不做无差别加码。
+
+- **#4 `/v1/local-recommend` 冷启动改为后台定时预热**（`backend/src/routes/api/recommend.ts`）：新增 `startLocalProviderWarmer()`（模块加载期启动，幂等、定时器 `unref` 不阻塞进程退出；首轮延迟 4s，此后周期 `min(60s, 最小 TTL/2)`），每轮遍历 `getEnabledByCapability("localPlatformRecommend")` 中**声明了 `recommendCacheTtlSeconds>0`** 的插件，缓存缺失 / 过期时后台 `kickProviderInvoke` 拉取并写入 `providerRecommendCache`。**关键重构**：`kickProviderInvoke` 由 `registerRecommend` 内部提升到模块作用域，与请求路径**共用同一张在途单飞表**——预热与请求、以及前端 8s 轮询 / 多客户端并发，对同一 provider 任意时刻至多一次沙箱调用。请求路径的 2500ms 软截止**保持不变**（预热只是把「每进程首启一次」的确定性冷启动成本挪到无人等待的时间窗口，不放宽请求侧上界）。
+- **#3 首页 4 个预热请求合并为 1 个聚合接口**：新增 `GET /rest/api/v1/home/preload`（`backend/src/routes/api/homePreload.ts`，挂 `LIBRARY_BROWSE` + `PLAYLIST_VIEW` 双权限门，响应为最小 ack `{ success: true }` —— 前端本就丢弃这 4 份数据）。服务端逐个触发第一页查询，并**复用**从 `/v1/songs`、`/v1/albums`、`/v1/artists`、`/v1/playlists` 抽出的同一份实现（`buildSongsPage` / `buildAlbumsPage` / `buildArtistsPage` / `buildPlaylistsPage`，原路由退化为薄封装，SQL / 逻辑逐字未改）；单个列表失败仅告警、不影响其它列表与 ack。前端 `frontend/src/stores/preload.ts` 相应改为单条聚合请求。
+- **#2 封面懒加载治理**：新增全局指令 `v-lazy-cover`（`frontend/src/directives/lazyCover.ts`，`IntersectionObserver` + `rootMargin:"200px"`），首页 4 处卡片封面改用它——**未靠近视口不设 `src`**，取代原生 `loading="lazy"`（桌面快网阈值过大，实测会把视口附近整屏图片一次性预取，仍是约 130 张）；首页卡片封面尺寸由默认 300 收紧为 `coverUrl(id, 150)`（卡片实际显示约 140~160px；`coverUrl` 的 300 默认值不动，详情页大图不受影响）。
+- **收藏加载在途去重**：`frontend/src/stores/favorites.ts` 的 `loadFavorites()` 补闭包级 `inflight` 单飞（保留原 `if (loaded) return`），消除 `MainLayout.vue` 同一处「直接调 + 经 `preloadHome()` 再调」导致的**同一个 `getStarred2`（151KB）并发两次并互相排队**（实测第二次 q≈689ms）。
+
+### 决策 / 审查
+
+- **#1 连接层（启用 HTTP/2 或提高每域名并发）——审查后不做**。结论：浏览器 HTTP/1.1 **每源 6 连接是硬约束**，唯一提升手段是 HTTP/2，而浏览器仅支持 **h2 over TLS**（不支持 h2c 明文）；`h2` 需 HTTPS，会打断已硬编码 `http://192.168.10.240:46400` 的安卓 / Windows 客户端与 HA 集成，属净回归。且 #2 已从**源头**把首屏并发封面请求数从「上屏前一次性 130 张」降到「视口邻近的十几张」，6 条连接即足够、排队不再形成；封面端点本身已具备 `ETag` / `Cache-Control`（revalidate）与端到端背压响应头（`buildCoverPressureHeaders`），无需再加无差别并发。不做即为正确方向，不再提议。
+
+### Test / 回归守卫
+
+- **新增守卫 `backend/scripts/check-home-perf.mjs`（31 条断言，零依赖 node）**：锁定上述四件套的**静默失效契约**——`startLocalProviderWarmer` 必须在模块加载期被调用且定时器 `unref`、`kickProviderInvoke` 只定义一次（预热与请求共用在途单飞表）、预热必须过 `recommendCacheTtlSeconds` 过滤、请求侧 2500ms 软截止保留、`__warmLocalProvidersOnceForTest` 存在、`__resetRecommendRefreshStateForTest` 清 `providerRecommendCache`；`/v1/home/preload` 注册 + 双权限门 + 复用四个 `buildXxxPage`（且 `library.ts` / `playlists.ts` 确有对应导出）；前端 `preload` 不得再逐个请求 `songs/albums/artists/playlists`；`v-lazy-cover` 全局注册、`rootMargin:"200px"`、首页 4 处封面走指令且不得退回 `loading="lazy"` / 默认 300；`loadFavorites` 保留在途单飞。**已做双向变异验证**：预热器不启动 / 封面尺寸退回默认 / 前端退回首屏 4 请求 / 去重被移除 / 少挂一道权限门 / 退回原生 `loading="lazy"` 共 6 组变异全部判红，基线判绿。
+- **新增 `backend/tests/routes/homePreloadRoute.test.ts`（3 例）**：鉴权后一次性触发四个列表第一页且四个入参精确（含用户对象透传）、响应体仅 `{ success: true }`、未鉴权不得进入、单列表抛异常仍返回 ack 且不影响其它列表。
+- **新增 `backend/tests/qa_perf/localProviderWarmer.test.ts`（6 例）**：声明 TTL 的 provider 预热一次且随后请求命中缓存不再外呼、未声明 TTL 的不预热、缓存仍新鲜不重复预热、TTL 过期后预热重拉、并发两轮预热共享在途单飞（只外呼一次）、预热与请求路径共用单飞表（请求不再额外外呼，且远早于软截止返回非 pending）。
+- **`backend/tests/routes/apiScanRead.test.ts`** 将 `/v1/home/preload` 纳入标准只读路由扫描（契约覆盖）。
+- **`.github/workflows/ci.yml` 新增 `home-perf-guard` 作业**（零依赖、秒级）。
+- 门禁（230 本地复跑，全绿）：`node scripts/check-home-perf.mjs` = 0（31 条）；`node scripts/check-workflow-paths.mjs` = 0；`backend/scripts/check-*.mjs` 全部守卫通过；`npx tsc --noEmit`（backend）= 0；`npx vue-tsc --noEmit`（frontend）= 0；新增用例 **9 例全绿**（`homePreloadRoute` 3 + `localProviderWarmer` 6）。
+
 ## [4.6.33] - 2026-10-18
 
 ### Test / 回归守卫

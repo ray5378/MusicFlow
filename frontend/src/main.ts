@@ -4,6 +4,7 @@ import { Search, User, Lock } from "@element-plus/icons-vue";
 import App from "./App.vue";
 import router from "./router";
 import { longpress } from "./directives/longpress";
+import { lazyCover } from "./directives/lazyCover";
 import MfIcon from "./components/MfIcon.vue";
 import PlatformBadge from "./components/PlatformBadge.vue";
 import { i18n } from "./locales";
@@ -88,6 +89,7 @@ app.component("User", User);
 app.component("Lock", Lock);
 
 app.directive("longpress", longpress);
+app.directive("lazy-cover", lazyCover);
 app.component("MfIcon", MfIcon);
 app.component("PlatformBadge", PlatformBadge);
 

@@ -16,18 +16,29 @@ export const useFavoritesStore = defineStore("favorites", () => {
   // Favorites 页监听它重载列表,实现「点击我喜欢后实时更新,无需强制刷新」。
   const revision = ref(0);
 
+  // 在途单飞去重:并发调用共享同一个 promise。
+  // 背景:MainLayout 同一处既直接调 loadFavorites()、又通过 preloadHome() 再调一次,
+  // 旧实现只有 `if (loaded) return` 没有在途去重,导致同一个 getStarred2(151KB)被并发
+  // 请求两次并互相排队(实测第二次排队 q≈689ms)。finally 里清空以允许后续重新加载。
+  let inflight: Promise<void> | null = null;
+
   async function loadFavorites() {
     if (loaded.value) return;
-    loading.value = true;
-    try {
-      const res = await api.get("/rest/getStarred2?f=json");
-      const starred = res.data["subsonic-response"]?.starred2 || { song: [], album: [], artist: [] };
-      favoriteSongIds.value = new Set((starred.song || []).map((s: any) => s.id));
-      favoriteAlbumIds.value = new Set((starred.album || []).map((a: any) => a.id));
-      favoriteArtistIds.value = new Set((starred.artist || []).map((a: any) => a.id));
-      loaded.value = true;
-    } catch { /* ignore */ }
-    finally { loading.value = false; }
+    if (inflight) return inflight;
+    const p = (async () => {
+      loading.value = true;
+      try {
+        const res = await api.get("/rest/getStarred2?f=json");
+        const starred = res.data["subsonic-response"]?.starred2 || { song: [], album: [], artist: [] };
+        favoriteSongIds.value = new Set((starred.song || []).map((s: any) => s.id));
+        favoriteAlbumIds.value = new Set((starred.album || []).map((a: any) => a.id));
+        favoriteArtistIds.value = new Set((starred.artist || []).map((a: any) => a.id));
+        loaded.value = true;
+      } catch { /* ignore */ }
+      finally { loading.value = false; inflight = null; }
+    })();
+    inflight = p;
+    return p;
   }
 
   function isFavorite(songId: string): boolean {

@@ -45,6 +45,87 @@ import {
   touch,
 } from "./shared.js";
 
+// ==================== 歌单列表查询的可复用实现(优化 #3) ====================
+// 首页预热聚合接口(GET /v1/home/preload)要在服务端内部重新触发 /v1/playlists 的
+// 第一页查询,让相关缓存就绪。抽出为「入参即原始 query 字符串 + 当前用户」的纯函数,
+// 路由与预热器共用同一份实现 —— 不复制 SQL,也不重写过滤/排序逻辑。
+export function buildPlaylistsPage(qp: {
+  page?: string; pageSize?: string; query?: string; platform?: string;
+  local?: string; favorite?: string; sort?: string;
+}, user: { id?: string; isAdmin?: boolean } | undefined): { total: number; page: number; pageSize: number; items: any[] } {
+  const page = Math.max(1, parseInt(qp.page || "1") || 1);
+  // 单页上限 500:歌单选择器场景要一次性拿到全量(前端循环分页),100 太紧
+  // (实测 761 个歌单时选择器只能看到前 100 个)。查询本身是 SQL LIMIT/OFFSET
+  // + COUNT,放宽上限不增加额外开销。
+  const pageSize = Math.min(500, Math.max(1, parseInt(qp.pageSize || "20") || 20));
+  const query = (qp.query || "").trim();
+  const platform = (qp.platform || "").trim();
+  const localOnly = (qp.local || "").trim() === "1";
+  const favOnly = (qp.favorite || "").trim() === "1";
+  const sort = (qp.sort || "").trim();
+  // 当前用户已收藏的歌单 id 集合:收藏过滤与每项 favorite 状态都按它判断。
+  const favIds = new Set(db.select({ pid: playlistFavorites.playlistId })
+    .from(playlistFavorites).where(eq(playlistFavorites.userId, user?.id ?? ""))
+    .all().map(r => r.pid));
+  // Push the ownership/visibility filter + name search + platform/local/favorite
+  // filters to SQL. and() skips undefined conditions, so any subset works.
+  // 音乐库对所有用户开放:任何登录用户都能看到「自己 + 公开 + 导入/插件歌单
+  // (sourceUrl 非空,如 go-music-dl 等导入的曲库内容)」;私人普通歌单仍仅属主可见。
+  const where = and(
+    user?.isAdmin
+      ? undefined
+      : or(
+          eq(playlists.ownerId, user?.id ?? ""),
+          eq(playlists.isPublic, 1),
+          isNotNull(playlists.sourceUrl),
+        ),
+    query ? like(playlists.name, `%${query}%`) : undefined,
+    platform ? eq(playlists.sourcePlatform, platform) : undefined,
+    localOnly ? isNull(playlists.sourceUrl) : undefined,
+    // 收藏过滤改为按当前用户:只显示「我收藏的」歌单(不再是全局 favorite 标记)。
+    favOnly ? inArray(playlists.id, [...favIds]) : undefined,
+  );
+  // Ordering. An explicit sort (by creation time / name) fully overrides the
+  // default daily-recommend-first + recency ranking; unknown values fall back
+  // to that default. Pushed to SQL with LIMIT/OFFSET so we never load the
+  // whole table into JS just to slice it.
+  let orderByExpr: any;
+  switch (sort) {
+    case "created_asc":  orderByExpr = [asc(playlists.createdAt)]; break;
+    case "created_desc": orderByExpr = [desc(playlists.createdAt)]; break;
+    case "name_asc":     orderByExpr = [asc(playlists.name)]; break;
+    case "name_desc":    orderByExpr = [desc(playlists.name)]; break;
+    default: {
+      const dailyOrder = sql`CASE WHEN ${playlists.comment} LIKE ${`%${dailyRecommendTag() || "每日推荐"}%`} AND ${playlists.name} = ${dailyRecommendTag() || "每日推荐"} THEN 0 ELSE 1 END`;
+      const recency = sql`COALESCE(${playlists.updatedAt}, ${playlists.createdAt})`;
+      orderByExpr = [dailyOrder, desc(recency)];
+    }
+  }
+  const rows = (where
+    ? db.select().from(playlists).where(where)
+    : db.select().from(playlists))
+    .orderBy(...orderByExpr)
+    .limit(pageSize)
+    .offset((page - 1) * pageSize)
+    .all();
+  const total = (where
+    ? db.select({ c: count() }).from(playlists).where(where)
+    : db.select({ c: count() }).from(playlists))
+    .get()?.c ?? 0;
+  const items = rows.map(p => ({
+    id: p.id, name: p.name, owner: p.ownerId, public: !!p.isPublic,
+    songCount: p.songCount || 0, duration: p.duration || 0,
+    // Always expose a cover ref; getCoverArt falls back to a 4-grid collage for self-built playlists
+    coverArt: `pl-${p.id}`, sourcePlatform: p.sourcePlatform || "",
+    isImported: isImportedPlaylist(p), pluginSynced: isPluginSyncPlaylist(p), sourcePluginId: p.sourcePlugin || "", syncEnabled: !!p.syncEnabled,
+    // favorite 改为「当前用户是否收藏」(按 playlist_favorites 判断),不再用全局标记。
+    favorite: favIds.has(p.id),
+    isDaily: isDailyRecommendPlaylist(p),
+    created: p.createdAt, changed: p.updatedAt,
+  }));
+  return { total, page, pageSize, items };
+}
+
 export function registerPlaylists(app: Hono): void {
 app.use("/v1/playlist-search", permMiddleware(PERM.LIBRARY_SEARCH));
 
@@ -257,78 +338,15 @@ app.post("/v1/playlists/:id/favorite", permMiddleware(PERM.FAVORITES_MANAGE), as
 // ==================== Playlists (paginated) ====================
 
 app.get("/v1/playlists", permMiddleware(PERM.PLAYLIST_VIEW), (c) => {
-  const page = Math.max(1, parseInt(c.req.query("page") || "1") || 1);
-  // 单页上限 500:歌单选择器场景要一次性拿到全量(前端循环分页),100 太紧
-  // (实测 761 个歌单时选择器只能看到前 100 个)。查询本身是 SQL LIMIT/OFFSET
-  // + COUNT,放宽上限不增加额外开销。
-  const pageSize = Math.min(500, Math.max(1, parseInt(c.req.query("pageSize") || "20") || 20));
-  const query = (c.req.query("query") || "").trim();
-  const platform = (c.req.query("platform") || "").trim();
-  const localOnly = (c.req.query("local") || "").trim() === "1";
-  const favOnly = (c.req.query("favorite") || "").trim() === "1";
-  const sort = (c.req.query("sort") || "").trim();
-  const user = c.get("user");
-  // 当前用户已收藏的歌单 id 集合:收藏过滤与每项 favorite 状态都按它判断。
-  const favIds = new Set(db.select({ pid: playlistFavorites.playlistId })
-    .from(playlistFavorites).where(eq(playlistFavorites.userId, user?.id ?? ""))
-    .all().map(r => r.pid));
-  // Push the ownership/visibility filter + name search + platform/local/favorite
-  // filters to SQL. and() skips undefined conditions, so any subset works.
-  // 音乐库对所有用户开放:任何登录用户都能看到「自己 + 公开 + 导入/插件歌单
-  // (sourceUrl 非空,如 go-music-dl 等导入的曲库内容)」;私人普通歌单仍仅属主可见。
-  const where = and(
-    user?.isAdmin
-      ? undefined
-      : or(
-          eq(playlists.ownerId, user?.id ?? ""),
-          eq(playlists.isPublic, 1),
-          isNotNull(playlists.sourceUrl),
-        ),
-    query ? like(playlists.name, `%${query}%`) : undefined,
-    platform ? eq(playlists.sourcePlatform, platform) : undefined,
-    localOnly ? isNull(playlists.sourceUrl) : undefined,
-    // 收藏过滤改为按当前用户:只显示「我收藏的」歌单(不再是全局 favorite 标记)。
-    favOnly ? inArray(playlists.id, [...favIds]) : undefined,
-  );
-  // Ordering. An explicit sort (by creation time / name) fully overrides the
-  // default daily-recommend-first + recency ranking; unknown values fall back
-  // to that default. Pushed to SQL with LIMIT/OFFSET so we never load the
-  // whole table into JS just to slice it.
-  let orderByExpr: any;
-  switch (sort) {
-    case "created_asc":  orderByExpr = [asc(playlists.createdAt)]; break;
-    case "created_desc": orderByExpr = [desc(playlists.createdAt)]; break;
-    case "name_asc":     orderByExpr = [asc(playlists.name)]; break;
-    case "name_desc":    orderByExpr = [desc(playlists.name)]; break;
-    default: {
-      const dailyOrder = sql`CASE WHEN ${playlists.comment} LIKE ${`%${dailyRecommendTag() || "每日推荐"}%`} AND ${playlists.name} = ${dailyRecommendTag() || "每日推荐"} THEN 0 ELSE 1 END`;
-      const recency = sql`COALESCE(${playlists.updatedAt}, ${playlists.createdAt})`;
-      orderByExpr = [dailyOrder, desc(recency)];
-    }
-  }
-  const rows = (where
-    ? db.select().from(playlists).where(where)
-    : db.select().from(playlists))
-    .orderBy(...orderByExpr)
-    .limit(pageSize)
-    .offset((page - 1) * pageSize)
-    .all();
-  const total = (where
-    ? db.select({ c: count() }).from(playlists).where(where)
-    : db.select({ c: count() }).from(playlists))
-    .get()?.c ?? 0;
-  const items = rows.map(p => ({
-    id: p.id, name: p.name, owner: p.ownerId, public: !!p.isPublic,
-    songCount: p.songCount || 0, duration: p.duration || 0,
-    // Always expose a cover ref; getCoverArt falls back to a 4-grid collage for self-built playlists
-    coverArt: `pl-${p.id}`, sourcePlatform: p.sourcePlatform || "",
-    isImported: isImportedPlaylist(p), pluginSynced: isPluginSyncPlaylist(p), sourcePluginId: p.sourcePlugin || "", syncEnabled: !!p.syncEnabled,
-    // favorite 改为「当前用户是否收藏」(按 playlist_favorites 判断),不再用全局标记。
-    favorite: favIds.has(p.id),
-    isDaily: isDailyRecommendPlaylist(p),
-    created: p.createdAt, changed: p.updatedAt,
-  }));
-  return c.json({ total, page, pageSize, items });
+  return c.json(buildPlaylistsPage({
+    page: c.req.query("page"),
+    pageSize: c.req.query("pageSize"),
+    query: c.req.query("query"),
+    platform: c.req.query("platform"),
+    local: c.req.query("local"),
+    favorite: c.req.query("favorite"),
+    sort: c.req.query("sort"),
+  }, c.get("user")));
 });
 
 // ==================== Navidrome compatible ====================

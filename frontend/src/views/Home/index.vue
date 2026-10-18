@@ -20,7 +20,7 @@
           v-longpress="() => openActionSheet(playlistActions(card), card.playlistName, t('home.playlist'))"
         >
           <div class="card-cover-wrap mf-coverwrap" @click="go('/playlists/' + card.playlistId)">
-            <img v-if="card.coverArt" :src="cover(card.coverArt)" class="card-cover" loading="lazy" decoding="async" fetchpriority="low" />
+            <img v-if="card.coverArt" v-lazy-cover="cover(card.coverArt)" class="card-cover" decoding="async" fetchpriority="low" />
             <div v-else class="card-cover-ph"><MfIcon name="Headphones" :size="32"  /></div>
             <span class="badge">{{ card.playlistName || card.name }}</span>
             <CoverPlay size="md" :label="t('home.play', { name: card.playlistName })" :action="() => playPl(card)" />
@@ -50,7 +50,7 @@
           v-longpress="() => openActionSheet(playlistActions(pl), pl.name, t('home.playlist'))"
         >
           <div class="card-cover-wrap mf-coverwrap" @click="go('/playlists/' + pl.id)">
-            <img v-if="pl.coverArt" :src="cover(pl.coverArt)" class="card-cover" loading="lazy" decoding="async" fetchpriority="low" />
+            <img v-if="pl.coverArt" v-lazy-cover="cover(pl.coverArt)" class="card-cover" decoding="async" fetchpriority="low" />
             <div v-else class="card-cover-ph"><MfIcon name="Headphones" :size="32"  /></div>
             <CoverPlay size="md" :label="t('home.play', { name: pl.name })" :action="() => playPl(pl)" />
           </div>
@@ -93,7 +93,7 @@
             class="card fnos-card-sheen"
           >
             <div class="card-cover-wrap mf-coverwrap" @click="pl.imported ? playPl(pl) : playRemotePl(group, pl)">
-              <img v-if="pl.cover" :src="pl.cover" class="card-cover" loading="lazy" decoding="async" fetchpriority="low" referrerpolicy="no-referrer" />
+              <img v-if="pl.cover" v-lazy-cover="pl.cover" class="card-cover" decoding="async" fetchpriority="low" referrerpolicy="no-referrer" />
               <div v-else class="card-cover-ph"><MfIcon name="Headphones" :size="28" /></div>
               <PlatformBadge :source="group.source" />
               <CoverPlay size="md" :label="t('home.play', { name: pl.name })" :action="() => pl.imported ? playPl(pl) : playRemotePl(group, pl)" />
@@ -122,7 +122,7 @@
             class="card fnos-card-sheen"
           >
             <div class="card-cover-wrap mf-coverwrap" @click="go('/playlists/' + pl.id)">
-              <img v-if="pl.coverArt" :src="cover(pl.coverArt)" class="card-cover" loading="lazy" decoding="async" fetchpriority="low" />
+              <img v-if="pl.coverArt" v-lazy-cover="cover(pl.coverArt)" class="card-cover" decoding="async" fetchpriority="low" />
               <div v-else class="card-cover-ph"><MfIcon name="Headphones" :size="28" /></div>
               <PlatformBadge :source="group.source" />
               <CoverPlay size="md" :label="t('home.play', { name: pl.name })" :action="() => playPl(pl)" />
@@ -170,7 +170,9 @@ const importingId = ref("");
 const homeCount = ref(8);
 
 function cover(id: string) {
-  return coverUrl(id);
+  // 卡片封面实际显示约 140~160px:桌面上收紧到 150 而非默认 300,
+  // 减少每张封面的解码/传输(详情页大图仍走 coverUrl 默认 300)。
+  return coverUrl(id, 150);
 }
 function go(path: string) {
   if (menuGuard()) return;

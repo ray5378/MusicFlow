@@ -16,15 +16,16 @@ export const usePreloadStore = defineStore("preload", () => {
     loading.value = true;
     try {
       const favStore = useFavoritesStore();
-      // 收藏状态与各列表页(page 1)预热互不依赖:原先先 await 收藏再发 4 个列表请求,
-      // 让整个预热至少多等一个收藏 RTT。这里全部并发,收藏只是其中一路。
-      // loadFavorites 内部 catch 自身错误、不会 reject;列表请求同样 catch 成 null。
+      // 收藏状态与列表预热互不依赖:原先先 await 收藏再发列表请求,让整个预热至少多等
+      // 一个收藏 RTT;这里全部并发,收藏只是其中一路。
+      // loadFavorites 内部 catch 自身错误、不会 reject。
       await Promise.all([
         favStore.loaded ? Promise.resolve() : favStore.loadFavorites(),
-        api.get("/rest/api/v1/songs", { params: { page: 1, pageSize: 25 } }).catch(() => null),
-        api.get("/rest/api/v1/albums", { params: { page: 1, pageSize: 20 } }).catch(() => null),
-        api.get("/rest/api/v1/artists", { params: { page: 1, pageSize: 20 } }).catch(() => null),
-        api.get("/rest/api/v1/playlists", { params: { page: 1, pageSize: 20 } }).catch(() => null),
+        // 原先把 songs/albums/artists/playlists 4 个列表(page 1)预热拆成 4 个并发请求;
+        // HTTP/1.1 下同源仅 6 条连接,多请求既争用连接、又让首页关键 XHR 排队。
+        // 后端 /home/preload 一次聚合返回这 4 份数据(前端不消费响应体),合并为 1 个请求
+        // 以削减连接争用;失败同样容错为 null。
+        api.get("/rest/api/v1/home/preload").catch(() => null),
       ]);
       loaded.value = true;
     } finally {

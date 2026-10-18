@@ -45,6 +45,11 @@ name: ci
 #  15. 下载+标签修复独立覆盖率门禁(job fetch-coverage-gate,配置 vitest.coverage.config.ts)
 #      ——只跑本链路测试,对 src/services/fetch/** 与内置标签来源(tagProvider/artistInfo)设
 #      **硬阈值**,破了即 CI 红。与主配置的「阈值仅提示不阻断」互补。
+#  16. 首页性能优化链路守卫(scripts/check-home-perf.mjs)——冷启动后台预热(共享在途单飞表 +
+#      TTL 过滤 + 定时器 unref)、/v1/home/preload 聚合接口(复用 buildXxxPage + 双权限门)、
+#      封面 v-lazy-cover 懒加载(rootMargin 200 且不退回原生 loading=lazy/size=300)、
+#      收藏 loadFavorites 在途去重。破坏全是静默的:首页又会退回冷启动硬等 2500ms、
+#      4 个预热请求争用 6 条 HTTP/1.1 连接、130 张封面全量预取、getStarred2 并发两次。
 # 镜像发布仍由 build.yml(v* tag)负责,与本 CI 互不影响。
 
 on:
@@ -134,6 +139,18 @@ jobs:
       - uses: actions/checkout@v4
       - name: 校验拖拽 seek 目标均按整秒对齐
         run: node backend/scripts/check-seek-granularity.mjs
+
+  # 首页性能优化链路守卫(2026-10-18)。四件套的共同点是**静默退化**:断了不报错、不会让任何
+  # 既有动态用例变红,只会让首页悄悄变慢 —— 冷启动又退回 raceDeadline 硬等 2500ms、前端又
+  # 拆回 4 个预热请求去争 6 条 HTTP/1.1 连接、130 张封面一次性全量预取、getStarred2(151KB)
+  # 被并发请求两次。零依赖 node 脚本,秒级完成;每条断言都做过双向变异验证(改坏必红)。
+  home-perf-guard:
+    name: 首页性能优化链路守卫(冷启动预热/聚合接口/封面懒加载/收藏去重)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 校验预热器接线/TTL 过滤/单飞共享、聚合接口复用与权限、懒加载与尺寸、在途去重
+        run: node backend/scripts/check-home-perf.mjs
 
   # DLNA 实时发现守卫:设备「实际已在线且在播」必须尽快出现在 `/v1/peers`。
   # 2026-09-26 事故:主卧已播放很久,播放器列表里却没有它。根因是 alive 通告抓取

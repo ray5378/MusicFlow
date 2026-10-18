@@ -76,6 +76,7 @@ const GETS: string[] = [
   "/v1/wish/export",
   "/v1/stats",
   "/v1/songs",
+  "/v1/home/preload",
   "/v1/genres",
   "/v1/albums",
   "/v1/artists",

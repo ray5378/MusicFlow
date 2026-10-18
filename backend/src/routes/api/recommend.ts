@@ -276,11 +276,108 @@ export function startRecommendCacheWarmer(): void {
   tick();
 }
 
-/** 测试钩子:清空失败退避表、在途刷新表与 provider 在途调用表(vitest 用例间隔离)。 */
+// ==================== 单飞调用(provider 结果缓存写入) ====================
+// 从 registerRecommend 内提到模块作用域:后台预热器(warmLocalProvidersOnce)需要在
+// 模块加载期就能复用它 —— 与请求路径共用同一在途表,避免重复外呼。
+/** 取(或发起)某 provider 的单飞调用。返回**原始结果 promise**:成功时先写入
+ *  providerRecommendCache 再 resolve 该结果(冷启动路径依赖此返回值当作本轮真值),
+ *  失败原样 reject,由调用方各自处理(冷启动交 raceDeadline 竞速;SWR 后台自行 catch)。
+ *  在途表 providerInvokeInflight 见模块顶部。 */
+function kickProviderInvoke(pluginId: string, p: any): Promise<any> {
+  const existing = providerInvokeInflight.get(pluginId);
+  if (existing) return existing;
+  const tracked: Promise<any> = p.impl
+    .recommendLocal(getPluginConfig(pluginId) || {})
+    .then((fresh: any) => {
+      providerRecommendCache.set(pluginId, { ts: Date.now(), result: fresh });
+      return fresh;
+    })
+    .finally(() => {
+      providerInvokeInflight.delete(pluginId);
+    });
+  providerInvokeInflight.set(pluginId, tracked);
+  return tracked;
+}
+
+// ==================== local-recommend 冷启动预热(优化 #4) ====================
+// 根因:进程刚启动(或内存缓存被 reclaim 清空)时 providerRecommendCache 无条目,
+// 首页首个 /v1/local-recommend 会对每个声明 TTL 的榜单插件走 raceDeadline,硬等
+// LOCAL_PROVIDER_DEADLINE_MS(2500ms) —— 生产日志实测慢请求 ms=2582/2484/1756/1521/1208。
+// 这段等待发生在请求路径上,直接把首页打开拖慢。沙箱 provider 的首次调用成本高
+// (冷启动加载/握手),是一次性昂贵开销;与其让请求路径买单,不如在后台提前跑一轮把
+// 结果写进 providerRecommendCache —— 之后请求路径直接命中缓存秒回。
+// 为什么用后台预热而不是让请求路径继续等 2500ms:等待是「每进程首启一次」的确定性
+// 成本,后台预热把它挪到无人等待的时间窗口;请求路径仍保持有界(超时转 pending,前端
+// 轮询自愈)。只预热**声明了 recommendCacheTtlSeconds(>0)** 的插件 —— 内置「本地随机」
+// (localPlatformRecommend 能力但无该字段)每次需重洗,缓存分支根本不命中它,预热无意义。
+const LOCAL_PROVIDER_WARMER_INITIAL_MS = 4 * 1000;
+const LOCAL_PROVIDER_WARMER_MAX_INTERVAL_MS = 60 * 1000;
+let localProviderWarmerTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** 预热周期 = min(60s, 所有声明 TTL 插件的最小 ttl/2)。
+ *  取二者较小值:ttl/2 保证 TTL 较短的插件也在过期前被刷新;60s 为上限,避免非必要的
+ *  频繁外呼。现有榜单插件 TTL 均为 120s(ttl/2 = 60s),正好与上限相等。 */
+function localProviderWarmIntervalMs(): number {
+  let interval = LOCAL_PROVIDER_WARMER_MAX_INTERVAL_MS;
+  for (const p of getEnabledByCapability("localPlatformRecommend")) {
+    const ttlSec = Number(p.manifest?.recommendCacheTtlSeconds);
+    if (Number.isFinite(ttlSec) && ttlSec > 0) interval = Math.min(interval, (ttlSec * 1000) / 2);
+  }
+  return interval;
+}
+
+/** 跑一轮预热:遍历声明 TTL 的 localPlatformRecommend 插件,缓存缺失或已过期则后台
+ *  单飞拉取(kickProviderInvoke 与请求路径共用同一在途表);返回全部在途 promise,
+ *  便于测试等待其完成。 */
+function warmLocalProvidersOnce(): Promise<void> {
+  const tasks: Promise<any>[] = [];
+  for (const p of getEnabledByCapability("localPlatformRecommend")) {
+    if (typeof p.impl?.recommendLocal !== "function") continue;
+    const ttlSec = Number(p.manifest?.recommendCacheTtlSeconds);
+    if (!(Number.isFinite(ttlSec) && ttlSec > 0)) continue; // 未声明 TTL:不预热
+    const pluginId = p.manifest.id;
+    const cached = providerRecommendCache.get(pluginId);
+    if (cached && Date.now() - cached.ts < ttlSec * 1000) continue; // 仍新鲜,不重复拉
+    // 失败仅 warn,不阻塞、不设退避 —— 下一轮仍会重试。
+    tasks.push(kickProviderInvoke(pluginId, p).catch((e: any) => {
+      console.warn(`[LOCAL-RECOMMEND] 预热 ${pluginId} 失败:`, e?.message || e);
+    }));
+  }
+  return Promise.all(tasks).then(() => undefined);
+}
+
+/** 测试钩子:跑一轮预热并等待所有 kick 结束(vitest 据此断言缓存已写入)。 */
+export function __warmLocalProvidersOnceForTest(): Promise<void> {
+  return warmLocalProvidersOnce();
+}
+
+/** 启动周期预热(幂等:已有定时器直接 return)。递归 setTimeout + finally re-arm,
+ *  与 startRecommendCacheWarmer 同款;定时器 unref,不阻进程退出。首轮用较短初始
+ *  延迟(3~5s,避开启动期批量任务抢资源),之后按 min(60s, ttl/2) 周期。 */
+export function startLocalProviderWarmer(): void {
+  if (localProviderWarmerTimer) return;
+  const tick = (delayMs: number) => {
+    localProviderWarmerTimer = setTimeout(() => {
+      warmLocalProvidersOnce()
+        .catch((e: any) => {
+          console.warn("[LOCAL-RECOMMEND] 预热轮次失败:", e?.message || e);
+        })
+        .finally(() => {
+          tick(localProviderWarmIntervalMs()); // re-arm(在 finally,异常也不能断链)
+        });
+    }, delayMs);
+    localProviderWarmerTimer?.unref?.();
+  };
+  tick(LOCAL_PROVIDER_WARMER_INITIAL_MS);
+}
+
+/** 测试钩子:清空失败退避表、在途刷新表、provider 在途调用表与 provider 结果缓存
+ *  (vitest 用例间隔离;预热用例需要从「缓存为空」的冷态起跑)。 */
 export function __resetRecommendRefreshStateForTest(): void {
   recommendColdFailAt.clear();
   recommendRefreshInflight.clear();
   providerInvokeInflight.clear();
+  providerRecommendCache.clear();
 }
 
 export function registerRecommend(app: Hono): void {
@@ -324,30 +421,13 @@ app.get("/v1/recommend", async (c) => {
 // 启动周期预热(SWR 的一部分;幂等,重复注册不会叠加定时器)。
 startRecommendCacheWarmer();
 
+// 启动 local provider 后台预热(优化 #4;幂等,重复注册不会叠加定时器)。
+startLocalProviderWarmer();
+
 // ==================== 首页「本地随机(按平台)」(能力驱动,不写死插件名) ====================
 // 由启用的 `localPlatformRecommend` 插件(如内置 local-random-recommend)提供:
 // 从本地库按平台分组随机取已入库歌单,供三端(Web/客户端/HA)统一展示动态刷新的
 // 平台歌单——不依赖上游固定精选。核心只按能力遍历调用并透传数据。
-
-/** 取(或发起)某 provider 的单飞调用。返回**原始结果 promise**:成功时先写入
- *  providerRecommendCache 再 resolve 该结果(冷启动路径依赖此返回值当作本轮真值),
- *  失败原样 reject,由调用方各自处理(冷启动交 raceDeadline 竞速;SWR 后台自行 catch)。
- *  在途表 providerInvokeInflight 见模块顶部。 */
-function kickProviderInvoke(pluginId: string, p: any): Promise<any> {
-  const existing = providerInvokeInflight.get(pluginId);
-  if (existing) return existing;
-  const tracked: Promise<any> = p.impl
-    .recommendLocal(getPluginConfig(pluginId) || {})
-    .then((fresh: any) => {
-      providerRecommendCache.set(pluginId, { ts: Date.now(), result: fresh });
-      return fresh;
-    })
-    .finally(() => {
-      providerInvokeInflight.delete(pluginId);
-    });
-  providerInvokeInflight.set(pluginId, tracked);
-  return tracked;
-}
 
 /** 冷启动 provider 软截止(ms):超过则本轮不再阻塞等待,转后台单飞拉取。 */
 const LOCAL_PROVIDER_DEADLINE_MS = 2500;

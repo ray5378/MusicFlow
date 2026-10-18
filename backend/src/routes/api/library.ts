@@ -43,44 +43,27 @@ import {
 } from "./shared.js";
 import { translate } from "../../i18n.js";
 
-export function registerLibrary(app: Hono): void {
-app.use("/v1/songs", permMiddleware(PERM.LIBRARY_BROWSE));
+// ==================== 列表第一页查询的可复用实现(优化 #3) ====================
+// 首页预热聚合接口(GET /v1/home/preload)要在服务端内部重新触发「歌曲/专辑/艺术家」
+// 列表的查询,让相关缓存(如艺术家列表的进程内缓存、SQLite 语句与页缓存)就绪。
+// 为此把各列表处理器的实现从路由中抽出为「入参即原始 query 字符串」的纯函数,
+// 路由与预热器共用同一份实现 —— 不复制 SQL,也不重写排序/分页逻辑。
 
-app.use("/v1/genres", permMiddleware(PERM.LIBRARY_BROWSE));
-
-app.use("/v1/albums", permMiddleware(PERM.LIBRARY_BROWSE));
-
-app.use("/v1/artists", permMiddleware(PERM.LIBRARY_BROWSE));
-
-app.use("/v1/stats", permMiddleware(PERM.LIBRARY_BROWSE));
-
-app.use("/v1/song-search", permMiddleware(PERM.LIBRARY_SEARCH));
-
-app.use("/v1/artist-search", permMiddleware(PERM.LIBRARY_SEARCH));
-
-app.use("/v1/album-search", permMiddleware(PERM.LIBRARY_SEARCH));
-
-app.get("/v1/stats", (c) => {
-  const songCount = db.select().from(songs).all().length;
-  const albumCount = db.select().from(albums).all().length;
-  const artistCount = db.select().from(artists).all().length;
-  const userCount = db.select().from(users).all().length;
-  return c.json({ songCount, albumCount, artistCount, userCount });
-});
-
-// ==================== Songs (paginated + searchable) ====================
-
-app.get("/v1/songs", (c) => {
-  const page = Math.max(1, parseInt(c.req.query("page") || "1") || 1);
-  const pageSize = Math.min(2000, Math.max(1, parseInt(c.req.query("pageSize") || "50") || 50));
-  const query = (c.req.query("query") || "").trim();
-  const genre = (c.req.query("genre") || "").trim();
+/** 歌曲分页(与 /v1/songs 同源实现)。 */
+export function buildSongsPage(qp: {
+  page?: string; pageSize?: string; query?: string; genre?: string;
+  sort?: string; sortField?: string; order?: string;
+}): { total: number; page: number; pageSize: number; items: any[] } {
+  const page = Math.max(1, parseInt(qp.page || "1") || 1);
+  const pageSize = Math.min(2000, Math.max(1, parseInt(qp.pageSize || "50") || 50));
+  const query = (qp.query || "").trim();
+  const genre = (qp.genre || "").trim();
   // sort=recentAdded: 最新添加入库的歌曲（按入库时间倒序，封顶 500 首，新入库自动进入列表）
-  const sort = (c.req.query("sort") || "").trim();
+  const sort = (qp.sort || "").trim();
   const recentAdded = sort === "recentAdded";
   // 通用排序:sortField(名称/时长/入库时间/艺术家/专辑/播放次数) + order(asc|desc)
-  const sortField = (c.req.query("sortField") || "").trim();
-  const sortOrder = (c.req.query("order") || "asc").toLowerCase() === "desc" ? "desc" : "asc";
+  const sortField = (qp.sortField || "").trim();
+  const sortOrder = (qp.order || "asc").toLowerCase() === "desc" ? "desc" : "asc";
   const SORT_COLUMNS: Record<string, unknown> = {
     name: songs.title,
     duration: songs.duration,
@@ -143,7 +126,112 @@ app.get("/v1/songs", (c) => {
       log.error("歌曲组内多源查询失败", { err: (e as Error)?.message || e });
     }
   }
-  return c.json({ total, page, pageSize, items });
+  return { total, page, pageSize, items };
+}
+
+/** 专辑分页(与 /v1/albums 同源实现)。 */
+export function buildAlbumsPage(qp: {
+  page?: string; pageSize?: string; query?: string;
+}, userId?: string): { total: number; page: number; pageSize: number; items: any[] } {
+  const page = Math.max(1, parseInt(qp.page || "1") || 1);
+  const pageSize = Math.min(200, Math.max(1, parseInt(qp.pageSize || "50") || 50));
+  const query = (qp.query || "").trim();
+  // SQL-level filter (name/artist LIKE) + ORDER BY created_at DESC + pagination,
+  // so we no longer load the whole albums table into memory on every request.
+  const where = query
+    ? or(like(albums.name, `%${query}%`), like(albums.artist, `%${query}%`))
+    : undefined;
+  const totalRow = where
+    ? db.select({ n: sql<number>`count(*)` }).from(albums).where(where).get()
+    : db.select({ n: sql<number>`count(*)` }).from(albums).get();
+  const total = totalRow?.n ?? 0;
+  const start = (page - 1) * pageSize;
+  const rows = where
+    ? db.select().from(albums).where(where).orderBy(desc(albums.createdAt)).limit(pageSize).offset(start).all()
+    : db.select().from(albums).orderBy(desc(albums.createdAt)).limit(pageSize).offset(start).all();
+  // 收藏标记:按当前页专辑 ID 批量查收藏表(避免每行一次查询)。
+  const albumStarredSet = new Set<string>();
+  if (userId && rows.length) {
+    const favs = db.select({ albumId: userFavoriteAlbums.albumId }).from(userFavoriteAlbums)
+      .where(and(eq(userFavoriteAlbums.userId, userId), inArray(userFavoriteAlbums.albumId, rows.map(r => r.id)))).all();
+    for (const f of favs) albumStarredSet.add(f.albumId);
+  }
+  const items = rows.map(a => ({
+    id: a.id, name: a.name, artist: a.artist, artistId: a.artistId, year: a.year,
+    songCount: a.songCount, duration: a.duration, playCount: a.playCount,
+    coverArt: albumCoverRef(a),
+    starred: albumStarredSet.has(a.id) ? true : undefined,
+  }));
+  return { total, page, pageSize, items };
+}
+
+/** 艺术家分页(与 /v1/artists 同源实现,复用同一个 artistListCache)。 */
+export function buildArtistsPage(qp: {
+  page?: string; pageSize?: string; query?: string;
+}, userId?: string): { total: number; page: number; pageSize: number; items: any[] } {
+  const page = Math.max(1, parseInt(qp.page || "1") || 1);
+  const pageSize = Math.min(200, Math.max(1, parseInt(qp.pageSize || "50") || 50));
+  const query = (qp.query || "").trim();
+  // Push the name search to SQL to shrink the working set; the final sort stays
+  // in JS (localeCompare) so Chinese/locale ordering is preserved exactly.
+  // 无限滚动每块都调此端点:全量取数+排序是每块延迟主因(17k 行实测 ~90ms)。
+  // 按 query 缓存「排好序的完整数组」,滚动期间各块直接切片复用;写入后缓存失效。
+  const cacheKey = query.toLowerCase();
+  const rows = (getArtistList(cacheKey) as typeof artists.$inferSelect[]) || buildArtistList(cacheKey, query);
+  const total = rows.length;
+  const start = (page - 1) * pageSize;
+  // 收藏标记:按当前页艺人 ID 批量查收藏表(避免每行一次查询)。
+  const artistStarredSet = new Set<string>();
+  if (userId && rows.length) {
+    const favs = db.select({ artistId: userFavoriteArtists.artistId }).from(userFavoriteArtists)
+      .where(and(eq(userFavoriteArtists.userId, userId), inArray(userFavoriteArtists.artistId, rows.map(r => r.id)))).all();
+    for (const f of favs) artistStarredSet.add(f.artistId);
+  }
+  const items = rows.slice(start, start + pageSize).map(a => ({
+    id: a.id, name: a.name, albumCount: a.albumCount, coverArt: a.coverArt ? `ar-${a.id}` : undefined,
+    scrapeMissing: a.scrapeMissing === 1,
+    starred: artistStarredSet.has(a.id) ? true : undefined,
+  }));
+  return { total, page, pageSize, items };
+}
+
+export function registerLibrary(app: Hono): void {
+app.use("/v1/songs", permMiddleware(PERM.LIBRARY_BROWSE));
+
+app.use("/v1/genres", permMiddleware(PERM.LIBRARY_BROWSE));
+
+app.use("/v1/albums", permMiddleware(PERM.LIBRARY_BROWSE));
+
+app.use("/v1/artists", permMiddleware(PERM.LIBRARY_BROWSE));
+
+app.use("/v1/stats", permMiddleware(PERM.LIBRARY_BROWSE));
+
+app.use("/v1/song-search", permMiddleware(PERM.LIBRARY_SEARCH));
+
+app.use("/v1/artist-search", permMiddleware(PERM.LIBRARY_SEARCH));
+
+app.use("/v1/album-search", permMiddleware(PERM.LIBRARY_SEARCH));
+
+app.get("/v1/stats", (c) => {
+  const songCount = db.select().from(songs).all().length;
+  const albumCount = db.select().from(albums).all().length;
+  const artistCount = db.select().from(artists).all().length;
+  const userCount = db.select().from(users).all().length;
+  return c.json({ songCount, albumCount, artistCount, userCount });
+});
+
+// ==================== Songs (paginated + searchable) ====================
+
+app.get("/v1/songs", (c) => {
+  return c.json(buildSongsPage({
+    page: c.req.query("page"),
+    pageSize: c.req.query("pageSize"),
+    query: c.req.query("query"),
+    genre: c.req.query("genre"),
+    sort: c.req.query("sort"),
+    sortField: c.req.query("sortField"),
+    order: c.req.query("order"),
+  }));
 });
 
 // 单曲详情:在列表行字段之上补两类「体积大、不适合逐行返回」的东西 ——
@@ -239,67 +327,21 @@ app.get("/v1/genres", (c) => {
 // ==================== Albums (paginated + searchable) ====================
 
 app.get("/v1/albums", (c) => {
-  const page = Math.max(1, parseInt(c.req.query("page") || "1") || 1);
-  const pageSize = Math.min(200, Math.max(1, parseInt(c.req.query("pageSize") || "50") || 50));
-  const query = (c.req.query("query") || "").trim();
-  // SQL-level filter (name/artist LIKE) + ORDER BY created_at DESC + pagination,
-  // so we no longer load the whole albums table into memory on every request.
-  const where = query
-    ? or(like(albums.name, `%${query}%`), like(albums.artist, `%${query}%`))
-    : undefined;
-  const totalRow = where
-    ? db.select({ n: sql<number>`count(*)` }).from(albums).where(where).get()
-    : db.select({ n: sql<number>`count(*)` }).from(albums).get();
-  const total = totalRow?.n ?? 0;
-  const start = (page - 1) * pageSize;
-  const rows = where
-    ? db.select().from(albums).where(where).orderBy(desc(albums.createdAt)).limit(pageSize).offset(start).all()
-    : db.select().from(albums).orderBy(desc(albums.createdAt)).limit(pageSize).offset(start).all();
-  // 收藏标记:按当前页专辑 ID 批量查收藏表(避免每行一次查询)。
-  const albumUser = c.get("user");
-  const albumStarredSet = new Set<string>();
-  if (albumUser?.id && rows.length) {
-    const favs = db.select({ albumId: userFavoriteAlbums.albumId }).from(userFavoriteAlbums)
-      .where(and(eq(userFavoriteAlbums.userId, albumUser.id), inArray(userFavoriteAlbums.albumId, rows.map(r => r.id)))).all();
-    for (const f of favs) albumStarredSet.add(f.albumId);
-  }
-  const items = rows.map(a => ({
-    id: a.id, name: a.name, artist: a.artist, artistId: a.artistId, year: a.year,
-    songCount: a.songCount, duration: a.duration, playCount: a.playCount,
-    coverArt: albumCoverRef(a),
-    starred: albumStarredSet.has(a.id) ? true : undefined,
-  }));
-  return c.json({ total, page, pageSize, items });
+  return c.json(buildAlbumsPage({
+    page: c.req.query("page"),
+    pageSize: c.req.query("pageSize"),
+    query: c.req.query("query"),
+  }, c.get("user")?.id));
 });
 
 // ==================== Artists (paginated + searchable) ====================
 
 app.get("/v1/artists", (c) => {
-  const page = Math.max(1, parseInt(c.req.query("page") || "1") || 1);
-  const pageSize = Math.min(200, Math.max(1, parseInt(c.req.query("pageSize") || "50") || 50));
-  const query = (c.req.query("query") || "").trim();
-  // Push the name search to SQL to shrink the working set; the final sort stays
-  // in JS (localeCompare) so Chinese/locale ordering is preserved exactly.
-  // 无限滚动每块都调此端点:全量取数+排序是每块延迟主因(17k 行实测 ~90ms)。
-  // 按 query 缓存「排好序的完整数组」,滚动期间各块直接切片复用;写入后缓存失效。
-  const cacheKey = query.toLowerCase();
-  const rows = (getArtistList(cacheKey) as typeof artists.$inferSelect[]) || buildArtistList(cacheKey, query);
-  const total = rows.length;
-  const start = (page - 1) * pageSize;
-  // 收藏标记:按当前页艺人 ID 批量查收藏表(避免每行一次查询)。
-  const artistUser = c.get("user");
-  const artistStarredSet = new Set<string>();
-  if (artistUser?.id && rows.length) {
-    const favs = db.select({ artistId: userFavoriteArtists.artistId }).from(userFavoriteArtists)
-      .where(and(eq(userFavoriteArtists.userId, artistUser.id), inArray(userFavoriteArtists.artistId, rows.map(r => r.id)))).all();
-    for (const f of favs) artistStarredSet.add(f.artistId);
-  }
-  const items = rows.slice(start, start + pageSize).map(a => ({
-    id: a.id, name: a.name, albumCount: a.albumCount, coverArt: a.coverArt ? `ar-${a.id}` : undefined,
-    scrapeMissing: a.scrapeMissing === 1,
-    starred: artistStarredSet.has(a.id) ? true : undefined,
-  }));
-  return c.json({ total, page, pageSize, items });
+  return c.json(buildArtistsPage({
+    page: c.req.query("page"),
+    pageSize: c.req.query("pageSize"),
+    query: c.req.query("query"),
+  }, c.get("user")?.id));
 });
 
 // 取全量/搜索艺术家并做 JS localeCompare 排序(保留中文序),结果按 query 缓存供后续块复用。
