@@ -981,4 +981,46 @@ describe("orchestrator — 缺口补齐", () => {
     expect(r.items[0].status).toBe("done");
     expect(r.warnings.some((w) => w.includes("增值标签采集异常"))).toBe(true);
   });
+
+  it("G33. comment 双口径：平台声明 mp3/128、源实测 flac/817 → 两个口径都必须落进 comment", async () => {
+    // 复现 240 真实场景：酷狗把无损源**声明**成 mp3/128（extra 阶梯虚标），下载后内容嗅探
+    // 判定 flac、有效码率 817，按「源达标无损」落 losslessRoot。comment 只写声明值会让
+    // 「128K 为何在无损目录」变成悬案，故必须同时写出「声明音质」与「源实测音质」两个口径。
+    let got: Record<string, unknown> = {};
+    const deps = makeDeps({
+      collectCandidates: async () => [
+        cand({
+          id: "c",
+          url: "http://h/a.mp3",
+          container: "mp3",
+          bitrateKbps: 128,
+          declared: { durationSec: 200 },
+        }),
+      ],
+      // 探针给出与声明不符的真实结果（内容嗅探优先，见 probe.ts）
+      probeFile: async (file: string) => ({
+        path: file,
+        bytes: 8_000_000,
+        container: "flac",
+        bitrateKbps: 817,
+        sampleRateHz: 44100,
+        durationSec: 200,
+        hasCover: false,
+      }),
+      writeTags: async (src: string, tags: Record<string, unknown>) => {
+        got = tags;
+        return { ok: true, file: src, bytes: 1000, mtimeMs: 1, warnings: [] };
+      },
+    });
+    const r = await run({
+      targets: [tgt({ id: "t1", title: "A", durationSec: 200 })],
+      sourceId: "src-1",
+      deps,
+    });
+    expect(r.items[0].status).toBe("done");
+    const comment = String(got.comment);
+    expect(comment).toContain("声明音质:mp3/128kbps"); // 口径一：平台声明（cand.declared）
+    expect(comment).toContain("源实测音质:flac/817kbps"); // 口径二：下载后源探针（probed）
+    expect(comment).toMatch(/取链时间:/);
+  });
 });

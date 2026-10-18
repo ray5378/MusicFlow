@@ -340,7 +340,7 @@ function tierOf(c: Candidate): QualityTier {
   return q ? classifyTier(q) : "unknown";
 }
 
-/** 声明/探针音质的短描述（写进 comment 供日后核查）。 */
+/** 音质短描述（「声明」与「源实测」两个口径共用同一格式；写进 comment 供日后核查）。 */
 function describeQuality(q: CandidateQuality | undefined): string {
   if (!q) return "未知";
   const parts: string[] = [];
@@ -1504,7 +1504,15 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
       year: cand.year,
     };
     if (cfg.writeSourceComment) {
-      tags.comment = `来源:${cand.platform || cand.pluginId} 声明音质:${describeQuality(cand.declared)} 取链时间:${new Date().toISOString()}`;
+      // 双口径（2026-10-19 产品调定）：comment 不写「声明」一个口径，而是**声明 + 源实测**两个口径。
+      // 起因（240 实测）：酷狗把无损源**声明**成 mp3/128（extra 音质阶梯虚标），下载后内容嗅探
+      // 判定 flac、有效码率 817，按「源达标无损」正确落进 losslessRoot；而 comment 只有声明值，
+      // 于是「日志写 128K、文件却在无损目录」看起来像 bug。声明值回答「平台说给了什么」，
+      // 源实测值回答「我们实际拿到什么」，两者并列即自证分流依据。
+      // 口径说明：源实测 = 下载到的**源文件**探针（`probed`，与品质分流判据 isLosslessGradeSource
+      // 同一份）。**不**在转码后二次调用 writeTags 写「成品口径」——那会多一次 ffmpeg 写标签、
+      // 多一条 TAG_FAILED 失败路径，而转码只是换封装/响度归一、不改「源站到底给了什么」。
+      tags.comment = `来源:${cand.platform || cand.pluginId} 声明音质:${describeQuality(cand.declared)} 源实测音质:${describeQuality(probed)} 取链时间:${new Date().toISOString()}`;
     }
     // 增值项采集：风格 / 歌词 / 封面。整体 try 兜底，异常只告警（绝不让整首歌失败）。
     let builtinTagSrc: string | null = null;

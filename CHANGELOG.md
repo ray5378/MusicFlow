@@ -2,6 +2,24 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.36] - 2026-10-19
+
+### Fix / 下载产物 comment 改为「声明 + 源实测」双口径
+
+音乐文件内嵌的 `comment` 标签此前只记录信源**声明**的音质档位，于是出现「声明 mp3/128kbps、文件却在无损目录」的观感冲突：240 实测《Self Redemption》落入 `/MUSIC/LOSSLESS`，成品 flac 有效码率 817kbps，而 comment 写的是「声明音质:mp3/128kbps」——用户据此以为「128K 的歌被错放进无损目录」。真实成因是平台侧**虚标**（酷狗把无损源声明成 mp3/128，见 `extra` 音质阶梯），下载后内容嗅探判定 flac、有效码率 817，按既有判据（`isLosslessGradeSource` 取**转码前源探针**）正确落无损根。问题不在分流，而在「comment 只写了一个口径，无法自证分流依据」。
+
+- **`backend/src/services/fetch/orchestrator.ts`**：comment 组装由单口径改为双口径 —— `来源:<平台> 声明音质:<cand.declared> 源实测音质:<probed> 取链时间:<ISO>`。
+  - 「声明音质」= 信源声明值（平台说给了什么）；「源实测音质」= 下载后对**源文件**的真实探针（我们实际拿到什么），与品质分流判据用的是**同一份** `probed`。
+  - 未采用「成品探针」口径：标签在转码前写入源文件、再由 `transcode` 的 `keepTags` 带入成品，若为拿成品口径而在转码后二次 `writeTags`，会多一次 ffmpeg 写标签、多一条 `TAG_FAILED` 失败路径；且转码只做换封装/响度归一，不改变「源站到底给了什么」。
+  - 「实测」一词锚定为「源」而非「成品」，避免出现新矛盾：默认配置下（`transcodeEnabled=true`、`transcodeTarget="flac"`、响度归一化默认开启 → `transcode.ts` 的 skip 条件几乎不成立）成品容器恒为 flac，若写「实测音质:mp3/128kbps」会与文件名 `*.flac` 再次对不上。
+- **`backend/src/services/fetch/tagWriter.ts`**：`applyTagsVariant` 文档注释同步为「来源/声明音质/源实测音质/取链时间」（comment 仍不参与简繁转换）。
+- **兼容性**：仅新写入的文件带双口径；历史文件的单口径 comment 照旧原样保留（无解析方，`songs.comment` 为整串透传）。标签修复路径**不设置** comment，重写时经 `-c copy` 原样继承，双口径不会被修复流程抹掉。
+
+### Test / 回归守卫
+
+- **`backend/scripts/check-tag-repair.mjs` 新增 R13（64 → 67 条断言）**：正向两条（`声明音质:${describeQuality(cand.declared)}` 必须在位；`源实测音质:${describeQuality(probed)}` 必须在位）+ 反向一条（`mustNotMatch` 钉死「只写声明音质」的单口径旧写法），双向锁定防退回。
+- **`backend/tests/fetch/orchestrator.gaps.test.ts` 新增 G33**：构造「声明 mp3/128、探针实测 flac/817」的不一致候选，断言写进文件的 comment 同时含 `声明音质:mp3/128kbps` 与 `源实测音质:flac/817kbps`。
+
 ## [4.6.35] - 2026-10-18
 
 ### Fix / 运行身份（compose 模板不再出现 PUID / PGID）

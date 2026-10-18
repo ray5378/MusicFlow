@@ -6,7 +6,7 @@
 // 丢数据或让候选池永不收敛 —— 只有在用户发现「封面没了 / 碟号是垃圾值 / 待修复永远不降」
 // 时才暴露。故逐条用源码级断言钉死。
 //
-// 十二条规则：
+// 十三条规则：
 //   R1 碟号纪律：成品文件**不写也不留** DISCNUMBER/DISCTOTAL。tagWriter 必须显式
 //       清空继承来的碟号（`-metadata disc=`），且**不得**写入任何碟号值。
 //   R2 保留内嵌封面：标签修复路径 keepSourceCover **恒为 true**；下载路径按 embedCover 判定。
@@ -27,6 +27,8 @@
 //       正常跑完清快照；sweep 的 scan/repair 两个循环头都要有停止检查，且**不得**把待处理清单整段清空。
 //   R12 立刻停止：stopTagRepair 只置 stopRequested 标志、把快照 stopped 落盘、清半成品 tagtmp、
 //       顺延 LAST_RUN_KEY（D2），**不等**本轮真正结束（不得 async/await 整轮）；另暴露 isTagRepairStopping。
+//   R13 comment 双口径：下载期 comment 必须同时写「声明音质」（平台声明）与「源实测音质」
+//       （转码前源探针 probed，与品质分流判据同一份），且不得退回只写声明的单口径旧写法。
 //
 // 零依赖 node 脚本（与 check-dead-song-purge.mjs 同款，共用 strip-comments），挂 ci.yml 守卫 job。
 import { existsSync, readFileSync } from "node:fs";
@@ -436,8 +438,29 @@ mustNotMatch(
   "stopTagRepair 必须同步返回（仅置标志、不等整轮结束）；改成 async 去 await 本轮跑完会让「停止」按钮卡到整轮结束",
 );
 
+// ---------- R13 comment 双口径（声明 + 源实测） ----------
+// 2026-10-19 产品调定：下载期 comment 必须**同时**写「平台声明档位」与「下载后源实测档位」。
+// 只写声明值会让「声明 mp3/128kbps、成品却落进无损目录」看起来像 bug（240 实测：酷狗把无损源
+// 虚标成 mp3/128，源实测 flac/817 才是分流依据）。这条契约断了不报错、不会让任何动态用例变红，
+// 只会让文件里的说明与实际不符 —— 故用「正向两条 + 反向一条」钉死，防止退回单口径。
+mustMatch(
+  ORCH,
+  /声明音质:\$\{describeQuality\(cand\.declared\)\}/,
+  "comment 必须保留「声明音质」口径（平台声明值：回答「平台说给了什么」）",
+);
+mustMatch(
+  ORCH,
+  /源实测音质:\$\{describeQuality\(probed\)\}/,
+  "comment 必须补「源实测音质」口径，且实测值必须取转码前的**源探针** probed（与品质分流判据 isLosslessGradeSource 同一份），不得换成成品探针或 declared",
+);
+mustNotMatch(
+  ORCH,
+  /声明音质:\$\{describeQuality\(cand\.declared\)\} 取链时间/,
+  "不得退回「只写声明音质」的单口径旧写法（声明与源实测并列才能自证「128K 为何落无损目录」）",
+);
+
 // ---------- 自检：守卫必须真的扫到了东西 ----------
-if (checks < 62) {
+if (checks < 65) {
   console.error(`✗ 守卫自身失效：只执行了 ${checks} 条检查 —— 扫描逻辑或文件路径约定已变，请先修守卫本身`);
   process.exit(1);
 }
@@ -447,4 +470,4 @@ if (errors.length > 0) {
   for (const e of errors) console.error("  ✗ " + e);
   process.exit(1);
 }
-console.log(`✅ 标签写入/修复链路守卫通过：${checks} 条检查（只认非注释行）—— 碟号纪律 / 保留内嵌封面 / 简繁统一 / 终态不可得 / 待修口径 / 原子写 / QQ 端点与限流 / 风格与时长单位 / 断点续跑 / 立刻停止 全部在位`);
+console.log(`✅ 标签写入/修复链路守卫通过：${checks} 条检查（只认非注释行）—— 碟号纪律 / 保留内嵌封面 / 简繁统一 / 终态不可得 / 待修口径 / 原子写 / QQ 端点与限流 / 风格与时长单位 / 断点续跑 / 立刻停止 / comment 双口径 全部在位`);
