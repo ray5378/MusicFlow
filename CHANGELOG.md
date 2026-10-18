@@ -2,6 +2,18 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.32] - 2026-10-18
+
+### Fix
+
+- **续跑进度口径修正（修正 8）**：`progressPhase(phase, total, preserve)` 的 `total` 形参表示的是**本阶段剩余**数，而 `preserve=true`（续跑进入同阶段）时 `progress.checked` 仍保留着「本段已处理」计数。此前实现直接 `progress.total = total` 覆盖，导致续跑时分母小于已处理数 → 管理端进度提前冲到 100%、「待修复」（前端取 `total - checked`）提前归零，而实际仍有大量候选在跑（240 生产实测：分母 14293、已处理 793 时界面已显示 100%/待修复 0）。现改为 `progress.total = preserve ? progress.checked + total : total`，续跑分母 = 本段已处理 + 本阶段剩余，进度与「待修复」与真实剩余一致。非续跑路径（`preserve=false`）行为不变。
+
+### Test / 回归守卫
+
+- **`backend/tests/fetch/tagRepair.test.ts`**：在「续跑恢复计数」用例中新增分母断言 `expect(live.total).toBe(6)`（快照已处理 5 + 剩余候选 1），钉死续跑分母口径（此前无断言 → 覆盖式实现可静默通过）。
+- **`backend/scripts/check-tag-repair.mjs`** 新增 1 条 R11 守卫：必须存在 `progress.total = preserve ? progress.checked + total : total;`（62 → **63 条检查**）。
+- **CI 全量门禁稳定性**：`backend/vitest.config.ts` 新增 `testTimeout: 20000`。根因是 `tests/plugins/tagProvider.test.ts` 的 QQ 请求限流用例**刻意真实等待** 1.2s + 300~800ms 抖动，在 CI 负载下超出 vitest 默认 5000ms 单测超时被误判失败（同一 commit 的 `ci` 作业同命令全绿、`build-and-push` 作业全红即为佐证，见 v4.6.31 的 tag 构建失败并触发回滚）。仅抬高上限，不改变任何用例的执行语义。
+
 ## [4.6.31] - 2026-10-18
 
 ### Feat

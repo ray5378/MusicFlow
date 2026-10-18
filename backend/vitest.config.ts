@@ -5,6 +5,12 @@ export default defineConfig({
     include: ["tests/**/*.test.ts", "src/services/sendspin/**/*.test.ts"],
     environment: "node",
     globals: false,
+    // 【2026-10-18 CI 稳定】全量门禁跑在 CI 上会与同 run 的镜像构建争抢算力,
+    // tagProvider 的 QQ 请求限流用例(真实等待 1.2s + 300~800ms 抖动)在负载下会超出
+    // vitest 默认 5000ms 单测超时被误判失败(同一 commit 的 ci 作业同命令全绿、build
+    // 作业全红即为佐证,见 v4.6.31 的 build-and-push 失败)。此处仅抬高上限,不改变
+    // 任何用例的执行语义(该等待是用例刻意为之,不能靠缩短等待绕过)。
+    testTimeout: 20000,
     // 【CI 稳定性】Sendspin Guard 作业(见 .github/workflows/sendspin-guard.yml)置位
     // MUSICFLOW_GUARD_NO_CONSOLE_INTERCEPT=1 时关闭 console 截获。原因:sendspin 测试文件
     // 在 afterAll 停服务后仍有异步收尾**迟到**输出 —— 推流主循环(GroupPump.pushLoop 是

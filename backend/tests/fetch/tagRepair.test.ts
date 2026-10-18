@@ -1373,6 +1373,9 @@ describe("续跑快照 / 立刻停止", () => {
     expect(live.phase).toBe("repair");
     expect(live.checked).toBe(5); // 从快照起步，而非 0
     expect(live.fixed).toBe(3);
+    // 修正8：续跑进度分母 = 本段已处理(5) + 本阶段剩余候选(1) = 6（此前直接覆盖成 1，
+    // 分母小于已处理数 → 界面进度提前 100%、「待修复」(total-checked) 提前归零）。
+    expect(live.total).toBe(6);
     release();
     const { result } = await p;
     expect(result?.checked).toBe(6); // 快照 5 + 本首 1

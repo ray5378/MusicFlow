@@ -373,6 +373,11 @@ mustNotMatch(
   /\.pendingIds = \[\];/,
   "不得把待处理清单整段清空（如停止/sweep 返回前 `pendingIds = []`）—— 那会丢弃未处理候选、让续跑变成重头再扫",
 );
+mustMatch(
+  TAGREPAIR,
+  /progress\.total = preserve \? progress\.checked \+ total : total;/,
+  "续跑（preserve=true）时进度分母必须是「本段已处理 + 本阶段剩余」（progress.total = checked + total）——直接覆盖会让分母小于已处理数，进度提前冲到 100%、界面「待修复」（= total - checked）提前归零，而实际仍有候选在跑",
+);
 
 // ---------- R12 立刻停止（仅置标志，不等整轮结束） ----------
 mustMatch(

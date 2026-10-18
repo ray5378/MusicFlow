@@ -394,7 +394,11 @@ function progressStart(mode: TagRepairMode, resume?: TagRepairRunSnapshot | null
 function progressPhase(phase: "scan" | "repair", total: number, preserve = false): void {
   if (!progress) return;
   progress.phase = phase;
-  progress.total = total;
+  // 【2026-10-18 修正 8】传进来的 total 是**本阶段剩余**数；preserve=true（续跑）时 progress.checked
+  // 还保留着「本段已处理」计数，故分母必须叠加它（total = checked + 剩余）才是真实总数。
+  // 此前直接覆盖：续跑时分母小于已处理数 → 进度提前冲到 100%、界面「待修复」（= total - checked）
+  // 提前归零，而实际仍有剩余候选在跑（用户实测反馈）。
+  progress.total = preserve ? progress.checked + total : total;
   if (preserve) return;
   progress.checked = 0;
   progress.fixed = 0;
