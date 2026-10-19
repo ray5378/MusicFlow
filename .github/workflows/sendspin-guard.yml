@@ -157,6 +157,42 @@ jobs:
           if [ "$miss" -eq 0 ]; then echo "OK: 切歌 keep_stream 契约在位"; fi
           exit "$miss"
 
+      # —— P3(过渡兜底):新流宣告前必发 `stream/clear` ——
+      # 回退掉这处 clear,会让「上一轮走过 stream/end + stopped 复位」之后的起播重新
+      # 陷入真机固件约 2s 的 IDLE 闩锁窗口 → 自动切歌起播无声(2026-10-19 真机实测)。
+      # 断言:从 flushAnnounceFor 的函数体内取 `stream/clear` 与 `announceStream()` 的行号,
+      # clear 必须存在且**早于** start(顺序倒置 = 没兜底)。
+      # 注:P2 安全阀(KEEP_STREAM_LEGACY=0 → legacy 组退回 stream/end)依据的「legacy
+      # 客户端可能误处理 stream/clear」假设,已被 2026-10-19 真机推翻 —— esp32-player2
+      # (legacy=true) 恰恰需要该 clear 解固件 IDLE 闩锁,故兜底 clear 对 legacy 成员同样下发。
+      # ⚠️ 本步是**过渡契约**:MA 对齐改造(自动切歌 keep_stream 连续化,不再发
+      # stream/end + stopped)落地后,兜底 clear 与 else 复位分支一并移除,本步随之删除。
+      - name: "Guard P3 (transitional) - pre-clear backstop before stream/start"
+        shell: bash
+        run: |
+          body=$(awk '/flushAnnounceFor\(c: SendspinConnection\): void \{/{on=1} on{print} on&&/^  \}/{exit}' backend/src/services/sendspin/server.ts)
+          if [ -z "$body" ]; then
+            echo "::error::P3 回归:找不到 flushAnnounceFor 函数体(兜底 clear 的落点)"
+            exit 1
+          fi
+          cl=$(printf '%s\n' "$body" | grep -nF 'c.sendJson("stream/clear", {});' | head -1 | cut -d: -f1)
+          al=$(printf '%s\n' "$body" | grep -nF 'c.announceStream();' | head -1 | cut -d: -f1)
+          miss=0
+          if [ -z "$cl" ]; then
+            echo "::error::P3 回归:flushAnnounceFor 内缺少 stream/clear 兜底(自动切歌起播会因固件 IDLE 闩锁无声)"
+            miss=1
+          fi
+          if [ -z "$al" ]; then
+            echo "::error::P3 回归:flushAnnounceFor 内找不到 announceStream()(新流宣告点被改名?)"
+            miss=1
+          fi
+          if [ "$miss" -eq 0 ] && [ "$cl" -ge "$al" ]; then
+            echo "::error::P3 回归:stream/clear 必须紧邻在 announceStream() **之前**(顺序倒置 = 没兜底)"
+            miss=1
+          fi
+          if [ "$miss" -eq 0 ]; then echo "OK: 新流宣告前 stream/clear 兜底在位(${cl} < ${al})"; fi
+          exit "$miss"
+
       - name: Upload guard log on failure
         if: failure()
         uses: actions/upload-artifact@v4

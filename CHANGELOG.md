@@ -2,6 +2,23 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.39] - 2026-10-19
+
+### Fix / Sendspin 自动切歌起播无声（新流宣告前补发 `stream/clear` 兜底）
+
+真机（esp32-player2，ESPHome 明文 legacy 客户端）报「自动切歌后无声，拖动进度条 seek 才出声」。报文级埋点把判别点钉死：**无声样本的 `group/update->playing` 距 `stream/start` 只有 152 / 199 / 344 / 352 / 1067ms，且前面都发过 `group/update -> stopped`；正常样本则是 3081 / 5070ms；手动 seek 出声那次仅 48ms 且前面没有 stopped。**
+
+根因：上一轮走 `finishPlayback` 的 else 复位分支时发出 `stream/end` + `group/update -> stopped`，真机固件把 stopped 镜像成组播放器 IDLE，约 2s 内不再接受 `stream/start`。而服务端把 `stream/start` 绑在「首个音频帧产出」上，本地快源 0.15~1.0s 就产出首帧 ⇒ start 太早，被固件 `pending_start_` 吞掉 ⇒ 报文链路全绿但**无声**，且坏态**跨曲目持续**，直到一次 `stream/clear` 才解闩锁（这正是拖动 seek 能立刻出声的原因）。
+
+- **`backend/src/services/sendspin/server.ts`**：`SendspinGroup.flushAnnounceFor()` 在 `announceStream()` **之前**补发一条 `stream/clear`。落点刻意选在此处而非起播侧的 `clearPlayback()` —— 那里新连接尚未入组、与 start 的间隔不可控；而真机实测 clear 必须与 start **紧邻**（seek 路径 48ms 即出声）。对 keep_stream / late-join 路径只是多一次无害的重复 clear。诊断日志只落解码调试日志（`recordSendspinDebug`，插件 `debug_log` 开关，默认关），不进常态 console。
+- **口径说明（重要）**：这是**保守兜底**，不是 MA / `aiosendspin` 的标准语义 —— 那边过渡期根本不发 `stream/end` + `stopped`（`clear()` 只发 `stream/clear`；`stop(keep_stream=True)` 跳过 `stream/end`；`group/update(stopped)` 只有「自然曲终且未取消」才走）。本版先守住已复现症状的修复；下一步按 MA 方向做「自动切歌 keep_stream 连续化」，届时 `finishPlayback` 的 else 复位分支与本处兜底 clear 一并移除。
+
+### Test / 回归守卫
+
+- **`backend/src/services/sendspin/trackChangeKeepStream.test.ts` 新增 P3 用例组（4 条）**：纯内存断言 `flushAnnounceFor` 的**报文序** —— ①`["stream/clear","stream/start"]` 顺序不可倒置；②重复入队只兑现一次；③设备明确报 `available:false` 时既不 clear 也不 start 且条目留队重试；④成员不在待宣告队列时不得凭空补 clear。
+- **既有 P2 用例「legacy 安全阀绝不发 stream/clear」按现场证据修正**：该断言源自 MA `playback.py:405-423` 的保守假设（legacy 客户端「可能」误处理 `stream/clear`），但真机 esp32-player2（`legacy=true`）实测恰相反 —— 它需要一条与 start 紧邻的 `stream/clear` 解固件 IDLE 闩锁；故兜底 clear **对 legacy 成员同样下发**，断言改为「clear 只出现在 `stream/end` 之后、且紧邻 `stream/start` 前」。
+- **`.github/workflows/sendspin-guard.yml` 新增 P3 步骤（过渡契约）**：从 `flushAnnounceFor` 函数体内取 `stream/clear` 与 `announceStream()` 的行号，断言 clear 存在且**早于** start（顺序倒置 / 删掉兜底一律判红）。MA 对齐改造落地后本步骤随兜底一并移除。
+
 ## [4.6.38] - 2026-10-19
 
 ### Feat / 媒体源扫描进度实时化 + 每源每日定时增量扫描

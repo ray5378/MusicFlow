@@ -627,6 +627,26 @@ export class SendspinGroup {
       this.pendingAnnounces.splice(i, 1);
       i = this.pendingAnnounces.indexOf(c);
     }
+    // ★ 过渡兜底(2026-10-19 真机实测):新流宣告前补发一条 `stream/clear`。
+    //   病灶:走 else 复位分支的上一轮末态是 `stream/end` + `group/update -> stopped`,
+    //   真机固件把 stopped 镜像成组播放器 IDLE 后需约 2s 才重新接受 `stream/start`;
+    //   而本地快源 0.15~1.0s 就产出首帧 ⇒ start 太早,被固件 `pending_start_` 吞掉
+    //   ⇒ 报文链路全绿但**无声**,且坏态跨曲目持续(唯有一次 `stream/clear` 才解
+    //   闩锁 —— 这正是用户拖动进度条 seek 能立刻出声的原因)。
+    //   clear 必须与 start **紧邻**(seek 路径实测 48ms 即出声),故落在此处而非起播侧
+    //   的 clearPlayback(那里新 conn 尚未入组,且与 start 的间隔不可控)。
+    //   对 keep_stream / late-join 路径只是多一次无害的重复 clear。
+    //   ⚠️ 这是**保守兜底**,不是 MA / aiosendspin 的标准语义 —— 那边过渡期根本不发
+    //   stream/end + stopped(见本文件 clearPlayback / finishPlayback 注释)。待自动
+    //   切歌改走 keep_stream 连续化后,本处 clear 与 else 复位分支一并移除。
+    //   诊断只落解码调试日志(recordSendspinDebug,插件 debug_log 开关,默认关),
+    //   不进常态 console —— 每次切歌一条 info 属噪声;开开关即可看到 clear→start 紧邻。
+    try {
+      recordSendspinDebug("log", `flushAnnounce pre-clear -> ${c.clientId ?? "?"} legacy=${c.legacy} group=${this.name}`, { level: "debug", src: "sendspin" });
+      c.sendJson("stream/clear", {});
+    } catch {
+      /* 单成员 clear 失败不连累宣告 */
+    }
     try {
       c.announceStream();
     } catch {
