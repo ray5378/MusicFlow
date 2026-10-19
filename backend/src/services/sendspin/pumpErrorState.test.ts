@@ -4,7 +4,7 @@
 // group.current 残留 → pollCore `playing: !!g.current` 永远 true → 主进程 pollState
 // 永远 PLAYING pos=0 dur=311 uri=- → PlaybackTracker/QueueController 被假在播骗住
 // (stalled 复查见 PLAYING 误判「确在播放」清计数)→ 不重投不切歌,群组永久卡死。
-// 契约:异常终止清 current + finishPlayback(silentState,不发 stopped)⇒
+// 契约:异常终止清 current(过渡复位:只置空,不发 stream/end+stopped)⇒
 // poll 上报 IDLE ⇒ auto-advance 走既有跳歌自愈(失败矩阵:显式失败 ⇒ 跳下一首)。
 import { describe, it, expect, afterEach } from "vitest";
 import { GroupPump, overridePumpSource } from "./streamEngine.js";
@@ -38,7 +38,7 @@ async function waitInactive(pump: GroupPump, ms: number, what: string): Promise<
 afterEach(() => overridePumpSource(null));
 
 describe("GroupPump 异常终止(假在播根源修复守卫)", () => {
-  it("推帧中途异常:清 current + finishPlayback,poll 不再报 playing", async () => {
+  it("推帧中途异常:清 current(过渡复位,不 finishPlayback),poll 不再报 playing", async () => {
     overridePumpSource(async () => ({ pcm: new Float32Array(48000 * 2 * 2), durationMs: 2000 }));
     const { group, finishedAt } = stubGroup();
     let pushes = 0;
@@ -52,7 +52,9 @@ describe("GroupPump 异常终止(假在播根源修复守卫)", () => {
     await waitInactive(pump, 8000, "推帧异常");
     // 旧代码此处 group.current 残留 → pollCore playing 恒 true → 群组永久假在播
     expect(group.current).toBeNull();
-    expect(finishedAt()).toBe(1);
+    // MA 对齐:推帧异常走 linkDied 分支 —— 只置空 current,**不**调 finishPlayback
+    // (过渡期不发 stream/end+stopped;终态收尾由 stopCore 兜)。旧契约断言 1 已作废。
+    expect(finishedAt()).toBe(0);
   }, 15000);
 
   it("异常终止后 pollCore 视角:playing=false(可被 auto-advance 正常切歌)", async () => {

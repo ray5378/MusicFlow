@@ -18,7 +18,9 @@ v4.6.39 的「新流宣告前补发 `stream/clear`」是**保守兜底**（见�
 - **`trackChangeKeepStream.test.ts`**：门禁用例改为「默认 = MA 严格档」（空组 / 含 legacy 一律 false）；原「默认放行」用例改为 `KEEP_STREAM_LEGACY=1` 强制放开；legacy 切歌用例断言改为「只发 `stream/end`、绝不 `stream/clear`」；**删除 P3 兜底用例组**。
 - **`trackChangeStoppedSequence.test.ts`**：去掉强制 `KEEP_STREAM_LEGACY=0` 的 env 覆盖（默认即严格档），保留「切歌窗口内不出现 `group/update{stopped}`」断言。
 - **`pumpEncoderDeath.test.ts`**：自然曲终不再直接 `finishPlayback` —— 断言改为 `finished === 0`。
-- **`pumpErrorState.test.ts`**：异常终止契约文案更新为 `finishPlayback(silentState)`。
+- **`pumpErrorState.test.ts`**：异常终止契约改为「只置空 current、不 `finishPlayback`」，断言改 `finishedAt() === 0`。
+- **`tests/sendspin/streamEngineGaps.test.ts`**：自然曲终 / `linkDied` / 窗口 EOF 三例断言由 `finished === 1` 改 `0`（外抛 catch 例仍 `1`）。
+- **`childMain.test.ts`**：为 `asPlayableGroup` 假组补齐 `canKeepStream() => false`（过渡分支新判据会调用它，假组缺此方法会 TypeError）。
 - **`.github/workflows/sendspin-guard.yml`**：P2 判据同步为 `if (g.canKeepStream()) {`；**删除过渡用的 P3 步骤**，新增 **P3「过渡期不得报 stopped」**：钉死 `playerCore` 两处过渡分支走 `finishPlayback({ silentState: true })`、且 `streamEngine` 不得再出现裸 `finishPlayback()`。
 
 ## [4.6.39] - 2026-10-19

@@ -68,6 +68,9 @@ function asPlayableGroup(g: any): any {
   g.finishPlayback = () => {};
   g.commonSendAheadUs = () => 0;
   g.pendingAnnounces = [];
+  // playCore/playGroupCore 过渡分支会调 canKeepStream():真组(空成员)恒 false,
+  // 假组必须补齐同形,否则 TypeError(2026-10-19 MA 对齐去掉 g.current 前置后暴露)。
+  g.canKeepStream = () => false;
   g.pushFrame = async (_ts: bigint, pcm: Float32Array) => Math.floor(pcm.length / 2);
   return g;
 }
