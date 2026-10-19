@@ -39,7 +39,7 @@ import {
 //   有缓存(无论新旧) → 立即返回缓存;
 //   缓存已过期       → 触发后台刷新(single-flight 去重,成功后原子更新缓存);
 //   无任何缓存       → 立即返回空频道 + pending:true,后台 single-flight 拉取
-//                      (60s 失败退避,防前端重试打爆上游);前端轮询重试自动填充。
+//                      (指数退避:3s 起翻倍、封顶 60s,防前端重试打爆上游);前端轮询重试自动填充。
 // 后台刷新与请求路径共用同一聚合函数 fetchRecommendChannels,保证两条路径产物一致。
 // 聚合结果 write-through 落 settings 表(见下方 B1),进程重启/内存回收后不再冷。
 
@@ -205,15 +205,30 @@ const recommendRefreshInflight = new Map<string, Promise<void>>();
  */
 const providerInvokeInflight = new Map<string, Promise<any>>();
 
-/** 冷启动/刷新失败退避表:key → 上次失败时刻。60s 内不再重复发起后台拉取,
- *  防止前端轮询重试把故障中的上游打爆(2026-10-15 B2)。 */
-const recommendColdFailAt = new Map<string, number>();
-const RECOMMEND_REFRESH_BACKOFF_MS = 60 * 1000;
+/** 冷启动/刷新失败退避表:key → { 上次失败时刻, 连续失败次数 }。按指数退避,
+ *  退避窗口内不再重复发起后台拉取,防止前端轮询重试把故障中的上游打爆(2026-10-15 B2)。 */
+const recommendColdFailAt = new Map<string, { at: number; streak: number }>();
+
+/** 指数退避基准(首次失败后的等待窗口)。 */
+export const RECOMMEND_REFRESH_BACKOFF_BASE_MS = 3_000;
+/** 指数退避上限(封顶,避免退避窗口无限增长)。 */
+export const RECOMMEND_REFRESH_BACKOFF_MAX_MS = 60_000;
+
+/** 纯函数:按连续失败次数计算退避窗口。
+ *  首次失败(base)起 3s → 6s → 12s … 翻倍,封顶 60s。failStreak <= 0 视为首轮,
+ *  保证返回值始终有限(3s),绝不出现 NaN/Infinity。 */
+export function recommendRefreshBackoffMs(failStreak: number): number {
+  return Math.min(
+    RECOMMEND_REFRESH_BACKOFF_MAX_MS,
+    RECOMMEND_REFRESH_BACKOFF_BASE_MS * 2 ** Math.max(0, failStreak - 1),
+  );
+}
 
 /** 缓存的后台刷新(SWR 过期续命 + 冷启动首拉共用,不 await):single-flight 去重;
  *  成功后原子更新缓存并 write-through 落 DB(B1)。聚合层面插件失败会被吞进
  *  primaryError 并返回空 channels —— 有旧缓存时**不覆盖**(保留 last-good,下次
- *  请求继续 stale 返回并再试);冷启动(无旧缓存)则记入失败退避表,60s 内不再 kick。 */
+ *  请求继续 stale 返回并再试);冷启动(无旧缓存)则记入失败退避表,按指数退避
+ *  (3s 起翻倍、封顶 60s)不再 kick。 */
 function refreshRecommendCacheInBackground(
   cacheKey: string,
   providerId: string,
@@ -221,21 +236,27 @@ function refreshRecommendCacheInBackground(
   rpList: any[],
 ): void {
   if (recommendRefreshInflight.has(cacheKey)) return;
-  const failedAt = recommendColdFailAt.get(cacheKey);
-  if (failedAt && Date.now() - failedAt < RECOMMEND_REFRESH_BACKOFF_MS) return;
+  const f = recommendColdFailAt.get(cacheKey);
+  if (f && Date.now() - f.at < recommendRefreshBackoffMs(f.streak)) return;
+  /** 记一次失败:连续失败次数 +1,并按新次数取指数退避窗口(仅用于告警文案)。 */
+  const markFailure = (): number => {
+    const streak = (recommendColdFailAt.get(cacheKey)?.streak ?? 0) + 1;
+    recommendColdFailAt.set(cacheKey, { at: Date.now(), streak });
+    return recommendRefreshBackoffMs(streak);
+  };
   const task = (async () => {
     const { channels, primaryError } = await fetchRecommendChannels(providerId, rp, rpList);
     if (primaryError && channels.length === 0) {
-      recommendColdFailAt.set(cacheKey, Date.now());
-      console.warn(`[RECOMMEND] 后台拉取失败(60s 退避): ${primaryError}`);
+      const backoffMs = markFailure();
+      console.warn(`[RECOMMEND] 后台拉取失败(${Math.round(backoffMs / 1000)}s 指数退避): ${primaryError}`);
       return;
     }
     recommendColdFailAt.delete(cacheKey);
     writeAggCache(cacheKey, { ts: Date.now(), channels });
     log.info(`[RECOMMEND] 后台拉取完成: ${cacheKey}`);
   })().catch((e: any) => {
-    recommendColdFailAt.set(cacheKey, Date.now());
-    console.warn("[RECOMMEND] 后台拉取失败(60s 退避):", e?.message || e);
+    const backoffMs = markFailure();
+    console.warn(`[RECOMMEND] 后台拉取失败(${Math.round(backoffMs / 1000)}s 指数退避):`, e?.message || e);
   }).finally(() => {
     recommendRefreshInflight.delete(cacheKey);
   });
@@ -244,13 +265,16 @@ function refreshRecommendCacheInBackground(
 
 // ==================== 周期性预热刷新 ====================
 // 模式与 services/dailyScheduler.ts 一致:递归 setTimeout、finally 里 re-arm、
-// 异常不断链。间隔 = TTL/2:用户请求几乎总能命中未过期缓存。只预热「已有缓存」
+// 异常不断链。首轮用较短初始延迟(启动后 4s)尽早把首页聚合缓存暖起来 —— 否则
+// 首次预热要等到 TTL/2(150s)后,期间首页首开全靠请求路径冷拉,打不开得快;
+// 之后间隔 = TTL/2:用户请求几乎总能命中未过期缓存。只预热「已有缓存」
 // 的 key(说明首页被用过);冷启动不做无谓外呼。定时器 unref,不阻进程退出。
+export const RECOMMEND_WARMER_INITIAL_MS = 4 * 1000;
 let recommendWarmerTimer: ReturnType<typeof setTimeout> | null = null;
 
 export function startRecommendCacheWarmer(): void {
   if (recommendWarmerTimer) return;
-  const tick = () => {
+  const tick = (delayMs: number) => {
     recommendWarmerTimer = setTimeout(() => {
       try {
         // 用当前插件集重算 cacheKey(插件增删后旧 key 自然不再预热,由内存清理兜底)。
@@ -268,12 +292,12 @@ export function startRecommendCacheWarmer(): void {
       } catch (e: any) {
         console.warn("[RECOMMEND] SWR 预热失败:", e?.message || e);
       } finally {
-        tick(); // re-arm(在 finally,异常也不能断链)
+        tick(RECOMMEND_CACHE_TTL_MS / 2); // re-arm(在 finally,异常也不能断链)
       }
-    }, RECOMMEND_CACHE_TTL_MS / 2);
+    }, delayMs);
     recommendWarmerTimer?.unref?.();
   };
-  tick();
+  tick(RECOMMEND_WARMER_INITIAL_MS);
 }
 
 // ==================== 单飞调用(provider 结果缓存写入) ====================
@@ -412,7 +436,7 @@ app.get("/v1/recommend", async (c) => {
   }
 
   // 无任何缓存(冷启动,2026-10-15 B2 起不再阻塞):立即返回空频道 + pending:true,
-  // 后台 single-flight 拉取(成功 write-through 落 DB,失败 60s 退避)。前端收到
+  // 后台 single-flight 拉取(成功 write-through 落 DB,失败走指数退避)。前端收到
   // pending 后轮询重试,数据到位自动填充——首页打开路径从此零阻塞外呼。
   refreshRecommendCacheInBackground(cacheKey, providerId, rp, rpList);
   return c.json({ success: true, channels: [], providerId, pending: true });

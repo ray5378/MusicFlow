@@ -2,6 +2,24 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.42] - 2026-10-19
+
+### Perf / 首页打开提速（三端一体：服务端预热 + Web 首页 + HA 卡片媒体库首页）
+
+用户反馈：HA 卡片打开媒体库首页很慢、**卡片加载了但封面迟迟不显示**；Web 首页首开也偏慢。对照实现是客户端发现页（即使本地零封面缓存也很快）。三处一起改：
+
+- **服务端（后台预热提前 + 失败退避改指数）**
+  - `backend/src/routes/api/recommend.ts`：聚合缓存预热器首轮延迟由 `RECOMMEND_CACHE_TTL_MS / 2`（≈150s）改为 `RECOMMEND_WARMER_INITIAL_MS = 4s` —— 否则进程刚启的一两分钟内，首页首个 `/v1/recommend` 只能走请求路径冷拉（插件外呼 900ms+）。预热周期仍为 `TTL/2`，递归 `setTimeout` 的 finally re-arm 与 unref 语义不变。
+  - 后台刷新失败退避由**固定 60s** 改为**指数退避**：`recommendRefreshBackoffMs(failStreak)` 按连续失败次数 `3s → 6s → 12s → 24s → 48s` 翻倍、封顶 60s（`RECOMMEND_REFRESH_BACKOFF_BASE_MS=3000`、`…_MAX_MS=60000`）；`recommendColdFailAt` 由「时刻」改为「时刻 + 连续失败次数」。上游短暂抖动不再被固定退避锁死一分钟，也不会退避窗口无限增长。
+- **Web 首页**（`frontend/src/views/Home/index.vue`）：首屏顶部的固定推荐卡与并排随机歌单封面改为**首屏立即加载**并给 `fetchpriority="high"`（原为 `v-lazy-cover` + `low`）；下半屏「平台精选 / 本地随机」分区保持原懒加载与 `low` 优先级不变 —— 让首屏封面先于屏外上百张同源封面抢到连接。
+- **HA 卡片**（`hass-musicflow-card` v2.5.1）：`_fetchHomeItems` 由 5 路 `Promise.all` 齐等改为**两阶段** —— 阶段一只 await 快三路（歌单 / 固定卡计数 / 固定卡），顶部固定卡与侧栏随机立即渲染；慢两路（平台精选 / 本地随机，冷启动 2.5s+）另起**非 await** 的 `Promise.all`，在 `.then` 里经 `_appendHomeSections` 追加到列表尾，并复用虚拟滚动「失效首块 + 重载」就地补齐（不白屏、不整页重载）。慢两路回包比对 `level.vSeq` 序号，期间切 agent / 刷新 / 搜索即丢弃旧回包；首屏前 8 行封面 `fetchpriority=high`，其余保持 `loading=lazy`。
+
+### Test / 回归守卫
+
+- **新增 `backend/tests/routes/recommendWarmerBackoff.test.ts`**：断言 `recommendRefreshBackoffMs` 的指数增长与 60s 封顶（`1→3s`、`2→6s`、`3→12s`、`4→24s`、`5→48s`、`≥6→60s`，以及 `≤0` 视为首轮恒为有限值 3s、绝不 NaN/Infinity），并断言 `RECOMMEND_WARMER_INITIAL_MS` 为秒级有限值、退避基准 < 上限。
+- **`backend/scripts/check-home-perf.mjs`**：R3 段改为 4 条**精确计数**断言（首屏 `v-lazy-cover` / `fetchpriority` 数量钉死，防退化回「整屏懒加载」）；新增 R6 段钉死 `RECOMMEND_WARMER_INITIAL_MS = 4 * 1000`、`tick(RECOMMEND_CACHE_TTL_MS / 2)` 的 re-arm 形态（禁用旧的一次性 `}, RECOMMEND_CACHE_TTL_MS / 2);` 形态）、`recommendRefreshBackoffMs(` 与退避基准/上限常量，并禁止旧常量 `RECOMMEND_REFRESH_BACKOFF_MS` 复现。
+- **`hass-musicflow-card` 的 `tools/guard-card-ui.mjs` 新增 E 组（4 条）**：静态钉住「阶段一 `Promise.all` 不含慢两路 / 慢两路不得被 await 且走 `_appendHomeSections` + `_homeAll` / 回包比对 `vSeq` 不一致即 `return` / 首屏前 N 行封面 `fetchpriority=high`」；src 与 dist **双重校验**，并**已做变异验证**（4 处各自改回旧形态，对应用例逐条转红）。
+
 ## [4.6.41] - 2026-10-19
 
 ### Fix / Sendspin 自然曲终总时长归零(对齐 MA `freeze_progress`,UI 稳定停在「4:22 / 4:22」)

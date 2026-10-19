@@ -98,6 +98,17 @@ function mustCountRaw(rel, re, n, why) {
   if (c < n) errors.push(`${rel}: ${why} —— 期望至少 ${n} 处，实际 ${c} 处`);
 }
 
+/** 模板文件（.vue）用**原样文本精确**计数：用于钉「首屏 2 处 eager / 下半屏 2 处 lazy」这类
+ *  必须恰好 n 处的接线（多一处少一处都是退化，不能用 >= 放过）。 */
+function mustCountRawExact(rel, re, n, why) {
+  checks += 1;
+  const text = textOf(rel);
+  if (!text) return;
+  const g = new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g");
+  const c = (text.match(g) || []).length;
+  if (c !== n) errors.push(`${rel}: ${why} —— 期望 ${n} 处，实际 ${c} 处`);
+}
+
 // ---------- R1 冷启动预热（recommend.ts） ----------
 mustMatch(
   RECOMMEND,
@@ -192,7 +203,20 @@ mustMatch(
   /rootMargin: "200px"/,
   "lazyCover 的 rootMargin 必须保留（提前一屏预载；改成 0 会在快速滚动时出现空白）",
 );
-mustCountRaw(HOME, /v-lazy-cover=/g, 4, "首页 4 处封面必须走 v-lazy-cover");
+mustCountRawExact(HOME, /v-lazy-cover=/g, 2, "首页仅下半屏 2 处封面走 v-lazy-cover（首屏顶部 2 处已改 eager 高优先级）");
+mustCountRawExact(
+  HOME,
+  /fetchpriority="high"/g,
+  2,
+  "首屏顶部两处封面（固定卡 + 并排随机）必须 eager + fetchpriority=\"high\"：若退回低优先级，浏览器会把它们排在页面的 XHR 之后，用户看到「卡片出来了、封面迟迟不显示」",
+);
+mustCountRawExact(
+  HOME,
+  /:src="cover\(/g,
+  2,
+  "首屏顶部两处封面必须直接绑定 :src（走 eager 即时发请求，不再等 IntersectionObserver 回调才赋 src）",
+);
+mustCountRawExact(HOME, /fetchpriority="low"/g, 2, "下半屏两处封面必须保持低优先级（不得与首屏封面抢同源 6 连接）");
 mustNotMatch(
   HOME,
   /loading="lazy"/,
@@ -278,9 +302,44 @@ mustMatch(
   "外壳卸载时必须置位 playerPeersDisposed 并清掉延迟定时器（登出后 <1s 卸载,悬挂回调仍会打 /v1/peers）",
 );
 
+// ---------- R6 聚合缓存预热提速 + 指数退避（recommend.ts，2026-10-19） ----------
+//
+// 首轮预热原为 TTL/2 = 150s：进程刚启动的那段时间里，首页首开只能走请求路径冷拉，
+// 用户恰好在这段窗口打开首页就是「慢」。改为启动后 ~4s 就预热一轮，之后仍按 TTL/2
+// 周期续命。失败退避同步从固定 60s 改为指数（3s 起、封顶 60s）：上游故障时既不
+// 死等 60s，也不会被前端轮询瞬间打爆。破坏同样是静默的（首轮又变回 150s / 退避又
+// 退回固定 60s 都不报错、不红任何动态用例），故一并钉死。
+mustMatch(
+  RECOMMEND,
+  /export const RECOMMEND_WARMER_INITIAL_MS = 4 \* 1000;/,
+  "聚合缓存预热首轮必须在启动后数秒内触发（export RECOMMEND_WARMER_INITIAL_MS = 4*1000）：退回 TTL/2(150s) 会让进程启动窗口内的首页首开长期靠冷拉",
+);
+mustMatch(
+  RECOMMEND,
+  /tick\(RECOMMEND_CACHE_TTL_MS \/ 2\);/,
+  "首轮之后必须按 TTL/2 周期重新 re-arm（只热一次 = 缓存随后又过期，用户请求命中不到未过期缓存）",
+);
+mustNotMatch(
+  RECOMMEND,
+  /\}, RECOMMEND_CACHE_TTL_MS \/ 2\);$/,
+  "首轮延迟不得再等于 TTL/2（150s）—— 首轮必须走 RECOMMEND_WARMER_INITIAL_MS 这档短延迟",
+);
+mustMatch(
+  RECOMMEND,
+  /export function recommendRefreshBackoffMs\(/,
+  "缺少指数退避纯函数 recommendRefreshBackoffMs（退避策略将无法被确定性单测覆盖）",
+);
+mustMatch(RECOMMEND, /RECOMMEND_REFRESH_BACKOFF_BASE_MS = 3_000;/, "指数退避基准必须为 3s");
+mustMatch(RECOMMEND, /RECOMMEND_REFRESH_BACKOFF_MAX_MS = 60_000;/, "指数退避上限必须封顶 60s");
+mustNotMatch(
+  RECOMMEND,
+  /RECOMMEND_REFRESH_BACKOFF_MS\b/,
+  "旧的固定 60s 退避常量 RECOMMEND_REFRESH_BACKOFF_MS 必须删除（防止两套退避逻辑并存/误用）",
+);
+
 if (errors.length) {
   console.error(`✗ 首页性能优化链路守卫失败：${errors.length} 项违规（共 ${checks} 条断言）`);
   for (const e of errors) console.error("  ✗ " + e);
   process.exit(1);
 }
-console.log(`✅ 首页性能优化链路守卫通过：${checks} 条断言全部成立（冷启动预热 / 聚合预热接口 / 封面懒加载 / 收藏在途去重 / 首屏外呼分层）。`);
+console.log(`✅ 首页性能优化链路守卫通过：${checks} 条断言全部成立（冷启动预热 / 聚合预热接口 / 封面懒加载+首屏 eager / 收藏在途去重 / 首屏外呼分层 / 聚合缓存预热提速+指数退避）。`);
