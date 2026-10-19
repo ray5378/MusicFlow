@@ -2,6 +2,20 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.43] - 2026-10-19
+
+### Test / 首页打开提速的回归守卫补强（承接 4.6.42）
+
+4.6.42 已落地三端首页提速，本次补齐**行为级**回归守卫（此前只有静态脚本守卫），并做反向变异验证确保守卫非空转。
+
+- **新增 `frontend/e2e/home-first-paint-covers.spec.ts`**（Playwright，随 `frontend-responsive.yml` 的 `npx playwright test` 全量门禁运行）：
+  - 用 `page.route` 注入确定性首页数据（8 张随机歌单 + home-cards 空 + 平台/本地渠道各 2 张），断言不依赖真实曲库；
+  - **关键在于把 `IntersectionObserver` 换成「只注册、永不回调」的替身**：否则上半屏卡片本就在首屏视口内，即便误用 `v-lazy-cover`，observer 回调也会立刻补 `src`，「急切 vs 懒加载」区分不出来，守卫退化为空转。替换后：`:src` 由模板直接写入（必然有 src）、`v-lazy-cover` 的 src 只在回调里写（永不赋值），二者才可判别；
+  - 断言：上半屏 `img.card-cover[fetchpriority="high"]` 恰 8 张且每张 `src` 均已设置（急切加载）；下半屏 `fetchpriority="low"]` ≥2 张且未滚动时**全部**未设置 `src`（懒加载，不预取屏外同源封面）。
+  - 三种反向变异均被判红并记录：① 上半屏 `:src` → `v-lazy-cover`；② 下半屏 `fetchpriority="low"` → `high`；③ 下半屏 `v-lazy-cover` → `:src`。
+- **扩充 `backend/tests/routes/recommendWarmerBackoff.test.ts`**：新增 `describe("startRecommendCacheWarmer 递归调度时序")` —— 用 `vi.spyOn(globalThis, "setTimeout")` 拦截调度参数，断言首轮延迟恒为 `RECOMMEND_WARMER_INITIAL_MS`(=4s) 且 `< RECOMMEND_CACHE_TTL_MS / 2`（防退回旧的 ≈150s）、重复 `startRecommendCacheWarmer()` 幂等（只挂 1 个定时器）、首次 tick 的 `finally` re-arm 恒为 `RECOMMEND_CACHE_TTL_MS / 2` 且递归稳定（连续两轮仍为 TTL/2）。不真跑定时器、不读写 DB（模块加载期定时器均已 `unref`）。
+- 用例总数：该文件 4 → 5 条。
+
 ## [4.6.42] - 2026-10-19
 
 ### Perf / 首页打开提速（三端一体：服务端预热 + Web 首页 + HA 卡片媒体库首页）
