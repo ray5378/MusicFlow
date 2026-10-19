@@ -2,12 +2,14 @@
 //
 // 每源可在 config JSON 里配 scanAutoEnabled / scanAutoTimeOfDay（HH:mm，服务器本地时区）。
 // 闸门顺序（对齐 upgradeScheduler / libraryScheduler）：
-//   enabled → scanAutoEnabled → 当日未跑过（按日界）→ 到点 → fire-and-forget 增量扫描。
+//   enabled → scanAutoEnabled → 当日未跑过（按日界）→ 到点 → 无在跑 → fire-and-forget 增量扫描。
 // 触发即落 lastRunAt（每源独立 key）：当天不再重复，即使扫描排队/失败也等明天。
+// 扫描实体走 scanRunner（与手动 POST /scan 共用同一份扫描状态+进度），故定时扫描
+// 的实时进度同样能被媒体源页的聚合轮询读到，而不是「完成后才有最终态」。
 import { sqlite } from "../../db/index.js";
 import { createLogger } from "../../utils/logger.js";
 import { getSetting, setSetting } from "../settings.js";
-import { runBatchJob } from "../../batch/runner.js";
+import { isSourceScanRunning, startSourceScan } from "./scanRunner.js";
 import { todayTriggerMs } from "../fetch/upgradeScheduler.js";
 
 const log = createLogger("scan-scheduler");
@@ -40,16 +42,27 @@ export function runScanSchedulerOnce(nowMs = Date.now()): string[] {
     if (last >= dayStart) continue; // 今天已触发过
     const triggerMs = todayTriggerMs(String(cfg.scanAutoTimeOfDay || "03:00"), d);
     if (triggerMs <= 0 || nowMs < triggerMs) continue;
+    // 该源已有扫描在跑（手动点按 / 上一轮排队中）：本轮让渡，**不落标记**，下一 tick 再判。
+    if (isSourceScanRunning(s.id)) continue;
     setSetting(key, String(nowMs));
     triggered.push(s.id);
-    void runBatchJob("scan", { sourceId: s.id, mode: "incremental" })
-      .then((r) => {
-        const st = (r as { result?: { added?: number; updated?: number; removed?: number; skipped?: number } })?.result ?? {};
-        log.info(
-          `[SCAN-AUTO] 源「${s.name}」定时增量扫描完成: +${st.added ?? 0} ~${st.updated ?? 0} -${st.removed ?? 0} skip=${st.skipped ?? 0}`,
-        );
-      })
-      .catch((e) => log.warn(`[SCAN-AUTO] 源「${s.name}」定时扫描失败: ${String((e as Error)?.message || e)}`));
+    startSourceScan({
+      sourceId: s.id,
+      mode: "incremental",
+      trigger: "auto",
+      onDone: (r) => {
+        if (r.status === "completed") {
+          const st = (r.result ?? {}) as { added?: number; updated?: number; removed?: number; skipped?: number };
+          log.info(
+            `[SCAN-AUTO] 源「${s.name}」定时增量扫描完成: +${st.added ?? 0} ~${st.updated ?? 0} -${st.removed ?? 0} skip=${st.skipped ?? 0}`,
+          );
+        } else if (r.status === "failed") {
+          log.warn(`[SCAN-AUTO] 源「${s.name}」定时扫描失败: ${r.error}`);
+        } else {
+          log.info(`[SCAN-AUTO] 源「${s.name}」定时扫描已停止`);
+        }
+      },
+    });
   }
   return triggered;
 }

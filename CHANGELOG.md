@@ -2,6 +2,25 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.38] - 2026-10-19
+
+### Feat / 媒体源扫描进度实时化 + 每源每日定时增量扫描
+
+此前扫描进度**只存在于批量子进程 IPC 回调的瞬时载荷里**：手动点按 `POST /v1/sources/:id/scan` 时前端自己起一个「谁发起谁轮询」的轮询赌一把；定时扫描则直接调 `runBatchJob` 且**不传 `onProgress`** —— 既不写进程内状态也无进度。于是「定时或其它标签页触发的扫描」在前端**什么都看不到**，只能在完成后拿到最终态。本版把扫描实体收口到一份可查询的共享状态，并将定时扫描接入同一入口。
+
+- **`backend/src/services/source/scanRunner.ts`（新增）**：把「发起一次扫描 + 记录实时进度 + 收尾」收口到一处，供手动与定时两条路径共用。`scanJobs` Map 保存 `{status, startedAt, finishedAt, progress, result, error, mode, trigger, controller}`；`startSourceScan()` 先置 running 态，再接批量子进程 IPC：`{stage:"scan", ...ScanProgress}` 写入 `job.progress`，`scrape-*` 载荷旁路回调用方（保持既有 `scrapeJobs` 语义逐字不变）；`completed / stopped / failed` 三态收尾（外层 `aborted` 或 signal 已 abort 判 stopped）。扫描计数按 batch 作业的**真实双层载荷**解一层 —— `scanHandler` 返回 `{result, aborted, scrape}`，故取 `result.result` 才是 `{added, updated, removed, skipped, failed}`（少解一层会让前端计数恒为 0、失败告警永不弹）。30min TTL 清扫（`running` 态不清），定时器 `unref`。
+- **`backend/src/services/source/scanScheduler.ts`**：每日定时增量扫描改走 `startSourceScan(trigger:"auto")` —— 定时扫描的实时进度同样落进共享状态，前端聚合轮询即可读到。新增**让渡语义**：该源已在跑（手动点按 / 上一轮排队）时 `continue` **且不落 `lastRunAt` 标记**，下一 tick 再判，避免「当天定时被一次手动扫描顶掉而静默漏跑」。
+- **`backend/src/routes/api/sources.ts`**：`POST /v1/sources/:id/scan` 改走 `startSourceScan`；并发闸改 `isSourceScanRunning(id)`；新增聚合接口 **`GET /v1/sources/scan-status`**（一次返回全部源状态，外发前摘掉 `controller`），前端不再依赖「谁发起谁轮询」；`POST /v1/sources` 补上与 `PUT` 同口径的 `sanitizeScanAuto`（非布尔 / 非法 `HH:mm` 一律删除，防开关回传脏值落库后调度器静默不触发）。
+- **`backend/src/routes/api/shared.ts`**：`scanJobs` / `SCAN_JOB_TTL_MS` / `scanJobsSweep` 转出到 `scanRunner.ts`，保持既有引用面不变。
+- **`frontend/src/views/admin/Sources/index.vue`**：改为**常驻 3s 轮询**聚合接口（`onMounted` 起、`onUnmounted` 清），任何触发方式的扫描都能实时显示进度；`loadSources()` 重载时保留 `_scanning / _scanProgress / _scanTrigger` 运行态，避免轮询刷新把已显示的进度抹掉而闪烁；新增与编辑对话框各加「定时增量扫描」开关 + `HH:mm` 时间选择器（**仅增量，不提供定时全量** —— 产品定调）；卡片显示定时状态摘要，进度区对 `trigger==="auto"` 显示「定时」来源标签；完成态按 `completed / stopped / failed` 分别弹 toast。
+- **`frontend/src/locales/{zh-CN,en-US}.json`**：`admin.sources` 补 7 个键（双语 parity）：`autoScan` / `autoScanHint` / `autoScanOff` / `autoScanOn` / `autoScanTime` / `autoScanTimePlaceholder` / `autoTriggered`。
+
+### Test / 回归守卫
+
+- **`backend/tests/source/scanScheduler.test.ts`（新增，15 用例）**：覆盖类型闸 / 开关闸 / config 非法 / 当日已跑 / 未到点 / 已在跑让渡（不落标记）/ 正常触发（落 `lastRunAt` + `trigger=auto`）/ 异步收尾 completed；`startSourceScan` 覆盖并发让渡、`scan` 与 `scrape-*` 载荷分流、completed / failed / stopped 三态收尾。mock 的 `runBatchJob` 按**真实双层载荷**构造（`{result:{result,…},aborted,scrape}`），防止「少解一层」被假绿掩盖。
+- **`backend/scripts/check-source-scan.mjs`（新增，37 条断言，零依赖 node）**：正向钉死 `scanRunner` 的进度落点 / 三态收尾 / `result?.result` 解层、定时走 `startSourceScan` 且 `trigger:auto`、聚合接口与 `sanitizeScanAuto` 接线、前端常驻轮询与定时配置 UI；反向 `mustNotMatch` 钉死定时与路由不得退回直调 `runBatchJob`、`startProgressPolling` 不得复活；`mustOrderBefore` 钉死「并发让渡判定必须早于 `setSetting`」。**已做双向变异验证**（改坏必红）：抹掉进度落点 / 聚合路由改名 / 轮询间隔改动 / 定时退回 `runBatchJob` / 少解一层 `result` / 让渡与落标记顺序颠倒，六项变异均判红，还原后基线 37 条全绿。
+- **`.github/workflows/ci.yml`**：新增 `source-scan-guard` 作业（零依赖、秒级）。
+
 ## [4.6.37] - 2026-10-19
 
 ### Perf / 首页首屏外呼分层（下半屏与流转播放初始化改为「首屏绘制后自动延迟拉」）

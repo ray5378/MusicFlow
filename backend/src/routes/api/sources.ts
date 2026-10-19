@@ -4,7 +4,6 @@ import { sqlite } from "../../db/index.js";
 import {
   BusinessErrorCode,
   SCRAPE_JOB_ID,
-  ScanProgress,
   adminMiddleware,
   apiError,
   apiErrorStatus,
@@ -19,8 +18,6 @@ import {
   path,
   playHistory,
   playlistSongs,
-  runBatchJob,
-  scanJobs,
   scrapeJobs,
   songs,
   testWebDAVConnection,
@@ -29,6 +26,7 @@ import {
   userFavoriteSongs,
   uuidv4,
 } from "./shared.js";
+import { isSourceScanRunning, listScanJobs, scanJobs, startSourceScan } from "../../services/source/scanRunner.js";
 
 /**
  * 归一化媒体源开关。
@@ -86,7 +84,8 @@ app.post("/v1/sources", adminMiddleware, async (c) => {
     type: body.type || "webdav",
     // 不传 enabled → 默认开启(与历史行为一致)
     enabled: normalizeEnabled(body.enabled, 1),
-    config: JSON.stringify(body.config || {}),
+    // 与 PUT 同口径消毒「每日定时增量扫描」两键（非布尔 / 非法 HH:mm 一律删除）
+    config: JSON.stringify(sanitizeScanAuto(body.config || {})),
   }).run();
   return c.json({ id });
 });
@@ -163,60 +162,47 @@ app.post("/v1/sources/:id/scan", adminMiddleware, async (c) => {
   const source = db.select().from(mediaSources).where(eq(mediaSources.id, id)).get();
   if (!source) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.source.notFound"), apiErrorStatus(BusinessErrorCode.NOT_FOUND));
   if (!source.enabled) return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.source.disabled"), apiErrorStatus(BusinessErrorCode.CONFLICT));
-  if (scanJobs.has(id) && scanJobs.get(id)!.status === "running") {
+  if (isSourceScanRunning(id)) {
     return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.scanner.busy"), apiErrorStatus(BusinessErrorCode.CONFLICT));
   }
 
   const body = await c.req.json().catch(() => ({}));
   const mode: "full" | "incremental" = body.mode === "incremental" ? "incremental" : "full";
 
-  const config = JSON.parse(source.config || "{}");
-  const controller = new AbortController();
-  const job = { status: "running", startedAt: new Date().toISOString(), progress: undefined as ScanProgress | undefined, mode, controller };
-  scanJobs.set(id, job);
-
   // 扫描在一次性批量子进程里执行(方案3);子进程进度经 IPC 转发:
-  //   { stage: "scan", ...ScanProgress } → job.progress
-  //   { stage: "scrape-start" | "scrape" | "scrape-done" | "scrape-failed" } → scrapeJobs
-  const onProgress = (p: any) => {
-    if (!p || typeof p !== "object") return;
-    if (p.stage === "scrape-start") {
-      const j = { status: "running", startedAt: new Date().toISOString(), progress: { done: 0, total: p.total } as any };
-      scrapeJobs.set(SCRAPE_JOB_ID, j);
-      return;
-    }
-    if (p.stage === "scrape-done") {
-      const cur = scrapeJobs.get(SCRAPE_JOB_ID);
-      if (cur) scrapeJobs.set(SCRAPE_JOB_ID, { status: "done", startedAt: cur.startedAt, finishedAt: new Date().toISOString(), progress: p.progress });
-      log.info(`[ARTIST-SCRAPE] done: scraped ${p.progress?.scraped}, skipped ${p.progress?.skipped}, errors ${p.progress?.errors?.length}`);
-      return;
-    }
-    if (p.stage === "scrape-failed") {
-      const cur = scrapeJobs.get(SCRAPE_JOB_ID);
-      if (cur) scrapeJobs.set(SCRAPE_JOB_ID, { status: "failed", startedAt: cur.startedAt, error: p.error || translate("errors.scraper.failed"), progress: cur.progress });
-      return;
-    }
-    if (p.stage === "scrape") {
-      const cur = scrapeJobs.get(SCRAPE_JOB_ID);
-      if (cur) cur.progress = { ...p };
-      return;
-    }
-    job.progress = { ...p };
-  };
-
-  (async () => {
-    try {
-      const { result, aborted } = await runBatchJob("scan", { sourceId: id, mode }, { signal: controller.signal, onProgress });
-      if (aborted || controller.signal.aborted) {
-        scanJobs.set(id, { status: "stopped", result: result?.result, startedAt: job.startedAt, progress: job.progress, mode });
-      } else {
-        scanJobs.set(id, { status: "completed", result: result?.result, startedAt: job.startedAt, progress: job.progress, mode });
+  //   { stage: "scan", ...ScanProgress } → 共享扫描状态（scanRunner 统一维护，手动/定时共用）
+  //   { stage: "scrape-start" | "scrape" | "scrape-done" | "scrape-failed" } → scrapeJobs（仅手动路径）
+  const started = startSourceScan({
+    sourceId: id,
+    mode,
+    trigger: "manual",
+    onProgress: (p: any) => {
+      if (p.stage === "scrape-start") {
+        const j = { status: "running", startedAt: new Date().toISOString(), progress: { done: 0, total: p.total } as any };
+        scrapeJobs.set(SCRAPE_JOB_ID, j);
+        return;
       }
-    } catch (e: any) {
-      log.error("[SCANNER] Scan error", { err: e });
-      scanJobs.set(id, { status: "failed", error: e.message || translate("errors.scanner.failed"), startedAt: job.startedAt, progress: job.progress, mode });
-    }
-  })();
+      if (p.stage === "scrape-done") {
+        const cur = scrapeJobs.get(SCRAPE_JOB_ID);
+        if (cur) scrapeJobs.set(SCRAPE_JOB_ID, { status: "done", startedAt: cur.startedAt, finishedAt: new Date().toISOString(), progress: p.progress });
+        log.info(`[ARTIST-SCRAPE] done: scraped ${p.progress?.scraped}, skipped ${p.progress?.skipped}, errors ${p.progress?.errors?.length}`);
+        return;
+      }
+      if (p.stage === "scrape-failed") {
+        const cur = scrapeJobs.get(SCRAPE_JOB_ID);
+        if (cur) scrapeJobs.set(SCRAPE_JOB_ID, { status: "failed", startedAt: cur.startedAt, error: p.error || translate("errors.scraper.failed"), progress: cur.progress });
+        return;
+      }
+      if (p.stage === "scrape") {
+        const cur = scrapeJobs.get(SCRAPE_JOB_ID);
+        if (cur) cur.progress = { ...p };
+        return;
+      }
+    },
+  });
+  if (!started.started) {
+    return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.scanner.busy"), apiErrorStatus(BusinessErrorCode.CONFLICT));
+  }
 
   return c.json({ success: true, message: mode === "incremental" ? "增量扫描已开始" : "全库扫描已开始" });
 });
@@ -231,11 +217,15 @@ app.post("/v1/sources/:id/scan-stop", adminMiddleware, (c) => {
   return c.json({ success: true, message: "正在停止扫描..." });
 });
 
+// 聚合扫描状态：一次性返回所有源的扫描任务状态（含定时触发的），供媒体源页
+// 常驻轮询实时显示进度 —— 不再依赖「谁发起谁轮询」（定时/他人触发的扫描也要可见）。
+app.get("/v1/sources/scan-status", adminMiddleware, (c) => c.json({ jobs: listScanJobs() }));
+
 app.get("/v1/sources/:id/scan-status", adminMiddleware, (c) => {
   const id = c.req.param("id")!;
   const job = scanJobs.get(id);
   if (!job) return c.json({ status: "idle" });
-  return c.json({ status: job.status, progress: job.progress, result: job.result, error: job.error, startedAt: job.startedAt, mode: job.mode });
+  return c.json({ status: job.status, progress: job.progress, result: job.result, error: job.error, startedAt: job.startedAt, mode: job.mode, trigger: job.trigger });
 });
 
 // ==================== Plugins ====================

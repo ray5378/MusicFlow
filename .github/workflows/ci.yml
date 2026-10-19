@@ -52,6 +52,10 @@ name: ci
 #      全量 /v1/peers 一律延后到首屏绘制之后)。破坏全是静默的:首页又会退回冷启动硬等
 #      2500ms、4 个预热请求争用 6 条 HTTP/1.1 连接、130 张封面全量预取、getStarred2 并发
 #      两次、14 条 XHR 在首屏一次性并发把内容挤慢。
+#  17. 媒体源扫描链路守卫(scripts/check-source-scan.mjs)——手动/定时扫描共用同一份可查询
+#      运行状态(scanRunner)以支撑前端实时进度、定时走 startSourceScan 且并发让渡不落标记、
+#      聚合接口 /v1/sources/scan-status、POST 与 PUT 同口径消毒定时两键、前端常驻轮询聚合
+#      接口与定时配置 UI。破坏全是静默的:前端「只有完成后才有最终态」、定时扫描悄悄不触发。
 # 镜像发布仍由 build.yml(v* tag)负责,与本 CI 互不影响。
 
 on:
@@ -153,6 +157,19 @@ jobs:
       - uses: actions/checkout@v4
       - name: 校验预热器接线/TTL 过滤/单飞共享、聚合接口复用与权限、懒加载与尺寸、在途去重、首屏外呼分层
         run: node backend/scripts/check-home-perf.mjs
+
+  # 媒体源扫描链路守卫(2026-10-19)。契约的共同点是**静默退化**:断开不报错、不会让任何既有
+  # 动态用例变红,只是让前端「只有完成后才有最终态」或让每源定时增量扫描悄悄不触发 ——
+  # 进度未落 queryable 状态、定时退回直调 runBatchJob 丢进度、并发让渡误落标记顶掉当日定时、
+  # 聚合接口被拆回单源轮询、POST 漏消毒定时两键落脏值。零依赖 node 脚本,秒级完成;
+  # 每条断言都做过双向变异验证(改坏必红)。
+  source-scan-guard:
+    name: 媒体源扫描链路守卫(实时进度/定时共用/并发让渡/聚合接口)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 校验扫描状态收口/定时共用入口/并发让渡/聚合接口/配置消毒/前端常驻轮询
+        run: node backend/scripts/check-source-scan.mjs
 
   # DLNA 实时发现守卫:设备「实际已在线且在播」必须尽快出现在 `/v1/peers`。
   # 2026-09-26 事故:主卧已播放很久,播放器列表里却没有它。根因是 alive 通告抓取

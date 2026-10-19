@@ -269,22 +269,9 @@ export function assertKeyAccess(c: Context, id: string) {
   return id === user?.id || user?.isAdmin;
 }
 
-export const scanJobs = new Map<string, { status: string; startedAt: string; progress?: ScanProgress; result?: any; error?: string; mode?: string; controller?: AbortController }>();
-
-// 完成/失败/停止的扫描任务保留 30 min(前端轮询取结果),超时清理防 Map 无界
-// (running 中任务不清,避免并发扫描判定失效;参照 online.ts matchJobs 同款)。
-
-export const SCAN_JOB_TTL_MS = 30 * 60 * 1000;
-
-export const scanJobsSweep = setInterval(() => {
-  const now = Date.now();
-  for (const [k, v] of scanJobs) {
-    if (v.status === "running") continue;
-    if (now - Date.parse(v.startedAt) >= SCAN_JOB_TTL_MS) scanJobs.delete(k);
-  }
-}, 5 * 60 * 1000);
-
-(scanJobsSweep as any).unref?.();
+// 媒体源扫描任务状态已抽到 services/source/scanRunner.ts（手动 POST /scan 与
+// 每日定时扫描共用同一份状态与进度），此处转出以保持既有引用面不变。
+export { scanJobs, SCAN_JOB_TTL_MS, scanJobsSweep } from "../../services/source/scanRunner.js";
 
 export const BUILTIN_IDS = new Set(BUILTIN_PLUGINS.map((b) => b.manifest.id));
 

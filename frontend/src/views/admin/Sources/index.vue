@@ -29,6 +29,11 @@
           <p v-if="source.config?.root_path"><strong>{{ t('admin.sources.rootPath') }}:</strong> {{ source.config.root_path }}</p>
           <p v-if="source.config?.username"><strong>{{ t('common.username') }}:</strong> {{ source.config.username }}</p>
           <p><strong>{{ t('common.status') }}:</strong> <el-tag :type="source.enabled ? 'success' : 'info'" size="small">{{ source.enabled ? t('common.enabled') : t('common.disabled') }}</el-tag></p>
+          <p>
+            <strong>{{ t('admin.sources.autoScan') }}:</strong>
+            <el-tag v-if="source.config?.scanAutoEnabled" type="warning" size="small">{{ t('admin.sources.autoScanOn', { time: source.config?.scanAutoTimeOfDay || '03:00' }) }}</el-tag>
+            <el-tag v-else type="info" size="small">{{ t('admin.sources.autoScanOff') }}</el-tag>
+          </p>
         </div>
 
         <!-- Scan progress -->
@@ -36,6 +41,7 @@
           <div class="progress-header">
             <span class="progress-label">
               {{ source._scanProgress.phase === 'traverse' ? t('admin.sources.scanningDir') : source._scanProgress.phase === 'scanning' ? t('admin.sources.scraping') : t('admin.sources.scanDone') }}
+              <el-tag v-if="source._scanTrigger === 'auto'" size="small" type="info" class="auto-tag">{{ t('admin.sources.autoTriggered') }}</el-tag>
             </span>
             <span class="progress-count" v-if="source._scanProgress.phase === 'scanning'">
               <el-tag size="small" :type="source._scanProgress.mode === 'incremental' ? 'warning' : 'primary'" class="mode-tag">
@@ -111,6 +117,14 @@
             <el-input v-model="newSource.config.path" placeholder="/local/music" />
           </el-form-item>
         </template>
+        <el-divider />
+        <el-form-item :label="t('admin.sources.autoScan')">
+          <el-switch v-model="newSource.autoEnabled" />
+          <span class="form-hint">{{ t('admin.sources.autoScanHint') }}</span>
+        </el-form-item>
+        <el-form-item v-if="newSource.autoEnabled" :label="t('admin.sources.autoScanTime')">
+          <el-time-picker v-model="newSource.autoTime" format="HH:mm" value-format="HH:mm" :clearable="false" :placeholder="t('admin.sources.autoScanTimePlaceholder')" />
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="showAddDialog = false">{{ t('common.cancel') }}</el-button>
@@ -136,6 +150,14 @@
         <el-form-item :label="t('common.enable')">
           <el-switch v-model="editSource.enabled" :active-value="1" :inactive-value="0" />
         </el-form-item>
+        <el-divider />
+        <el-form-item :label="t('admin.sources.autoScan')">
+          <el-switch v-model="editSource.config.scanAutoEnabled" />
+          <span class="form-hint">{{ t('admin.sources.autoScanHint') }}</span>
+        </el-form-item>
+        <el-form-item v-if="editSource.config.scanAutoEnabled" :label="t('admin.sources.autoScanTime')">
+          <el-time-picker v-model="editSource.config.scanAutoTimeOfDay" format="HH:mm" value-format="HH:mm" :clearable="false" :placeholder="t('admin.sources.autoScanTimePlaceholder')" />
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="showEditDialog = false">{{ t('common.cancel') }}</el-button>
@@ -156,30 +178,40 @@ const { t } = useI18n();
 const sources = ref<any[]>([]);
 const showAddDialog = ref(false);
 const showEditDialog = ref(false);
-const newSource = reactive({ name: "", type: "webdav", config: { url: "", username: "", password: "", root_path: "", path: "" } });
-const editSource = reactive({ id: "", name: "", type: "webdav", enabled: 1, config: { url: "", username: "", password: "", root_path: "", path: "" } });
-let progressTimers: Record<string, ReturnType<typeof setInterval>> = {};
+const newSource = reactive({ name: "", type: "webdav", autoEnabled: false, autoTime: "03:00", config: { url: "", username: "", password: "", root_path: "", path: "" } });
+const editSource = reactive({ id: "", name: "", type: "webdav", enabled: 1, config: { url: "", username: "", password: "", root_path: "", path: "", scanAutoEnabled: false, scanAutoTimeOfDay: "03:00" } });
+let pollTimer: ReturnType<typeof setInterval> | null = null;
 
 async function loadSources() {
   try {
+    // 保留进行中的扫描运行态：重载卡片数据时不把已显示的进度抹掉（否则轮询会闪一下）。
+    const prev = new Map(sources.value.map((s: any) => [s.id, s]));
     const res = await api.get("/rest/api/v1/sources");
-    sources.value = res.data.map((s: any) => ({ ...s, _testing: false, _scanning: false, _scanProgress: null }));
-    // Resume polling for any sources that were mid-scan (progress persists across page switches)
-    sources.value.forEach((s: any) => checkScanStatus(s));
+    sources.value = res.data.map((s: any) => {
+      const old = prev.get(s.id);
+      return {
+        ...s,
+        _testing: false,
+        _scanning: old?._scanning ?? false,
+        _scanProgress: old?._scanProgress ?? null,
+        _scanTrigger: old?._scanTrigger ?? null,
+      };
+    });
   } catch { sources.value = []; }
 }
 
 async function addSource() {
   if (!newSource.name) { ElMessage.warning(t("admin.sources.requiredName")); return; }
   try {
-    await api.post("/rest/api/v1/sources", {
-      name: newSource.name, type: newSource.type,
-      config: newSource.type === "webdav"
-        ? { url: newSource.config.url, username: newSource.config.username, password: newSource.config.password, root_path: newSource.config.root_path }
-        : { path: newSource.config.path }
-    });
+    const config: Record<string, any> = newSource.type === "webdav"
+      ? { url: newSource.config.url, username: newSource.config.username, password: newSource.config.password, root_path: newSource.config.root_path }
+      : { path: newSource.config.path };
+    config.scanAutoEnabled = newSource.autoEnabled;
+    config.scanAutoTimeOfDay = newSource.autoTime;
+    await api.post("/rest/api/v1/sources", { name: newSource.name, type: newSource.type, config });
     showAddDialog.value = false;
-    newSource.name = ""; newSource.config = { url: "", username: "", password: "", root_path: "", path: "" };
+    newSource.name = ""; newSource.autoEnabled = false; newSource.autoTime = "03:00";
+    newSource.config = { url: "", username: "", password: "", root_path: "", path: "" };
     ElMessage.success(t("common.addSuccess"));
     loadSources();
   } catch (e: any) { ElMessage.error(e.response?.data?.error || t("common.addFailed")); }
@@ -205,55 +237,47 @@ async function testConnection(source: any) {
   finally { source._testing = false; }
 }
 
-function checkScanStatus(source: any) {
-  // If idle and no progress data, nothing to show
-  if (!source._scanProgress && !progressTimers[source.id]) {
-    const existing = api.get(`/rest/api/v1/sources/${source.id}/scan-status`).then((res) => {
-      const data = res.data;
-      if (data.status === "running" && data.progress) {
-        source._scanning = true;
-        source._scanProgress = { ...data.progress };
-        startProgressPolling(source);
-      }
-    }).catch(() => {});
-  }
-}
-
-function startProgressPolling(source: any) {
-  if (progressTimers[source.id]) clearInterval(progressTimers[source.id]);
-  progressTimers[source.id] = setInterval(async () => {
-    try {
-      const res = await api.get(`/rest/api/v1/sources/${source.id}/scan-status`);
-      const data = res.data;
-      if (data.status === "running" && data.progress) {
-        source._scanning = true;
-        source._scanProgress = { ...data.progress };
-      } else if (data.status === "completed") {
-        clearInterval(progressTimers[source.id]);
-        delete progressTimers[source.id];
-        source._scanning = false;
-        source._scanProgress = null;
-        const r = data.result;
+// 常驻轮询「聚合扫描状态」：任何触发方式（手动点按 / 每日定时 / 其它标签页发起）的扫描
+// 都能实时显示进度，而不是只在完成后才看到最终态。3s 一次，仅本页挂载期间运行。
+async function pollScanStatus() {
+  let jobs: Record<string, any>;
+  try {
+    const res = await api.get("/rest/api/v1/sources/scan-status");
+    jobs = res.data?.jobs || {};
+  } catch { return; }
+  let needReload = false;
+  for (const s of sources.value) {
+    const job = jobs[s.id];
+    if (job && job.status === "running") {
+      s._scanning = true;
+      s._scanTrigger = job.trigger || null;
+      s._scanProgress = job.progress
+        ? { ...job.progress, mode: job.mode || job.progress.mode }
+        : {
+            phase: "traverse", mode: job.mode, totalDirs: 0, processedDirs: 0,
+            totalFiles: 0, processedFiles: 0, added: 0, updated: 0, skipped: 0, failed: 0, currentTrack: "",
+          };
+      continue;
+    }
+    const wasRunning = s._scanning || !!s._scanProgress;
+    s._scanning = false;
+    s._scanProgress = null;
+    s._scanTrigger = null;
+    if (wasRunning && job) {
+      needReload = true;
+      if (job.status === "completed") {
+        const r = job.result;
         ElMessage.success(t("admin.sources.scanDoneSummary", { added: r?.added || 0, updated: r?.updated || 0, removed: r?.removed || 0 }));
         // 成功 toast 只报新增/更新/移除 —— 有失败必须单独提示,否则用户以为「跳过」而已。
         if (r?.failed) ElMessage.warning(t("admin.sources.failed", { count: r.failed }));
-        loadSources();
-      } else if (data.status === "stopped") {
-        clearInterval(progressTimers[source.id]);
-        delete progressTimers[source.id];
-        source._scanning = false;
-        source._scanProgress = null;
+      } else if (job.status === "stopped") {
         ElMessage.info(t("admin.sources.scanStopped"));
-        loadSources();
-      } else if (data.status === "failed") {
-        clearInterval(progressTimers[source.id]);
-        delete progressTimers[source.id];
-        source._scanning = false;
-        source._scanProgress = null;
-        ElMessage.error(t("admin.sources.scanFailed", { error: data.error }));
+      } else if (job.status === "failed") {
+        ElMessage.error(t("admin.sources.scanFailed", { error: job.error }));
       }
-    } catch { /* ignore */ }
-  }, 2000);
+    }
+  }
+  if (needReload) loadSources();
 }
 
 async function stopScan(source: any) {
@@ -270,7 +294,7 @@ async function scanSource(source: any, mode: "full" | "incremental" = "full") {
     const res = await api.post(`/rest/api/v1/sources/${source.id}/scan`, { mode });
     if (res.data.success) {
       ElMessage.info(mode === "incremental" ? t("admin.sources.incrementalScanStarted") : t("admin.sources.fullScanStarted"));
-      startProgressPolling(source);
+      pollScanStatus();
     } else {
       source._scanning = false;
       ElMessage.error(res.data.error || t("admin.sources.scanStartFailed"));
@@ -283,7 +307,13 @@ async function scanSource(source: any, mode: "full" | "incremental" = "full") {
 
 function openEdit(source: any) {
   editSource.id = source.id; editSource.name = source.name; editSource.type = source.type;
-  editSource.enabled = source.enabled; editSource.config = { ...source.config };
+  editSource.enabled = source.enabled;
+  // 定时增量扫描两键回填：缺省时归一成「关 + 03:00」，避免开关/时间选择器拿到 undefined。
+  editSource.config = {
+    ...source.config,
+    scanAutoEnabled: !!source.config?.scanAutoEnabled,
+    scanAutoTimeOfDay: source.config?.scanAutoTimeOfDay || "03:00",
+  };
   showEditDialog.value = true;
 }
 
@@ -300,8 +330,14 @@ async function deleteSource(source: any) {
   catch (e: any) { ElMessage.error(e.response?.data?.error || t("common.deleteFailed")); }
 }
 
-onMounted(loadSources);
-onUnmounted(() => { Object.values(progressTimers).forEach(clearInterval); });
+onMounted(() => {
+  loadSources();
+  // 常驻低频轮询：让定时/他人触发的扫描也能实时可见（先拉数据、再起轮询，二者不互斥）。
+  pollTimer = setInterval(pollScanStatus, 3000);
+});
+onUnmounted(() => {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+});
 </script>
 
 <style lang="scss" scoped>
@@ -337,6 +373,8 @@ onUnmounted(() => { Object.values(progressTimers).forEach(clearInterval); });
   }
 }
 :deep(.el-card) { background: rgba(255,255,255,0.04) !important; border: 1px solid rgba(255,255,255,0.07) !important; }
+.form-hint { margin-left: 8px; color: var(--fnos-text-tertiary); font-size: 12px; }
+.auto-tag { margin-left: 6px; }
 @media (max-width: 768px) {
   .admin-sources { padding: 20px 16px; }
   .page-header h2 { font-size: 24px; }
