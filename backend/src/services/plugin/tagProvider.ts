@@ -178,6 +178,18 @@ export function __resetTagProviderMemo(): void {
   memo.clear();
 }
 
+/** 仅供测试：把全局 QQ 节流队列复位（排队链置空 + 下次可发起时刻清零）。
+ *
+ * 【2026-10-19 CI 稳定】用例若切假时钟（`vi.useFakeTimers()` 再 `vi.useRealTimers()`），
+ * 队列里排队中的 `setTimeout` 会**随假时钟一起被丢弃** → `qqTail` 永不 settle →
+ * 该测试文件后续**所有** QQ 请求全部卡死（实测 CI：单文件 66 个用例中 38 个各超时 20s，
+ * 文件累计耗时 805s，把 15 分钟的覆盖率门禁作业拖红）。
+ * 每个用例前复位队列即可彻底消除用例之间的共享队列状态依赖（与 memo 复位同理）。 */
+export function __resetTagProviderQueue(): void {
+  qqNextAt = 0;
+  qqTail = Promise.resolve();
+}
+
 // ---------- 平台请求 ----------
 
 /** 搜索候选(归一化后的统一形状)。 */

@@ -6,7 +6,7 @@
 // 丢数据或让候选池永不收敛 —— 只有在用户发现「封面没了 / 碟号是垃圾值 / 待修复永远不降」
 // 时才暴露。故逐条用源码级断言钉死。
 //
-// 十三条规则：
+// 十四条规则：
 //   R1 碟号纪律：成品文件**不写也不留** DISCNUMBER/DISCTOTAL。tagWriter 必须显式
 //       清空继承来的碟号（`-metadata disc=`），且**不得**写入任何碟号值。
 //   R2 保留内嵌封面：标签修复路径 keepSourceCover **恒为 true**；下载路径按 embedCover 判定。
@@ -29,6 +29,9 @@
 //       顺延 LAST_RUN_KEY（D2），**不等**本轮真正结束（不得 async/await 整轮）；另暴露 isTagRepairStopping。
 //   R13 comment 双口径：下载期 comment 必须同时写「声明音质」（平台声明）与「源实测音质」
 //       （转码前源探针 probed，与品质分流判据同一份），且不得退回只写声明的单口径旧写法。
+//   R14 QQ 节流队列可复位：模块级全局 qqNextAt/qqTail 必须暴露 __resetTagProviderQueue，
+//       且单测每个用例前复位 —— 否则假时钟用例会丢弃在途排队、永久卡死后续所有 QQ 请求
+//       （2026-10-19 CI 实测单文件 805s、38 个用例各超时 20s，只在 shuffle 某顺序下偶发）。
 //
 // 零依赖 node 脚本（与 check-dead-song-purge.mjs 同款，共用 strip-comments），挂 ci.yml 守卫 job。
 import { existsSync, readFileSync } from "node:fs";
@@ -45,6 +48,7 @@ const ORCH = "backend/src/services/fetch/orchestrator.ts";
 const CONFIG = "backend/src/services/fetch/config.ts";
 const ROUTES = "backend/src/routes/api/fetch.ts";
 const TAGPROVIDER = "backend/src/services/plugin/tagProvider.ts";
+const TAGPROVIDER_TEST = "backend/tests/plugins/tagProvider.test.ts";
 const ARTISTINFO = "backend/src/services/plugin/artistInfo.ts";
 const ZH = "frontend/src/locales/zh-CN.json";
 const EN = "frontend/src/locales/en-US.json";
@@ -237,6 +241,34 @@ mustMatch(
   TAGPROVIDER,
   /300 \+ Math\.random\(\) \* 500/,
   "QQ 限流必须叠加 300~800ms 随机抖动（固定间隔仍可能触发风控）",
+);
+
+// ---------- R14 QQ 节流队列可复位（测试隔离，防 CI 假红） ----------
+// QQ 节流队列是模块级全局（qqNextAt/qqTail）。一旦某个用例切假时钟再切回，队列里排队中的
+// `setTimeout` 会随假时钟被丢弃 → `qqTail` 永不 settle → 该测试文件后续**所有** QQ 请求
+// 全部卡死（2026-10-19 CI 实测：单文件 66 个用例中 38 个各超时 20s、文件耗时 805s，
+// 把 15 分钟的覆盖率门禁作业拖红，且只在 sequence.shuffle 的某一种顺序下偶发）。
+// 这条契约同样是**静默失效**：删掉复位后单测在多数顺序下仍全绿，只有在 CI 打乱到
+// 「限流用例紧跟超时用例」时才红，故必须静态钉死。
+mustMatch(
+  TAGPROVIDER,
+  /export function __resetTagProviderQueue\(\): void \{/,
+  "必须导出 __resetTagProviderQueue（测试用队列复位入口）",
+);
+mustMatch(
+  TAGPROVIDER,
+  /^qqNextAt = 0;$/,
+  "__resetTagProviderQueue 必须把 qqNextAt 清零（否则后续用例仍要补等上一次限流间隔）",
+);
+mustMatch(
+  TAGPROVIDER,
+  /^qqTail = Promise\.resolve\(\);$/,
+  "__resetTagProviderQueue 必须把 qqTail 置回已解决（否则残留的在途排队会永久卡死后续请求）",
+);
+mustMatch(
+  TAGPROVIDER_TEST,
+  /__resetTagProviderQueue\(\);/,
+  "tagProvider 单测必须每个用例前复位 QQ 队列（与 memo 复位同理，消除跨用例共享状态）",
 );
 
 // ---------- R9 风格来源 ----------

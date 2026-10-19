@@ -4,6 +4,15 @@
 
 ## [4.6.43] - 2026-10-19
 
+### Fix / CI 覆盖率门禁偶发红修复：QQ 节流队列被假时钟卡死
+
+`ci` 作业的 `fetch-coverage-gate`（下载 + 标签修复覆盖率门禁）随本次推送偶发红，且**只在用例顺序被打乱时**复现：
+
+- **现象**：单文件 `backend/tests/plugins/tagProvider.test.ts` 耗时 **805s（13.4 分钟）**，66 个用例中 38 个各报 `Test timed out in 20000ms`，把 15 分钟的作业拖到红；同 run 的其它 7 项 CI 全绿，`build-and-push` 的全量 vitest 也全绿（同一份用例在别的顺序下能过）。
+- **根因**：`tagProvider.ts` 的 QQ 限流队列 `qqTail` 是**模块级全局串行链**。用例「请求超时(10s) → AbortController.abort」用 `vi.useFakeTimers()` 切假时钟；若此时 `qqNextAt` 仍在未来，`qqThrottled` 内部 `await new Promise(r => setTimeout(r, wait))` 排的是**假闹钟**，`vi.useRealTimers()` 一执行就把该闹钟连同 `setTimeout` 一起丢弃 → `run` 永不 settle → `qqTail` 永久 pending → 该文件后续**所有** QQ 请求全部卡死（每个 20s 超时）。触发条件苛刻（仅当限流用例恰排在超时用例之前，概率取决于 `sequence.shuffle` 的随机顺序），故此前多轮 CI 都过、偶发放炮。
+- **修**：`tagProvider.ts` 新增测试专用导出 `__resetTagProviderQueue()`（复位 `qqNextAt` 与 `qqTail`）；`tagProvider.test.ts` 的 `beforeEach` 与既有 `__resetTagProviderMemo()` 一并调用。`qqNextAt=0` 后该用例的 `wait` 恒 ≤0，不再排假闹钟；同时彻底消除跨用例共享的队列状态依赖。**不改动任何生产语义**（新增的仅是测试专属导出）。
+- **守卫**：`backend/scripts/check-tag-repair.mjs` 新增 **R14**（4 条断言：导出存在 + `qqNextAt` 清零 + `qqTail` 置回已解决 + 单测 `beforeEach` 必须调用），并做 3 种反向变异验证（去 export / 删 `qqTail` 复位行 / 单测去复位调用）均判红。
+
 ### Test / 首页打开提速的回归守卫补强（承接 4.6.42）
 
 4.6.42 已落地三端首页提速，本次补齐**行为级**回归守卫（此前只有静态脚本守卫），并做反向变异验证确保守卫非空转。

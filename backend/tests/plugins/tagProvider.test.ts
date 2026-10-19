@@ -21,7 +21,7 @@
 //   8. **简繁字形归一**（同上）：匹配比较侧统一折算到简体，避免「平台繁体登记 vs DB 简体」
 //      造成的恒不匹配；写入侧字形不受影响（仍由 tagWriter 的 applyTagsVariant 决定）。
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { __resetTagProviderMemo, tagProviderPlugin } from "../../src/services/plugin/tagProvider.js";
+import { __resetTagProviderMemo, __resetTagProviderQueue, tagProviderPlugin } from "../../src/services/plugin/tagProvider.js";
 import type { LyricSongInput } from "../../src/plugins/types.js";
 
 // QQ 侧默认限流为「1.2s + 300~800ms 抖动」；测试置 0，避免 14 个用例被逐次拖延
@@ -31,8 +31,14 @@ process.env.MF_QQ_MIN_GAP_MS = "0";
 // 【修正 6】插件内新增「同曲多能力往返去重」memo（模块级全局缓存，TTL 180s）。不清理会让
 // 后一个用例读到前一个用例的 canned 响应（例如 withInfoGenre:false 的用例会命中上一条
 // 缓存而误判 genre 存在）——故每个用例前必须清空。
+// 【2026-10-19 CI 稳定】QQ 节流队列同样是模块级全局（qqNextAt/qqTail）。不复位的话，
+// 「请求超时(10s) → abort」用例切假时钟后，队列里排队中的 `setTimeout` 会随假时钟一起被丢弃
+// → `qqTail` 永不 settle → 本文件后续**所有** QQ 请求全部卡死（CI 实测：66 个用例中 38 个
+// 各超时 20s、单文件耗时 805s）。这条跨用例的共享状态依赖只在 `sequence.shuffle` 打乱到
+// 「限流用例紧跟超时用例」这一种顺序下才显形，属典型的偶发放炮，必须在每个用例前复位。
 beforeEach(() => {
   __resetTagProviderMemo();
+  __resetTagProviderQueue();
 });
 
 /** 真实抓取的 QQ 搜索响应（素材：告白气球 / 周杰伦；裁剪为两条候选）。
