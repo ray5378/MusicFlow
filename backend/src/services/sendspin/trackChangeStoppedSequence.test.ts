@@ -7,7 +7,7 @@
 //
 // 修复:切歌/借流这类「紧邻 playing」的过渡,`finishPlayback` 走 `silentState` ——
 //   只发 `stream/end` 收尾旧流,**不发 group/update(stopped)**。
-//   终态停止(曲终/stop)行为不变(仍发 stopped)。
+//   终态停止(队列放完 / 用户 stop,经 stopCore)行为不变(仍发 stopped)。
 //
 // 本文件断言**同一成员的消息序**:切歌窗口内不得出现 `group/update{stopped}`
 //   紧跟 `group/update{playing}`(同组)。用真服务 + 明文(legacy)客户端直接抓文本帧。
@@ -62,11 +62,9 @@ function collect(ws: WebSocket) {
 
 describe("切歌消息序:stopped 不得紧跟 playing(空转 stopped 修复)", () => {
   let tmpDir: string;
-  const savedKeep = process.env.MUSICFLOW_SENDSPIN_KEEP_STREAM_LEGACY;
 
   beforeAll(async () => {
-    // 强制走**非 keep_stream 回退路径**(= 修复前恰好会发 stopped 的那条;真机即走此路)
-    process.env.MUSICFLOW_SENDSPIN_KEEP_STREAM_LEGACY = "0";
+    // 默认即 MA 严格档:明文(legacy)客户端在场 ⇒ 整组走 stream/end 档(只发 end,不报 stopped)。
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "sendspin-tc-"));
     setSendspinIdentityDir(tmpDir);
     await startSendspinService(PORT);
@@ -84,8 +82,6 @@ describe("切歌消息序:stopped 不得紧跟 playing(空转 stopped 修复)", 
   afterAll(async () => {
     await stopSendspinService();
     if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
-    if (savedKeep === undefined) delete process.env.MUSICFLOW_SENDSPIN_KEEP_STREAM_LEGACY;
-    else process.env.MUSICFLOW_SENDSPIN_KEEP_STREAM_LEGACY = savedKeep;
   });
 
   afterEach(() => {
@@ -111,7 +107,7 @@ describe("切歌消息序:stopped 不得紧跟 playing(空转 stopped 修复)", 
       playGroupCore(srv, GNAME, ["TC-1"], { songId: "tc-1", title: "t", duration: 30 } as any);
       await waitFor(() => c.texts.some((t) => t?.type === "stream/start"), 15000, "曲1 stream/start");
 
-      // 自证确实走的是**非 keep_stream 回退路径**(否则本用例无判别意义)
+      // 自证确实走 MA 严格档(legacy 成员在场 ⇒ keep_stream 门禁 false;否则本用例无判别意义)
       expect(srv.group(GNAME).canKeepStream()).toBe(false);
 
       // 切歌窗口起点

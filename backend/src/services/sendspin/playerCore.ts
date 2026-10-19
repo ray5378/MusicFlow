@@ -283,13 +283,13 @@ export function playCore(
   //   只发 stream/clear 清设备缓冲,**绝不 stream/end**,随后新流 stream/start
   //   只更新 codec header → gapless。旧行为(切歌也发 end)会让设备拆掉解码/
   //   扬声器上下文并看到 stopped 一闪,下一首还要完整重建流。
-  //   仅「有旧曲在播 + 组过 keep_stream 门禁」走新路径;首播 / 无 current /
-  //   legacy 成员在场时退回原来的 end+start 完整重建(canKeepStream 内判门禁)。
-  if (g.current && g.canKeepStream()) {
+  //   组过 keep_stream 门禁(成员里没有 legacy)走新路径;legacy 成员在场则退回
+  //   `stream/end` 档(门禁在 canKeepStream 内判定)—— 与 MA 对 legacy 客户端行为一致。
+  if (g.canKeepStream()) {
     g.clearPlayback();
   } else {
-    // 顺序:先置空 current 让 group/update 报 stopped,再 finishPlayback 发 stream/end。
-    g.current = null;
+    // MA legacy 档(keep_stream=False):只发 `stream/end` 收尾旧流,**不报 stopped**
+    // (silentState)—— 避免固件把 group/update→stopped 镜像成 IDLE 锁死后续 stream/start。
     g.finishPlayback({ silentState: true });
   }
   g.positionMs = seekPositionMs ?? 0;
@@ -316,9 +316,10 @@ export function playCore(
   // 后台起播:解码→按组时间线推流。不阻塞调用方(pollState 反映进度)。
   void pump.play(item.songId).catch((e) => {
     // 无可播源等:置空 current,交 QueueController 走跳过/换源。
-    // stream/start 已发过,必须 stream/end 收尾,否则客户端空等。
+    // MA 对齐:失败即跳歌属过渡 —— 只发 stream/end 收尾(若 start 已发),**不报
+    // stopped**(报 stopped 会让固件镜像 IDLE 并锁死下一首的 stream/start)。
     g.current = null;
-    g.finishPlayback();
+    g.finishPlayback({ silentState: true });
     onPlayFailed(clientId, item.songId, (e as Error)?.message || String(e));
   });
 }
@@ -377,11 +378,10 @@ export function playGroupCore(
   g.close();
   // ★ 切歌/seek 只 stream/clear 绝不 stream/end(MA keep_stream 语义,详见
   //   playCore 同名段落注释)。用户组各成员逐一清缓冲,流上下文保留 → gapless。
-  if (g.current && g.canKeepStream()) {
+  if (g.canKeepStream()) {
     g.clearPlayback();
   } else {
-    // 顺序:先置空 current 让 group/update 报 stopped,再 finishPlayback 发 stream/end。
-    g.current = null;
+    // MA legacy 档:只发 `stream/end` 收尾旧流,**不报 stopped**(同 playCore)。
     g.finishPlayback({ silentState: true });
   }
   g.positionMs = seekPositionMs ?? 0;
@@ -397,8 +397,9 @@ export function playGroupCore(
   }
   // 后台起播:解码→按组时间线推流。不阻塞调用方(pollState 反映进度)。
   void pump.play(item.songId).catch((e) => {
+    // MA 对齐:同 playCore —— 失败即跳歌属过渡,只发 stream/end,**不报 stopped**。
     g.current = null;
-    g.finishPlayback();
+    g.finishPlayback({ silentState: true });
     onPlayFailed(groupName, item.songId, (e as Error)?.message || String(e));
   });
 }

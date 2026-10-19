@@ -1,12 +1,12 @@
 // pushLoop 降级上限(2026-10-07 240 生产实锤):编码器死亡后旧实现无限降级推进,
 // 把剩余整首推成静音(进度照走、切歌才恢复)。锁定:持续零产出超过
-// MAX_SILENT_DEGRADE ⇒ 提前按自然播完收场(endedNaturally → finishPlayback →
+// MAX_SILENT_DEGRADE ⇒ 提前按自然播完收场(endedNaturally → 置空 current →
 // 自动切歌),绝不整首默剧。
 import { describe, it, expect } from "vitest";
 import { GroupPump, overridePumpSource } from "./streamEngine.js";
 
 describe("GroupPump 编码器死亡兜底", () => {
-  it("持续零产出:到达降级上限即提前收场并 finishPlayback(不再整首默剧)", async () => {
+  it("持续零产出:到达降级上限即提前收场(置空 current,不再整首默剧)", async () => {
     // 上限取 500ms(= STALL_GRACE 下限);虚拟时间 20 帧(25ms/帧)即触顶。
     process.env.SENDSPIN_MAX_SILENT_DEGRADE_MS = "500";
     let finished = 0;
@@ -30,7 +30,8 @@ describe("GroupPump 编码器死亡兜底", () => {
       await new Promise((r) => setTimeout(r, 25));
     }
     expect(Date.now() - t0).toBeLessThan(6000); // 远小于 60s 元数据时长 ⇒ 提前收场
-    expect(finished).toBe(1);                   // 按自然播完收场 → 自动切歌
+    // MA 对齐:自然曲终不再直接 finishPlayback(过渡期禁 stream/end + stopped;终态由 stopCore 兜)
+    expect(finished).toBe(0);                   // 仅置空 current → poll 报 IDLE → 自动切歌
     expect(group.current).toBeNull();
   }, 15000);
 });

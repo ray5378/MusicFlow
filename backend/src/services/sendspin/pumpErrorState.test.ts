@@ -4,7 +4,7 @@
 // group.current 残留 → pollCore `playing: !!g.current` 永远 true → 主进程 pollState
 // 永远 PLAYING pos=0 dur=311 uri=- → PlaybackTracker/QueueController 被假在播骗住
 // (stalled 复查见 PLAYING 误判「确在播放」清计数)→ 不重投不切歌,群组永久卡死。
-// 契约:异常终止与自然结束同口径 —— 清 current + finishPlayback 宣告结束 ⇒
+// 契约:异常终止清 current + finishPlayback(silentState,不发 stopped)⇒
 // poll 上报 IDLE ⇒ auto-advance 走既有跳歌自愈(失败矩阵:显式失败 ⇒ 跳下一首)。
 import { describe, it, expect, afterEach } from "vitest";
 import { GroupPump, overridePumpSource } from "./streamEngine.js";

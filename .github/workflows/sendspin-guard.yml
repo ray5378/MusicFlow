@@ -16,11 +16,11 @@ name: Sendspin Guard
 #       主进程测试跑 in-proc，全绿，只有真机 fork 模式才暴露（续播回 0）。
 #       —— forkSeekContract.test.ts（协议层）+ 下方源码守卫（生产侧三点）
 #
-#   P2 切歌 keep_stream（v4.0.72）：track change 只发 stream/clear 清缓冲，
-#       绝不发 stream/end；stream/end 只留给队列空 / 用户 stop / 成员摘除。
-#       依据 MA player.py:1454 "The spec reserves stream/end for queue-empty,
-#       not track changes." 真机（esp32-player2 / ESPHome 2026.9.0）实测
-#       设备侧打印 "Stream clear" 且全程无 "Stream ended"。
+#   P2 切歌 keep_stream（2026-10-19 严格对齐 MA）：track change 只发 stream/clear
+#       清缓冲，绝不发 stream/end；stream/end 只留给队列空 / 用户 stop / legacy 档。
+#       legacy 档依据 MA playback.py:422-423（legacy 客户端在场强制 keep_stream=False，
+#       allow_legacy_clients 默认 True）；非 legacy 档依据 MA player.py:1454
+#       "The spec reserves stream/end for queue-empty, not track changes."
 #       —— trackChangeKeepStream.test.ts
 #
 # 为什么除了 vitest 还要源码扫描：上面三类里最危险的是**静默失效** ——
@@ -144,12 +144,12 @@ jobs:
             echo "::error::P2 回归:SendspinGroup 缺少 clearPlayback()(切歌只清缓冲,不发 stream/end)"
             miss=1
           fi
-          n=$(grep -cF 'if (g.current && g.canKeepStream()) {' backend/src/services/sendspin/playerCore.ts)
+          n=$(grep -cF 'if (g.canKeepStream()) {' backend/src/services/sendspin/playerCore.ts)
           if [ "$n" -lt 2 ]; then
             echo "::error::P2 回归:playCore 与 playGroupCore 都必须走 canKeepStream() 分支(当前命中 $n 处,期望 2)"
             miss=1
           fi
-          # 回退阀门:碰到真不认 stream/clear 的固件可一键回到 MA 严格档
+          # 强制放开阀门:`=1` 时即便有 legacy 成员也走 keep_stream(临时对照用)
           if ! grep -qF 'MUSICFLOW_SENDSPIN_KEEP_STREAM_LEGACY' backend/src/services/sendspin/server.ts; then
             echo "::error::P2 回归:缺少 MUSICFLOW_SENDSPIN_KEEP_STREAM_LEGACY 回退阀门"
             miss=1
@@ -157,40 +157,24 @@ jobs:
           if [ "$miss" -eq 0 ]; then echo "OK: 切歌 keep_stream 契约在位"; fi
           exit "$miss"
 
-      # —— P3(过渡兜底):新流宣告前必发 `stream/clear` ——
-      # 回退掉这处 clear,会让「上一轮走过 stream/end + stopped 复位」之后的起播重新
-      # 陷入真机固件约 2s 的 IDLE 闩锁窗口 → 自动切歌起播无声(2026-10-19 真机实测)。
-      # 断言:从 flushAnnounceFor 的函数体内取 `stream/clear` 与 `announceStream()` 的行号,
-      # clear 必须存在且**早于** start(顺序倒置 = 没兜底)。
-      # 注:P2 安全阀(KEEP_STREAM_LEGACY=0 → legacy 组退回 stream/end)依据的「legacy
-      # 客户端可能误处理 stream/clear」假设,已被 2026-10-19 真机推翻 —— esp32-player2
-      # (legacy=true) 恰恰需要该 clear 解固件 IDLE 闩锁,故兜底 clear 对 legacy 成员同样下发。
-      # ⚠️ 本步是**过渡契约**:MA 对齐改造(自动切歌 keep_stream 连续化,不再发
-      # stream/end + stopped)落地后,兜底 clear 与 else 复位分支一并移除,本步随之删除。
-      - name: "Guard P3 (transitional) - pre-clear backstop before stream/start"
+      # —— P3：过渡期不得报 stopped(MA:stopped 唯一产地 = 队列放完 / 用户 stop) ——
+      # 自动切歌是「取消+续流」:过渡期只发 stream/clear(keep_stream)或 stream/end(legacy),
+      # **绝不** group/update(stopped) —— 报 stopped 会让固件把它镜像成 IDLE 并锁死后续
+      # stream/start(2026-10-19 真机无声实锤)。终态收尾由 stopCore 统一兜底。
+      - name: "Guard P3 - no stopped during track change (silentState only)"
         shell: bash
         run: |
-          body=$(awk '/flushAnnounceFor\(c: SendspinConnection\): void \{/{on=1} on{print} on&&/^  \}/{exit}' backend/src/services/sendspin/server.ts)
-          if [ -z "$body" ]; then
-            echo "::error::P3 回归:找不到 flushAnnounceFor 函数体(兜底 clear 的落点)"
-            exit 1
-          fi
-          cl=$(printf '%s\n' "$body" | grep -nF 'c.sendJson("stream/clear", {});' | head -1 | cut -d: -f1)
-          al=$(printf '%s\n' "$body" | grep -nF 'c.announceStream();' | head -1 | cut -d: -f1)
           miss=0
-          if [ -z "$cl" ]; then
-            echo "::error::P3 回归:flushAnnounceFor 内缺少 stream/clear 兜底(自动切歌起播会因固件 IDLE 闩锁无声)"
+          n=$(grep -cF 'g.finishPlayback({ silentState: true });' backend/src/services/sendspin/playerCore.ts)
+          if [ "$n" -lt 2 ]; then
+            echo "::error::P3 回归:playCore/playGroupCore 过渡收尾必须走 finishPlayback({ silentState: true })(当前 $n 处,期望 ≥2;带 stopped 会造成固件 IDLE 闩锁无声)"
             miss=1
           fi
-          if [ -z "$al" ]; then
-            echo "::error::P3 回归:flushAnnounceFor 内找不到 announceStream()(新流宣告点被改名?)"
+          if grep -qF 'this.group.finishPlayback();' backend/src/services/sendspin/streamEngine.ts; then
+            echo "::error::P3 回归:streamEngine 不得再直接 finishPlayback()(自然曲终/linkDied 只置空 current,不发 stream/end+stopped)"
             miss=1
           fi
-          if [ "$miss" -eq 0 ] && [ "$cl" -ge "$al" ]; then
-            echo "::error::P3 回归:stream/clear 必须紧邻在 announceStream() **之前**(顺序倒置 = 没兜底)"
-            miss=1
-          fi
-          if [ "$miss" -eq 0 ]; then echo "OK: 新流宣告前 stream/clear 兜底在位(${cl} < ${al})"; fi
+          if [ "$miss" -eq 0 ]; then echo "OK: 过渡期不报 stopped(silentState 收尾)在位"; fi
           exit "$miss"
 
       - name: Upload guard log on failure

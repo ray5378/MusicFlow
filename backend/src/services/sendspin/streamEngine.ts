@@ -421,7 +421,7 @@ export class GroupPump {
    *  此前 pushLoop 用共享的 group.positionMs 反推帧下标(`Math.floor(positionMs/FRAME_MS)`),
    *  而 seek() 的「先发布目标位置」恰好写的就是这个共享字段 → 旧循环下一帧直接
    *  跳到目标处取帧 → 旧滑窗给不出数据 → seg.length===0 误判 EOF →
-   *  contentEnded → finishPlayback → 设备 IDLE、预建流作废(2026-09-22 真机实锤,
+   *  contentEnded → 触发收尾、预建流作废(2026-09-22 真机实锤,
    *  FP-TRACE 堆栈钉死 pushLoop EOF 路径)。原则:**共享位置只写不读**,取帧一律用本游标。 */
   private playCursorMs = 0;
   /** ★ 对外上报进度的**下界**(本轮起播位置 / seek 目标)。
@@ -883,7 +883,7 @@ export class GroupPump {
           // 根因修复(2026-10-08「月满西楼」群组永久卡死):旧注释说「状态由
           // QueueController 处理」,但 QueueController 只能经 poll 看状态 ——
           // current 残留时 pollCore 恒报 playing,队列层全被假在播骗住,无人处理。
-          // 置 linkDied ⇒ 收尾段与自然结束同口径清 current + finishPlayback
+          // 置 linkDied ⇒ 收尾段清 current(仅置空,不再 finishPlayback)
           // ⇒ poll 报 IDLE ⇒ auto-advance 正常跳歌自愈。
           linkDied = true;
           break; // 连接断开等:停止推流,收尾段清组状态。
@@ -1114,12 +1114,15 @@ export class GroupPump {
         );
         try {
           // 自然播完 → 置空 current,让 pollState 上报 IDLE → PlaybackTracker auto-advance。
-          // 同时宣告流结束:缺 stream/end + group/update(stopped),客户端永远卡 PLAYING。
           // linkDied(推帧中断/链路死亡)同样清 current —— 否则 pollCore 恒报
           // playing(pos 冻结在死亡点),队列层永久假在播(「月满西楼」卡死根因)。
+          // ★ MA 对齐(2026-10-19):这里**不发** stream/end、也**不报** stopped ——
+          //   spec 把 stream/end 保留给「队列空/真正结束」(MA player.py:1454),
+          //   自动切歌是「取消+续流」:过渡期只由起播侧发一条 stream/clear。
+          //   终态收尾(队列放完 / 用户 stop)统一由 stopCore → finishPlayback 发
+          //   stream/end + group/update(stopped),与 MA group.stop() 唯一产地一致。
           if (this.endedNaturally || linkDied) {
             this.group.current = null;
-            this.group.finishPlayback();
           }
         } finally {
           // 整首音频到此无用,立即释放(长曲上百 MB),不等下一首覆盖。
@@ -1149,13 +1152,16 @@ export class GroupPump {
       // 根因修复(2026-10-08 240「月满西楼」群组永久卡死):异常死亡旧代码只置
       // running —— group.current 残留 ⇒ pollCore `playing: !!g.current` 永远 true
       // ⇒ 主进程 pollState 永远 PLAYING pos=0 uri=- ⇒ tracker/QueueController 被
-      // 假在播状态骗住,既不重投也不切歌。与自然结束分支同口径:清 current +
-      // finishPlayback 宣告结束 ⇒ poll 上报 IDLE ⇒ auto-advance 走既有跳歌自愈
+      // 假在播状态骗住,既不重投也不切歌。与自然结束分支同口径:清 current(过渡复位,
+      // 只发 stream/end 不报 stopped)⇒ poll 上报 IDLE ⇒ auto-advance 走既有跳歌自愈
       // (失败矩阵:显式失败 ⇒ 跳下一首取新流)。releaseAudio 同样必须做,否则
       // 整包 PCM/流式 ffmpeg 残留(与自然路径 finally 同理)。
       try {
+        // MA 对齐:异常终止同样只做「过渡复位」—— 只发 stream/end 收尾旧流,**不报**
+        // stopped(silentState),避免固件把 group/update→stopped 镜像成 IDLE 闩锁;
+        // 终态(队列放完)仍由 stopCore 走默认 finishPlayback(带 stopped)。
         this.group.current = null;
-        this.group.finishPlayback();
+        this.group.finishPlayback({ silentState: true });
       } catch { /* 最小 stub 组无 finishPlayback 时忽略 */ }
       this.releaseAudio();
     }

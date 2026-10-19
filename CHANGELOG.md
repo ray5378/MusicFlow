@@ -2,6 +2,25 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.40] - 2026-10-19
+
+### Fix / Sendspin 自动切歌严格对齐 MA（过渡期不再发 `stream/end` + `stopped`，legacy 档只发 `stream/end`）
+
+v4.6.39 的「新流宣告前补发 `stream/clear`」是**保守兜底**（见该版本条目）。本版按拍板方向**严格对齐 MA / `aiosendspin` 语义**，从根源移除「自动切歌过渡期发 `stopped`」这一病灶，并删除该兜底 clear：
+
+- **权威语义（MA）**：自动切歌 = `cancel(keep_stream=True)` → `PushStream.clear()`（只发 `stream/clear`）+ `stop(keep_stream=True)`（**跳过** `stream/end`），**绝不改 `group/update` 状态**；`stream/end` 与 `group/update(stopped)` 只留给「队列放完 / 用户 stop」（`player.py:1454` "The spec reserves stream/end for queue-empty, not track changes."；`aiosendspin` `server/group.py` 的 `stop()` 是 stopped 的唯一产地）。legacy 档（`playback.py:422-423`，`allow_legacy_clients` 默认 True）强制 `keep_stream=False` ⇒ **只发 `stream/end`、不发 `stream/clear`**。
+- **`backend/src/services/sendspin/streamEngine.ts`**：自然曲终 / `linkDied` 分支只置空 `group.current`（保留「poll 报 IDLE ⇒ auto-advance」自愈口径），**不再 `finishPlayback()`**（原先发 `stream/end` + `group/update -> stopped`，正是固件把 stopped 镜像成 IDLE、锁死后续 `stream/start` 的病灶）；异常终止分支改 `finishPlayback({ silentState: true })`。终态收尾（队列放完 / 用户 stop）统一由 `playerCore.stopCore` / `stopGroupCore` 的 `finishPlayback()` 兜底，与 MA `group.stop()` 唯一产地一致。
+- **`backend/src/services/sendspin/playerCore.ts`**：`playCore` / `playGroupCore` 过渡分支判据由 `if (g.current && g.canKeepStream())` 改为 `if (g.canKeepStream())`（自动切歌时 `current` 已被 `streamEngine` 置空，旧判据会误走 `stream/end` 档）—— 过门禁即只 `clearPlayback()`，否则（legacy 在场）只 `finishPlayback({ silentState: true })`；后台起播失败回调同改 `silentState`（失败即跳歌属过渡，不报 stopped）。
+- **`backend/src/services/sendspin/server.ts`**：`canKeepStream()` 默认口径**翻转为 MA 严格档** —— 组内任一 legacy 成员在场即整组退回 `stream/end` 档；`MUSICFLOW_SENDSPIN_KEEP_STREAM_LEGACY=1` 仅作临时强制放开阀（默认不设）。**删除 `flushAnnounceFor()` 内 v4.6.39 的兜底 `stream/clear`**（过渡期既不再发 `stream/end` + `stopped`，无需 clear 解 IDLE 闩锁；keep_stream 路径的 clear 由起播侧 `clearPlayback()` 负责）。
+
+### Test / 回归守卫
+
+- **`trackChangeKeepStream.test.ts`**：门禁用例改为「默认 = MA 严格档」（空组 / 含 legacy 一律 false）；原「默认放行」用例改为 `KEEP_STREAM_LEGACY=1` 强制放开；legacy 切歌用例断言改为「只发 `stream/end`、绝不 `stream/clear`」；**删除 P3 兜底用例组**。
+- **`trackChangeStoppedSequence.test.ts`**：去掉强制 `KEEP_STREAM_LEGACY=0` 的 env 覆盖（默认即严格档），保留「切歌窗口内不出现 `group/update{stopped}`」断言。
+- **`pumpEncoderDeath.test.ts`**：自然曲终不再直接 `finishPlayback` —— 断言改为 `finished === 0`。
+- **`pumpErrorState.test.ts`**：异常终止契约文案更新为 `finishPlayback(silentState)`。
+- **`.github/workflows/sendspin-guard.yml`**：P2 判据同步为 `if (g.canKeepStream()) {`；**删除过渡用的 P3 步骤**，新增 **P3「过渡期不得报 stopped」**：钉死 `playerCore` 两处过渡分支走 `finishPlayback({ silentState: true })`、且 `streamEngine` 不得再出现裸 `finishPlayback()`。
+
 ## [4.6.39] - 2026-10-19
 
 ### Fix / Sendspin 自动切歌起播无声（新流宣告前补发 `stream/clear` 兜底）
