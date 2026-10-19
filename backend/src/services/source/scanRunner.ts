@@ -39,13 +39,19 @@ export const scanJobs = new Map<string, ScanJobState>();
 
 export const SCAN_JOB_TTL_MS = 30 * 60 * 1000;
 
-export const scanJobsSweep = setInterval(() => {
-  const now = Date.now();
+/**
+ * 清扫终态任务：TTL 自**完成时刻**(finishedAt)起算，而非开始时刻(startedAt)——大库扫描
+ * 常超过 30min，若按 startedAt 计时，任务一收尾就会被下一次清扫立即删除，前端 3s 轮询
+ * 可能整段错过终态（toast 不弹、卡片不刷新、进度静默消失）。running 一律保留。
+ */
+export function sweepScanJobs(now: number = Date.now()): void {
   for (const [k, v] of scanJobs) {
     if (v.status === "running") continue;
-    if (now - Date.parse(v.startedAt) >= SCAN_JOB_TTL_MS) scanJobs.delete(k);
+    if (now - Date.parse(v.finishedAt ?? v.startedAt) >= SCAN_JOB_TTL_MS) scanJobs.delete(k);
   }
-}, 5 * 60 * 1000);
+}
+
+export const scanJobsSweep = setInterval(() => sweepScanJobs(), 5 * 60 * 1000);
 
 (scanJobsSweep as any).unref?.();
 

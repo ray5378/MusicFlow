@@ -5,7 +5,8 @@
 //     未到点 / 已在跑让渡（不落标记） / 正常触发（落 lastRunAt + 起扫描）；
 //   - startScanScheduler：幂等挂载 + tick 异常吞掉；
 //   - scanRunner.startSourceScan：并发让渡、手动/定时来源标记、scan 与 scrape 载荷分流、
-//     完成 / 失败 / 停止 三态收尾。
+//     完成 / 失败 / 停止 三态收尾；
+//   - scanRunner.sweepScanJobs：终态 TTL 自**完成时刻**起算（大库长任务收尾后仍保留满 TTL）。
 //
 // 全程 vi.mock 打桩外围依赖：零真实网络 / 零真实子进程；media_sources 查询走 spy 控制，
 // settings 亦已打桩（避免 5s TTL 缓存带来的顺序耦合）。
@@ -30,7 +31,7 @@ import { getSetting, setSetting } from "../../src/services/settings.js";
 import { todayTriggerMs } from "../../src/services/fetch/upgradeScheduler.js";
 import { runBatchJob } from "../../src/batch/runner.js";
 import { runScanSchedulerOnce, startScanScheduler } from "../../src/services/source/scanScheduler.js";
-import { scanJobs, startSourceScan } from "../../src/services/source/scanRunner.js";
+import { scanJobs, startSourceScan, sweepScanJobs, SCAN_JOB_TTL_MS } from "../../src/services/source/scanRunner.js";
 
 // ==================== 公用件 ====================
 
@@ -243,5 +244,32 @@ describe("startSourceScan — 共享扫描状态与收尾", () => {
     scanJobs.get("s9")!.controller!.abort();
     await vi.waitFor(() => expect(done).toHaveBeenCalled());
     expect(scanJobs.get("s9")!.status).toBe("stopped");
+  });
+});
+
+// ==================== scanJobsSweep：终态 TTL 自完成时刻起算 ====================
+
+describe("scanJobsSweep — 终态 TTL 自完成时刻起算", () => {
+  const iso = (ms: number) => new Date(ms).toISOString();
+
+  it("跑超 TTL 的长任务，收尾后仍按 finishedAt 保留满 TTL；running 永不删", () => {
+    // 「长任务」：已跑 60min 才完成，finishedAt = NOW（刚完成）。
+    scanJobs.set("long", { status: "completed", startedAt: iso(NOW - 60 * 60 * 1000), finishedAt: iso(NOW), result: {} });
+    // 更早完成的终态任务：finishedAt 已超 TTL（NOW - 40min）。
+    scanJobs.set("old", { status: "completed", startedAt: iso(NOW - 90 * 60 * 1000), finishedAt: iso(NOW - 40 * 60 * 1000), result: {} });
+    // 仍在跑的旧任务：无论跑了多久都不得被清理。
+    scanJobs.set("run", { status: "running", startedAt: iso(NOW - 90 * 60 * 1000) });
+
+    // 距长任务「完成」还差 1ms 满 TTL：长任务必须保留。
+    // （若 TTL 退回按 startedAt 计时，长任务此刻距开始已 90min → 会被误删，本断言即变红。）
+    sweepScanJobs(NOW + SCAN_JOB_TTL_MS - 1);
+    expect(scanJobs.has("long")).toBe(true);
+    expect(scanJobs.has("old")).toBe(false);
+    expect(scanJobs.has("run")).toBe(true);
+
+    // 满 TTL 之后长任务才被清理；running 仍在。
+    sweepScanJobs(NOW + SCAN_JOB_TTL_MS + 1);
+    expect(scanJobs.has("long")).toBe(false);
+    expect(scanJobs.has("run")).toBe(true);
   });
 });

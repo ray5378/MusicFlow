@@ -15,6 +15,9 @@
 //      一次拿全部源状态。这条接口若被拆回单源查询,定时/他人触发的扫描前端又不可见。
 //   S5 定时配置消毒:POST /v1/sources 必须与 PUT 同口径 sanitizeScanAuto(否则前端开关
 //      回传的非布尔值会原样落库,调度器读到脏值静默不触发)。
+//   S6 终态保留:终态任务的 TTL 必须自**完成时刻**起算。大库扫描常跑超 30min,
+//      若按 startedAt 计时,任务一收尾就被下次清扫删掉,前端 3s 轮询可能整段错过终态
+//      (toast 不弹、卡片不刷新、进度静默消失)。
 //
 // 零依赖 node 脚本(strip-comments 与 check-home-perf.mjs 同款),挂 ci.yml 的 source-scan-guard 作业。
 import { existsSync, readFileSync } from "node:fs";
@@ -122,6 +125,11 @@ mustMatch(
   RUNNER,
   /SCAN_JOB_TTL_MS = 30 \* 60 \* 1000/,
   "完成态扫描任务必须保留 30min（前端轮询取结果），缺 TTL 会让 Map 无界",
+);
+mustMatch(
+  RUNNER,
+  /Date\.parse\(v\.finishedAt \?\? v\.startedAt\)/,
+  "清扫 TTL 必须自**完成时刻**起算（finishedAt ?? startedAt）—— 按 startedAt 计会让跑超 30min 的扫描一收尾就被下次清扫删掉，前端整段错过终态",
 );
 mustMatch(
   RUNNER,
