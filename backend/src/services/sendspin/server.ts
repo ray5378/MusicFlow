@@ -38,6 +38,7 @@ import "./roles/index.js";
 import { negotiateRoles } from "./roles/registry.js";
 import { createChunkEncoder, flacCodecHeaderB64, FLAC_BIT_DEPTH, type ChunkEncoder, type EncodedChunk, OPUS_FRAME_MS, SAMPLE_RATE, type SendspinCodec, waitFlacEncoderReady } from "./encoding.js";
 import { peekPump, stopGroupPump } from "./streamEngine.js";
+import { recordSendspinDebug } from "./debugLog.js";
 import { esphomeBridge } from "./esphomeBridge.js";
 import { computeCommonSendAhead, type SendAheadInput } from "./group.js";
 import { recordProbedRate } from "../playerRate.js";
@@ -197,7 +198,14 @@ export class SendspinServer {
 
   constructor(opts: SendspinServerOptions, log?: SendspinLog) {
     this.identity = opts.pairkeys;
-    this.log = log ?? opts.log ?? defaultLog;
+    // 埋点:所有 sendspin 日志(含 group/update、announceStream、client/state、
+    // finishPlayback、clearPlayback、sink 自愈、late-join)在 debug 日志开启时
+    // 一并落盘,排障时无需再改代码重编(见 debugLog.ts)。
+    const baseLog = log ?? opts.log ?? defaultLog;
+    this.log = (level, msg) => {
+      baseLog(level, msg);
+      recordSendspinDebug("log", msg, { level, src: "sendspin" });
+    };
     this.pairingPsk = Buffer.from(
       opts.pairingPskHex && opts.pairingPskHex.length === 64 ? opts.pairingPskHex : "1b5e24dbc1aed95fc2a5a338a90c05df44bd10f5ec1f4cd66cbf86272767b9d3",
       "hex",
@@ -1922,6 +1930,15 @@ export class SendspinConnection {
       `min_buffer=${this.minBufferMs}ms buffer_capacity=${this.bufferCapacityBytes}B ` +
       `available=${this.clientAvailable} state=${this.clientSyncState}`,
     );
+    recordSendspinDebug("wire.client_state", "client/state 设备上报字段", {
+      state: this.clientSyncState,
+      available: this.clientAvailable,
+      bufferCapacity: this.bufferCapacityBytes,
+      outputDelayMs: this.outputDelayMs,
+      requiredLeadMs: this.requiredLeadTimeMs,
+      minBufferMs: this.minBufferMs,
+      first,
+    });
   }
 
   /** 解析 `client/hello` 里的设备缓冲容量(`player@v1_support.buffer_capacity`)。
@@ -2030,6 +2047,12 @@ export class SendspinConnection {
     const wsAny = this.ws as any;
     this.lastBufferedAmount = typeof wsAny?.bufferedAmount === "number" ? Number(wsAny.bufferedAmount) : 0;
     this.lastSampleAt = now;
+    recordSendspinDebug("sink.sample", "sink 采样(设备侧 socket 排队字节)", {
+      buffered: this.lastBufferedAmount,
+      health: this.sinkHealth,
+      windows: this.sinkStallWindows,
+      level: this.sinkRecoveryLevel,
+    });
     // ① 建连宽限:握手 / 首帧期间本就不该判。
     if (now - this.connectedAt < SINK_WATCH_CONNECT_GRACE_MS) return;
     // ② 起播预填充窗口豁免:灌水位期间一律不判。注意设备不消费时 pump 会**一直**
@@ -2080,6 +2103,7 @@ export class SendspinConnection {
     }
     this.sinkHealth = "stalled";
     this.sinkStalledSinceMs = now;
+    recordSendspinDebug("sink.stalled", "开环判定设备停摆", { buffered: this.lastBufferedAmount });
     this.group?.escalateSinkRecovery(this);
   }
 
