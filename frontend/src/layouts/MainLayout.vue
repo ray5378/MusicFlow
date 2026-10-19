@@ -528,14 +528,35 @@ const authStore = useAuthStore();
 const playerStore = usePlayerStore();
 const favoritesStore = useFavoritesStore();
 
-// On layout mount (i.e. after login), restore any active DLNA cast session
-// from the backend so the UI reflects what's still playing on the device
-// after the tab was closed or the backend restarted. Then init the local
-// peer (register + heartbeat + WS + restore local queue).
-onMounted(async () => {
-  if (!authStore.isLoggedIn) return;
+// 流转播放初始化(恢复投屏目标 + 注册本机 peer + 连 WS + 建 20s 轮询)会打两次全量
+// /v1/peers:实测单次 809ms / 329KB,与首页首屏的 3 个关键 XHR 同时发出会争用
+// HTTP/1.1 同源的 6 条连接、把首屏内容往后挤。改为「首屏绘制后自动延迟拉」——
+// 功能不变,只是设备列表 / WS 晚约 1s 就绪;原 onMounted 的两步时序保持不变。
+let playerPeersStarted = false;
+let playerPeersTimer: ReturnType<typeof setTimeout> | null = null;
+let playerPeersDisposed = false; // 外壳卸载(登出 → /login)后不得再触发初始化
+
+async function initPlayerPeers(): Promise<void> {
+  if (playerPeersStarted || playerPeersDisposed) return;
+  playerPeersStarted = true;
+  if (playerPeersTimer) {
+    clearTimeout(playerPeersTimer);
+    playerPeersTimer = null;
+  }
   await playerStore.restoreCast().catch(() => {});
   await playerStore.initLocalPeer().catch(() => {});
+}
+
+function schedulePlayerPeers(): void {
+  if (playerPeersStarted || playerPeersTimer || playerPeersDisposed) return;
+  // rAF 双帧 ≈ 等首屏真实绘制之后;后台标签页会暂停 rAF,故加 1s 兜底定时器。
+  requestAnimationFrame(() => requestAnimationFrame(() => void initPlayerPeers()));
+  playerPeersTimer = setTimeout(() => void initPlayerPeers(), 1000);
+}
+
+onMounted(() => {
+  if (!authStore.isLoggedIn) return;
+  schedulePlayerPeers();
 });
 const sidebarCollapsed = ref(false);
 
@@ -588,6 +609,12 @@ window.addEventListener("pagehide", reportOfflineOnPageHide);
 window.addEventListener("freeze", pauseForGesture);
 syncTabVisibility();
 onUnmounted(() => {
+  // 延迟排期尚未触发就卸载(登出 → /login):置位并清表,避免悬挂回调在卸载后再打 /v1/peers。
+  playerPeersDisposed = true;
+  if (playerPeersTimer) {
+    clearTimeout(playerPeersTimer);
+    playerPeersTimer = null;
+  }
   window.removeEventListener("resize", updateViewport);
   document.removeEventListener("visibilitychange", syncTabVisibility);
   window.removeEventListener("blur", pauseForGesture);

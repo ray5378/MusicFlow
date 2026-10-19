@@ -17,6 +17,10 @@
 //   R4 收藏在途去重:MainLayout 同一处既直接调 loadFavorites()、又经 preloadHome() 再调一次。
 //      旧实现只有 `if (loaded) return` 没有在途去重 → 同一个 getStarred2(151KB)被并发请求
 //      两次并互相排队(实测第二次排队 q≈689ms)。
+//   R5 首屏外呼分层:首屏实测同时发出 14 条 XHR,其中流转播放初始化(两次全量 /v1/peers,
+//      809ms / 329KB)、平台精选(/v1/recommend)、本地随机(/v1/local-recommend,冷启动 3.7s)
+//      都在抢 HTTP/1.1 同源的 6 条连接。改为「首屏绘制之后自动延迟拉」后,若被改回
+//      「打开即并发」,首屏内容又会被这三个庞然大物挤慢 —— 不报错、不红任何动态用例。
 //
 // 零依赖 node 脚本(strip-comments 与 check-tag-repair.mjs 同款),挂 ci.yml 的 home-perf-guard 作业。
 import { existsSync, readFileSync } from "node:fs";
@@ -35,6 +39,7 @@ const FAVORITES = "frontend/src/stores/favorites.ts";
 const MAIN = "frontend/src/main.ts";
 const LAZYCOVER = "frontend/src/directives/lazyCover.ts";
 const HOME = "frontend/src/views/Home/index.vue";
+const MAINLAYOUT = "frontend/src/layouts/MainLayout.vue";
 
 const errors = [];
 let checks = 0;
@@ -207,9 +212,75 @@ mustMatch(
 );
 mustMatch(FAVORITES, /inflight = null;/, "loadFavorites 的 finally 必须清空 inflight（否则加载一次后再也无法刷新）");
 
+// ---------- R5 首屏外呼分层（2026-10-19） ----------
+//
+// 首屏实测同时发出 14 条 XHR:上半屏只有 3 路是真关键(歌单 / 首页配置 / 固定推荐卡),
+// 而流转播放初始化(两次全量 /v1/peers,单次 809ms / 329KB,之后每 20s 轮询一次)、
+// 平台精选(/v1/recommend)、本地随机(/v1/local-recommend,冷启动实测 3.7s)都在首屏
+// 抢 HTTP/1.1 同源的 6 条连接,把首屏内容整体往后挤。改动把后三者改为「首屏绘制之后
+// 自动延迟拉」(刻意不用视口/滚动触发:用户不滚动就永不加载,且滚动那一刻才付冷启动
+// 延迟)。破坏是静默的:改回「打开即并发」不报错、不红任何动态用例,只是首屏又被挤慢。
+mustMatch(
+  HOME,
+  /function scheduleLowerSections\(\): void \{/,
+  "Home 必须保留下半屏延迟排期函数 scheduleLowerSections（下半屏两路不得再回到 onMounted 的即时并发）",
+);
+mustMatch(
+  HOME,
+  /await Promise\.all\(\[loadPlaylists\(\), loadHomeConfig\(\), loadHomeCards\(\)\]\)/,
+  "Home 首屏即时并发只允许上半屏 3 路（歌单 / 首页配置 / 固定推荐卡）",
+);
+mustNotMatch(
+  HOME,
+  /Promise\.all\(\[[^\]]*loadLocalRandom\(\)/,
+  "loadLocalRandom 不得再进首屏即时并发（冷启动 3.7s 会长期占住 6 条连接之一）",
+);
+mustNotMatch(
+  HOME,
+  /const slow = loadRecommend\(\)/,
+  "loadRecommend 不得再回到「与上半屏同时发起」的写法",
+);
+mustMatch(
+  HOME,
+  /requestAnimationFrame\(\(\) => requestAnimationFrame\(startLowerSections\)\)/,
+  "下半屏延迟必须等一次真实绘制（rAF 双帧）后再开跑",
+);
+mustMatch(
+  HOME,
+  /setTimeout\(startLowerSections, 1000\)/,
+  "下半屏延迟必须有 1s 兜底定时器（后台标签页会暂停 rAF，否则永不加载）",
+);
+mustMatch(
+  MAINLAYOUT,
+  /function initPlayerPeers\(\): Promise<void> \{/,
+  "MainLayout 必须保留流转播放初始化的延迟入口 initPlayerPeers",
+);
+mustMatch(
+  MAINLAYOUT,
+  /requestAnimationFrame\(\(\) => requestAnimationFrame\(\(\) => void initPlayerPeers\(\)\)\)/,
+  "流转播放初始化（两次全量 /v1/peers）必须延后到首屏绘制之后，不得再在 onMounted 里直接 await",
+);
+mustCountRaw(
+  MAINLAYOUT,
+  /await playerStore\.restoreCast\(\)/g,
+  1,
+  "restoreCast 只允许出现在延迟入口 initPlayerPeers 里",
+);
+mustCountRaw(
+  MAINLAYOUT,
+  /playerStore\.initLocalPeer\(\)/g,
+  1,
+  "initLocalPeer 只允许出现在延迟入口 initPlayerPeers 里",
+);
+mustMatch(
+  MAINLAYOUT,
+  /playerPeersDisposed = true;/,
+  "外壳卸载时必须置位 playerPeersDisposed 并清掉延迟定时器（登出后 <1s 卸载,悬挂回调仍会打 /v1/peers）",
+);
+
 if (errors.length) {
   console.error(`✗ 首页性能优化链路守卫失败：${errors.length} 项违规（共 ${checks} 条断言）`);
   for (const e of errors) console.error("  ✗ " + e);
   process.exit(1);
 }
-console.log(`✅ 首页性能优化链路守卫通过：${checks} 条断言全部成立（冷启动预热 / 聚合预热接口 / 封面懒加载 / 收藏在途去重）。`);
+console.log(`✅ 首页性能优化链路守卫通过：${checks} 条断言全部成立（冷启动预热 / 聚合预热接口 / 封面懒加载 / 收藏在途去重 / 首屏外呼分层）。`);

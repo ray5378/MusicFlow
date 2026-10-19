@@ -139,7 +139,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, onActivated, onDeactivated } from "vue";
+import { ref, computed, nextTick, onMounted, onUnmounted, onActivated, onDeactivated } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
 import api, { formatApiError } from "@/api";
@@ -447,6 +447,35 @@ async function loadRecommend() {
   }
 }
 
+// ==================== 首屏外呼分层（2026-10-19） ====================
+// 首屏只有 3 路是真关键:歌单(loadPlaylists,并排随机卡直接由它派生)、首页配置
+// (loadHomeConfig)、固定推荐卡(loadHomeCards)。平台精选(loadRecommend)与本地随机
+// (loadLocalRandom)是**下半屏**分区,此前与上面 3 路一起在 onMounted 即时并发:
+// HTTP/1.1 同源只有 6 条连接,冷启动下 local-recommend 实测 3.7s(容器重启后插件
+// 沙箱装载),会把首屏内容整体往后挤。改为「上半屏数据到位并完成一次绘制后自动延迟拉」——
+// 刻意不用视口/滚动触发:用户不滚动就永不加载,且滚动那一刻才付冷启动延迟。
+let lowerStarted = false; // 下半屏是否已发起首次加载(keep-alive 下防重复)
+let lowerTimer: ReturnType<typeof setTimeout> | null = null;
+
+function startLowerSections(): void {
+  if (lowerStarted) return;
+  lowerStarted = true;
+  if (lowerTimer) {
+    clearTimeout(lowerTimer);
+    lowerTimer = null;
+  }
+  void loadLocalRandom();
+  void loadRecommend();
+}
+
+function scheduleLowerSections(): void {
+  if (lowerStarted || lowerTimer) return;
+  // rAF 双帧 ≈ 等「上半屏下一次真实绘制之后」再开跑(单帧可能在样式/布局提交前触发);
+  // 后台标签页会暂停 rAF,故加 1s 兜底定时器保证一定开跑 —— 二者谁先到谁生效。
+  requestAnimationFrame(() => requestAnimationFrame(startLowerSections));
+  lowerTimer = setTimeout(startLowerSections, 1000);
+}
+
 onUnmounted(() => {
   if (recommendRetryTimer) {
     clearTimeout(recommendRetryTimer);
@@ -455,6 +484,10 @@ onUnmounted(() => {
   if (localRecommendRetryTimer) {
     clearTimeout(localRecommendRetryTimer);
     localRecommendRetryTimer = null;
+  }
+  if (lowerTimer) {
+    clearTimeout(lowerTimer);
+    lowerTimer = null;
   }
 });
 
@@ -475,20 +508,20 @@ onDeactivated(() => {
 // 分区自愈(keep-alive 命中的是旧实例,onMounted 不会重跑)。
 onActivated(() => {
   localRecommendPaused = false;
+  // 首次进入:下半屏由 onMounted 排期,这里不得抢跑(抢跑会让「延迟拉」当场失效)。
+  if (!lowerStarted) return;
   if (localRandomChannels.value.length === 0) void loadLocalRandom();
 });
 
 onMounted(async () => {
   // P1-3 渐进渲染:各分区基于各自响应式 ref 独立渲染(模板未整页骨架门控 loading)。
-  // 快加载器(歌单/本地随机/配置/固定卡)决定首屏 loading 复位;loadRecommend 聚合
-  // 自 2026-10-15 起后端非阻塞(冷启动返回 pending + 后台拉取,前端轮询自动填充),
-  // 依旧独立进行、不阻塞其它分区与 loading 复位。
+  // 只有上半屏 3 路进首屏关键路径(并排随机卡 / 固定卡 / 占位都只依赖它们);平台精选
+  // 与本地随机两路由 scheduleLowerSections 在首屏绘制后延迟拉,不阻塞 loading 复位。
   loading.value = true;
-  const fast = Promise.all([loadPlaylists(), loadLocalRandom(), loadHomeConfig(), loadHomeCards()]);
-  const slow = loadRecommend();
-  await fast;
+  await Promise.all([loadPlaylists(), loadHomeConfig(), loadHomeCards()]);
   loading.value = false;
-  await slow;
+  await nextTick(); // 让上半屏先完成一次渲染提交,再放行下半屏外呼
+  scheduleLowerSections();
 });
 </script>
 

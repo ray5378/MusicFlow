@@ -2,6 +2,21 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.37] - 2026-10-19
+
+### Perf / 首页首屏外呼分层（下半屏与流转播放初始化改为「首屏绘制后自动延迟拉」）
+
+承接 4.6.34 的首页提速。浏览器实测首屏会**同时**发出 14 条 XHR，其中真正进关键路径的只有 3 路：歌单（`loadPlaylists`，顶部并排随机卡与占位都直接由它派生）、首页配置（`loadHomeConfig`）、固定推荐卡（`loadHomeCards`）。另外三路全在首屏抢 HTTP/1.1 同源的 6 条连接：流转播放初始化会打**两次全量 `/v1/peers`**（实测单次 809ms / 329KB，之后每 20s 还轮询一次）、平台精选 `/v1/recommend`、本地随机 `/v1/local-recommend`（容器重启后冷启动实测 3.7s，插件沙箱装载）。抢连接的代价就是首屏内容整体往后挤。
+
+- **`frontend/src/views/Home/index.vue`**：`onMounted` 的即时并发收窄为上半屏 3 路；`loadLocalRandom` 与 `loadRecommend` 改由 `scheduleLowerSections()` 排期 —— 上半屏数据到位并 `await nextTick()` 提交一次渲染后，用 **rAF 双帧**（≈等到下一次真实绘制之后）开跑，并加 **1s 兜底定时器**（后台标签页会暂停 rAF，否则永不加载）。刻意不用视口/滚动触发：用户不滚动就永不加载，且滚动那一刻才付冷启动延迟。`onActivated` 在 `lowerStarted` 之前直接返回（keep-alive 首次激活钩子紧随 `onMounted` 触发，抢跑会让「延迟拉」当场失效）；`onDeactivated` 的后台暂停语义、`pending` 轮询自愈（8s×18 / 8s×6）、`loading` 复位全部不变。
+- **`frontend/src/layouts/MainLayout.vue`**：流转播放初始化（`restoreCast` → `initLocalPeer`，原两步时序逐字保留）收敛进 `initPlayerPeers()`，由 `schedulePlayerPeers()` 以同样的 rAF 双帧 + 1s 兜底在首屏绘制后触发。功能不变，只是设备列表 / WS 晚约 1s 就绪；`restoreCast` 抢占 `currentPeerId`、`startLocalPeersPoll` 的 20s 轮询、WS `peer_snapshot` 兜底恢复等行为全未改动。
+- **未做**：不裁剪 `/v1/peers` 返回体。本轮症状是「首次初始化被抢连接」，把初始化整体挪出首屏即消除；裁 `queue.items` 会连带 WS 侧 `summarizeQueue` 的截断语义一起改，属另一条独立契约，不在本次范围。
+
+### Test / 回归守卫
+
+- **`backend/scripts/check-home-perf.mjs` 新增 R5（31 → 42 条断言）**：正向钉死 `Home.scheduleLowerSections` 存在、首屏即时并发**恰好**是 `Promise.all([loadPlaylists(), loadHomeConfig(), loadHomeCards()])`、rAF 双帧与 `setTimeout(startLowerSections, 1000)` 兜底在位；反向 `mustNotMatch` 钉死 `loadLocalRandom` 不得回到即时并发、`const slow = loadRecommend()` 不得复活；`MainLayout` 侧钉死 `initPlayerPeers` 存在、rAF 双帧入口在位、卸载时 `playerPeersDisposed = true` 的清表在位，且 `await playerStore.restoreCast()` 与 `playerStore.initLocalPeer()` 各**只出现一次**（只能待在延迟入口里）。**已做双向变异验证**：把两处改回「打开即并发」后 R5 报 4 项违规判红，还原后基线 42 条全绿。
+- **`.github/workflows/ci.yml`**：`home-perf-guard` 作业名与步骤描述同步补「首屏外呼分层」。
+
 ## [4.6.36] - 2026-10-19
 
 ### Fix / 下载产物 comment 改为「声明 + 源实测」双口径
