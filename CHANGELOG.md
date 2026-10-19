@@ -2,6 +2,23 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.41] - 2026-10-19
+
+### Fix / Sendspin 自然曲终总时长归零(对齐 MA `freeze_progress`,UI 稳定停在「4:22 / 4:22」)
+
+用户报告(2026-10-19):一首歌自然播完后,播放器当前时间停在 `4:22`、**总时长却变成 `0:00`**(应为 `4:22 / 4:22`)。
+
+- **根因**:v4.6.40 起自然曲终只置空 `group.current`(它是 `pollCore` 的 `playing` 唯一来源,须保留以驱动 auto-advance),而 `pollCore` 的 `durationMs` 取自 `current.durationMs` ⇒ `current` 一清即归 0;`positionMs` 本就保留 ⇒ 呈现「`4:22 / 0:00`」。
+- **修复(对齐 MA `metadata_role.freeze_progress()`)**:MA `providers/sendspin/playback.py::_stop_push_stream(snapshot_progress=...)` 只在自然 EOF 前先冻结进度/时长,此后组侧只重发最后一次锚点。MusicFlow 的等价物:
+  - **`backend/src/services/sendspin/server.ts`**:`SendspinGroup` 新增 `frozenDurationMs`(自然曲终「冻结时长」)。
+  - **`backend/src/services/sendspin/streamEngine.ts`**:自然曲终 / `linkDied` / 异常终止分支在清 `current` **之前**写入 `group.frozenDurationMs = group.current?.durationMs ?? this.durationMs`(位置本就冻结在末尾,只补时长这一个维度)。
+  - **`backend/src/services/sendspin/playerCore.ts`**:`pollCore` 的 `durationMs` 兜底改 `current?.durationMs ?? frozenDurationMs ?? 0`;`playCore` / `playGroupCore` 起播失败、`stopCore`、`stopGroupCore`、`handoverCore` 两组收尾等**复位站点**统一清零 `frozenDurationMs`(防陈旧时长串台)。
+
+### Test / 回归守卫
+
+- **新增 `backend/tests/sendspin/naturalEndDurationFreeze.test.ts`**:以**真实 `SendspinGroup`** 驱动 —— 曲终冻结后 `pollCore` 报 `playing=false` 且 `durationMs=262000`(4:22)、位置停末尾;在播中 `current` 屏蔽陈旧冻结值;`stopCore` / `stopGroupCore` 清零;`playCore` / `playGroupCore` 起播失败时 `current` 清空且冻结归零。
+- **`backend/tests/sendspin/streamEngineGaps.test.ts` 新增一例**:`durationMs>0` 的曲目自然播完后 `group.frozenDurationMs === durationMs` 且 `current === null`(写入点守卫)。
+
 ## [4.6.40] - 2026-10-19
 
 ### Fix / Sendspin 自动切歌严格对齐 MA（过渡期不再发 `stream/end` + `stopped`，legacy 档只发 `stream/end`）

@@ -1122,6 +1122,12 @@ export class GroupPump {
           //   终态收尾(队列放完 / 用户 stop)统一由 stopCore → finishPlayback 发
           //   stream/end + group/update(stopped),与 MA group.stop() 唯一产地一致。
           if (this.endedNaturally || linkDied) {
+            // MA `metadata_role.freeze_progress()` 等价(MA playback.py 的
+            // `_stop_push_stream(snapshot_progress=...)`):清 current 前先把该曲时长
+            // 冻结到组上 —— pollCore 的 durationMs 兜底读它,让曲终的 UI 停在
+            // 「当前时间 4:22 / 总时长 4:22」,而非清 current 后总时长归 0:00。
+            // 位置(positionMs)本就不在此清零,故「冻结」只需补时长这一个维度。
+            this.group.frozenDurationMs = this.group.current?.durationMs ?? this.durationMs;
             this.group.current = null;
           }
         } finally {
@@ -1160,6 +1166,7 @@ export class GroupPump {
         // MA 对齐:异常终止同样只做「过渡复位」—— 只发 stream/end 收尾旧流,**不报**
         // stopped(silentState),避免固件把 group/update→stopped 镜像成 IDLE 闩锁;
         // 终态(队列放完)仍由 stopCore 走默认 finishPlayback(带 stopped)。
+        this.group.frozenDurationMs = this.group.current?.durationMs ?? this.durationMs;
         this.group.current = null;
         this.group.finishPlayback({ silentState: true });
       } catch { /* 最小 stub 组无 finishPlayback 时忽略 */ }

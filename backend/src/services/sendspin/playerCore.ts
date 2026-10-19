@@ -207,6 +207,7 @@ export function handoverCore(
   //    的 ffmpeg 子进程)也必须杀,否则孤儿进程。与 playCore 的收尾段逐条对齐。
   stopGroupPump(gTo);
   gTo.current = null;
+  gTo.frozenDurationMs = 0;
   gTo.finishPlayback({ silentState: true });
   gTo.close();
   // ② 目标组就位(先成员 + 宣告,后搬泵 —— 见上文顺序说明)。
@@ -230,6 +231,7 @@ export function handoverCore(
   if (at === null) return { ok: false, reason: "transfer-failed" };
   // ④ 源端到此为止:流的归属已经交出去了,不留半截状态(与 stopCore 同语义)。
   gFrom.current = null;
+  gFrom.frozenDurationMs = 0;
   gFrom.finishPlayback();
   gFrom.close();
   log.info(
@@ -319,6 +321,7 @@ export function playCore(
     // MA 对齐:失败即跳歌属过渡 —— 只发 stream/end 收尾(若 start 已发),**不报
     // stopped**(报 stopped 会让固件镜像 IDLE 并锁死下一首的 stream/start)。
     g.current = null;
+    g.frozenDurationMs = 0;
     g.finishPlayback({ silentState: true });
     onPlayFailed(clientId, item.songId, (e as Error)?.message || String(e));
   });
@@ -337,6 +340,7 @@ export function stopCore(srv: SendspinServer | null, clientId: string, keepCurre
   if (!keepCurrent) {
     g.positionMs = 0;
     g.current = null;
+    (g as any).frozenDurationMs = 0;
   }
   // 流结束 + playback_state → stopped,组状态同步给客户端(自然结束走 pump)。
   const live = srv?.group(clientId);
@@ -399,6 +403,7 @@ export function playGroupCore(
   void pump.play(item.songId).catch((e) => {
     // MA 对齐:同 playCore —— 失败即跳歌属过渡,只发 stream/end,**不报 stopped**。
     g.current = null;
+    g.frozenDurationMs = 0;
     g.finishPlayback({ silentState: true });
     onPlayFailed(groupName, item.songId, (e as Error)?.message || String(e));
   });
@@ -411,6 +416,7 @@ export function stopGroupCore(srv: SendspinServer | null, groupName: string): vo
   pumpFor(srv, g).stop();
   g.positionMs = 0;
   g.current = null;
+  g.frozenDurationMs = 0;
   g.finishPlayback();
 }
 
@@ -752,7 +758,7 @@ export function pollCore(srv: SendspinServer | null, clientId: string): { playin
     playing: !!g.current,
     paused: !!g.paused,
     positionMs: g.positionMs,
-    durationMs: (g as any).current?.durationMs ?? 0,
+    durationMs: (g as any).current?.durationMs ?? (g as any).frozenDurationMs ?? 0,
   };
 }
 

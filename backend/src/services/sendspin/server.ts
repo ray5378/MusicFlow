@@ -595,6 +595,16 @@ export class SendspinGroup {
   timelineBaseUs = 0n;
   /** 当前播曲(由 ProtocolPlayer.playMedia 写入,供 pollState/自动切歌判定)。 */
   current: { songId: string; title?: string; artist?: string; album?: string; coverArt?: string; mime?: string; durationMs: number } | null = null;
+  /** 自然曲终「冻结时长」(对齐 MA `metadata_role.freeze_progress()` —— MA
+   *  `providers/sendspin/playback.py::_stop_push_stream(snapshot_progress=True)`
+   *  只在自然 EOF 前冻结进度/时长,此后组侧只重发最后一次锚点)。
+   *  用途:pollCore 在 `current` 已清(playing=false,驱动 auto-advance 的唯一来源,
+   *  不可破坏)时,`durationMs` 兜底读它 —— 让自然曲终的 UI 停在
+   *  「当前时间 4:22 / 总时长 4:22」,而不是清 current 后总时长归 0:00。
+   *  写入点:streamEngine 自然曲终 / linkDied / 异常终止(位置本就冻结,只补时长
+   *  这一个维度);清零点:起播失败 / stop / stopGroup / 借流收尾(playerCore 各
+   *  `current = null` 的复位站点)。 */
+  frozenDurationMs = 0;
   /** 延迟的 stream/start 目标集(见 protocolPlayer.playMedia 注释:解码可达 10s,
    *  立即宣告会让设备在空等中丢弃该流)。由 pushFrame 在**首个音频帧之前**兑现。
    *  数组(多房间组每个成员各兑现一次);单设备组退化为单元素,与旧单字段语义一致。 */

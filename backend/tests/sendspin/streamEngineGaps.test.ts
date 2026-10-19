@@ -104,6 +104,23 @@ describe("streamEngine pushLoop:整包路径的时长/锚点/诊断分支", () =
     }
   }, 30_000);
 
+  it("自然曲终(durationMs>0):冻结该曲时长后再清 current ⇒ UI 停在 4:22/4:22", async () => {
+    const DUR = 262_000; // 4:22
+    overridePumpSource(async () => ({ pcm: new Float32Array(48 * FRAME_SAMPLES), durationMs: DUR }));
+    const logs: string[] = [];
+    const { g } = makeGroup();
+    const pump = new GroupPump(makeServer(logs), g);
+    await pump.play("song-freeze-dur");
+    await waitInactive(pump, 15000, "自然曲终冻结时长");
+    // 过渡复位:current 置空(poll 报 IDLE ⇒ auto-advance 不受影响)……
+    expect(g.current).toBeNull();
+    expect(g.finished).toBe(0);
+    // ……但该曲时长被冻结到组上(pollCore.durationMs 兜底读它),不再随 current 归 0。
+    expect(g.frozenDurationMs).toBe(DUR);
+    // 位置本就冻结在末尾(>0)⇒ UI 呈现「4:22 / 4:22」而非「4:22 / 0:00」。
+    expect(g.positionMs).toBeGreaterThan(0);
+  }, 30_000);
+
   it("pushFrame 抛错(连接断)→ 停推 + 打日志,不静默截断", async () => {
     const boom = new Error("ws closed");
     overridePumpSource(async () => ({ pcm: new Float32Array(10 * FRAME_SAMPLES), durationMs: 0 }));
