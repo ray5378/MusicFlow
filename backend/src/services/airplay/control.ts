@@ -361,6 +361,7 @@ function upsertFromDb(r: any): void {
     host: "",
     port: 0,
     supportsRsa: false,
+    supportsAp2: false, // 持久化行不含能力:mDNS 的 `_airplay` 记录到了才标
     lastSeen: r.last_seen ? Date.parse(r.last_seen) || 0 : 0,
     available: false,
   };
@@ -440,12 +441,21 @@ export function isAirPlayDeviceDisabled(deviceId: string): boolean {
 export function listAirPlayDevices(): {
   id: string; name: string; alias: string; displayName: string;
   available: boolean; disabled: boolean; supportsRsa: boolean; am?: string; host: string; port: number;
+  /** AP2 能力标记(E2):仅当设备同时广播 `_airplay._tcp` 且 protovers ≥ 1.1。
+   *  **不改变投屏路径** —— E3~E5 落地前仍一律走 AP1。 */
+  supportsAp2: boolean;
+  /** AP2 TXT 原始能力(features/srcvers/protovers/gid/flags),供 E3 握手/加密读取。 */
+  ap2?: { features?: string; srcvers?: string; protovers?: string; gid?: string; flags?: string; model?: string };
 }[] {
   return getAirPlayDevices().map((d) => ({
     id: d.id, name: d.name, alias: d.alias || "",
     displayName: (d.alias || d.name).trim(),
     available: d.available, disabled: !!d.disabled,
     supportsRsa: d.supportsRsa, am: d.am, host: d.host, port: d.port,
+    supportsAp2: !!d.supportsAp2,
+    ap2: d.ap2
+      ? { features: d.ap2.features, srcvers: d.ap2.srcvers, protovers: d.ap2.protovers, gid: d.ap2.gid, flags: d.ap2.flags, model: d.ap2.model }
+      : undefined,
   }));
 }
 

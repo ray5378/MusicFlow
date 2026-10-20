@@ -77,6 +77,10 @@ export const airplayRendererPlugin: RendererPlugin = {
         model: d.am || "RAOP",
         hasVolumeControl: true,
         supportsRsa: d.supportsRsa,
+        // E2:能力分级。**只上报能力,不改投屏路径** —— E3~E5 的 AP2 发送端落地前,
+        // 所有设备仍走 AP1(见 cast() 的调用点未变)。
+        supportsAp2: d.supportsAp2,
+        ap2Protovers: d.ap2?.protovers,
       },
     }));
   },

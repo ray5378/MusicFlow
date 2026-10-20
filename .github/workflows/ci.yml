@@ -87,6 +87,11 @@ name: ci
 #      三段式 `METHOD url RTSP/1.0`(RFC 2326);sendRtsp 与 fire-and-forget 的 sendRtspNoWait
 #      两个分支都不得漏版本段,并反向断言不得再出现两段式写法。破坏全静默:真机容错吸收,
 #      但标准合规接收端(shairport-sync 等)一律 400,用户感知「接收器连不上、放不出声」。
+#  24. AirPlay2 发现分级守卫(scripts/check-airplay-ap2-discovery.mjs)——`_airplay._tcp`
+#      只给「已由 `_raop` 建表的」设备打 supportsAp2,纯 AP2-only 广播不得造出设备;判据
+#      必须是「有 `_airplay` 记录 && protovers ≥ 1.1」;`_airplay` down 必须撤能力而设备
+#      可用性仍归 `_raop`;AP1 投屏入口(castToAirPlayDevice)不得提前分流。破坏全静默:
+#      多出一批投不了的设备 / 所有设备都被判成 AP2 / 关掉 AP2 仍长期显示支持。
 # 镜像发布仍由 build.yml(v* tag)负责,与本 CI 互不影响。
 
 on:
@@ -281,6 +286,18 @@ jobs:
       - uses: actions/checkout@v4
       - name: 校验 sendRtsp / sendRtspNoWait 请求行均为 METHOD url RTSP/1.0
         run: node backend/scripts/check-airplay-rtsp-line.mjs
+
+  # 2026-10-20(课题 E2):发现层分级。`_airplay._tcp` 只允许给「已由 `_raop` 建表的」
+  # 设备打 supportsAp2 能力标记 —— 纯 AP2-only 广播不得造出设备(AP2 发送端未落地前
+  # 它们投不了,进表只会变成「点了报错」的死设备);判据必须是「有 `_airplay` 记录 &&
+  # protovers ≥ 1.1」,不得写死或依赖靠猜的 features 位;`_airplay` down 必须撤能力。
+  airplay-ap2-discovery-guard:
+    name: "AirPlay2 发现分级守卫(设备表唯一来源 / protovers 判据 / down 撤能力)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 校验 _airplay 只打能力不建表、判据为 protovers ≥ 1.1、AP1 投屏入口未改
+        run: node backend/scripts/check-airplay-ap2-discovery.mjs
 
   # 2026-09-27:后端路由按业务域拆分后,7 处路径耦合的静态守卫全部静默失同步
   # (3 处假红 + 3 处假绿)。守卫盯的是源码内容,却没人盯「源码还在不在那个位置」——

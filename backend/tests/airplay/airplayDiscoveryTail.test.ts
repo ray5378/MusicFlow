@@ -75,7 +75,7 @@ describe("discovery: 30s 续期", () => {
     vi.useFakeTimers();
     try {
       startAirPlayDiscovery();
-      expect(M.browsers.length).toBe(1); // 常驻句柄
+      expect(M.browsers.length).toBe(2); // 常驻句柄:_raop(设备表)+ _airplay(AP2 能力)
 
       // 预置一台「曾被发现、现在已陈旧离线」的设备:续期只能让它复活,不能重建行。
       addPersistedAirPlayDevice({
@@ -84,13 +84,15 @@ describe("discovery: 30s 续期", () => {
         host: "192.168.10.44",
         port: 5000,
         supportsRsa: true,
+        supportsAp2: false,
         lastSeen: 0,
         available: false,
       });
 
       vi.advanceTimersByTime(30_000); // 触发续期定时器
-      expect(M.browsers.length).toBe(2); // 续期换了一个**短命新句柄**(不是复用常驻句柄)
-      const spin = M.browsers[1];
+      // 续期对**两种**记录各换一个短命新句柄(raop + airplay),共 4 条;不是复用常驻句柄。
+      expect(M.browsers.length).toBe(4);
+      const spin = M.browsers[2]; // 第 3 条是 `_raop` 的续期句柄(设备续期走它)
 
       // 新句柄命中 → 只续 lastSeen / available(不落库、不发 alive,由常驻句柄负责事件)。
       spin.onHit(svc({ name: "tickdev@Tick", fqdn: "tickdev@Tick._raop._tcp.local", addresses: ["192.168.10.44"] }));

@@ -80,19 +80,23 @@ afterEach(() => {
 });
 
 describe("发现生命周期", () => {
-  it("startAirPlayDiscovery 建立 browser 并监听 up/down/txt-update/srv-update", () => {
+  it("startAirPlayDiscovery 建立两条 browser(_raop 设备表 + _airplay AP2 能力)并监听事件", () => {
     startAirPlayDiscovery();
-    expect(M.browsers.length).toBe(1);
-    const b = M.browsers[0];
-    for (const ev of ["up", "down", "txt-update", "srv-update"]) {
-      expect(b.handlers[ev]?.length, ev).toBe(1);
+    expect(M.browsers.length).toBe(2);
+    for (const b of M.browsers) {
+      for (const ev of ["up", "txt-update", "srv-update"]) {
+        expect(b.handlers[ev]?.length, ev).toBe(1);
+      }
     }
+    // `_raop` 句柄必须监听 down(离线/删除);`_airplay` 句柄也要监听 down(撤掉 AP2 能力)。
+    expect(M.browsers[0].handlers["down"]?.length).toBe(1);
+    expect(M.browsers[1].handlers["down"]?.length).toBe(1);
   });
 
   it("幂等:重复 start 不再新建 browser", () => {
     startAirPlayDiscovery();
     startAirPlayDiscovery();
-    expect(M.browsers.length).toBe(1);
+    expect(M.browsers.length).toBe(2);
   });
 
   it("mDNS 不可用(new Bonjour 抛错)→ 静默返回,不冒泡", () => {
@@ -106,7 +110,7 @@ describe("发现生命周期", () => {
     stopAirPlayDiscovery();
     expect(M.destroyed).toBe(1);
     startAirPlayDiscovery();
-    expect(M.browsers.length).toBe(2);
+    expect(M.browsers.length).toBe(4); // 每次 start 两条(raop + airplay)
   });
 });
 
@@ -193,7 +197,7 @@ describe("持久化钩子与手动重扫", () => {
   it("addPersistedAirPlayDevice 可以直接灌入库里恢复的离线设备", () => {
     addPersistedAirPlayDevice({
       id: "restored", name: "Restored", host: "192.168.10.9", port: 5000,
-      supportsRsa: false, lastSeen: Date.now(), available: false,
+      supportsRsa: false, supportsAp2: false, lastSeen: Date.now(), available: false,
     });
     expect(getAirPlayDevice("restored")!.available).toBe(false);
   });
@@ -201,7 +205,7 @@ describe("持久化钩子与手动重扫", () => {
   it("removeAirPlayDevice 删除(用户永久删除)", () => {
     addPersistedAirPlayDevice({
       id: "gone", name: "G", host: "1.2.3.4", port: 5000,
-      supportsRsa: false, lastSeen: Date.now(), available: true,
+      supportsRsa: false, supportsAp2: false, lastSeen: Date.now(), available: true,
     });
     removeAirPlayDevice("gone");
     expect(getAirPlayDevice("gone")).toBeUndefined();
@@ -214,9 +218,9 @@ describe("持久化钩子与手动重扫", () => {
   it("rescanAirPlayDevices:命中即 upsert(刚上电的接收端立刻出现)", async () => {
     startAirPlayDiscovery();
     const p = rescanAirPlayDevices(20);
-    // 重扫会新开一个 browser 句柄;模拟它命中
-    const refresh = M.browsers[M.browsers.length - 1];
-    refresh.onHit(svc({ name: "B@NewSpeaker", fqdn: "B@NewSpeaker._raop._tcp.local" }));
+    // 重扫会新开两个句柄(_raop 再 _airplay);设备仍只由 `_raop` 那条产生。
+    const refreshRaop = M.browsers[M.browsers.length - 2];
+    refreshRaop.onHit(svc({ name: "B@NewSpeaker", fqdn: "B@NewSpeaker._raop._tcp.local" }));
     await p;
     expect(getAirPlayDevice("B")).toBeTruthy();
   });
