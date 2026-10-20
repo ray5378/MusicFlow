@@ -136,6 +136,17 @@
             <div class="device-row-name">
               {{ deviceDisplayName(dev, `airplay:${dev.id}`) }}
               <el-tag v-if="isDeviceRenamed(dev, `airplay:${dev.id}`)" size="small" type="warning" style="margin-left: 6px">{{ t('groups.renamed') }}</el-tag>
+              <!-- 链路状态:与 Sendspin 行同款「连接态胶囊」(绿点=已连接)。判据 =
+                   mDNS 发现侧的实际可用性(dev.available;90s 未刷新即判离线),不是
+                   「扫到过就算连上」。可用时图标转橙(= DLNA 行同款在线高亮)+ 这里
+                   亮出「已连接」;不可用时图标转灰,沿用例行的「离线」标签。 -->
+              <span
+                v-if="dev.available"
+                class="device-link-status is-on"
+                :title="t('groups.airplayLinkOnTitle', { host: dev.host, port: dev.port })"
+              >
+                <span class="dot" />{{ t('groups.airplayLinkOn') }}
+              </span>
               <span v-if="!dev.available" class="device-offline-tag">{{ t('groups.offline') }}</span>
               <el-tag v-if="dev.disabled" size="small" type="danger" style="margin-left: 6px">{{ t('common.disabled') }}</el-tag>
             </div>

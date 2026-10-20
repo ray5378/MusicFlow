@@ -93,6 +93,31 @@ D1(输出编码全局统一 FLAC)落地后暴露的**功能回退**:`decideTrans
 - 收紧 `backend/tests/services/transcode.test.ts`:两条旧用例(「源即 mp3 且码率达标 → 不转码」「仅 maxBitRate 且源码率不超标 → 原样返回」)改判为「必须转码」,镜像用例表同步更新并**重新定位** —— 该表只描述本服务端(MusicFlow)语义,不再与客户端 `_contractVectors` 逐项等同(后者描述**外部服务端**「源格式相同即可字节直传」的启发式,刻意分道:不为本服务端的 D1 去劣化外服务器的字节 seek)。
 - `check-audio-default-flac.mjs` 增补 3 条断言(共 18 条):**常量断言** `canUseOriginal` 不得再加回来、显式 format 分支恒 `should:true`、显式 maxBitRate 分支恒转 mp3;反向变异(把快路径加回去)判红 2 条,还原后全绿。
 
+### Fix / 4.6.45 遗留 CI 红：任务 D 的会话收尾断言未同步（全量测试 2 例红）
+
+`e58aeda`（任务 D）把 AirPlay 会话收尾改为**一律**透传 `current` / `positionSec` / `durationSec`（「IDLE 必带真实落点」契约），而 `backend/tests/services/airplaySessionRuntime.test.ts` 里两处旧断言仍按**旧形态**写（推流失败 → `undefined`；自然结束 → 只有 `loudnessStderr`）→ `ci` 与 `build-and-push` 两个 job 的全量测试各红 2 例（同一个根因）。
+
+- **修**：两处断言按新契约收紧 —— 推流失败路径无 loudnorm JSON ⇒ `{ current: true, positionSec: 0, durationSec: 240 }`（**不带** `loudnessStderr`）；自然结束路径在该对象基础上多带 `loudnessStderr`。
+- **验证**：本机（230）按 CI 同口径实跑全量 `npx vitest run`：**523 个测试文件全过**、`7346 passed | 1 expected fail`，与 CI 结果一致。
+
+### Fix / Web「播放器」页 AirPlay 设备没有图标、在线态缺「已连接」标志
+
+用户实测反馈：AirPlay 设备行**看不到图标**；并明确要求「AirPlay 设备连上后应和 DLNA 设备一样图标变色、并有已连接的标志」。
+
+- **根因（前端，`frontend/src/components/MfIcon.vue`）**：设备行写的是 `<MfIcon name="Airplay" />`，名字拼写**完全正确**，但 `MfIcon` 的 `ICONS` 注册表里从未注册过 `Airplay`（该图标只在 `lucide-vue-next` 里存在，没有被 import 进注册表）。于是 `resolved()` 返回 `null` → 走 `<slot v-else />` → 页面渲染出一个**空 span**：位置占着、什么都不显示。**破坏是全静默的**：不报错、不崩溃，`vue-tsc` 管不到（name 是任意字符串，解析结果不进类型系统），既有单测也照样绿 —— 只有肉眼看到「那块是空的」才会发现。
+  - 同类缺陷在仓库里还查到两处，本次一并补齐：`ChevronUp`（流转编辑页「上移」按钮，`frontend/src/views/Flows/Editor.vue`）、`Pin`（每日推荐「转为本地歌单」，`frontend/src/views/Playlists/Detail.vue` 与 `frontend/src/views/Playlists/index.vue`）。
+- **修**：
+  - `MfIcon.vue` 的 lucide import 清单与 `ICONS` 注册表补齐 `Airplay` / `ChevronUp` / `Pin`。
+  - `frontend/src/views/Groups/index.vue` 的 AirPlay 设备行新增**连接态胶囊**（`device-link-status is-on`：绿点 + 「已连接」），判据 = `dev.available`（mDNS 发现侧的实际可用性，90s 未刷新即判离线）—— 可用时图标转橙（= DLNA 行同款在线高亮）+ 亮出「已连接」；不可用时图标转灰、沿用既有「离线」标签（**与 DLNA 行同口径**）。胶囊的视觉与判据语义复用 Sendspin 行既有的连接态（用户拍板口径）。
+  - i18n 新增 `groups.airplayLinkOn` / `groups.airplayLinkOnTitle`（zh-CN + en-US 双侧对齐）。
+- **新增静态守卫**：`backend/scripts/check-mficon-registry.mjs`，挂 `ci.yml` 的 `frontend-guards` job（第 22 条）。三条规则：
+  1. **R1 注册表自洽**：`ICONS` 每一项都必须有真实的 lucide 组件来源（⊆ import 清单）—— 防「拼错的名字」躺进注册表，那它自己也就成了不出声的失效项；并钉死 `resolved()` 的收尾必须是 `|| null`（若被改成「兜底成某个默认图标」，漏注册就从静默空白变成静默错误图标，更难发现）。
+  2. **R2 引用可解析**：`frontend/src` 下所有 `<MfIcon>` 的**静态** name 必须能解析（direct / toPascal / ALIAS 同款四条路径，与运行时 `resolved()` 一致）；比较运算符右侧的字面量（如 `p.kind === 'group' ? 'Box' : 'Monitor'` 里的 `'group'`）按取值条件剔除，不当图标名。
+  3. **R3 反向钉死**：当前在用的 `Airplay` / `ChevronUp` / `Pin` 必须在册 —— 否则把注册项删掉后 R2 又会绿（「两处一起坏」的假绿）。
+  - 反向变异验证：摘掉 `ICONS` 里的 `Airplay` / 把 `resolved` 收尾改成写死默认图标 / 往 `ICONS` 塞入未 import 的名字 —— 三项**全部判红**，还原后逐字节一致。
+- **门禁**：`npx vue-tsc --noEmit`（frontend）0 错误、`npx tsc --noEmit`（backend）0 错误、`node backend/scripts/check-*.mjs` 共 **25 个**守卫全绿。
+- **影响面**：仅「播放器」页 AirPlay 区块与图标注册表；DLNA / Sendspin / 组 / 客户端的既有渲染与链路**零改动**（胶囊只是 AirPlay 行新增的一个状态位）。
+
 ## [4.6.44] - 2026-10-20
 
 ### Perf / 首页提速收尾：聚合缓存冷启动预热 + 首页并排随机池改走全量轻量接口

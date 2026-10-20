@@ -915,6 +915,8 @@
     "refresh": "刷新",
     "airplayNote": "仅 AirPlay 1 (RAOP)。当前只在「阿音 WR320」上验证过,其他设备不保证兼容;不支持 AirPlay 2。",
     "airplayMeta": "AirPlay 设备 · {enc} · {host}:{port}",
+    "airplayLinkOn": "已连接",
+    "airplayLinkOnTitle": "AirPlay 设备（{host}:{port}）已在 mDNS 中可见：此刻在网，可直接投屏。",
     "rsaEnc": "RSA 加密",
     "noEnc": "不支持加密",
     "noAirplayDevices": "未发现 AirPlay 设备。请确认设备已开启 AirPlay 并处于同一局域网;点右上角「扫描」可立即重查一次 mDNS。",

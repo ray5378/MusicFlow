@@ -78,6 +78,11 @@ name: ci
 #      **真实落点**(写死 0 → 结束判据退化成 idle_early);被取代的旧会话**抑制**过期 IDLE(它属于
 #      上一首、与新会话共用同一 playerId);in-proc/fork 两条路径同口径;pollState 必带 mediaUri。
 #      破坏全是静默的:用户感知=「放完不自动下一首 / 重复播放同一首 / 不接受外部切歌」。
+#  22. MfIcon 图标注册表守卫(scripts/check-mficon-registry.mjs)——前端所有 <MfIcon> 的静态
+#      name 必须能在 MfIcon.vue 的 ICONS 注册表里解析,注册表自身每项也要有真实 lucide 组件
+#      来源;并**反向**钉死「当前在用的 Airplay / ChevronUp / Pin 不得被摘掉」。破坏全是静默的:
+#      名字没在册 → resolved 返回 null → 渲染空 span(vue-tsc 与既有测试都拦不住),
+#      用户感知就是「这块怎么是空的」(2026-10-20 实报「AirPlay 设备在前端没有图标」)。
 # 镜像发布仍由 build.yml(v* tag)负责,与本 CI 互不影响。
 
 on:
@@ -140,6 +145,12 @@ jobs:
       # 任何视图改动遗漏翻译/漏背 key 都归这里拦。
       - name: 校验 i18n 键对齐且源码无硬编码中文
         run: node backend/scripts/check-i18n.mjs
+      # MfIcon 图标注册表守卫:前端所有 <MfIcon> 的静态 name 必须能在 MfIcon.vue 的
+      # ICONS 注册表里解析(direct / toPascal / ALIAS 同款四条路径)。名字没在册时 resolved
+      # 返回 null → 渲染空 span,不报错、vue-tsc 也管不到(2026-10-20 用户实报「AirPlay 设备
+      # 在前端没有图标」即此类:name="Airplay" 拼写正确但从未注册)。
+      - name: 校验 MfIcon 图标名全部可解析(未在册 = 静默空白)
+        run: node backend/scripts/check-mficon-registry.mjs
 
   # 渲染器进程隔离守卫:凡是「墙钟节拍驱动」的推流运行时(sendspin 25ms / airplay 7.98ms),
   # 必须托管在 backend/src/services/rendererHost 的常驻子进程里 —— 留在主进程会被 Web 请求、

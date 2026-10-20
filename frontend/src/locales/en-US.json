@@ -915,6 +915,8 @@
     "refresh": "Refresh",
     "airplayNote": "AirPlay 1 (RAOP) only. Currently verified only on the \"Aying WR320\"; other devices are not guaranteed to be compatible; AirPlay 2 is not supported.",
     "airplayMeta": "AirPlay device · {enc} · {host}:{port}",
+    "airplayLinkOn": "Connected",
+    "airplayLinkOnTitle": "AirPlay device ({host}:{port}) is visible on mDNS: it is currently online and ready to be casted to.",
     "rsaEnc": "RSA encryption",
     "noEnc": "no encryption",
     "noAirplayDevices": "No AirPlay devices found. Make sure a device has AirPlay enabled and is on the same LAN; use Scan in the top right to re-query mDNS right away.",
