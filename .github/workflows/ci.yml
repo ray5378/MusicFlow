@@ -67,6 +67,11 @@ name: ci
 #      反向(DLNA 起播停同 host AirPlay 会话)也必须仍在。破坏全是静默的:只停 SOAP 时
 #      DLNA 队列会自动续播反杀 AirPlay,用户感知就是「AirPlay 刚出声约 1 秒就被切走」
 #      (2026-10-20 HiVi H5MKII 实测二阶反杀)。
+#  20. AirPlay 解码 af 守卫(scripts/check-airplay-decode-af.mjs)—— 同一段音频只归一**一次**,
+#      且唯一发生地是**出流侧公共链路**(resolveRequestAf,由 cast 判定给出 channel="airplay");
+#      AirPlay 解码侧只做 RAOP 硬性输出段(44100Hz/16bit/stereo),不得再出现 loudnorm/alimiter/
+#      volume=;同时**反向**钉死「出流侧的归一与音色 DSP 必须还在」,防「两处都删」把唯一那遍也删没。
+#      破坏全是静默的:重复归一会让动态被二次压缩,用户感知只是「听着不对劲」(2026-10-20 实测复盘)。
 # 镜像发布仍由 build.yml(v* tag)负责,与本 CI 互不影响。
 
 on:
@@ -220,6 +225,17 @@ jobs:
       - uses: actions/checkout@v4
       - name: 校验单一助手、冻结先于 SOAP Stop、in-proc/fork 两入口同步、反向互斥仍在
         run: node backend/scripts/check-airplay-dlna-mutex.mjs
+
+  # 2026-10-20:AirPlay 解码侧此前与出流侧**重复**做响度归一(同一段音频两遍,且顺序与
+  # pipeline.ts 的「响度→DSP→限幅」契约相反 → 动态被二次压缩)。本 job 把「解码侧只做
+  # RAOP 输出段、归一唯一发生地在出流侧公共链路」钉死在 CI。
+  airplay-decode-af-guard:
+    name: "AirPlay 解码 af 守卫(解码侧不得再归一 / 输出段仍在 / 归一仍在源头做)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 校验解码侧无 loudnorm、输出段 44.1k/16bit/stereo 仍在、出流侧归一与 DSP 仍在
+        run: node backend/scripts/check-airplay-decode-af.mjs
 
   # 2026-09-27:后端路由按业务域拆分后,7 处路径耦合的静态守卫全部静默失同步
   # (3 处假红 + 3 处假绿)。守卫盯的是源码内容,却没人盯「源码还在不在那个位置」——

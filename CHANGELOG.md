@@ -33,6 +33,15 @@
 - **影响面（严格限定同 host 有 DLNA 兄弟设备这一种拓扑）**：非 Linkplay 类纯 AirPlay 设备（无同 host DLNA peer）**完全不受影响**（不冻结、不碰任何队列）；反向互斥（DLNA 起播停同 host AirPlay 会话）**一字未动**。唯一行为变化是「AirPlay 起播时，同 host 的 DLNA 队列从『自动续播反杀』改为『就地冻结、可续播』」。
 - **不在本轮范围（记录在案）**：同 host 存在其它活动时推流节拍会变差（实测 `reanchors 12→83`、`maxGap 75→292ms`）有可闻爆音风险，属独立课题。
 
+### Fix / AirPlay 投屏:同一段音频被归一两次(解码侧与出流侧重复响度归一)
+
+排查 AirPlay 出声链路的后续复盘中发现的**静默听感缺陷**:同一段音频被做了**两遍**响度归一。
+
+- **根因(服务端,`backend/src/services/airplay/decoder.ts`)**:出流侧公共链路已在归一 —— `routes/rest/index.ts::resolveRequestAf()` 在渠道开启时调 `resolveLoudnessAf`(cast 通道判定把 `kind==="airplay"` 映射为 `channel="airplay"`);而 AirPlay **解码侧** `buildAirplayAf()` 又独立调了一遍 `resolveLoudnessAf()` 并挂限制器。于是 ①同一段音频归一两次(动态被二次压缩);②顺序与 `pipeline.ts` 注释里的「响度 → DSP → 限幅」契约**相反**(出流侧 DSP 落在归一之后,解码侧归一又落在 DSP 之后)。全程不报错、不崩溃,只是听感偏「平/闷」,手测极易漏判。
+- **修(`backend/src/services/airplay/decoder.ts`)**:解码侧只保留 `outputFilters()` 生成的 **RAOP 硬性输出段**(44100Hz / 16bit / stereo,恒定 pin、非过渡),删掉 `resolveLoudnessAf` 调用与其拼装;随之清理已成死码的 `loudness` 选项与 `isChannelEnabled("airplay")` 依赖(**解码侧与渠道开关脱钩**,开关只在出流侧生效)。`rowId` 字段保留仅为兼容既有调用方,解码侧已不参与响度决策。
+- **影响面**:响度归一仍**只在音源源头做一遍**(出流侧公共链路),其它播放器与公共段**零改动**;音色 DSP 未丢(`playerDspFilters()` 只在出流侧 `resolveRequestAf` 调用)。
+- **已知副作用(记录在案)**:解码侧不再产出 loudnorm 的 stderr 测量报告,故 `control.ts::handleAirplaySessionEnded` 的 P0-4 落点**不再**从 AirPlay 会话拿到新的响度测量值(该值此前取自已归一过的流,参考意义本就有限;DLNA/客户端路径的测量不受影响)。
+
 ### Test / 回归守卫与用例
 
 - 新增 `backend/scripts/check-airplay-stream-auth.mjs`（5 组共 16 条断言）并挂 `ci.yml` 新 job `airplay-stream-auth-guard`：R1 豁免清单单一真源且**恰好三条**（增删/改名必红）；R2 `/rest/*` 门禁走 `isRestAuthExemptPath(c.req.path)`、仍 `authMiddleware` 兜底、**旧内联 `includes('/dlna/stream/')` 已彻底移除**、`/rest/api/*` 第二道门禁仍在；R3 `/airplay/stream/:token` handler 必须 `resolveAirPlaySession` 自校验 + 无效即 `403` + 复用 `serveCastStream(kind:"airplay")`（并反向校验 DLNA 对照实现未被改坏）；R4 出流族两处分类同步认 AirPlay 且无 `startsWith("/rest/")` 之类整面误判；R5 行为用例在册。每条断言均做双向变异验证（改坏必红，见下）。
@@ -41,6 +50,9 @@
 - 覆盖：`src/middleware/restExempt.ts` 落在 `vitest.config.ts` 的覆盖率统计范围内（`src/index.ts` 原本就排除），行为用例对其全量分支覆盖。
 - 新增 `backend/scripts/check-airplay-dlna-mutex.mjs`（5 组 9 条断言）并挂 `ci.yml` 新 job `airplay-dlna-mutex-guard`：R1 同 host DLNA 互斥只有**单一助手** `yieldSiblingDlnaForAirPlay` 一处实现，助手内**两件事都在**且**冻结先于 SOAP Stop**、且经**动态 import** 取 QueueController；R2 两个起播入口（`startSession` / `castViaChild`）**各调一次、共 2 处**；R3 **常量断言**：助手之外不得再出现任何裸 `stopDevicePlayback(...)`（防手写互斥绕过助手）；R4 反向互斥 `castToDevice → stopAirPlaySessionsForHost` 仍在；R5 `stopAirPlaySessionsForHost` 仍导出。每条断言均做双向变异验证（改坏必红，见下）。
 - 扩充 `backend/tests/airplay/controlOrchestration.test.ts`（+5 条，替身补 `getQueueController.stopPlayback` 并纳入 beforeEach 复位）：① 起播前**冻结**同 host DLNA 队列（`stopPlayback("dlna:<peer>")`）；② 冻结**先于** SOAP Stop（`invocationCallOrder` 断言顺序）；③ **fork 路径**同样冻结（两条入口不得分叉）；④ 冻结抛错**不拖垮起播**且不跳过 SOAP Stop；⑤ 同 host 无 DLNA peer 时**不冻结任何队列**。
+
+- 新增 `backend/scripts/check-airplay-decode-af.mjs`(5 组 15 条断言)并挂 `ci.yml` 新 job `airplay-decode-af-guard`:R1 解码侧不引用 `resolveLoudnessAf`/渠道开关、pipeline 导入清单收口;R2 输出段参数锁定(targetRate/16bit/forceRate/stereo/hasLoudnorm=false);R3 **常量断言**:剥注释后解码侧全文不得出现 `loudnorm`/`alimiter`/`volume=`;R4 **反向断言**:出流侧 `resolveRequestAf` 仍调 `resolveLoudnessAf` + `playerDspFilters`,且 cast 判定仍映射 `channel="airplay"`(防「两处都删」);R5 单一实现不复制。三项反向变异(把 loudnorm 加回解码侧 / 摘掉 stereo 的 pin / 真正摘掉出流侧调用点)全部判红,还原后全绿。
+- 调整 `backend/tests/airplay/decoderAf.test.ts` 与 `decoderProducer.test.ts`:锁新形态(解码 af **逐字等于**输出段、绝不含 loudnorm/alimiter;`pipeline.airplay` 开关开/关**逐字一致**,证明解码侧与开关脱钩;lavfi 全链跑通时 stderr **不再**产出 `input_i`)。
 
 ## [4.6.44] - 2026-10-20
 

@@ -14,13 +14,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
 import { PCM_BYTES_PER_CHUNK, SAMPLE_RATE } from "./raop.js";
 import { createLogger } from "../../utils/logger.js";
 import { resolveFfmpeg } from "../transcode.js";
-import {
-  decodeArgs,
-  outputFilters,
-  resolveLoudnessAf,
-  isLoopbackUrl,
-} from "../audio/pipeline.js";
-import { isChannelEnabled } from "../audio/pipelineSwitches.js";
+import { decodeArgs, outputFilters, isLoopbackUrl } from "../audio/pipeline.js";
 import { StderrTail } from "../audio/stderrTail.js";
 
 const log = createLogger("AIRPLAY");
@@ -46,58 +40,50 @@ export function degreesToDb(volume: number): number {
 // 时,唯独 AirPlay 这条链路换不掉。
 
 export interface AirplayDecodeOpts {
-  /** 分析行 id(= songs.id):命中已测量走静态 volume,否则实时 loudnorm。 */
+  /**
+   * 分析行 id(= songs.id)。**仅为兼容调用方而保留**(airplay/control.ts 与
+   * sessionRuntime.ts 仍在传):解码侧自 2026-10-20 起不再做响度归一,本字段在
+   * decoder.ts 内已不参与任何决策(响度归一由出流侧公共链路承担)。
+   */
   rowId?: string;
-  /** 响度段开关(缺省启用);false = 整条 -af 不加(与旧命令逐字节一致)。 */
-  loudness?: {
-    enabled?: boolean;
-    targetLoudness?: number;
-  };
   /** 强制输入格式(测试用 lavfi);生产靠扩展名/协议自动识别。 */
   inputFormat?: string;
 }
 
 /**
- * 组装 AirPlay 解码 af:[响度?,限制器,aresample=44100,dither](P1-3,导出供单测):
- * - 通道开关 `pipeline.airplay` 关(P5-1) → 不带响度段,**仍走管道**(不是绕过,D9):
- *   输出段的 pin(44.1k/16bit/stereo)是 RAOP 协议硬性要求,与开关无关,照旧;
- * - 44.1k/16-bit/stereo 是 RAOP 协议硬性要求,恒定 pin(非过渡,与 sendspin 的
- *   forceRate 不同);
- * - 重采样规则与输出段一致:链中有 loudnorm → swr,否则 soxr(见 outputFilters)。
+ * 组装 AirPlay 解码 af —— **只有输出段**(P1-3,2026-10-20 修订,导出供单测):
+ *
+ * 解码侧**不再**做响度归一:此前这里又调了一遍 resolveLoudnessAf 并挂限制器,而响度归一
+ * 已由**出流侧公共链路**(routes/rest/index.ts::resolveRequestAf)承担 —— 同一段音频被归
+ * 一**两遍**,且出流侧 DSP 落在归一之后、解码侧归一又落在 DSP 之后,与 pipeline.ts 注释里
+ * 「响度 → DSP → 限幅」的顺序契约**相反**。听感上的表现是动态被二次压缩(静默故障)。
+ *
+ * 保留的部分:`outputFilters()` 生成的输出段 —— 44100Hz / 16bit / stereo 是 **RAOP 协议
+ * 硬性要求**(恒定 pin,非过渡;与 sendspin 的 forceRate 不同),删响度不能连输出段一起删。
+ * 链中已无 loudnorm,故重采样走 soxr(见 outputFilters)。
  */
-export function buildAirplayAf(opts: Pick<AirplayDecodeOpts, "rowId" | "loudness"> = {}): {
-  af: string[];
-  hasLoudnorm: boolean;
-} {
-  const loud = isChannelEnabled("airplay")
-    ? resolveLoudnessAf({
-        rowId: opts.rowId,
-        enabled: opts.loudness?.enabled,
-        targetLoudness: opts.loudness?.targetLoudness,
-        escapeEnvVar: "AIRPLAY_LOUDNESS",
-      })
-    : [];
-  const hasLoudnorm = loud.some(f => f.startsWith("loudnorm"));
-  // 输出段:源位深按 F32 解码口径(恒 dither 到 16bit);采样率恒 pin 44100,
-  // 声道恒 stereo(RAOP 协议硬性要求,非过渡——与 sendspin 的 forceRate 不同)。
-  const out = outputFilters({
+export function buildAirplayAf(): string[] {
+  // 源位深按 F32 解码口径(恒 dither 到 16bit);采样率恒 pin 44100,声道恒 stereo。
+  return outputFilters({
     sourceRate: null,
     sourceBits: 32,
     targetRate: SAMPLE_RATE,
     targetBits: 16,
-    hasLoudnorm,
+    hasLoudnorm: false,
     forceRate: SAMPLE_RATE,
     forceChannels: "stereo",
   });
-  return { af: [...loud, ...out], hasLoudnorm };
 }
 
 /** Spawn ffmpeg decoding `input` to raw stereo s16le 44100 PCM on stdout.
  *
- * P1-3:参数经统一管道装配(响度＋限制器＋协议输出段);输入必须是合规的
+ * P1-3(2026-10-20 修订):参数经统一管道装配(**仅**协议输出段 —— 响度归一由出流侧
+ * 公共链路承担,解码侧不再二次归一);输入必须是合规的
  * (SPEC §1.8:本地路径或回环 token URL),否则直接抛错 —— 调用方先过
  * resolvePipelineInput,禁止静默直连远端(Alpine DNS 全坏＋鉴权头泄漏)。
- * 返回的 proc 挂 `stderrText()`(stderr **尾部**,上限 64KB,供 P0-4 解析 loudnorm)。
+ * 返回的 proc 挂 `stderrText()`(stderr **尾部**,上限 64KB)。⚠️ 解码侧已无 loudnorm,
+ * 故 stderr 不再产出测量报告 —— control.ts 的 P0-4 落点(handleAirplaySessionEnded)
+ * 从此拿不到 AirPlay 侧的新测量值(归一改由出流侧公共链路承担,详见该函数注释)。
  */
 export function spawnDecoder(
   input: string,
@@ -107,7 +93,7 @@ export function spawnDecoder(
   if (/^https?:\/\//i.test(input) && !isLoopbackUrl(input)) {
     throw new Error("AirPlay 解码输入必须合规(SPEC §1.8):本地文件路径或回环 token URL,调用方先过 resolvePipelineInput");
   }
-  const { af } = buildAirplayAf(opts);
+  const af = buildAirplayAf();
   const args = decodeArgs({
     input,
     inputFormat: opts.inputFormat,

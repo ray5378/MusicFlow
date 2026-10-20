@@ -25,7 +25,8 @@ vi.mock("../../src/utils/logger.js", async (io) => {
   return { ...real, createLogger: () => log };
 });
 
-// 通道开关(P5-1):关掉时 buildAirplayAf 的响度段必须整段消失。
+// 渠道开关(P5-1):2026-10-20 起解码侧与开关脱钩(归一唯一发生地在出流侧);
+// 下面仍打桩开关,用来证明「开关已不再改变解码 af」。
 const h = vi.hoisted(() => ({ airplayChannelOn: true }));
 vi.mock("../../src/services/audio/pipelineSwitches.js", async (io) => {
   const real: any = await io();
@@ -139,20 +140,19 @@ describe("ffmpeg 定位与兜底(D35:统一到 transcode.resolveFfmpeg)", () => 
   });
 });
 
-describe("buildAirplayAf 通道开关(P5-1)", () => {
-  it("通道关 → 不带响度段,但输出段照旧(RAOP 协议硬性要求)", () => {
+describe("buildAirplayAf 与 pipeline.airplay 开关脱钩(2026-10-20:解码侧不再归一)", () => {
+  it("开关开/关逐字一致,且 af 只剩 RAOP 输出段(无 loudnorm/alimiter)", () => {
+    h.airplayChannelOn = true;
+    const on = buildAirplayAf();
     h.airplayChannelOn = false;
-    const { af, hasLoudnorm } = buildAirplayAf({});
-    expect(hasLoudnorm).toBe(false);
-    expect(af.some((f) => f.startsWith("loudnorm"))).toBe(false);
+    const off = buildAirplayAf();
+    // 解码侧不再读渠道开关:归一唯一发生地是出流侧(routes/rest/index.ts::resolveRequestAf)。
+    expect(off).toEqual(on);
+    expect(on.some((f) => f.includes("loudnorm"))).toBe(false);
+    expect(on.some((f) => f.includes("alimiter"))).toBe(false);
     // 关的是响度,不是管道:44.1k/16bit/stereo 的 pin 仍然在位。
-    expect(af).toContain("aformat=channel_layouts=stereo");
-    expect(af.some((f) => f.startsWith("aresample="))).toBe(true);
-  });
-
-  it("通道开 → 响度段回来(与上面成对,证明开关真在起作用)", () => {
-    const { hasLoudnorm } = buildAirplayAf({});
-    expect(hasLoudnorm).toBe(true);
+    expect(on).toContain("aformat=channel_layouts=stereo");
+    expect(on.some((f) => f.startsWith("aresample=") && f.includes("osr=44100") && f.includes("osf=s16"))).toBe(true);
   });
 });
 

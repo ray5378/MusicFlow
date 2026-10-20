@@ -3,51 +3,28 @@
 import { describe, it, expect } from "vitest";
 import { spawnDecoder, buildAirplayAf } from "../../src/services/airplay/decoder.js";
 
-describe("buildAirplayAf(P1-3)", () => {
-  it("缺省:实时 loudnorm ＋ 限制器 ＋ 44100 重采样 ＋ triangular_hp", () => {
-    const { af, hasLoudnorm } = buildAirplayAf({});
-    expect(hasLoudnorm).toBe(true);
-    expect(af[0]).toContain("loudnorm=I=-14");
-    expect(af).toContain("alimiter=limit=-1dB:level=false:asc=true:latency=true");
-    // 重采样＋dither 合并进同一个 aresample(与 MA 同构,分开写跑两遍)
-    expect(af).toContain("aresample=resampler=swr:osr=44100:osf=s16:dither_method=triangular_hp");
-    expect(af).toContain("aformat=channel_layouts=stereo");
+describe("buildAirplayAf(2026-10-20 修订:解码侧只做 RAOP 输出段,不再二次归一)", () => {
+  // 44.1k/16bit/stereo 与 dither 合并进同一条 aresample(与 MA 同构);链中已无 loudnorm → 走 soxr。
+  const OUTPUT_ONLY = [
+    "aresample=resampler=soxr:precision=30:osr=44100:osf=s16:dither_method=triangular_hp",
+    "aformat=channel_layouts=stereo",
+  ];
+
+  it("只返回输出段,绝不含 loudnorm / alimiter(同一段音频不再归一两遍)", () => {
+    const af = buildAirplayAf();
+    expect(af).toEqual(OUTPUT_ONLY);
+    expect(af.some((f) => f.includes("loudnorm"))).toBe(false);
+    expect(af.some((f) => f.includes("alimiter"))).toBe(false);
   });
 
-  it("逃生舱/单源关闭 → 响度段空,输出段保留(协议硬性要求)", () => {
+  it("逃生舱不再改变解码 af(响度归一已整体挪到出流侧公共链路)", () => {
     process.env.AIRPLAY_LOUDNESS = "0";
     try {
-      const { af } = buildAirplayAf({});
-      expect(af).toEqual([
-        "aresample=resampler=soxr:precision=30:osr=44100:osf=s16:dither_method=triangular_hp",
-        "aformat=channel_layouts=stereo",
-      ]);
+      expect(buildAirplayAf()).toEqual(OUTPUT_ONLY);
     } finally {
       delete process.env.AIRPLAY_LOUDNESS;
     }
-    expect(buildAirplayAf({ loudness: { enabled: false } }).af).toEqual([
-      "aresample=resampler=soxr:precision=30:osr=44100:osf=s16:dither_method=triangular_hp",
-      "aformat=channel_layouts=stereo",
-    ]);
-  });
-
-  it("有测量值走静态 volume(播过一次的本地行)", async () => {
-    const { saveAnalysis, deleteAnalysis } = await import("../../src/services/audio/analysisStore.js");
-    const { db } = await import("../../src/db/index.js");
-    const { songs } = await import("../../src/db/schema.js");
-    const { eq } = await import("drizzle-orm");
-    db.insert(songs).values({
-      id: "af-ap", title: "af", artist: "a", duration: 10,
-      path: "/music/af.mp3", contentType: "audio/mpeg", type: "local",
-    } as any).run();
-    saveAnalysis("af-ap", "local", { loudnessIntegrated: -8 });
-    try {
-      const { af } = buildAirplayAf({ rowId: "af-ap" });
-      expect(af[0]).toBe("volume=-6dB"); // -14 - (-8)
-    } finally {
-      deleteAnalysis("af-ap");
-      db.delete(songs).where(eq(songs.id, "af-ap")).run();
-    }
+    expect(buildAirplayAf()).toEqual(OUTPUT_ONLY);
   });
 });
 
@@ -57,7 +34,7 @@ describe("spawnDecoder 输入合规 + stderr", () => {
     expect(() => spawnDecoder("http://192.168.1.10/a.mp3")).toThrow(/SPEC §1.8/);
   });
 
-  it("lavfi 全链跑通:播完 stderr 打出 input_i(供 P0-4 解析)", async () => {    const ff = spawnDecoder("sine=frequency=440:duration=2:sample_rate=44100", undefined, {
+  it("lavfi 全链跑通:链中已无 loudnorm,stderr 不再产出 input_i", async () => {    const ff = spawnDecoder("sine=frequency=440:duration=2:sample_rate=44100", undefined, {
       inputFormat: "lavfi",
     });
     // 必须有人排 stdout,否则管道满后 ffmpeg 憋住永不退出(生产由 producer 排)。
@@ -68,7 +45,7 @@ describe("spawnDecoder 输入合规 + stderr", () => {
       ff.on("exit", () => { clearTimeout(t); resolve(); });
     });
     const text = ((ff as any).stderrText as () => string)();
-    expect(text).toContain("input_i");
+    expect(text).not.toContain("input_i");
   }, 20_000);
 });
 
