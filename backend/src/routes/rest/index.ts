@@ -2221,8 +2221,9 @@ async function boundedBufferWait<T>(
 // 开关控制:插件总开关关闭 = 完全恢复插件化前行为(按原源播放)。
 type SongRow = typeof songs.$inferSelect;
 
-// P2-2 备注:旧「DLNA web 源格式兜底」(上游嗅探 + ogg→192k mp3)已删除 ——
-// DLNA 全通道走管道后输出格式只由 resolveDlnaOutput 定(ogg 系一律 mp3 320),
+// P2-2 / D1 备注:旧「DLNA web 源格式兜底」(上游嗅探 + ogg→192k mp3)已删除 ——
+// DLNA 全通道走管道后输出格式只由 resolveDlnaOutput 定(2026-10-20 D1 起与
+// resolveChannelCodec 完全一致,默认一律 FLAC),
 // 不再依赖上游实际格式探测;上游错标(suffix 与实际不符)由 ffmpeg 解码器自适应。
 
 restRoutes.get("/stream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {

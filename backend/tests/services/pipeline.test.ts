@@ -7,6 +7,7 @@ import {
   limiterFilter,
   outputFilters,
   codecArgs,
+  resolveChannelCodec,
   resolveDlnaOutput,
   DEFAULT_TARGET_LUFS,
   LIMITER_CEILING_DB,
@@ -257,23 +258,69 @@ describe("整命令段序(P1-6):解码 → af → 编码", () => {
   });
 });
 
-describe("resolveDlnaOutput(P2-2):DLNA 输出决策", () => {
-  it("ogg 系一律回退 mp3 320(音箱不认 Ogg/Opus)", async () => {
-    for (const s of ["ogg", "oga", "opus"]) {
-      const o = resolveDlnaOutput(s);
-      expect(o.codec).toBe("mp3");
-      expect(o.bitrateKbps).toBe(320);
-      expect(o.mime).toBe("audio/mpeg");
+describe("resolveChannelCodec(D1):默认输出编码全局统一 FLAC", () => {
+  // 契约(D1,2026-10-20):除客户端显式要 format=mp3|aac 的转码路径
+  // (decideTranscode/serveTranscodedSong)外,五类源后缀 + 未知兜底全部 → FLAC。
+  // 容器与编码参数沿用既有 flac 分支(-c:a flac),不引入新参数。
+  const FLAC = { codec: "flac", container: "flac", mime: "audio/flac" } as const;
+
+  it("无损源(flac/wav/alac/aiff/ape)→ FLAC", () => {
+    for (const s of ["flac", "wav", "alac", "aiff", "ape"]) {
+      expect(resolveChannelCodec(s)).toEqual(FLAC);
     }
   });
-  it("其余跟随源族,与 resolveChannelCodec 一致", async () => {
-    const { resolveChannelCodec } = await import("../../src/services/audio/pipeline.js");
-    for (const s of ["mp3", "flac", "wav", "m4a", "aac", "wma", "ape", null, undefined, ""]) {
+
+  it("mp3 → FLAC(不再 mp3 320)", () => {
+    for (const s of ["mp3", ".mp3", "MP3", " mp3 "]) {
+      expect(resolveChannelCodec(s)).toEqual(FLAC);
+    }
+  });
+
+  it("acc 系(m4a/aac)→ FLAC(不再 aac 256)", () => {
+    for (const s of ["m4a", "aac"]) {
+      expect(resolveChannelCodec(s)).toEqual(FLAC);
+    }
+  });
+
+  it("ogg 系(ogg/oga/opus)→ FLAC(不再 opus 128)", () => {
+    for (const s of ["ogg", "oga", "opus"]) {
+      expect(resolveChannelCodec(s)).toEqual(FLAC);
+    }
+  });
+
+  it("未知 / 空 / 非音频后缀 → FLAC(兜底也不再 mp3 320)", () => {
+    for (const s of ["wma", "mka", "unknown", "", "   ", null, undefined]) {
+      expect(resolveChannelCodec(s)).toEqual(FLAC);
+    }
+  });
+
+  it("统一形状:全部不带码率参数(不引入新参数)", () => {
+    for (const s of ["mp3", "m4a", "aac", "ogg", "opus", "wma", null]) {
+      const ch = resolveChannelCodec(s);
+      expect(ch.codec).toBe("flac");
+      expect(ch.bitrateKbps).toBeUndefined();
+      expect(ch.container).toBe("flac");
+      expect(ch.mime).toBe("audio/flac");
+    }
+  });
+});
+
+describe("resolveDlnaOutput(D1):与公共决策完全一致", () => {
+  it("全部源后缀(含曾回退 mp3 320 的 ogg 系)一律 FLAC", () => {
+    for (const s of ["mp3", "m4a", "aac", "ogg", "oga", "opus", "flac", "wav", "alac", "aiff", "ape", "wma", null, undefined, ""]) {
+      const o = resolveDlnaOutput(s);
+      expect(o.codec).toBe("flac");
+      expect(o.container).toBe("flac");
+      expect(o.mime).toBe("audio/flac");
+    }
+  });
+  it("与 resolveChannelCodec 逐后缀完全一致(DIDL mime 与出流 MIME 同源)", () => {
+    for (const s of ["mp3", "flac", "wav", "m4a", "aac", "ogg", "oga", "opus", "wma", "ape", null, undefined, ""]) {
       expect(resolveDlnaOutput(s)).toEqual(resolveChannelCodec(s));
     }
   });
-  it("cast 时 DIDL mime 与出流 mime 同一来源(天然同步)", async () => {
-    expect(resolveDlnaOutput("ogg").mime).toBe("audio/mpeg");
+  it("cast 时 DIDL mime 与出流 mime 同一来源(天然同步)", () => {
+    expect(resolveDlnaOutput("ogg").mime).toBe("audio/flac");
     expect(resolveDlnaOutput("flac").mime).toBe("audio/flac");
   });
 });

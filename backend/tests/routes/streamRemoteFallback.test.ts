@@ -157,7 +157,7 @@ describe("/rest/stream-remote 多源换源 + 管道出流（P2-7）", () => {
 
     expect(res.status).toBe(200);
     expect(res.headers.get("x-musicflow-transcoded")).toBe("1");
-    expect(res.headers.get("content-type")?.split(";")[0]).toBe("audio/mpeg");
+    expect(res.headers.get("content-type")?.split(";")[0]).toBe("audio/flac");
     // 实时管道流没有字节总量：直出时代上游 Content-Length 一定在。
     expect(res.headers.get("content-length")).toBeNull();
     expect(res.headers.get("accept-ranges")).toBeNull();
@@ -174,7 +174,7 @@ describe("/rest/stream-remote 多源换源 + 管道出流（P2-7）", () => {
 
     expect(res.status).toBe(200);
     expect(res.headers.get("x-musicflow-transcoded")).toBe("1");
-    expect(res.headers.get("content-type")?.split(";")[0]).toBe("audio/mpeg");
+    expect(res.headers.get("content-type")?.split(";")[0]).toBe("audio/flac");
     // 换源候选确被拉取(alt1,而非歌名撞车的 alt2)
     expect(upstreamHits.some((u) => u.includes("id=alt1"))).toBe(true);
     expect(upstreamHits.some((u) => u.includes("id=alt2"))).toBe(false);

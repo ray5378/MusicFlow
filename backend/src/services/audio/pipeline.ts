@@ -383,34 +383,29 @@ export interface ChannelCodec {
 }
 
 /**
- * 按源后缀定输出编码(D4 跟随源族):
- * 无损(flac/wav/alac/aiff/ape)→FLAC;mp3→mp3 320;acc 系(m4a/aac)→aac 256;
- * ogg 系(ogg/oga/opus)→opus 128;未知兜底 mp3 320(最广兼容)。
+ * 按源后缀定**默认输出编码**(D4 跟随源族 → **D1 全局统一 FLAC**,2026-10-20):
+ *
+ * 除客户端**显式**要求 `format=mp3|aac` 的转码路径(那条走
+ * `decideTranscode`/`serveTranscodedSong`,**不经本函数**、行为不变)外,
+ * 源后缀无论 无损(flac/wav/alac/aiff/ape)、mp3、acc 系(m4a/aac)、
+ * ogg 系(ogg/oga/opus)还是**未知兜底**,默认输出**一律 FLAC**。
+ * 容器与编码参数沿用既有 flac 分支(`-c:a flac`),**不引入新参数** ——
+ * 播放链路的输出编码目标由此(HTTP / DLNA / AirPlay 中间流)统一。
  */
 export function resolveChannelCodec(suffix: string | null | undefined): ChannelCodec {
-  const s = String(suffix || "").trim().toLowerCase().replace(/^\./, "");
-  if (["flac", "wav", "alac", "aiff", "ape"].includes(s)) {
-    return { codec: "flac", container: "flac", mime: "audio/flac" };
-  }
-  if (s === "mp3") return { codec: "mp3", bitrateKbps: 320, container: "mp3", mime: "audio/mpeg" };
-  if (s === "aac" || s === "m4a") return { codec: "aac", bitrateKbps: 256, container: "adts", mime: "audio/aac" };
-  if (s === "ogg" || s === "oga" || s === "opus") {
-    return { codec: "opus", bitrateKbps: 128, container: "ogg", mime: "audio/ogg" };
-  }
-  return { codec: "mp3", bitrateKbps: 320, container: "mp3", mime: "audio/mpeg" };
+  return { codec: "flac", container: "flac", mime: "audio/flac" };
 }
 
 /**
- * DLNA 输出决策(P2-2):跟随源族,但 ogg 系(ogg/oga/opus)一律回退 mp3 320 ——
- * 音箱(MUZO 2017 固件等)普遍不支持 Ogg/Opus 容器(沿用旧 serveDlnaWebStream 兜底
- * 规则,码率按 D4 取 320)。返回 ChannelCodec,cast 时 DIDL mime 与出流
- * Content-Type 共用它,天然同步(P2-2 MIME 同步要求)。
+ * DLNA 输出决策(P2-2 → **D1 收敛**,2026-10-20):**与公共决策完全一致**。
+ *
+ * 旧的「ogg 系(ogg/oga/opus)一律回退 mp3 320」分支(理由是老固件不认 Ogg/Opus
+ * 容器)被「全局统一 FLAC」自然取代 —— FLAC 早已是现有无损源的目标格式,老固件
+ * 兼容性与现状等同(Ogg 回退的存在理由不再成立)。二者必须**同源**:否则 cast 时
+ * DIDL mime 与实际出流 Content-Type 会不一致。返回 ChannelCodec,两处 MIME 天然
+ * 同步(P2-2 MIME 同步要求)。
  */
 export function resolveDlnaOutput(suffix: string | null | undefined): ChannelCodec {
-  const s = String(suffix || "").trim().toLowerCase().replace(/^\./, "");
-  if (s === "ogg" || s === "oga" || s === "opus") {
-    return { codec: "mp3", bitrateKbps: 320, container: "mp3", mime: "audio/mpeg" };
-  }
   return resolveChannelCodec(suffix);
 }
 

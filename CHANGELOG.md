@@ -42,6 +42,15 @@
 - **影响面**:响度归一仍**只在音源源头做一遍**(出流侧公共链路),其它播放器与公共段**零改动**;音色 DSP 未丢(`playerDspFilters()` 只在出流侧 `resolveRequestAf` 调用)。
 - **已知副作用(记录在案)**:解码侧不再产出 loudnorm 的 stderr 测量报告,故 `control.ts::handleAirplaySessionEnded` 的 P0-4 落点**不再**从 AirPlay 会话拿到新的响度测量值(该值此前取自已归一过的流,参考意义本就有限;DLNA/客户端路径的测量不受影响)。
 
+### Feat / 默认输出编码全局统一为 FLAC(播放链路输出编码目标收敛)
+
+**用户显式要求(拍板 D1)**:源为 mp3 / m4a / aac / ogg / opus / 未知 时,默认输出**一律转码成 FLAC**,统一播放的输出编码目标。
+
+- **改(`backend/src/services/audio/pipeline.ts`)**:`resolveChannelCodec(suffix)` 不再按源族分档(旧:无损→FLAC / mp3→mp3 320 / m4a+aac→aac 256 / ogg+opus→opus 128 / 未知→mp3 320),**一律返回 FLAC**(容器与编码参数沿用既有 flac 分支,不引入新参数);`resolveDlnaOutput` 的「ogg 系 → mp3 320」回退(理由是老固件不认 Ogg/Opus 容器)被「全局统一 FLAC」自然取代,收敛为**与公共决策同源** —— 否则 cast 时 DIDL mime 与实际出流 Content-Type 会不一致。`/rest/stream` 未带 `format` 的默认路径随之变化(本任务唯一允许触达的公共段)。
+- **客户端联动(核对结论:判定逻辑无需改,改为锁定契约)**:`shouldUseServerTimeOffsetSeek()` 首行即 `if (serverPipelinedHttp) return true;`,而本服务端(MusicFlow 自报名)一律命中该早返回,故「未带 format 但服务端返回 FLAC」天然走 `timeOffset` 重拉、不做字节 seek、不从头播放;下方格式/码率比对分支只服务**明确识别出的非本服务端**(其直传流仍可字节 seek),不劣化。客户端补 D1 契约注释与行为断言(`transcoded_stream_seek` / `player_stream_source` / `audio_quality`),并核对强制 mp3 名单仍**按源后缀**判断(命中者显式请求 `format=mp3`,显式 format 优先于默认 FLAC)—— 两者不冲突、不重复转码。
+- **影响面**:客户端 / DLNA / AirPlay 中间流统一为 FLAC(AirPlay 解码侧因此多一次 FLAC 解码,CPU 略增、功能无影响);Sendspin 直接解码源字节,不消费该编码决策,**不受影响**;显式 `format=mp3|aac` 的转码路径(`decideTranscode` / `serveTranscodedSong`)行为不变。
+- **残留问题(记录在案,超出本任务允许改动面)**:`decideTranscode` 的「可复用原始直传」分支仍假设「管道输出 = 源格式」,当 `maxBitRate ≥ 源码率` 时(如高品质 320 遇 192kbps mp3、流量节省 128 遇 128kbps mp3)会落回默认 FLAC,出现「界面显示 320K/128K、实际是无损」的档位标签与实际不符;修它需改 `services/transcode.ts`(属公共段红线),本任务不动,待拍板。
+
 ### Test / 回归守卫与用例
 
 - 新增 `backend/scripts/check-airplay-stream-auth.mjs`（5 组共 16 条断言）并挂 `ci.yml` 新 job `airplay-stream-auth-guard`：R1 豁免清单单一真源且**恰好三条**（增删/改名必红）；R2 `/rest/*` 门禁走 `isRestAuthExemptPath(c.req.path)`、仍 `authMiddleware` 兜底、**旧内联 `includes('/dlna/stream/')` 已彻底移除**、`/rest/api/*` 第二道门禁仍在；R3 `/airplay/stream/:token` handler 必须 `resolveAirPlaySession` 自校验 + 无效即 `403` + 复用 `serveCastStream(kind:"airplay")`（并反向校验 DLNA 对照实现未被改坏）；R4 出流族两处分类同步认 AirPlay 且无 `startsWith("/rest/")` 之类整面误判；R5 行为用例在册。每条断言均做双向变异验证（改坏必红，见下）。
@@ -53,6 +62,9 @@
 
 - 新增 `backend/scripts/check-airplay-decode-af.mjs`(5 组 15 条断言)并挂 `ci.yml` 新 job `airplay-decode-af-guard`:R1 解码侧不引用 `resolveLoudnessAf`/渠道开关、pipeline 导入清单收口;R2 输出段参数锁定(targetRate/16bit/forceRate/stereo/hasLoudnorm=false);R3 **常量断言**:剥注释后解码侧全文不得出现 `loudnorm`/`alimiter`/`volume=`;R4 **反向断言**:出流侧 `resolveRequestAf` 仍调 `resolveLoudnessAf` + `playerDspFilters`,且 cast 判定仍映射 `channel="airplay"`(防「两处都删」);R5 单一实现不复制。三项反向变异(把 loudnorm 加回解码侧 / 摘掉 stereo 的 pin / 真正摘掉出流侧调用点)全部判红,还原后全绿。
 - 调整 `backend/tests/airplay/decoderAf.test.ts` 与 `decoderProducer.test.ts`:锁新形态(解码 af **逐字等于**输出段、绝不含 loudnorm/alimiter;`pipeline.airplay` 开关开/关**逐字一致**,证明解码侧与开关脱钩;lavfi 全链跑通时 stderr **不再**产出 `input_i`)。
+
+- 新增 `backend/scripts/check-audio-default-flac.mjs`(15 条断言)并挂 `ci.yml` 新 job `audio-default-flac-guard`:五类源后缀 + 未知兜底一律 FLAC;DLNA 决策与公共决策同源;显式 `format=mp3|aac` 的转码路径仍在(未误删);`decideTranscode` 的直传判定仍在。两项反向变异(改回按源族旧分支 / 恢复 `ogg→mp3`)均判红,还原后逐字节一致。
+- 服务端测试:`tests/services/pipeline.test.ts` 补 `resolveChannelCodec` / `resolveDlnaOutput` 两组 9 用例;`tests/rest/dlnaOggFallback.test.ts` 全量改判 FLAC;`tests/routes/streamRemoteFallback.test.ts` 默认出流 mime 改判 `audio/flac`。客户端:`transcoded_stream_seek_test.dart` / `seek_reload_routing_test.dart` 新增「D1:未带 format + 服务端返回 FLAC」组(判定需 timeOffset、重拉地址带 timeOffset 且不带 format、绝不做源内字节 seek)。
 
 ## [4.6.44] - 2026-10-20
 

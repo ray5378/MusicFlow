@@ -264,6 +264,20 @@ jobs:
       - name: 校验 osf 接线与插入位置 / 源位深探测 / 表改名与老库搬迁 / flow 贯通 / 播放器页入口
         run: node backend/scripts/check-audio-output-format.mjs
 
+  # 默认输出编码统一 FLAC(D1,2026-10-20 任务A)。这条链的破坏是**静默的**:把
+  # resolveChannelCodec 改回按源族分支(mp3→mp3 320 / m4a→aac 256 / ogg→opus 128 /
+  # 未知→mp3 320)后不报错、不崩,只是 HTTP/DLNA/AirPlay 四端输出编码重新漂移。
+  # 静态钉死「任何源后缀 → FLAC」与「DLNA 收敛为与公共决策一致」;运行时全量断言
+  # (五类后缀 + 未知 + 无损源)见 backend/tests/services/pipeline.test.ts。
+  # 零依赖 node 脚本,秒级完成;每条断言都做过反向变异验证(改回旧值必红)。
+  audio-default-flac-guard:
+    name: 默认输出编码统一 FLAC 守卫(五类源后缀 + 未知 → FLAC)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 校验 resolveChannelCodec 无按源族分支 / resolveDlnaOutput 收敛 / 默认接线未改 / 有损转码路径仍在
+        run: node backend/scripts/check-audio-default-flac.mjs
+
   # 入库即入队守卫(产品定调 2026-10-11 的**最根本**一条:任何入库的网络歌曲都必须过一轮
   # 下载流程)。这条链断了**不报任何错** —— 导入照常成功、库里照常有行、歌单照常能看,
   # 只是「永远不会自动下载」,手测要等到用户抱怨「导入的歌怎么老是放不出来」才浮现。

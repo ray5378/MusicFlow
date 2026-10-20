@@ -18,10 +18,11 @@ import { restRoutes } from "../../src/routes/rest/index.js";
 import { createCastSession, setRuntimePort } from "../../src/services/dlna/control.js";
 import { resolveFfmpeg } from "../../src/services/transcode.js";
 
-// P2-2 契约:/rest/dlna/stream/:token 全通道走服务端实时管道,不再有直传旁路。
-// 输出编码只由 resolveDlnaOutput 定(suffix mp3 → mp3 320;suffix flac → FLAC),
+// P2-2 / D1 契约:/rest/dlna/stream/:token 全通道走服务端实时管道,不再有直传旁路。
+// 输出编码只由 resolveDlnaOutput 定(2026-10-20 D1 起与 resolveChannelCodec 完全一致,
+// **默认一律 FLAC** —— 含自 DB suffix 判定、原 ogg→mp3 320 回退的取消),
 // 与上游实际格式无关(ffmpeg 解码器自适应,旧嗅探/探测逻辑已删)。
-// 音箱兼容头:contentFeatures.dlna.org + 12h 假 Content-Length 恒带;
+// 音箱兼容头:contentFeatures.dlna.org + 12h 假 Content-Length(按 FLAC 码率估算)恒带;
 // ICY 仅设备请求 Icy-MetaData:1 时给(icy-metaint + 空元数据装帧)。
 const app = new Hono();
 app.route("/rest", restRoutes);
@@ -32,8 +33,7 @@ let m4aBytes: Buffer;
 let mp3Bytes: Buffer;
 let flacPath: string;
 
-// 12h 假总量:mp3 320k → 320*1000/8*43200;flac 按 1411k 估算。
-const FAKE_LEN_MP3 = String(Math.ceil(320 * 1000 / 8 * 12 * 3600));
+// 12h 假总量:默认输出已统一 FLAC,按 1411k 估算(与路由 flacEstimateKbps 一致)。
 const FAKE_LEN_FLAC = String(Math.ceil(1411 * 1000 / 8 * 12 * 3600));
 
 // 真实 HTTP 上游:按 path 返回不同格式。
@@ -102,15 +102,15 @@ beforeAll(async () => {
   db.insert(artists).values({ id: "ar1", name: "Test Artist" }).run();
   db.insert(albums).values({ id: "al1", name: "Test Album", artistId: "ar1", artist: "Test Artist", year: 2020, genre: "Test" }).run();
   db.insert(songs).values([
-    // DB suffix 记 mp3,上游实际 Ogg → 管道按 suffix 出 mp3 320(ffmpeg 自适应解码 ogg)。
+    // DB suffix 记 mp3,上游实际 Ogg → 管道按 D1 默认出 FLAC(ffmpeg 自适应解码 ogg)。
     { id: "wo", title: "Ogg", artist: "Test Artist", artistId: "ar1", album: "Test Album", albumId: "al1", duration: 2, path: "web:go-music-dl:qq", suffix: "mp3", bitRate: 320, genre: "Test", type: "web", groupId: "g-ogg", groupKey: "k-ogg", url: `${baseUrl}/ogg.ogg` },
-    // 上游实际 mp3 → 同样走管道重编码(不再透传,无上游 Content-Length)。
+    // 上游实际 mp3 → 同样走管道按 D1 输出 FLAC(不再透传,无上游 Content-Length)。
     { id: "wm", title: "Mpeg", artist: "Test Artist", artistId: "ar1", album: "Test Album", albumId: "al1", duration: 2, path: "web:go-music-dl:qq", suffix: "mp3", bitRate: 320, genre: "Test", type: "web", groupId: "g-mpeg", groupKey: "k-mpeg", url: `${baseUrl}/mpeg.mp3` },
     // 幂等用例专用行。
     { id: "wc", title: "Cached", artist: "Test Artist", artistId: "ar1", album: "Test Album", albumId: "al1", duration: 2, path: "web:go-music-dl:qq", suffix: "mp3", bitRate: 320, genre: "Test", type: "web", groupId: "g-cache", groupKey: "k-cache", url: `${baseUrl}/ogg.ogg` },
-    // Content-Type octet-stream + M4A body → 管道照常出 mp3(不依赖上游 MIME)。
+    // Content-Type octet-stream + M4A body → 管道照常出 FLAC(不依赖上游 MIME)。
     { id: "so", title: "SodaM4a", artist: "Test Artist", artistId: "ar1", album: "Test Album", albumId: "al1", duration: 2, path: "web:go-music-dl:soda", suffix: "mp3", bitRate: 320, genre: "Test", type: "web", groupId: "g-soda", groupKey: "k-soda", url: `${baseUrl}/soda.m4a` },
-    // octet-stream + 真实 mp3 → 管道重编码(字节与上游不再一致)。
+    // octet-stream + 真实 mp3 → 管道重编码为 FLAC(字节与上游不再一致)。
     { id: "sm", title: "SodaMp3", artist: "Test Artist", artistId: "ar1", album: "Test Album", albumId: "al1", duration: 2, path: "web:go-music-dl:soda", suffix: "mp3", bitRate: 320, genre: "Test", type: "web", groupId: "g-sodamp3", groupKey: "k-sodamp3", url: `${baseUrl}/soda_mp3.bin` },
     // 本地 FLAC 行:device-path(本地文件)同样走管道出 FLAC。
     { id: "lf", title: "LocalFlac", artist: "Test Artist", artistId: "ar1", album: "Test Album", albumId: "al1", duration: 2, path: `l:test:${flacPath}`, suffix: "flac", bitRate: 1411, genre: "Test", type: "local" },
@@ -123,11 +123,8 @@ afterAll(async () => {
   fs.rmSync(fixtureDir, { recursive: true, force: true });
 });
 
-const hasMp3Magic = (buf: Buffer) => {
-  const hasId3 = buf[0] === 0x49 && buf[1] === 0x44 && buf[2] === 0x33;
-  const hasMp3Sync = buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0;
-  return hasId3 || hasMp3Sync;
-};
+const hasFlacMagic = (buf: Buffer) =>
+  buf.length >= 4 && buf[0] === 0x66 && buf[1] === 0x4c && buf[2] === 0x61 && buf[3] === 0x43; // "fLaC"
 
 const expectDlnaHeaders = (res: Response, mime: string, fakeLen: string) => {
   expect(res.headers.get("content-type")).toBe(mime);
@@ -138,44 +135,44 @@ const expectDlnaHeaders = (res: Response, mime: string, fakeLen: string) => {
   expect(res.headers.get("icy-metaint")).toBeNull();
 };
 
-describe("/rest/dlna/stream/:token 全通道管道出流(P2-2)", () => {
-  it("上游实际 ogg + DB suffix mp3 → 管道出 mp3(ffmpeg 自适应解码)", async () => {
+describe("/rest/dlna/stream/:token 全通道管道出流(P2-2 / D1)", () => {
+  it("上游实际 ogg + DB suffix mp3 → 管道出 FLAC(ffmpeg 自适应解码)", async () => {
     const { token } = createCastSession("wo", "dev1", "http://localhost:1");
     const res = await app.request(`/rest/dlna/stream/${token}`);
     expect(res.status).toBe(200);
-    expectDlnaHeaders(res, "audio/mpeg", FAKE_LEN_MP3);
+    expectDlnaHeaders(res, "audio/flac", FAKE_LEN_FLAC);
     const buf = Buffer.from(await res.arrayBuffer());
     expect(buf.length).toBeGreaterThan(1024);
-    expect(hasMp3Magic(buf)).toBe(true);
+    expect(hasFlacMagic(buf)).toBe(true);
   });
 
-  it("上游实际 mp3 → 同样走管道重编码(不再透传上游字节)", async () => {
+  it("上游实际 mp3 → 同样走管道重编码为 FLAC(不再透传上游字节)", async () => {
     const { token } = createCastSession("wm", "dev1", "http://localhost:1");
     const res = await app.request(`/rest/dlna/stream/${token}`);
     expect(res.status).toBe(200);
-    expectDlnaHeaders(res, "audio/mpeg", FAKE_LEN_MP3);
+    expectDlnaHeaders(res, "audio/flac", FAKE_LEN_FLAC);
     const buf = Buffer.from(await res.arrayBuffer());
-    expect(hasMp3Magic(buf)).toBe(true);
+    expect(hasFlacMagic(buf)).toBe(true);
     expect(buf.equals(mp3Bytes)).toBe(false); // 管道重编码,字节与上游不一致
   });
 
-  it("上游 octet-stream + M4A → 管道照常出 mp3(不依赖上游 MIME)", async () => {
+  it("上游 octet-stream + M4A → 管道照常出 FLAC(不依赖上游 MIME)", async () => {
     const { token } = createCastSession("so", "dev1", "http://localhost:1");
     const res = await app.request(`/rest/dlna/stream/${token}`);
     expect(res.status).toBe(200);
-    expectDlnaHeaders(res, "audio/mpeg", FAKE_LEN_MP3);
+    expectDlnaHeaders(res, "audio/flac", FAKE_LEN_FLAC);
     const buf = Buffer.from(await res.arrayBuffer());
     expect(buf.length).toBeGreaterThan(1024);
-    expect(hasMp3Magic(buf)).toBe(true);
+    expect(hasFlacMagic(buf)).toBe(true);
   });
 
-  it("上游 octet-stream + 真实 mp3 → 管道重编码(不再透传修正 MIME)", async () => {
+  it("上游 octet-stream + 真实 mp3 → 管道重编码为 FLAC(不再透传修正 MIME)", async () => {
     const { token } = createCastSession("sm", "dev1", "http://localhost:1");
     const res = await app.request(`/rest/dlna/stream/${token}`);
     expect(res.status).toBe(200);
-    expectDlnaHeaders(res, "audio/mpeg", FAKE_LEN_MP3);
+    expectDlnaHeaders(res, "audio/flac", FAKE_LEN_FLAC);
     const buf = Buffer.from(await res.arrayBuffer());
-    expect(hasMp3Magic(buf)).toBe(true);
+    expect(hasFlacMagic(buf)).toBe(true);
     expect(buf.equals(mp3Bytes)).toBe(false);
   });
 
@@ -195,7 +192,7 @@ describe("/rest/dlna/stream/:token 全通道管道出流(P2-2)", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("icy-metaint")).toBe("16384");
     const buf = Buffer.from(await res.arrayBuffer());
-    expect(hasMp3Magic(buf)).toBe(true);
+    expect(hasFlacMagic(buf)).toBe(true);
     // 装帧:每 16384 音频字节后 1 字节 0x00,零块位置固定步长 16385。
     expect(buf.length).toBeGreaterThan(16385);
     for (let pos = 16384; pos < buf.length; pos += 16385) {
@@ -211,6 +208,6 @@ describe("/rest/dlna/stream/:token 全通道管道出流(P2-2)", () => {
     const { token: t2 } = createCastSession("wc", "dev1", "http://localhost:1");
     const r2 = await app.request(`/rest/dlna/stream/${t2}`);
     expect(r2.status).toBe(200);
-    expectDlnaHeaders(r2, "audio/mpeg", FAKE_LEN_MP3);
+    expectDlnaHeaders(r2, "audio/flac", FAKE_LEN_FLAC);
   });
 });
