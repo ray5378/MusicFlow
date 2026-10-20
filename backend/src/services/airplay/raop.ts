@@ -249,6 +249,16 @@ export class RaopPlayer {
   private seq = (Math.random() * 0xffff) | 0;
   private headTs = 0;
   private startTs = 0;
+  /** `startTs` 对应的真实 NTP 时刻(内容时间线 → 墙钟的锚点)。
+   *
+   *  为什么必须单独记(2026-10-21 230 测试床实锤):seek 走"完整重建"后,`startTs`
+   *  会被重锚成 `baseTs + seekSec*rate`(内容位置),而 RTP→NTP 的换算若仍用
+   *  `ts2ntp(headTs)`,SYNC 包就会把"30 秒处的内容"标成"未来 30 秒才播" ——
+   *  shairport 实测日志 `Check packet from buffer … 31.08 seconds ahead` /
+   *  `crazy time interval of -30.08 seconds`,接收端因此一直等这个时间点,
+   *  表现就是**拖动进度后彻底无声**(HiVi 用户反馈同症状)。
+   *  正确做法:RTP 时间线只负责包间连续性,NTP 锚点 = 真正开始推流的墙钟时刻。 */
+  private startNtp = 0n;
   private baseTs = 0; // RTP ts of file-time 0 (fixed at RECORD; seek re-anchors startTs on it)
   // libraop default latency_frames = 1s of frames (cliraop passes MS2TS(1000,sr));
   // the device derives its RTP hold depth mostly from this sync field, and a
@@ -497,10 +507,12 @@ export class RaopPlayer {
     if (setup.headers["session"]) this.session = setup.headers["session"];
 
     // RECORD
-    this.headTs = ntp2ts(ntpNow(), this.opts.sampleRate);
+    const ntp0 = ntpNow();
+    this.headTs = ntp2ts(ntp0, this.opts.sampleRate);
     this.headTs -= this.headTs % CHUNK_LEN;
     this.startTs = this.headTs;
     this.baseTs = this.headTs;
+    this.startNtp = ntp0;
     const rtpInfo = `seq=${this.seq};rtptime=${this.headTs}`;
     const record = await this.sendRtsp("RECORD", null, null, [["Range", "npt=0-"], ["RTP-Info", rtpInfo]]);
     // libraop: Audio-Latency (frames) from the RECORD reply adjusts the latency
@@ -620,7 +632,11 @@ export class RaopPlayer {
     pkt[2] = 0;
     pkt[3] = 7;
     pkt.writeUInt32BE((this.headTs - this.latencyFrames) >>> 0, 4);
-    const ntp = ts2ntp(this.headTs, this.opts.sampleRate);
+    // NTP 锚点 = startNtp + (headTs - startTs) 对应的时长 —— **不能用**
+    // ts2ntp(headTs):headTs 里含内容偏移(seek 后 +seekSec*rate),直接换算会把
+    // 音频标到未来(实测 shairport 报 "31.08 seconds ahead" → 拖动后无声)。
+    const elapsedTs = (this.headTs - this.startTs) >>> 0;
+    const ntp = this.startNtp + ts2ntp(elapsedTs, this.opts.sampleRate);
     writeNtp(pkt, Number(ntp >> 32n), Number(ntp & 0xffffffffn), 8);
     pkt.writeUInt32BE(this.headTs >>> 0, 16);
     if (this.serverControlPort) this.ctrlSocket.send(pkt, 0, pkt.length, this.serverControlPort, this.opts.host);
@@ -654,10 +670,13 @@ export class RaopPlayer {
     // Anchor headTs to the wall clock for the whole stream (libraop gate
     // semantics: every chunk carries startTs + idx*CHUNK_LEN and is sent once
     // the wall clock has reached its slot). headTs therefore never drifts from
-    // real time, so sync-packet ts2ntp(headTs) and timing-reply ntpNow() always
-    // share the same clock base — the receiver's per-second synchro recalcs
-    // stay correct instead of muting in a fixed rhythm.
+    // real time; SYNC 包的 NTP 由 startNtp + (headTs − startTs) 换算(见 sendSync),
+    // 与 timing-reply 的 ntpNow() 同源,接收端的每秒校准才不会被 seek 偏移带歪。
     const wallStart = performance.now();
+    // 真正开始推流的墙钟锚点:内容 `startTs` 就在这一刻开始播。seek 重建会话后
+    // `startTs` 被重锚到内容位置(可能 +30s),SYNC 的 NTP 必须仍取"现在",
+    // 否则接收端会把音频当成"未来 N 秒才该播"而一直保持静音(见 startNtp 注释)。
+    this.startNtp = ntpNow();
     let idx = 0;
     let firstSyncSent = false;
     while (this.streaming && !this.destroying) {
@@ -721,7 +740,11 @@ export class RaopPlayer {
     this.paused = false;
     if (this.syncTimer) { clearInterval(this.syncTimer); this.syncTimer = null; }
     this.startTs = seekStartTs(this.baseTs, seekSec, this.opts.sampleRate, CHUNK_LEN);
-    this.seq = (Math.random() * 0xffff) | 0;
+    // ⚠️ **seq 必须保持连续**,不能随机重置(2026-10-21 240 现网「HiVi 拖动后彻底无声」)。
+    // RTP 的 16 位 seq 是接收端判丢包的唯一依据:一重置,设备会认为中间缺了一大段包,
+    // 持续发 NACK 重传请求(实测 seek 后 loss 每秒 +30),而旧包已清空无从补发 ⇒
+    // 设备一直等"丢失的包",时间线停住 = 无声。原地 seek 只需要**新的 rtptime + marker**,
+    // seq 继续递增即可(与 libraop 的 flush 语义一致)。
     this.started = false;
     this.audioBacklog.clear();
     this.backlogSeq = 0;
@@ -733,6 +756,15 @@ export class RaopPlayer {
         log.warn(`RAOP FLUSH rejected (${(e as Error)?.message}); relying on first-packet marker`);
       }
     }
+  }
+
+  /** 新会话起播时的内容起点(秒):只重锚 RTP 时间线与上报位置,**不发 FLUSH**。
+   *  用于「seek 走完整重建」路径 —— 新 RTSP 会话刚建立,没有旧时间线需要冲刷。
+   *  (2026-10-21:HiVi 对 FLUSH 后的原地重锚处理不正确 → 拖动后无声,故 seek 改重建。) */
+  setStartPosition(seekSec: number): void {
+    this.startTs = seekStartTs(this.baseTs, seekSec, this.opts.sampleRate, CHUNK_LEN);
+    this.positionSec = seekSec;
+    this.started = false;
   }
 
   /** Send volume via SET_PARAMETER (dB, -30..0). Fire-and-forget: receivers

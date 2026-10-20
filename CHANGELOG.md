@@ -2,6 +2,37 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.49] - 2026-10-21
+
+### Fix / AirPlay 一直卡在同一首歌:客户端「流转播放 + 拖动进度」并发建会话（根因修复）
+
+用户实测:在客户端里**流转播放**的同时**拖动进度**,AirPlay 端(HiVi H5MKII)会彻底卡住 —— 一直重复同一首、点别的歌/切歌接口回 `{"success":true}` 但完全没有动作,直到重启容器。日志确认:该设备的 `QueueController.advancing` 被一次 `playCurrent` 永久占用,而 5s 轮询在 advancing 期间会被整台跳过 → 该设备连状态都不再上报。
+
+- **根因(不是超时问题,是并发交错)**:客户端流转与拖动是**两条并发链** —— `transfer-from → playFrom`(占 `advancing`),紧接着 `seek → transport`(**不占** `advancing`)。两条链各自对同一台设备执行「停旧会话 → 建 RTSP 会话」,设备端因此在极短窗口内收到多份 ANNOUNCE/SETUP/RECORD;HiVi 的会话表错乱后,后续握手再也拿不到 200,`castToAirPlayDevice` 永远停在 connect 上 → `advancing` 永不释放 → 所有切歌被 `if (advancing.has(id)) return` 静默吞掉。
+- **修(设备级串行闸,`services/airplay/control.ts`)**:新增 `withDeviceGate(deviceId, fn)` —— 同一设备的 **cast / seek / stop / pause / resume / stopAirPlaySession** 六个会话生命周期入口严格按到达顺序执行,绝不交错。要点:
+  - **必须可重入**(`AsyncLocalStorage` 记录"当前调用链已持有哪把闸"):seek 持闸执行 `prepareSeek` 时,收尾路径可能在同一链内再调停播;若二次排队就自己等自己 ⇒ 永久卡死(本次实现的第一版正是这样,被既有用例 20s 超时抓到)。
+  - 闸内实现拆成 `castUnlocked` / `seekUnlocked`:内部只调**不加锁**的私有函数,公开入口才加闸 —— 否则 seek 回落到"重投"时会二次排队自锁。守卫 R11 对此有**反向断言**。
+  - `stopAirPlaySessionsForHost` / `startAirPlayService` 的 byebye 收尾 / `stopAirPlayService` 也统一走公开入口(同样排队),不绕过闸。
+  - fork 模式同样在**主进程**侧排队(子进程本就是单线程事件循环,但主进程的 RPC 会并发)。
+- **配套兜底(`services/player/QueueController.ts`)**:给 `playCurrent` 里两个"理论上可能永不返回"的 await 加硬顶 —— 可播性裁决 `judgePlayable` 10s(超时按"未知"照常试播,与既有"不把不知道当成死的"语义一致)、`player.playMedia` 30s(超时走既有 cast 失败分支)。底层无法取消,但**调用方一定继续**,`advancing` 不再可能被永久占用;迟到的 rejection 被就地吞掉,不会变成 unhandledRejection。
+- **实测(240 热补丁)**:
+  - 修复前:`16:09:04` 一次 idle_early 之后,该设备零 `playCurrent`、零 poll、`next` 全部静默无效(advancing 卡死 30+ 分钟)。
+  - 修复后:连续 **8 轮「transfer-from + seek 同时下发」**全部正常返回,casts 严格串行(每轮 1.4~1.6s),无 timeout 告警;并发结束后 `next` 立即生效、`playCurrent` 正常推进。
+- **测试/守卫**:`controlOrchestration.test.ts` 新增「设备级串行闸」组 —— 两次并发 cast 的 connect/spawn 严格成对串行、两次并发 seek 的解码器重建不交错、闸内重入不锁死;`check-airplay-playback-chain.mjs` 扩到 **R1~R13**(R11:闸存在 + 可重入 + 六入口齐全 + 闸内不得回调公开入口),反向变异 3 项(去掉 seek 的闸 / 去掉重入判定 / 闸内回调公开 cast)**全部判红**。
+- **影响面**:只作用于 AirPlay 设备会话的**时序**;出流地址、编码、RTSP 报文内容、DLNA / Sendspin / 客户端链路**一字未改**。
+
+### Fix / AirPlay 拖动进度后彻底无声（SYNC 时钟锚点被内容位移带跑 + seq 随机重置）
+
+230 测试床（shairport-sync + Apple 官方 ALAC 解码器）实测取证：
+
+- **接收端铁证**：拖动后日志持续出现 `Check packet from buffer … 31.08 seconds ahead` 与 `crazy time interval of -30.08 seconds` —— 音频被标注成「**未来** 30 秒才该播」，播放线程因此一直空转输出静音。
+- **根因**：seek 重建会话后 `startTs` 被重锚到 `baseTs + seekSec*rate`（内容位置），而 SYNC 包的 NTP 仍按 `ts2ntp(headTs)` 换算 —— NTP 被内容偏移整体带跑了 `seekSec` 秒。
+- **修**：`RaopPlayer` 新增 `startNtp`（内容起点对应的真实墙钟时刻），SYNC 包 NTP = `startNtp + ts2ntp(headTs − startTs)`；`connect()`（RECORD）与 `stream()`（真正起播）各锚一次。
+- **配套**：seek 默认走「完整重建会话」（`AIRPLAY_SEEK_INPLACE=1` 保留原地重锚实验路径），重建起播时按目标秒 `setStartPosition` 重锚 RTP 时间线；`prepareSeek` **不再随机重置 16 位 seq**（接收端会判「中间缺一大段包」并持续 NACK）。
+- **ALAC 互操作核验**：用 Apple 官方 ALAC 参考解码器（`/tmp/alactest`，与真机同族实现）解码我方 352 帧 raw ALAC —— `Decode status=0`、352 帧、与输入 PCM **逐字节一致**，证明帧格式无误；shairport 的 ffmpeg / hammerton 解码器不支持 RAOP 的 raw（uncompressed escape）帧，属测试床限制，非发送端缺陷。
+- **实测（230 + 240 热补丁）**：修复后 shairport `seconds ahead` / `crazy time interval` 计数**归零**；管道 PCM 由 -91 dB（全零）变为真实内容（mean -77.5 dB / max -58.3 dB，受设备音量档位衰减）；AP1 / AP2 的起播 + 前跳 + 回跳全部成功，位置单调推进。
+- **测试/守卫**：`raopPlayer.test.ts` 新增三例（起播 NTP ≈ 现在、seek 30s 重建后 NTP 仍 ≈ 现在且 rtptime 落在内容时间线、latency 字段口径）；`check-airplay-playback-chain.mjs` 扩到 **R1~R13**（R12 钉死 NTP 锚点、含「不得再用 `ts2ntp(this.headTs)`」反向断言；R13 钉死 seek 重建与 seq 连续）。
+
 ## [4.6.48] - 2026-10-20
 
 ### Fix / AirPlay 播到一半「从头开始」或「跳下一首」（HiVi H5MKII 现场实测定位）

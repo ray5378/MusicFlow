@@ -10,6 +10,7 @@
 // already pull from — and feed it to ffmpeg. Nothing in services/dlna/* is
 // modified.
 import { type ChildProcessWithoutNullStreams } from "child_process";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { PlaybackState } from "../player/types.js";
 import { RaopPlayer, type RaopSession, type RaopRealtimeStats } from "./raop.js";
 import { makeProducer, spawnDecoder, degreesToDb, killDecoder } from "./decoder.js";
@@ -126,6 +127,44 @@ export function toLoopbackAirPlayStreamUrl(streamUrl: string): string {
   }
 }
 
+/**
+ * 设备级串行闸(2026-10-21 240 现网「流转 + 拖动进度」卡死根因)。
+ *
+ * 客户端流转播放与拖动进度的时序是**并发**的:transfer 先 `playFrom`(占住
+ * QueueController.advancing),紧接着 seek 走 `transport`(不占 advancing)。
+ * 两条链各自对**同一台设备**执行"停旧会话 → 建 RTSP 会话",于是设备端会同时
+ * 收到多份 ANNOUNCE/SETUP/RECORD。真机(HiVi H5MKII)的会话表会因此错乱:
+ * 后续握手永远等不到 200 → `castToAirPlayDevice` 一直等在 connect 上,
+ * QueueController 的 `advancing` 随之被永久占用 ⇒ 用户看到「一直卡在同一首,
+ * 点别的歌也没反应」。
+ *
+ * 正交的 `advancing` 只能串行化"起播"这一条链,管不到 seek/stop/pause;
+ * 所以在**会话生命周期**这一层再加一道 per-device 串行闸:同一设备的
+ * cast / seek / stop / pause / resume 严格按到达顺序执行,绝不交错。
+ *
+ * 实现是 promise 链尾追加(`prev.then(fn, fn)`:前一个失败也继续),Map 里始终
+ * 只保留"已 settle 的尾",不随操作次数增长。fork 模式同样适用(主进程侧排队,
+ * 子进程本就是单线程事件循环)。
+ */
+const deviceGates = new Map<string, Promise<void>>();
+/** 记录「当前异步调用链已持有哪把闸」:同一链内重入必须放行,否则自锁死。
+ *  典型重入:seek 持闸执行 prepareSeek → 收尾/测试替身再调 stopAirPlaySession
+ *  (同一设备) → 若再排一次队,两者互相等,永久卡住。 */
+const gateHeld = new AsyncLocalStorage<ReadonlySet<string>>();
+
+function withDeviceGate<T>(deviceId: string, fn: () => Promise<T>): Promise<T> {
+  if (gateHeld.getStore()?.has(deviceId)) return fn(); // 可重入:同一调用链不再排队
+  const prev = deviceGates.get(deviceId) ?? Promise.resolve();
+  const exec = () => {
+    const next = new Set(gateHeld.getStore() ?? []);
+    next.add(deviceId);
+    return gateHeld.run(next, fn);
+  };
+  const run = prev.then(exec, exec);
+  deviceGates.set(deviceId, run.then(() => undefined, () => undefined));
+  return run;
+}
+
 /** 该设备是否有活跃推流会话(fork 看子进程镜像的会话表;in-proc 看本地 sessions)。 */
 function hasActiveSession(deviceId: string): boolean {
   if (isAirPlayForkMode()) return airplaySupervisor.mirror.sessions.has(deviceId);
@@ -157,7 +196,7 @@ export async function stopAirPlaySessionsForHost(host: string): Promise<string[]
   const h = host.toLowerCase();
   for (const d of getAirPlayDevices()) {
     if (d.host && d.host.toLowerCase() === h && hasActiveSession(d.id)) {
-      await stopSession(d.id);
+      await stopAirPlaySession(d.id);
       stopped.push(d.id);
     }
   }
@@ -169,7 +208,7 @@ export async function stopAirPlaySessionsForHost(host: string): Promise<string[]
 
 /** Stop an active AirPlay session (used by device management: delete/disable). */
 export async function stopAirPlaySession(deviceId: string): Promise<void> {
-  await stopSession(deviceId);
+  await withDeviceGate(deviceId, () => stopSession(deviceId));
 }
 
 /** 双协议互斥:让同一物理设备(同 host)的 DLNA 通道彻底让出音频输入。
@@ -236,6 +275,11 @@ async function startSession(opts: AirPlayCastOptions, seekSec?: number): Promise
     throw e;
   }
 
+  // 重播输入同样走回环管道(同上:raw 直通会假 EOF/从头重连);回环地址幂等直通。
+  // seek 走**完整重建**时,新会话的 RTP 时间线要按目标秒重锚(否则上报位置从 0 起算)。
+  if (seekSec !== undefined && Number.isFinite(seekSec) && seekSec > 0) {
+    player.setStartPosition(seekSec);
+  }
   const ff = spawnDecoder(feedUrl, seekSec, {
     rowId: opts.songId,
   });
@@ -500,6 +544,12 @@ export function hasAirPlayDevice(deviceId: string): boolean {
 
 /** Cast a track to an AirPlay device and start playing it. */
 export async function castToAirPlayDevice(opts: AirPlayCastOptions): Promise<{ mediaUri: string }> {
+  // 设备级串行:与 seek/stop 按到达顺序执行(见 withDeviceGate 的事故说明)。
+  return withDeviceGate(opts.deviceId, () => castUnlocked(opts));
+}
+
+/** cast 的实际实现(**不再加闸**,供 seekAirPlay 等已在闸内的调用方直调,避免自锁死)。 */
+async function castUnlocked(opts: AirPlayCastOptions): Promise<{ mediaUri: string }> {
   if (isAirPlayDeviceDisabled(opts.deviceId)) {
     throw new Error("该 AirPlay 设备已被禁用");
   }
@@ -679,40 +729,44 @@ async function castViaChild(opts: AirPlayCastOptions): Promise<void> {
 }
 
 export async function pauseAirPlay(deviceId: string): Promise<void> {
-  if (isAirPlayForkMode()) {
-    try { await airplaySupervisor.rpc("pause", { deviceId }); } catch { /* 子进程没跑 → 无会话 */ }
-    return;
-  }
-  const s = sessions.get(deviceId);
-  if (!s) return;
-  s.player.pause();
+  return withDeviceGate(deviceId, async () => {
+    if (isAirPlayForkMode()) {
+      try { await airplaySupervisor.rpc("pause", { deviceId }); } catch { /* 子进程没跑 → 无会话 */ }
+      return;
+    }
+    const s = sessions.get(deviceId);
+    if (!s) return;
+    s.player.pause();
+  });
 }
 
 export async function resumeAirPlay(deviceId: string): Promise<void> {
-  if (isAirPlayForkMode()) {
-    // 子进程里会话还在(暂停态)→ 直接恢复推进;否则回落到「重播上一首」。
-    const resumed = airplaySupervisor.isRunning()
-      ? await airplaySupervisor.rpc<boolean>("resume", { deviceId }).catch(() => false)
-      : false;
-    if (resumed) return;
+  return withDeviceGate(deviceId, async () => {
+    if (isAirPlayForkMode()) {
+      // 子进程里会话还在(暂停态)→ 直接恢复推进;否则回落到「重播上一首」。
+      const resumed = airplaySupervisor.isRunning()
+        ? await airplaySupervisor.rpc<boolean>("resume", { deviceId }).catch(() => false)
+        : false;
+      if (resumed) return;
+      const last = lastCast.get(deviceId);
+      if (last) await castUnlocked({ ...last, deviceId });
+      return;
+    }
+    const s = sessions.get(deviceId);
+    if (s) {
+      // Session alive (paused): simply resume pushing chunks.
+      s.player.resume();
+      return;
+    }
+    // No session (stopped): replay the last track from the start — mirrors how a
+    // DLNA device that was stopped still has a loaded URI and Play restarts it.
     const last = lastCast.get(deviceId);
-    if (last) await castToAirPlayDevice({ ...last, deviceId });
-    return;
-  }
-  const s = sessions.get(deviceId);
-  if (s) {
-    // Session alive (paused): simply resume pushing chunks.
-    s.player.resume();
-    return;
-  }
-  // No session (stopped): replay the last track from the start — mirrors how a
-  // DLNA device that was stopped still has a loaded URI and Play restarts it.
-  const last = lastCast.get(deviceId);
-  if (last) await startSession({ ...last, deviceId }, 0);
+    if (last) await startSession({ ...last, deviceId }, 0);
+  });
 }
 
 export async function stopAirPlay(deviceId: string): Promise<void> {
-  await stopSession(deviceId);
+  await withDeviceGate(deviceId, () => stopSession(deviceId));
 }
 
 /** Seek the current track to `seconds`.
@@ -726,7 +780,28 @@ export async function stopAirPlay(deviceId: string): Promise<void> {
  *  ANNOUNCE/SETUP/RECORD round trip. No live session → fall back to the old
  *  restart path (e.g. a raw api.seek right after stop). */
 export async function seekAirPlay(deviceId: string, seconds: number): Promise<void> {
+  // 与 cast/stop 串行:流转刚起播时立刻拖动,seek 必须排在 cast 之后,
+  // 而不是与它并发再建一条 RTSP 会话(见 withDeviceGate)。
+  return withDeviceGate(deviceId, () => seekUnlocked(deviceId, seconds));
+}
+
+async function seekUnlocked(deviceId: string, seconds: number): Promise<void> {
   const t = Math.max(0, seconds);
+  // ⚠️ 默认走**完整重建**(2026-10-21 HiVi 真机:原地 seek 的 FLUSH 重锚后设备持续
+  // 认为缺包、时间线不推进 ⇒ 拖动后彻底无声)。重建 = TEARDOWN → 新 ANNOUNCE/SETUP/
+  // RECORD → 新 seq/rtptime/SSRC,设备行为确定;代价是 ~1.5s 静音。
+  // 原地 seek 保留为实验开关(AIRPLAY_SEEK_INPLACE=1),默认不走。
+  if (process.env.AIRPLAY_SEEK_INPLACE !== "1") {
+    if (isAirPlayForkMode()) {
+      const last = lastCast.get(deviceId);
+      if (last) await castUnlocked({ ...last, deviceId, seekSec: t });
+      return;
+    }
+    const last = lastCast.get(deviceId);
+    if (!last) return;
+    await startSession({ ...last, deviceId, seekSec: t }, t);
+    return;
+  }
   if (isAirPlayForkMode()) {
     // 子进程内原地 seek(RTSP 会话与 RTP socket 不动,只换 decoder);拿不到可原地
     // seek 的会话(无会话 / 已被拆)则回落到「带 seekSec 重投」。
@@ -735,7 +810,7 @@ export async function seekAirPlay(deviceId: string, seconds: number): Promise<vo
       : false;
     if (inPlace) return;
     const last = lastCast.get(deviceId);
-    if (last) await castToAirPlayDevice({ ...last, deviceId, seekSec: t });
+    if (last) await castUnlocked({ ...last, deviceId, seekSec: t });
     return;
   }
   const s = sessions.get(deviceId);
@@ -979,7 +1054,7 @@ export function startAirPlayService(): void {
   onAirPlayEvent((e) => {
     if (e.type === "byebye") {
       // Device vanished → force-stop any active session.
-      if (hasActiveSession(e.id)) void stopSession(e.id);
+      if (hasActiveSession(e.id)) void stopAirPlaySession(e.id);
     }
   });
   // fork 模式:顺带把推流子进程拉起来(不阻塞启动流程;投屏时还有懒启动兜底)。
@@ -1009,7 +1084,7 @@ export async function stopAirPlayService(): Promise<void> {
   // 1. 停掉全部活跃会话(RAOP TEARDOWN + ffmpeg kill),释放音频资源。
   const activeIds = Array.from(sessions.keys());
   for (const id of activeIds) {
-    try { await stopSession(id); } catch { /* ignore */ }
+    try { await stopAirPlaySession(id); } catch { /* ignore */ }
   }
   // 2. 清内存态(音量/最近投屏/设备列表)。
   volumeState.clear();

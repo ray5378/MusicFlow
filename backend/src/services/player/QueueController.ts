@@ -38,6 +38,37 @@ function stripPlayerPrefix(playerId: string): string {
   return playerId;
 }
 
+/**
+ * 给 playCurrent 里「理论上可能永不返回」的 await 加硬顶(2026-10-21 240 现网事故)。
+ *
+ * 事故形态:HiVi 的 `advancing` 被一次 `playCurrent` 永久占用 ——
+ * `next`/`play` 全部在 `if (this.advancing.has(id)) return` 处被**静默吞掉**
+ * (接口仍回 `{"success":true}`,日志里连 playCurrent 都没有),用户观感就是
+ * 「一直卡在同一首,点别的歌也没反应」。poll 循环同样跳过该设备,所以连状态都不再上报。
+ *
+ * 无法取消底层调用(socket/SQLite 无取消语义),所以这里只保证**调用方一定会继续**:
+ * 超时后按调用方给的兜底值返回,原 promise 的迟到结果/异常被就地吞掉
+ * (迟到的 rejection 不得变成 unhandledRejection —— 那会直接杀进程)。
+ */
+function withTimeout<T>(
+  p: Promise<T>,
+  ms: number,
+  label: string,
+  fallback: () => T,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // 先把迟到分支吃掉(与下面的 race 各挂一个 handler,互不影响)。
+  p.catch(() => { /* 超时后迟到失败:忽略 */ });
+  const timeout = new Promise<T>((resolve) => {
+    timer = setTimeout(() => {
+      log.warn(`[QueueController][timeout] ${label}: 超过 ${ms}ms 未返回,强制继续(避免 advancing 永久占用)`);
+      resolve(fallback());
+    }, ms);
+    timer.unref?.();
+  });
+  return Promise.race([p, timeout]).finally(() => { if (timer) clearTimeout(timer); });
+}
+
 interface QueueData {
   items: QueueItem[];
   currentIndex: number;
@@ -905,7 +936,15 @@ export class QueueController extends EventEmitter {
     let skips = 0;
     let item = q.currentIndex >= 0 ? q.items[q.currentIndex] : undefined;
     while (item) {
-      const verdict = await this.judgePlayable(item);
+      // 可播性裁决可能走网络探测(在线直链复核 / 优选换行);一旦某条链路挂死,
+      // 这里就是 advancing 永久占用的入口(2026-10-21 240:HiVi 卡在《亲爱的你啊》)。
+      // 超时按「未知」处理 = 照常试播,与既有「不把不知道当成死的」语义一致。
+      const verdict = await withTimeout(
+        this.judgePlayable(item),
+        10_000,
+        `${deviceId} judgePlayable(${item.songId})`,
+        () => "play" as const,
+      );
       if (verdict === "play") break;
 
       if (skips >= skipLimit) {
@@ -956,7 +995,14 @@ export class QueueController extends EventEmitter {
       // 拖动"投不出去"时,配合下面完成行的耗时能看出是设备慢还是链路断了。
       const castT0 = Date.now();
       log.debug(`[QueueController][cast] ${playerId} 起点 idx=${q.currentIndex} song=${fullItem.songId} baseUrl=${baseUrl} dur=${this.knownDuration(fullItem)}`);
-      const { mediaUri } = await player.playMedia(fullItem, baseUrl);
+      // cast 内部含 RTSP 握手 / 设备 SOAP / 令牌落库;任何一步挂死都会让 advancing 永不释放。
+      // 30s 硬顶(设备侧单步超时 8s,这里覆盖多步串联的最坏情况),超时走下面的失败分支。
+      const { mediaUri } = await withTimeout(
+        player.playMedia(fullItem, baseUrl),
+        30_000,
+        `${playerId} playMedia(${fullItem.songId})`,
+        () => { throw new Error("playMedia 超过 30000ms 未返回(cast 挂死)"); },
+      );
       log.debug(`[QueueController][cast] ${playerId} 完成 ${Date.now() - castT0}ms mediaUri=${mediaUri}`);
       // cast 命令已送达 → 断开连续失败链(下面的 catch 才计失败)。
       this.castFailStreak.delete(deviceId);

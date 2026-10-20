@@ -29,6 +29,8 @@ import {
   resolveRsaPublicKey,
   rsaOaepEncrypt,
   aesCbcEncrypt,
+  ntpNow,
+  ntpToMs,
 } from "../../src/services/airplay/raop.js";
 
 // ---------------------------------------------------------------------------
@@ -929,5 +931,63 @@ describe("sendRtsp:RTSP 请求构造与响应解析", () => {
     const { p, anyP } = makePlayer();
     anyP.socket = null;
     await expect((p as any).sendRtsp("TEARDOWN", null, null)).rejects.toThrow(/closed/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SYNC 包的 NTP 锚点(2026-10-21「拖动进度后无声」的根因回归)
+//
+// 背景:seek 走「完整重建」后 RTP 时间线被重锚到 baseTs + seekSec*rate(内容位置),
+// 若 SYNC 仍用 ts2ntp(headTs),接收端(shairport 实测)会报
+//   "Check packet from buffer … 31.08 seconds ahead" / "crazy time interval of -30.08s"
+// 并把音频当成「未来 30 秒才该播」⇒ 一直静音。正确语义:
+//   SYNC.ntp = 推流墙钟(startNtp) + (headTs − startTs) 对应的时长。
+describe("sendSync:NTP 锚点必须锚推流墙钟(拖动后无声根因)", () => {
+  /** 从 SYNC 包读出 NTP(秒/小数)并换算成毫秒(与 ntpNow 同一单调时钟口径)。 */
+  function readNtpMs(pkt: Buffer): number {
+    const sec = pkt.readUInt32BE(8);
+    const frac = pkt.readUInt32BE(12);
+    return sec * 1000 + (frac * 1000) / 2 ** 32;
+  }
+
+  it("普通起播:SYNC 的 NTP ≈ 现在(±1s)", () => {
+    const { p, anyP, ctrl } = makePlayer();
+    anyP.startNtp = ntpNow();
+    anyP.headTs = anyP.startTs;
+    (p as any).sendSync(true);
+    const pkt = ctrl.last;
+    expect(pkt[0]).toBe(0x90); // 首个 SYNC 带 marker 位
+    expect(pkt[1]).toBe(0xd4);
+    const delta = Math.abs(readNtpMs(pkt) - ntpToMs(ntpNow()));
+    expect(delta).toBeLessThan(1000);
+  });
+
+  it("seek 30s 重建后:内容偏移体现在 rtptime,但 NTP 仍是现在(不是 +30s)", () => {
+    const { p, anyP, ctrl } = makePlayer();
+    anyP.baseTs = 441000;
+    anyP.startTs = 441000;
+    anyP.headTs = 441000;
+    (p as any).setStartPosition(30);
+    // stream() 发第一包时 headTs = startTs、started 置真、并重锚 startNtp = ntpNow()
+    anyP.headTs = anyP.startTs;
+    anyP.started = true;
+    anyP.startNtp = ntpNow();
+    (p as any).sendSync(true);
+    const pkt = ctrl.last;
+    // rtp_timestamp(偏移 16)必须落在 30s 之后的内容时间线上
+    expect(pkt.readUInt32BE(16)).toBe(anyP.startTs);
+    expect(pkt.readUInt32BE(16) - 441000).toBeGreaterThanOrEqual(30 * SAMPLE_RATE - CHUNK_LEN);
+    // NTP 不能被内容偏移带跑(修复前这里会差 ~30000ms)
+    const delta = readNtpMs(pkt) - ntpToMs(ntpNow());
+    expect(Math.abs(delta)).toBeLessThan(1000);
+  });
+
+  it("SYNC 的 rtp_timestamp_latency 字段 = headTs − latencyFrames", () => {
+    const { p, anyP, ctrl } = makePlayer();
+    anyP.startNtp = ntpNow();
+    anyP.headTs = anyP.startTs;
+    (p as any).sendSync(false);
+    const pkt = ctrl.last;
+    expect(pkt.readUInt32BE(4)).toBe((anyP.headTs - anyP.latencyFrames) >>> 0);
   });
 });

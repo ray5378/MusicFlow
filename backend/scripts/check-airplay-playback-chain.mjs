@@ -366,6 +366,103 @@ console.log("===== R10 上游超时只约束「建连+响应头」,不得挂到 
   );
 }
 
+console.log("===== R11 设备级串行闸:「流转 + 拖动」并发不得交错建 RTSP 会话 =====");
+{
+  // 2026-10-21 240 现网:客户端 transfer 与 seek 是**并发**的两条链(seek 不走 advancing),
+  // 各自对同一台设备停/建会话 → 设备会话表错乱 → 后续握手挂住 → advancing 永久占用
+  // (用户观感「一直卡在同一首,点别的歌没反应」)。
+  check(
+    "存在 withDeviceGate(per-device promise 链)",
+    /function\s+withDeviceGate\s*</.test(ap),
+    "未找到 withDeviceGate",
+  );
+  check(
+    "闸必须可重入(AsyncLocalStorage 记录已持有的设备)",
+    /new\s+AsyncLocalStorage/.test(ap) && /gateHeld\.getStore\(\)\?\.has\(deviceId\)/.test(ap),
+    "闸未做重入判定(同一调用链里再调 stop 会自锁死)",
+  );
+  check(
+    "**常量断言**:六个会话入口都走闸(cast/seek/stop/pause/resume/stopAirPlaySession)",
+    count(ap, "withDeviceGate(") === 6,
+    `withDeviceGate 调用 = ${count(ap, "withDeviceGate(")}(六入口各 1,应为 6;函数定义是 withDeviceGate<T>( 不计入)`,
+  );
+  check(
+    "castToAirPlayDevice → withDeviceGate(opts.deviceId, ... castUnlocked)",
+    /withDeviceGate\(opts\.deviceId,\s*\(\)\s*=>\s*castUnlocked\(opts\)\)/.test(ap),
+    "castToAirPlayDevice 未包闸(或没走 castUnlocked)",
+  );
+  check(
+    "seekAirPlay → withDeviceGate(deviceId, ... seekUnlocked)",
+    /withDeviceGate\(deviceId,\s*\(\)\s*=>\s*seekUnlocked\(deviceId,\s*seconds\)\)/.test(ap),
+    "seekAirPlay 未包闸(或没走 seekUnlocked)",
+  );
+  check(
+    "**反向断言**:闸内实现(castUnlocked/seekUnlocked)不得再调公开入口(防自锁)",
+    !/castUnlocked[\s\S]{0,2000}?await\s+castToAirPlayDevice\(/.test(ap)
+      && !/seekUnlocked[\s\S]{0,3000}?await\s+seekAirPlay\(/.test(ap),
+    "闸内又调了公开的 cast/seek(会二次排队自锁)",
+  );
+}
+
+console.log("===== R12 SYNC 包 NTP 锚点:必须锚「推流墙钟」,不得把内容偏移(seek)当成未来时间 =====");
+{
+  // 2026-10-21 230 测试床实锤:seek 走完整重建后 startTs 被重锚到 baseTs+seekSec*rate,
+  // 而 SYNC 仍用 ts2ntp(headTs) → 把 30s 处的内容标成「未来 30 秒才播」。shairport 日志:
+  //   "Check packet from buffer … 31.08 seconds ahead" / "crazy time interval of -30.08 seconds"
+  // 接收端一直等这个时间点 ⇒ **拖动进度后彻底无声**(HiVi 同症状)。
+  const raop = stripComments(read("backend/src/services/airplay/raop.ts"));
+  check(
+    "RaopPlayer 持有 startNtp(内容起点对应的真实 NTP 时刻)",
+    /private\s+startNtp\s*=\s*0n/.test(raop),
+    "缺 startNtp 字段",
+  );
+  check(
+    "RECORD 时记下 ntp0 → startNtp(基准会话)",
+    /const\s+ntp0\s*=\s*ntpNow\(\)[\s\S]{0,400}?this\.startNtp\s*=\s*ntp0/.test(raop),
+    "connect() 未把 RECORD 时刻记进 startNtp",
+  );
+  check(
+    "stream() 起播时重锚 startNtp = ntpNow()(seek 重建也生效)",
+    /this\.startNtp\s*=\s*ntpNow\(\)/.test(raop),
+    "stream() 未在起播时重锚 startNtp",
+  );
+  check(
+    "sendSync:ntp = startNtp + ts2ntp(headTs − startTs)",
+    /this\.startNtp\s*\+\s*ts2ntp\(elapsedTs/.test(raop),
+    "sendSync 未按「起点 NTP + 已播时长」换算",
+  );
+  check(
+    "**反向断言**:sendSync 不得再用 ts2ntp(this.headTs)(含内容偏移)",
+    !/sendSync[\s\S]{0,1200}?ts2ntp\(this\.headTs/.test(raop),
+    "sendSync 仍直接换算 headTs → seek 后接收端会把音频当成未来时间",
+  );
+}
+
+console.log("===== R13 seek 语义:默认完整重建 + seq 连续(禁止随机重置) =====");
+{
+  const raop = stripComments(read("backend/src/services/airplay/raop.ts"));
+  check(
+    "prepareSeek 不得随机重置 seq(接收端会判丢包/持续 NACK)",
+    !/prepareSeek[\s\S]{0,1600}?this\.seq\s*=\s*\(Math\.random\(\)\s*\*\s*0xffff\)/.test(raop),
+    "prepareSeek 里有 seq 随机重置",
+  );
+  check(
+    "AirPlay 侧提供 setStartPosition(只重锚时间线,不发 FLUSH)",
+    /setStartPosition\(seekSec:\s*number\)/.test(raop),
+    "缺 setStartPosition",
+  );
+  check(
+    "seek 默认走完整重建(AIRPLAY_SEEK_INPLACE=1 才保留原地实验路径)",
+    /AIRPLAY_SEEK_INPLACE\s*!==\s*"1"/.test(ap),
+    "control.ts 的 seek 默认分支不是重建",
+  );
+  check(
+    "重建起播时按 seek 目标重锚 RTP 时间线",
+    /setStartPosition\(seekSec\)/.test(ap),
+    "startSession 未按 seekSec 调用 setStartPosition",
+  );
+}
+
 console.log("");
 if (failures.length) {
   console.log(`✗ AirPlay 播放链路时序守卫失败 ${failures.length} 项:`);

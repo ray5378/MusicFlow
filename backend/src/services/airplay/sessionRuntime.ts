@@ -128,6 +128,10 @@ export class AirplaySessionRuntime {
       player.stop().catch(() => {});
       throw e;
     }
+    // seek 走完整重建时,新会话的 RTP 时间线按目标秒重锚(否则上报位置从 0 起算)。
+    if (a.seekSec !== undefined && Number.isFinite(a.seekSec) && a.seekSec > 0) {
+      player.setStartPosition(a.seekSec);
+    }
     const ff = spawnDecoder(a.streamUrl, a.seekSec, { rowId: a.songId });
     const active: ActiveSession = {
       deviceId: a.deviceId,

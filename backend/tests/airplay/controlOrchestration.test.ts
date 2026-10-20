@@ -112,6 +112,7 @@ vi.mock("../../src/services/airplay/raop.js", () => {
     stop = vi.fn(async () => undefined);
     setVolumeDb = vi.fn();
     prepareSeek = vi.fn(async () => undefined);
+    setStartPosition = vi.fn();
     constructor(_opts: any) {
       S.players.push(this);
     }
@@ -947,6 +948,12 @@ describe("暂停 / 恢复 / 停止", () => {
 
 // ===========================================================================
 describe("Seek", () => {
+  // 2026-10-21:默认 seek 已改为「完整重建会话」;本组保留的是
+  // AIRPLAY_SEEK_INPLACE=1 的实验路径(原地换解码器),故组内统一置位。
+  let prevInPlace: string | undefined;
+  beforeEach(() => { prevInPlace = process.env.AIRPLAY_SEEK_INPLACE; process.env.AIRPLAY_SEEK_INPLACE = "1"; });
+  afterEach(() => { if (prevInPlace === undefined) delete process.env.AIRPLAY_SEEK_INPLACE; else process.env.AIRPLAY_SEEK_INPLACE = prevInPlace; });
+
   it("seekAirPlay:负数当 0 处理(catch-up/无效输入不能把进度搞坏)", async () => {
     const player = await seedSession();
     player.prepareSeek.mockImplementationOnce(async () => { player.endStream(); });
@@ -1553,10 +1560,80 @@ describe("播放链路时序(PLAYING 立即上报 / IDLE 真实落点 / 过期�
 });
 
 // ===========================================================================
-// 2026-10-20 240 现网:「HiVi 播到一半从头开始 / 去下一首」的取流契约。
-// 根因 = 解码器吃 raw 直通(`/rest/dlna/stream/:tok?raw=1`)+ 允许 HTTP 重连。
-// 下面两条钉住修复方向,变异(退回 raw / 退回 SIGTERM)即红。
+// 默认 seek 路径(未设 AIRPLAY_SEEK_INPLACE):完整重建会话 + 按目标秒重锚时间线
 // ===========================================================================
+describe("Seek(默认):完整重建会话 + setStartPosition", () => {
+  it("未设 AIRPLAY_SEEK_INPLACE → 不调 prepareSeek,而是重建会话并按目标秒锚定", async () => {
+    delete process.env.AIRPLAY_SEEK_INPLACE;
+    const player = await seedSession();
+    player.prepareSeek.mockClear();
+    const before = decoder.spawnDecoder.mock.calls.length;
+    await C.seekAirPlay(devId(), 65);
+    // 原地路径不得被走(否则 HiVi 对 FLUSH 后重锚处理不正确 → 无声)
+    expect(player.prepareSeek).not.toHaveBeenCalled();
+    // 新会话:新解码器 + 新 RaopPlayer,并按目标秒重锚 RTP 时间线
+    expect(decoder.spawnDecoder.mock.calls.length).toBe(before + 1);
+    const p2 = S.players[S.players.length - 1];
+    expect(p2).not.toBe(player);
+    expect(p2.setStartPosition).toHaveBeenCalledWith(65);
+    // 旧会话必须被收掉(RTSP TEARDOWN),否则设备同时维护两路会话
+    expect(player.stop).toHaveBeenCalled();
+  });
+});
+
+// ===========================================================================
+// 2026-10-21 240 现网「流转 + 拖动进度」卡死:客户端把 transfer 与 seek 并发打进来,
+// 两条链各自对同一台设备建 RTSP 会话 → 设备会话表错乱 → 后续握手挂住 →
+// QueueController.advancing 被永久占用(点别的歌没反应)。
+// 修复 = 设备级串行闸(可重入)。下面钉住「绝不交错」。
+// ===========================================================================
+describe("设备级串行闸:并发 cast/seek 不交错建会话", () => {
+  let prevInPlace2: string | undefined;
+  beforeEach(() => { prevInPlace2 = process.env.AIRPLAY_SEEK_INPLACE; process.env.AIRPLAY_SEEK_INPLACE = "1"; });
+  afterEach(() => { if (prevInPlace2 === undefined) delete process.env.AIRPLAY_SEEK_INPLACE; else process.env.AIRPLAY_SEEK_INPLACE = prevInPlace2; });
+
+  it("两次并发 cast(流转触发 + 用户点播)→ connect/spawn 严格成对串行", async () => {
+    S.setDevices([dev()]);
+    await Promise.all([
+      C.castToAirPlayDevice(castOpts(devId(), { seekSec: 0 })),
+      C.castToAirPlayDevice(castOpts(devId(), { seekSec: 30 })),
+    ]);
+    const c1 = S.players[0].connect.mock.invocationCallOrder[0];
+    const s1 = decoder.spawnDecoder.mock.invocationCallOrder[0];
+    const c2 = S.players[1].connect.mock.invocationCallOrder[0];
+    const s2 = decoder.spawnDecoder.mock.invocationCallOrder[1];
+    // 串行 = c1 < s1 < c2 < s2;交错(并发)会让 c2 落在 s1 之前。
+    expect(c1).toBeLessThan(s1);
+    expect(s1).toBeLessThan(c2);
+    expect(c2).toBeLessThan(s2);
+  });
+
+  it("两次并发 seek(拖动连发)→ 解码器重建严格串行,不交错", async () => {
+    const player = await seedSession();
+    // 每次原地 seek 都要把在途推流收掉(否则 seek 自己会等满 30s)。
+    player.prepareSeek.mockImplementation(async () => { player.endStream(); });
+    await Promise.all([
+      C.seekAirPlay(devId(), 10),
+      C.seekAirPlay(devId(), 20),
+    ]);
+    // 第一次 seek 的新解码器必须在第二次 seek 的 prepareSeek **之前**建好;
+    // 交错(并发)会让两个 seek 同时 kill/重建同一会话。
+    const s1 = decoder.spawnDecoder.mock.invocationCallOrder[0];
+    const p2 = player.prepareSeek.mock.invocationCallOrder[1];
+    expect(s1).toBeLessThan(p2);
+  });
+
+  it("闸可重入:seek 过程中收尾路径再调 stopAirPlaySession 不会自锁死", async () => {
+    const player = await seedSession();
+    player.prepareSeek.mockImplementationOnce(async () => {
+      // 同一异步链内重入:若闸不可重入,这里会永远等不到锁 → 20s 超时。
+      await C.stopAirPlaySession(devId());
+      player.endStream();
+    });
+    await expect(C.seekAirPlay(devId(), 30)).resolves.toBeUndefined();
+  });
+});
+
 describe("取流契约:回环管道化 + 强杀回收", () => {
   it("toLoopbackAirPlayStreamUrl:只换 origin,path/token/query 原样保留", () => {
     expect(C.toLoopbackAirPlayStreamUrl("http://192.168.1.9:46400/rest/airplay/stream/abc?x=1"))
