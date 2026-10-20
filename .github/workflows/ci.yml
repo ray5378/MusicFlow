@@ -83,6 +83,10 @@ name: ci
 #      来源;并**反向**钉死「当前在用的 Airplay / ChevronUp / Pin 不得被摘掉」。破坏全是静默的:
 #      名字没在册 → resolved 返回 null → 渲染空 span(vue-tsc 与既有测试都拦不住),
 #      用户感知就是「这块怎么是空的」(2026-10-20 实报「AirPlay 设备在前端没有图标」)。
+#  23. AirPlay RTSP 请求行守卫(scripts/check-airplay-rtsp-line.mjs)——RAOP 握手请求行必须是
+#      三段式 `METHOD url RTSP/1.0`(RFC 2326);sendRtsp 与 fire-and-forget 的 sendRtspNoWait
+#      两个分支都不得漏版本段,并反向断言不得再出现两段式写法。破坏全静默:真机容错吸收,
+#      但标准合规接收端(shairport-sync 等)一律 400,用户感知「接收器连不上、放不出声」。
 # 镜像发布仍由 build.yml(v* tag)负责,与本 CI 互不影响。
 
 on:
@@ -265,6 +269,18 @@ jobs:
       - uses: actions/checkout@v4
       - name: 校验 PLAYING 主动上报、IDLE 真实落点、stillCurrent 抑制、pollState 带 mediaUri
         run: node backend/scripts/check-airplay-playback-chain.mjs
+
+  # 2026-10-20:RAOP 握手请求行缺 `RTSP/1.0` 版本段(`METHOD url` 两段式)。真机 HiVi 容错
+  # 吸收所以长期未暴露;230 上用 shairport-sync 做接收端时对端直接 400(Bad Request),
+  # 表现为「接收器连不上、一个字都放不出来」。本 job 把「sendRtsp / sendRtspNoWait 两个
+  # 分支都必须拼三段式请求行」钉死在 CI,并反向断言不得再出现两段式写法。
+  airplay-rtsp-line-guard:
+    name: "AirPlay RTSP 请求行守卫(版本段不得省)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 校验 sendRtsp / sendRtspNoWait 请求行均为 METHOD url RTSP/1.0
+        run: node backend/scripts/check-airplay-rtsp-line.mjs
 
   # 2026-09-27:后端路由按业务域拆分后,7 处路径耦合的静态守卫全部静默失同步
   # (3 处假红 + 3 处假绿)。守卫盯的是源码内容,却没人盯「源码还在不在那个位置」——

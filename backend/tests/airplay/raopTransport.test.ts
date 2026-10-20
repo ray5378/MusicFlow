@@ -165,6 +165,18 @@ describe("connect():RAOP 会话建立", () => {
     expect(p.encrypted).toBe(false);
   });
 
+  // 请求行三段式(METHOD url RTSP/1.0)是 RFC 2326 硬要求。此前只发 `METHOD url`,
+  // 真机 HiVi H5MKII 容错吸收,但标准合规接收端(shairport-sync 等)直接 400
+  // (对端日志 msg_handle_line fail / can't find an RTSP header),表现为完全放不出声。
+  it("三条握手请求的请求行都是三段式(以 RTSP/1.0 收尾),不得漏版本段", async () => {
+    await connected();
+    const tcp = H.tcpSockets[0];
+    for (const [idx, method] of ["ANNOUNCE", "SETUP", "RECORD"].entries()) {
+      const firstLine = tcp.written[idx].split("\r\n")[0];
+      expect(firstLine).toMatch(new RegExp(`^${method} rtsp://\\S+ RTSP/1\\.0$`));
+    }
+  });
+
   it("SETUP 的 Transport 头回带本端 control/timing 端口(设备据此回包)", async () => {
     const { anyP } = await connected();
     const setup = H.tcpSockets[0].written[1];
@@ -271,6 +283,8 @@ describe("setVolumeDb / sendRtspNoWait:音量必须非阻塞(接收端常不回�
     expect(req).toContain("SET_PARAMETER ");
     expect(req).toContain("volume: -12.00");
     expect(req).toContain("Content-Type: text/parameters");
+    // fire-and-forget 分支也必须带 RTSP 版本段(否则合规接收端 400,音量静默失效)。
+    expect(req.split("\r\n")[0]).toMatch(/^SET_PARAMETER rtsp:\/\/\S+ RTSP\/1\.0$/);
     expect(anyP.socket).toBeTruthy();
   });
 

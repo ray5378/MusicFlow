@@ -333,6 +333,16 @@ export class RaopPlayer {
     this.localIp = this.audioSocket.address().address;
   }
 
+  /**
+   * 发一条 RTSP 请求。
+   *
+   * ⚠️ 请求行必须是 `METHOD url RTSP/1.0` 三段 —— **版本段不能省**(2026-10-20 定位):
+   * 此前只发 `METHOD url`,真机 HiVi H5MKII **容错吸收**了非法请求行,所以一直没暴露;
+   * 但标准合规的接收端(如 shairport-sync)会直接回 `RTSP/1.0 400 Bad Request`
+   * (对端日志 `msg_handle_line fail` / `can't find an RTSP header`),表现为
+   * 「ATV/AirPlay 接收器连不上、一个字都放不出来」。用 230 上的 shairport 做 A/B 实测:
+   * 无版本段 → 400;补上 `RTSP/1.0` → ANNOUNCE/SETUP/RECORD 全 200。
+   */
   private sendRtsp(method: string, body: string | null, contentType: string | null, extra: [string, string][] = []): Promise<{ status: number; headers: Record<string, string>; body: string }> {
     if (!this.socket) return Promise.reject(new Error("RTSP socket closed"));
     return new Promise((resolve, reject) => {
@@ -344,7 +354,7 @@ export class RaopPlayer {
       ];
       if (this.session) headers.push(["Session", this.session]);
       if (extra.length) headers.push(...extra);
-      let head = ` ${this.url}\r\n`;
+      let head = ` ${this.url} RTSP/1.0\r\n`;
       let payload = "";
       let extraBody: Buffer | null = null;
       if (contentType && body !== null) {
@@ -406,7 +416,10 @@ export class RaopPlayer {
    *  non-blocking: many receivers (e.g. HiVi H5MKII) accept it silently while
    *  streaming but never reply, and waiting ties up the HTTP handler (frontend
    *  volume slider stalls for the whole timeout). libraop's raopcl_set_volume
-   *  is likewise asynchronous. */
+   *  is likewise asynchronous.
+   *
+   *  请求行同样必须带 `RTSP/1.0` 版本段 —— 与 sendRtsp 同一条契约;漏一处就等于
+   *  那条控制指令(FLUSH / TEARDOWN / SET_PARAMETER)被合规接收端 400。 */
   private sendRtspNoWait(method: string, body: string | null, contentType: string | null, extra: [string, string][] = []): void {
     if (!this.socket || this.socket.destroyed) return;
     const headers: [string, string][] = [
@@ -417,7 +430,7 @@ export class RaopPlayer {
     ];
     if (this.session) headers.push(["Session", this.session]);
     if (extra.length) headers.push(...extra);
-    let head = ` ${this.url}\r\n`;
+    let head = ` ${this.url} RTSP/1.0\r\n`;
     let payload = "";
     if (contentType && body !== null) {
       payload = body;

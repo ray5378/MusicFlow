@@ -93,6 +93,24 @@ D1(输出编码全局统一 FLAC)落地后暴露的**功能回退**:`decideTrans
 - 收紧 `backend/tests/services/transcode.test.ts`:两条旧用例(「源即 mp3 且码率达标 → 不转码」「仅 maxBitRate 且源码率不超标 → 原样返回」)改判为「必须转码」,镜像用例表同步更新并**重新定位** —— 该表只描述本服务端(MusicFlow)语义,不再与客户端 `_contractVectors` 逐项等同(后者描述**外部服务端**「源格式相同即可字节直传」的启发式,刻意分道:不为本服务端的 D1 去劣化外服务器的字节 seek)。
 - `check-audio-default-flac.mjs` 增补 3 条断言(共 18 条):**常量断言** `canUseOriginal` 不得再加回来、显式 format 分支恒 `should:true`、显式 maxBitRate 分支恒转 mp3;反向变异(把快路径加回去)判红 2 条,还原后全绿。
 
+## [4.6.46] - 2026-10-20
+
+### Fix / AirPlay 投屏到标准合规接收端完全放不出声：RAOP 请求行缺 `RTSP/1.0` 版本段
+
+用 230 上起的 shairport-sync 冒充接收端（E0/E1 测试床）复测 AirPlay 时暴露：投屏建立会话就失败，服务端 `cast FAILED: RTSP ANNOUNCE failed: RTSP/1.0 400 Bad Request`，接收端日志是 `msg_handle_line fail` / `rtsp_read_request can't find an RTSP header`。
+
+- **根因（`backend/src/services/airplay/raop.ts`）**：`sendRtsp()` / `sendRtspNoWait()` 拼的请求行只有两段 —— `METHOD rtsp://host:port/<sid>`，**漏了 RFC 2326 要求的 `RTSP/1.0` 版本段**。所有 RTSP 指令（ANNOUNCE / SETUP / RECORD / FLUSH / TEARDOWN / SET_PARAMETER）都受影响。
+- **为什么一直没暴露**：真机 **HiVi H5MKII 对非法请求行是「容错吸收」**的（它照样回 200），所以此前真机投屏能用；换成标准合规的实现就一律 400。既有单测只断言 `toContain("ANNOUNCE ")`，也拦不住缺版本段。
+- **A/B 实测（同一份 SDP，对 230 的 shairport-sync:7100）**：
+  - 复刻旧写法（`ANNOUNCE rtsp://…`）→ `RTSP/1.0 400 Bad Request`
+  - 补上版本段（`ANNOUNCE rtsp://… RTSP/1.0`）→ `200 OK`；继续 SETUP → `200`（`Transport: …;server_port=…`）、RECORD → `200`，整条握手打通。
+- **修**：两个发送函数的请求行都改为三段式 `METHOD url RTSP/1.0`（fire-and-forget 分支同样补上，否则音量/FLUSH/TEARDOWN 在合规接收端静默失效）；源码内加契约注释说明真机容错掩盖了该缺陷。
+- **新增静态守卫**：`backend/scripts/check-airplay-rtsp-line.mjs`（挂 `ci.yml` 新 job `airplay-rtsp-line-guard`，第 23 条）—— 常量断言「`${this.url} RTSP/1.0` 恰好出现 2 次（两分支各一）」+ 两分支各自体内断言 + **反向**断言不得再出现两段式 `METHOD url` + 单测动态契约（握手三条与 `SET_PARAMETER` 的请求行都必须以 `RTSP/1.0` 收尾）。反向变异：只改一处漏版本 / 两处都漏 / 版本段多一个空格 —— **三项全判红**，还原后逐字节一致。
+- **单测**：`raopTransport.test.ts` 新增「三条握手请求行三段式」用例，并在 `SET_PARAMETER`（fire-and-forget）用例里补请求行断言。`raopTransport` + `raopPlayer` 共 **101 用例全过**。
+- **影响面**：仅 RAOP 请求行形态。SETUP/RECORD 的头字段与 SDP 内容**一字未动**；HiVi 真机对多出 `RTSP/1.0` 的合法请求行同样接受（本来就应该这么发）。
+
+## [4.6.45] - 2026-10-20
+
 ### Fix / 4.6.45 遗留 CI 红：任务 D 的会话收尾断言未同步（全量测试 2 例红）
 
 `e58aeda`（任务 D）把 AirPlay 会话收尾改为**一律**透传 `current` / `positionSec` / `durationSec`（「IDLE 必带真实落点」契约），而 `backend/tests/services/airplaySessionRuntime.test.ts` 里两处旧断言仍按**旧形态**写（推流失败 → `undefined`；自然结束 → 只有 `loudnessStderr`）→ `ci` 与 `build-and-push` 两个 job 的全量测试各红 2 例（同一个根因）。
