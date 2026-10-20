@@ -56,6 +56,15 @@ export interface DecodeRequest {
    */
   forceRate?: number;
   forceChannels?: number;
+  /**
+   * 是否为 http(s) 输入追加 HTTP 重连参数(缺省 true,与 MA 行为一致)。
+   * **仅 AirPlay 传 false**:它的输入是**本机回环**出流地址(`/rest/airplay/stream/:token`),
+   * 不存在需要兜底的网络抖动;而 ffmpeg 对「无 Content-Length 的 chunked 流」在断开时
+   * 没有可续接的位置信息,`-reconnect_streamed` 会**从 0 重读同一地址** ——
+   * 听感就是「一首歌播到一半又从头开始」(2026-10-20 240 现网实测)。
+   * 回环输入断流必须**当场失败**,由会话层走既有的失败/重试路径。
+   */
+  reconnect?: boolean;
 }
 
 /**
@@ -111,7 +120,8 @@ export function decodeArgs(req: DecodeRequest): string[] {
   }
   args.push(...INPUT_READ_ARGS);
   // MA:仅 http(s) 输入且未显式 -f 时补重连(本地路径 / lavfi 测试不带)。
-  if (!req.inputFormat && /^https?:\/\//i.test(req.input)) {
+  // `reconnect === false` 时显式不加 —— 见 DecodeRequest.reconnect 的说明(AirPlay 回环输入)。
+  if (req.reconnect !== false && !req.inputFormat && /^https?:\/\//i.test(req.input)) {
     args.push(...HTTP_RECONNECT_ARGS);
   }
   if (req.inputFormat) args.push("-f", req.inputFormat);

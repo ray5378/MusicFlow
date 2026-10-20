@@ -336,15 +336,36 @@ class UpstreamStallError extends Error {
   constructor() { super(`rawStreamCache: 上游停摆(>${stallTimeoutMs()}ms 无字节)`); this.name = "UpstreamStallError"; }
 }
 
-/** 把外部 signal 与超时 signal 合成 fetch 用 signal(不依赖 AbortSignal.any 的类型可用性)。 */
-function fetchSignalWithTimeout(signal: AbortSignal | undefined, ms: number): AbortSignal {
-  const timeout = AbortSignal.timeout(ms);
-  if (!signal) return timeout;
+/**
+ * 给 fetch 只加「建连 + 响应头」超时,**拿到响应头后必须解绑**。
+ *
+ * ⚠️ 绝不能把 `AbortSignal.timeout(ms)` 直接交给 fetch 并一直挂着:该 signal 在
+ * **body 读取期间**同样会 abort(undici 会中止响应体)。240 实测:raw 直通恰好每
+ * **15.000 秒**被掐一次(`buf-start` → `出流结束 ms=13372` 精确对齐 15s),表现为
+ * 解码器「播到一半停住 / 重连后从头 / 会话提前 IDLE 切歌」。
+ * body 阶段的停摆已有 `readWithStallGuard`(连续 N ms 无字节 ⇒ 显式错误),不需要也不该
+ * 用总时长硬顶 —— 一首 5 分钟的歌本来就要读 5 分钟。
+ *
+ * 外部 signal(客户端断开)必须继续生效:监听**不**移除,body 读取期间客户端跑了要立刻停。
+ */
+async function fetchHeadersWithTimeout(
+  url: string,
+  init: RequestInit,
+  signal: AbortSignal | undefined,
+  ms: number,
+): Promise<Response> {
   const ctrl = new AbortController();
-  const abort = () => ctrl.abort();
-  signal.addEventListener("abort", abort, { once: true });
-  timeout.addEventListener("abort", abort, { once: true });
-  return ctrl.signal;
+  const onAbort = () => ctrl.abort();
+  if (signal) {
+    if (signal.aborted) ctrl.abort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+  }
+  const timer = setTimeout(() => ctrl.abort(new Error(`rawStreamCache: 上游响应头超时(${ms}ms)`)), ms);
+  try {
+    return await fetch(url, { ...init, signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** 带停摆看门狗的一次 reader.read():超时先 cancel 上游再 throw(Promise.race 对落败
@@ -388,11 +409,11 @@ async function openUpstream(
   src.upstreamRequests += 1;
   // batch44(僵尸流修复):建连+响应头硬顶 —— 原 fetch 无超时,上游 TTFB 挂死会让
   // 回环响应无限等待(ffmpeg 无字节,只能等 90s 看门狗兜底)。
-  const res = await fetch(src.url, {
+  // ⚠️ 超时**只到响应头为止**(见 fetchHeadersWithTimeout):挂到 body 上会把长流每 15s 掐断。
+  const res = await fetchHeadersWithTimeout(src.url, {
     headers,
     redirect: "follow",
-    signal: fetchSignalWithTimeout(signal, openTimeoutMs()),
-  });
+  }, signal, openTimeoutMs());
   const contentRange = res.headers.get("content-range");
   const total = parseTotalFromRange(contentRange);
   const crStart = parseContentRangeStart(contentRange);
@@ -511,11 +532,10 @@ export interface ProxyRawOptions {
 async function passthrough(opts: ProxyRawOptions): Promise<Response> {
   const headers: Record<string, string> = { ...(opts.headers || {}) };
   if (opts.rangeHeader) headers["Range"] = opts.rangeHeader;
-  const upstream = await fetch(opts.url, {
+  const upstream = await fetchHeadersWithTimeout(opts.url, {
     headers,
     redirect: "follow",
-    signal: fetchSignalWithTimeout(opts.signal, openTimeoutMs()),
-  });
+  }, opts.signal, openTimeoutMs());
   return copyPassthrough(upstream);
 }
 

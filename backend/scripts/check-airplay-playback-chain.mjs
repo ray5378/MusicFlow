@@ -263,6 +263,109 @@ check(
   "control.ts 未导出 getAirPlayMediaUri 或未取 lastCast.streamUrl",
 );
 
+console.log("===== R8 取流契约:解码器必须吃「本机回环的完整管道」,且不得静默重连 =====");
+//
+// 背景(2026-10-20 240 现网实测,用户可见症状「HiVi 播到一半从头开始 / 去下一首」):
+//   · 旧实现用 resolvePipelineInput 把 airplay 出流地址包成 raw 直通
+//     (`/rest/dlna/stream/:tok?raw=1`)⇒ 丢掉整曲内存缓冲与「上游死亡⇒显式错误」契约;
+//   · raw 上游是 WebDAV 的 200 长连接(无 Range),中途断流时:
+//       ① 干净 EOF ⇒ ffmpeg exit 0 ⇒ 会话在 54s/265s 处报 IDLE ⇒ idle_early 切歌;
+//       ② 以错误收尾 ⇒ `-reconnect_streamed 1` 对无长度的 chunked 流**没有续接位置**,
+//          重连请求恒为 `Range: bytes=0-` ⇒ 从 0 重读(实测 20s 内 19730 次)。
+//   · 重连风暴期间 SIGTERM 不生效 ⇒ 每首歌遗留一个 18MB 僵尸解码器(实测累积 12 个)。
+// 三条都必须钉死:任何一条被改回去,单测都不会自己变红。
+const DECODER = "backend/src/services/airplay/decoder.ts";
+const dec = stripComments(read(DECODER));
+check(
+  "control.ts 存在 toLoopbackAirPlayStreamUrl(出流地址→本机回环同路径)",
+  /export\s+function\s+toLoopbackAirPlayStreamUrl\s*\(/.test(ap),
+  "未找到 toLoopbackAirPlayStreamUrl 的定义",
+);
+check(
+  "回环化只改 origin:路径必须仍是 /rest/airplay/stream/(不得误吞别的命名空间)",
+  /pathname\.startsWith\("\/rest\/airplay\/stream\/"\)/.test(ap)
+    && /return\s+`\$\{loopbackBase\(\)\}\$\{u\.pathname\}\$\{u\.search\}`/.test(ap),
+  "回环化实现未按「同 path/token 只换 origin」写",
+);
+check(
+  "in-proc 起播:spawnDecoder 首参是 feedUrl(回环管道),不是 raw 包装结果",
+  /const\s+feedUrl\s*=\s*toLoopbackAirPlayStreamUrl\(streamUrl\)/.test(ap)
+    && /spawnDecoder\(feedUrl,/.test(ap),
+  "起播路径未见 spawnDecoder(feedUrl, ...)",
+);
+check(
+  "原地 seek 重建解码器同样用 s.feedUrl(不得退回 streamUrl/raw)",
+  /spawnDecoder\(s\.feedUrl,\s*t,/.test(ap),
+  "seek 重建解码器未使用 s.feedUrl",
+);
+check(
+  "**反向断言**:control.ts 不得再用 resolvePipelineInput 包装 AirPlay 出流地址",
+  !/resolvePipelineInput\s*\(\s*\{\s*input:\s*(streamUrl|s\.streamUrl)\s*\}/.test(ap),
+  "又出现了把 streamUrl 交给 resolvePipelineInput(raw 直通)的写法",
+);
+check(
+  "fork 路径传给子进程的 streamUrl 也必须是回环管道",
+  /const\s+compliantUrl\s*=\s*toLoopbackAirPlayStreamUrl\(streamUrl\)/.test(ap)
+    && /streamUrl:\s*compliantUrl/.test(ap),
+  "castViaChild 未把回环化后的地址传给子进程",
+);
+check(
+  "解码器显式禁用 HTTP 重连(decodeArgs 传 reconnect: false)",
+  /reconnect:\s*false/.test(dec),
+  "spawnDecoder 的 decodeArgs 未见 reconnect: false",
+);
+check(
+  "**反向断言**:decodeArgs 的重连是可选开关(缺省仍为 true,其它链路零变化)",
+  /req\.reconnect\s*!==\s*false/.test(stripComments(read("backend/src/services/audio/pipeline.ts"))),
+  "decodeArgs 未按 req.reconnect !== false 判定(可能把其它链路的重连一起关了)",
+);
+
+console.log("===== R9 解码器回收:必须 SIGKILL(SIGTERM 对卡在重连/阻塞写的 ffmpeg 无效) =====");
+check(
+  "decoder.ts 导出 killDecoder 且实现为 SIGKILL",
+  /export\s+function\s+killDecoder\s*\(/.test(dec) && /kill\?\.\("SIGKILL"\)/.test(dec),
+  "killDecoder 缺失或未使用 SIGKILL",
+);
+check(
+  "**常量断言**:airplay 两个模块的 kill 调用一律走 killDecoder",
+  !/[a-zA-Z.]+\??\.kill\(\)/.test(ap) && !/[a-zA-Z.]+\??\.kill\(\)/.test(runtime),
+  "仍存在无参 .kill()(缺省 SIGTERM ⇒ 重连风暴中的解码器杀不掉)",
+);
+check(
+  "control/sessionRuntime 都从 decoder 模块引入 killDecoder",
+  /killDecoder\s*\}\s*from\s*"\.\/decoder\.js"/.test(ap)
+    && /killDecoder\s*\}\s*from\s*"\.\/decoder\.js"/.test(runtime),
+  "有模块未从 ./decoder.js 引入 killDecoder",
+);
+
+console.log("===== R10 上游超时只约束「建连+响应头」,不得挂到 body(否则长流每 15s 被掐断) =====");
+{
+  const raw = stripComments(read("backend/src/services/dlna/rawStreamCache.ts"));
+  // 240 实测:rawStreamCache 把 AbortSignal.timeout(openTimeoutMs) 直接交给 fetch,
+  // 该 signal 在 body 读取期间同样 abort ⇒ 上游长流精确每 15.000s 断一次
+  // (buf-start → 出流结束 ms≈13372)。解码器表现为「播到一半停住 / 重连从头 / 提前 IDLE」。
+  check(
+    "存在 fetchHeadersWithTimeout(拿到响应头即解绑超时)",
+    /async\s+function\s+fetchHeadersWithTimeout\s*\(/.test(raw),
+    "未见 fetchHeadersWithTimeout",
+  );
+  check(
+    "**反向断言**:不得再把 AbortSignal.timeout 直接交给 fetch 挂全程",
+    !/fetchSignalWithTimeout\s*\(/.test(raw) && !/signal:\s*fetchSignalWithTimeout/.test(raw),
+    "rawStreamCache 里仍存在 fetchSignalWithTimeout(超时会挂到 body 上)",
+  );
+  check(
+    "解绑点:fetch resolve 后 clearTimeout(超时不得继续生效)",
+    /finally\s*\{\s*clearTimeout\(timer\);/.test(raw),
+    "fetchHeadersWithTimeout 的 finally 未见 clearTimeout(timer)",
+  );
+  check(
+    "两个入口(openUpstream / passthrough)都走 fetchHeadersWithTimeout",
+    count(raw, "fetchHeadersWithTimeout(") === 3,
+    `调用点 = ${count(raw, "fetchHeadersWithTimeout(")}(定义 1 + 两入口各 1,应为 3)`,
+  );
+}
+
 console.log("");
 if (failures.length) {
   console.log(`✗ AirPlay 播放链路时序守卫失败 ${failures.length} 项:`);

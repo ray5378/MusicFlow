@@ -47,9 +47,13 @@ const S = vi.hoisted(() => {
     rpcFireAndForget: vi.fn(),
     resolvePipelineInput: vi.fn(async ({ input }: { input: string }) => ({ input: `compliant::${input}` })),
     createAirPlaySession: vi.fn((_songId: string, _deviceId: string, baseUrl: string) => ({
-      streamUrl: `${baseUrl}/rest/dlna/stream/tok-${Math.random().toString(36).slice(2, 8)}`,
+      // 真实形态:createAirPlaySession 发的是 airplay 命名空间 token(session.ts),
+      // 不是 dlna 的 raw token —— 桩必须与之一致,否则「回环管道化」不会生效。
+      streamUrl: `${baseUrl}/rest/airplay/stream/tok-${Math.random().toString(36).slice(2, 8)}`,
     })),
     getEffectiveBaseUrl: vi.fn(() => "http://192.168.1.9:46400"),
+    // 解码器输入固定走本机回环(见 control.ts::toLoopbackAirPlayStreamUrl)。
+    loopbackBase: vi.fn(() => "http://127.0.0.1:46400"),
     getCachedDevices: vi.fn<() => any[]>(() => []),
     setDeviceVolume: vi.fn(async () => undefined),
     setDeviceMute: vi.fn(async () => undefined),
@@ -129,6 +133,9 @@ vi.mock("../../src/services/airplay/decoder.js", () => ({
     return h;
   }),
   degreesToDb: (v: number) => S.degreesToDb(v),
+  // 会话收尾统一走 decode 层的 killDecoder;桩把它落到句柄的 kill 上(语义不变,
+  // 只是信号换成 SIGKILL),否则收尾路径会抛 "killDecoder is not a function"。
+  killDecoder: (ff: any) => { try { ff?.kill?.("SIGKILL"); } catch { /* ignore */ } },
 }));
 
 vi.mock("../../src/services/audio/pipeline.js", () => ({
@@ -240,9 +247,10 @@ beforeEach(() => {
     async ({ input }: { input: string }) => ({ input: `compliant::${input}` }));
   S.createAirPlaySession.mockReset().mockImplementation(
     (_songId: string, _deviceId: string, baseUrl: string) => ({
-      streamUrl: `${baseUrl}/rest/dlna/stream/tok-${Math.random().toString(36).slice(2, 8)}`,
+      streamUrl: `${baseUrl}/rest/airplay/stream/tok-${Math.random().toString(36).slice(2, 8)}`,
     }));
   S.getEffectiveBaseUrl.mockReset().mockImplementation(() => "http://192.168.1.9:46400");
+  S.loopbackBase.mockReset().mockImplementation(() => "http://127.0.0.1:46400");
   S.rpcFireAndForget.mockReset();
   S.reportPlaybackLoudness.mockReset();
   S.getPlayerController.reportState.mockReset();
@@ -532,15 +540,16 @@ describe("起播编排(startSession / castToAirPlayDevice)", () => {
     expect(C.getAirPlayStatus(devId()).duration).toBe(137);
   });
 
-  it("fork:cast 走 castViaChild,rpc 参数里带主进程解析出的 host/port/pk/et 与合规后的流地址", async () => {
+  it("fork:cast 走 castViaChild,rpc 参数里带主进程解析出的 host/port/pk/et 与回环流地址", async () => {
     S.fork = true;
     const d = dev();
     S.setDevices([d]);
-    S.resolvePipelineInput.mockResolvedValueOnce({ input: "compliant::http://tok" });
     const { mediaUri } = await C.castToAirPlayDevice(castOpts(d.id, { seekSec: 12 }));
     expect(sup.rpc).toHaveBeenCalledWith("cast", expect.objectContaining({
       deviceId: d.id, host: d.host, port: d.port, pk: d.pk, et: d.et,
-      streamUrl: "compliant::http://tok", seekSec: 12, songId: expect.any(String),
+      // 解码器输入必须是本机回环(127.0.0.1)+ airplay 命名空间(完整出流管道)。
+      streamUrl: expect.stringMatching(/^http:\/\/127\.0\.0\.1:46400\/rest\/airplay\/stream\/tok-/),
+      seekSec: 12, songId: expect.any(String),
     }));
     expect(mediaUri).toBe(""); // 未显式传 streamUrl → 返回空串,子进程才是真正起播方
   });
@@ -1000,13 +1009,14 @@ describe("Seek", () => {
     // 旧 finalizer 因此走 seekReplace 分支(只 kill 解码器、保留会话),正好是原地
     // seek 要验证的前提 —— 晚一步收尾就会把会话拆掉、退化成「整首重投」。
     player.prepareSeek.mockImplementationOnce(async () => { player.endStream(); });
-    S.resolvePipelineInput.mockResolvedValueOnce({ input: "resolved-for-seek" });
     const before = decoder.spawnDecoder.mock.calls.length;
     await C.seekAirPlay(devId(), 90);
     expect(decoder.spawnDecoder.mock.calls.length).toBe(before + 1);
-    // 重播输入同样要过合规门(旧 token 可能过期):喂给 ffmpeg 的必须是解析后的地址,
-    // 不能是会话里那个原始 token URL(变异 M47 直接跳过合规门重解)。
-    expect(last(decoder.spawnDecoder.mock.calls)?.[0]).toBe("resolved-for-seek");
+    // 重播输入同样必须是**本机回环的 airplay 管道**(不是 raw token,也不是 LAN origin):
+    // raw 直通在上游断流时会给「假 EOF」或触发 ffmpeg 从 0 重连(见 control.ts 注释)。
+    expect(last(decoder.spawnDecoder.mock.calls)?.[0]).toMatch(
+      /^http:\/\/127\.0\.0\.1:46400\/rest\/airplay\/stream\/tok-/,
+    );
     expect(player.prepareSeek).toHaveBeenCalledWith(90);
     // 会话仍然健在(没有走「会话被拆 → 重投」那条路)
     expect(C.getAirPlayStatus(devId()).playbackState).toBe(PlaybackState.PLAYING);
@@ -1539,5 +1549,31 @@ describe("播放链路时序(PLAYING 立即上报 / IDLE 真实落点 / 过期�
     hooks.onSessionEnded(d.id, { current: false, positionSec: 5, durationSec: 200 });
     await sleep(30);
     expect(S.getPlayerController.reportState).not.toHaveBeenCalled();
+  });
+});
+
+// ===========================================================================
+// 2026-10-20 240 现网:「HiVi 播到一半从头开始 / 去下一首」的取流契约。
+// 根因 = 解码器吃 raw 直通(`/rest/dlna/stream/:tok?raw=1`)+ 允许 HTTP 重连。
+// 下面两条钉住修复方向,变异(退回 raw / 退回 SIGTERM)即红。
+// ===========================================================================
+describe("取流契约:回环管道化 + 强杀回收", () => {
+  it("toLoopbackAirPlayStreamUrl:只换 origin,path/token/query 原样保留", () => {
+    expect(C.toLoopbackAirPlayStreamUrl("http://192.168.1.9:46400/rest/airplay/stream/abc?x=1"))
+      .toBe("http://127.0.0.1:46400/rest/airplay/stream/abc?x=1");
+  });
+
+  it("toLoopbackAirPlayStreamUrl:非 airplay 命名空间 / 非法 URL 原样返回(不误伤别的链路)", () => {
+    const dlna = "http://192.168.1.9:46400/rest/dlna/stream/abc?raw=1";
+    expect(C.toLoopbackAirPlayStreamUrl(dlna)).toBe(dlna);
+    expect(C.toLoopbackAirPlayStreamUrl("not a url")).toBe("not a url");
+  });
+
+  it("killDecoder:向解码器发 SIGKILL(缺省 SIGTERM 对卡在重连风暴的 ffmpeg 无效)", () => {
+    const kill = vi.fn();
+    C.killDecoder({ kill } as any);
+    expect(kill).toHaveBeenCalledWith("SIGKILL");
+    // null/undefined 不炸(收尾路径可能拿不到句柄)
+    expect(() => C.killDecoder(undefined)).not.toThrow();
   });
 });

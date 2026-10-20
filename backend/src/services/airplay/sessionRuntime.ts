@@ -10,7 +10,7 @@
 // 不再与 Web 请求、封面渲染、后台批量任务争抢主进程事件循环。
 import type { ChildProcessWithoutNullStreams } from "child_process";
 import { RaopPlayer, type RaopSession, type RaopRealtimeStats } from "./raop.js";
-import { spawnDecoder, makeProducer } from "./decoder.js";
+import { spawnDecoder, makeProducer, killDecoder } from "./decoder.js";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("AIRPLAY");
@@ -178,7 +178,7 @@ export class AirplaySessionRuntime {
         this.stopHealthLog(active);
         if (active.seekReplace) {
           active.seekReplace = false;
-          try { ff.kill(); } catch { /* ignore */ }
+          killDecoder(ff);
           this.hooks.onChanged?.();
           return;
         }
@@ -191,7 +191,7 @@ export class AirplaySessionRuntime {
           this.sessions.delete(active.deviceId);
         }
         active.ended = true;
-        try { ff.kill(); } catch { /* ignore */ }
+        killDecoder(ff);
         // 会话自然结束(整首播完 / 失败)也必须拆掉 RTP socket 并发 TEARDOWN,
         // 否则 socket 泄漏,设备同时维护多个并发会话(多个 timing 循环),互相干扰导致卡顿。
         active.player.stop().catch(() => {});
@@ -240,7 +240,7 @@ export class AirplaySessionRuntime {
     this.sessions.delete(deviceId);
     s.ended = true;
     this.stopHealthLog(s);
-    try { s.ffmpeg?.kill(); } catch { /* ignore */ }
+    try { killDecoder(s.ffmpeg); } catch { /* ignore */ }
     await s.player.stop().catch(() => {});
     this.hooks.onChanged?.();
   }
@@ -293,7 +293,7 @@ export class AirplaySessionRuntime {
     // Stop the old decoder NOW: makes the old producer's waitData unblock so the
     // old stream loop exits promptly instead of waiting out its 30s timeout.
     try {
-      s.ffmpeg.kill();
+      killDecoder(s.ffmpeg);
       s.ffmpeg.stdout?.destroy();
       s.ffmpeg.stderr?.destroy();
     } catch { /* ignore */ }

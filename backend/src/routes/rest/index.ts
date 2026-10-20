@@ -1628,6 +1628,23 @@ async function serveFfmpegPipe(
   // 排空 stderr 防止管道写满阻塞 ffmpeg,保留末尾(供 P0-4 解析 loudnorm JSON)。
   let errBuf = "";
   child.stderr.on("data", (d: Buffer) => { errBuf = (errBuf + d.toString()).slice(-8192); });
+  // 诊断(行为中性,仅 debug 级):出流进程的真实退出形态。
+  // 2026-10-20 AirPlay 现网「半路静默结束 → idle_early 切歌」排查需要区分三种形态:
+  //   ① 自然放完(exit 0 且客户端仍在读);
+  //   ② 客户端断开(signal.aborted ⇒ 被 kill);
+  //   ③ 上游/下游异常退出(非 0 码或信号)。
+  // 之前只有 ③ 会留痕,①② 完全静默 —— 出问题时无法判断是谁先动的手。
+  const pipeStartedAt = Date.now();
+  child.on("exit", (code, sig) => {
+    log.debug("ffmpeg 出流结束", {
+      songId: opts.songId ?? "-",
+      code,
+      signal: sig,
+      ms: Date.now() - pipeStartedAt,
+      clientAborted: signal.aborted,
+      source: opts.sourceLabel.slice(0, 80),
+    });
+  });
   child.on("exit", (code) => {
     if (code !== 0 && code !== null) {
       log.error("ffmpeg 出流退出异常", { code, stderr: errBuf.slice(0, 800), source: opts.sourceLabel });

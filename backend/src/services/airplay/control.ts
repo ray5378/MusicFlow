@@ -12,13 +12,12 @@
 import { type ChildProcessWithoutNullStreams } from "child_process";
 import { PlaybackState } from "../player/types.js";
 import { RaopPlayer, type RaopSession, type RaopRealtimeStats } from "./raop.js";
-import { makeProducer, spawnDecoder, degreesToDb } from "./decoder.js";
-import { resolvePipelineInput } from "../audio/pipeline.js";
+import { makeProducer, spawnDecoder, degreesToDb, killDecoder } from "./decoder.js";
 import { isAirPlayForkMode } from "./mode.js";
 import { airplaySupervisor } from "./supervisor.js";
 import { rpcFireAndForget } from "../rendererHost/front.js";
 import { getAirPlayDevice, getAirPlayDevices, onAirPlayEvent, startAirPlayDiscovery, stopAirPlayDiscovery, setAirPlayPersist, removeAirPlayDevice, type AirPlayDevice } from "./discovery.js";
-import { getEffectiveBaseUrl, getCachedDevices, setDeviceVolume, setDeviceMute, stopDevicePlayback } from "../dlna/control.js";
+import { getEffectiveBaseUrl, getCachedDevices, setDeviceVolume, setDeviceMute, stopDevicePlayback, loopbackBase } from "../dlna/control.js";
 import { sqlite } from "../../db/index.js";
 import { createAirPlaySession } from "./session.js";
 import type { AirplaySessionEndInfo } from "./sessionRuntime.js";
@@ -28,6 +27,8 @@ import { createLogger } from "../../utils/logger.js";
 // airplay 子进程要复用同一份实现,但不能经由本模块(会拖进 DB/DLNA/peer 等主进程态)。
 // re-export 保持既有引用可见(tests/services/airplayProducer.test.ts 从本模块导入)。
 export { makeProducer } from "./decoder.js";
+// killDecoder 同样从本模块透出(便于编排层测试与外部收尾路径共用同一份强杀逻辑)。
+export { killDecoder };
 
 const log = createLogger("AIRPLAY");
 
@@ -75,7 +76,10 @@ interface ActiveSession {
   artist?: string;
   album?: string;
   duration: number;
+  /** 对外展示/上报用的原始流地址(LAN origin,保持前端可见的 URI 不变)。 */
   streamUrl: string;
+  /** 解码器**实际**拉取的地址:本机回环的完整出流管道(见 toLoopbackAirPlayStreamUrl)。 */
+  feedUrl: string;
   startedAt: number;
   ended: boolean;
 }
@@ -93,6 +97,34 @@ interface ActiveSession {
 const sessions = new Map<string, ActiveSession>();
 const volumeState = new Map<string, { volume: number; muted: boolean; supportsRsa: boolean }>();
 const lastCast = new Map<string, { songId: string; title?: string; artist?: string; album?: string; coverArt?: string; durationSec?: number; streamUrl: string }>();
+
+/**
+ * 把 AirPlay 出流地址换成**本机回环**的同一条 URL(只换 origin,路径/token 不动)。
+ *
+ * 为什么必须回环:解码器输入必须过 SPEC §1.8 合规门(只允许本地路径或回环 URL),
+ * 而**不能**走 `resolvePipelineInput` 的 raw 包装 —— 那会把出流退化成 raw 直通,
+ * 丢掉整曲内存缓冲与「上游死亡 ⇒ 下游显式错误」契约。2026-10-20 240 现网实测的
+ * 两个用户可见症状都由此而来(证据已闭合):
+ *   ① 上游 WebDAV 返回 200(不支持 Range)、以干净 EOF 收尾时,ffmpeg exit 0 ⇒
+ *      会话在 54s/265s 处报 IDLE ⇒ `idle_early` 放行切歌;
+ *   ② 上游以错误收尾时,`-reconnect_streamed 1` 对「无 Content-Length 的 chunked 流」
+ *      没有可续接的位置,重连请求恒为 `Range: bytes=0-` ⇒ **从 0 重读** ——
+ *      听感就是「播到一半又从头开始」;重连风暴期间 SIGTERM 不生效 ⇒ 每首歌遗留一个
+ *      18MB 僵尸解码器(实测容器内累积 12 个)。
+ * 走完整管道后:整曲先落 membuf(网络源),或直读本地文件;上游再怎么抖都不影响本首。
+ *
+ * token 与 host 无关(服务端从 SQLite 解析),故换 origin 是安全的;非
+ * `/rest/airplay/stream/` 形态的地址(测试/外部显式传入)原样返回。
+ */
+export function toLoopbackAirPlayStreamUrl(streamUrl: string): string {
+  try {
+    const u = new URL(streamUrl);
+    if (!u.pathname.startsWith("/rest/airplay/stream/")) return streamUrl;
+    return `${loopbackBase()}${u.pathname}${u.search}`;
+  } catch {
+    return streamUrl;
+  }
+}
 
 /** 该设备是否有活跃推流会话(fork 看子进程镜像的会话表;in-proc 看本地 sessions)。 */
 function hasActiveSession(deviceId: string): boolean {
@@ -112,7 +144,7 @@ async function stopSession(deviceId: string): Promise<void> {
   if (!s) return;
   sessions.delete(deviceId);
   s.ended = true;
-  try { s.ffmpeg?.kill(); } catch { /* ignore */ }
+  try { killDecoder(s.ffmpeg); } catch { /* ignore */ }
   await s.player.stop().catch(() => {});
 }
 
@@ -192,6 +224,8 @@ async function startSession(opts: AirPlayCastOptions, seekSec?: number): Promise
   const baseUrl = opts.baseUrl || getEffectiveBaseUrl();
   if (!baseUrl) throw new Error("未确定播放流地址(DLNA_BASE_URL 或先进行一次投屏)");
   const streamUrl = opts.streamUrl || createAirPlaySession(opts.songId, opts.deviceId, baseUrl).streamUrl;
+  // 解码器吃**回环管道**(整曲缓冲 + 上游死亡⇒显式错误),不吃 raw 直通:见 toLoopbackAirPlayStreamUrl。
+  const feedUrl = toLoopbackAirPlayStreamUrl(streamUrl);
 
   const player = new RaopPlayer({ host: dev.host, port: dev.port, pk: dev.pk, et: dev.et });
   let session: RaopSession;
@@ -202,7 +236,7 @@ async function startSession(opts: AirPlayCastOptions, seekSec?: number): Promise
     throw e;
   }
 
-  const ff = spawnDecoder((await resolvePipelineInput({ input: streamUrl })).input, seekSec, {
+  const ff = spawnDecoder(feedUrl, seekSec, {
     rowId: opts.songId,
   });
   // ⚠️ 这里**不要**再 makeProducer(ff):runStream 内部会建唯一一份 producer。
@@ -219,6 +253,7 @@ async function startSession(opts: AirPlayCastOptions, seekSec?: number): Promise
     album: opts.album,
     duration: opts.durationSec || 0,
     streamUrl,
+    feedUrl,
     startedAt: Date.now(),
     ended: false,
   };
@@ -263,7 +298,7 @@ function runStream(active: ActiveSession, session: RaopSession): void {
     .finally(() => {
       if (active.seekReplace) {
         active.seekReplace = false;
-        try { ff.kill(); } catch { /* ignore */ }
+        killDecoder(ff);
         return;
       }
       // ⚠️ 必须在 delete **之前**判定,且这是整个收尾的关键一步(2026-10-20 现网定位):
@@ -276,7 +311,7 @@ function runStream(active: ActiveSession, session: RaopSession): void {
       if (stillCurrent) {
         sessions.delete(active.deviceId);
       }
-      try { ff.kill(); } catch { /* ignore */ }
+      try { killDecoder(ff); } catch { /* ignore */ }
       // 会话自然结束(整首播完 / 失败)也必须拆掉 RTP socket 并发 TEARDOWN,
       // 否则 socket 泄漏,设备同时维护多个并发会话(多个 timing 循环),互相干扰导致卡顿。
       active.player.stop().catch(() => {});
@@ -611,9 +646,9 @@ async function castViaChild(opts: AirPlayCastOptions): Promise<void> {
   const streamUrl = opts.streamUrl || createAirPlaySession(opts.songId, opts.deviceId, baseUrl).streamUrl;
 
   await ensureAirplayHost();
-  // fork 路径输入合规(SPEC §1.8):子进程不碰 DB,回环包装必须在主进程完成;
-  // 回环地址幂等直通,重复包装无害。
-  const compliantUrl = (await resolvePipelineInput({ input: streamUrl })).input;
+  // 子进程的解码器同样吃**回环管道**(见 toLoopbackAirPlayStreamUrl):子进程不碰 DB,
+  // 所以 URL 必须在主进程先换成回环形态。
+  const compliantUrl = toLoopbackAirPlayStreamUrl(streamUrl);
   await airplaySupervisor.rpc("cast", {
     deviceId: opts.deviceId,
     host: dev.host,
@@ -719,7 +754,7 @@ export async function seekAirPlay(deviceId: string, seconds: number): Promise<vo
   // Stop the old decoder NOW: makes the old producer's waitData unblock so the
   // old stream loop exits promptly instead of waiting out its 30s timeout.
   try {
-    s.ffmpeg.kill();
+    killDecoder(s.ffmpeg);
     s.ffmpeg.stdout?.destroy();
     s.ffmpeg.stderr?.destroy();
   } catch { /* ignore */ }
@@ -735,8 +770,8 @@ export async function seekAirPlay(deviceId: string, seconds: number): Promise<vo
     return;
   }
 
-  // 重播输入同样先过合规门(原 token 可能过期,重解出新 token;回环地址幂等直通)。
-  s.ffmpeg = spawnDecoder((await resolvePipelineInput({ input: s.streamUrl })).input, t, {
+  // 重播输入同样走回环管道(同上:raw 直通会假 EOF/从头重连);回环地址幂等直通。
+  s.ffmpeg = spawnDecoder(s.feedUrl, t, {
     rowId: lastCast.get(deviceId)?.songId,
   });
   runStream(s, s.session);

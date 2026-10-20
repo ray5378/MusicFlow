@@ -34,6 +34,20 @@ export function degreesToDb(volume: number): number {
   return -30 + (v / 100) * 30;
 }
 
+/**
+ * 回收解码器进程。**必须用 SIGKILL**:
+ * ffmpeg 只在主循环里检查 `received_sigterm`,当它卡在「chunked 流断开 ⇒ HTTP 重连
+ * 风暴」或阻塞在管道写时根本走不到检查点。2026-10-20 240 实测:对这类进程发 SIGTERM
+ * 20 分钟后仍存活(容器内累积 12 个 18MB 僵尸,每个都占着并发与内存)。
+ * 解码器是纯读、无落盘写入,强杀不会产生半成品文件。
+ *
+ * 放在本模块(in-proc 与 airplay 子进程共用)而不是 control.ts:子进程不能经由
+ * control.ts(会拖进 DB/DLNA/peer 等主进程态)。
+ */
+export function killDecoder(ff: { kill?: (sig?: NodeJS.Signals) => boolean } | null | undefined): void {
+  try { ff?.kill?.("SIGKILL"); } catch { /* 可能已退出 */ }
+}
+
 // ffmpeg 二进制定位统一走 transcode.resolveFfmpeg()(D35):
 // FFMPEG_PATH → ffmpeg-static 内置 → PATH。此前此处是「内置优先」的重复实现,
 // 导致运维注入 FFMPEG_PATH 想换掉 glibc 静态构建(Alpine/musl 下 NSS/DNS 不可用)
@@ -100,6 +114,13 @@ export function spawnDecoder(
     timeOffsetSec: seekSec,
     ...(af.length > 0 ? { af } : {}),
     outputFormat: "s16le",
+    // ⚠️ **禁用 HTTP 重连**(与其它链路相反,仅 AirPlay):输入恒为本机回环出流地址
+    // (`/rest/airplay/stream/:token`),断流必须当场失败。
+    // 若保留 `-reconnect_streamed 1`:该响应是**无 Content-Length 的 chunked 流**,
+    // ffmpeg 拿不到可续接的位置,重连请求恒为 `Range: bytes=0-` ⇒ **从 0 重读**,
+    // 听感就是「一首歌播到一半又从头开始」(2026-10-20 240 实测:20 秒内 19730 次重连、
+    // 每次都 bytes=0-);重连风暴期间 SIGTERM 也不生效,每首歌还会遗留一个僵尸解码器。
+    reconnect: false,
     // 注:声道 pin 在 af 里的 aformat(见 buildAirplayAf),此处不再重复 -ac。
   });
   const ff = spawn(resolveFfmpeg(), args);

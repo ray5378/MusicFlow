@@ -2,6 +2,34 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.48] - 2026-10-20
+
+### Fix / AirPlay 播到一半「从头开始」或「跳下一首」（HiVi H5MKII 现场实测定位）
+
+用户实测：AirPlay 投到 HiVi H5MKII，一首歌没播完就**从头重来**或**直接切下一首**（曲目 264s，中断点各不相同：54s / 92s / 138s…）。三段独立缺陷叠加，全部由 240 现网日志与受控实验证实：
+
+1. **上游取流被自家「响应头超时」拦腰截断（根因）**
+   - `services/dlna/rawStreamCache.ts` 把 `AbortSignal.timeout(openTimeoutMs=15s)` **直接交给 fetch 并挂满全程**。该 signal 在 **body 读取期间**同样会 abort（undici 会中止响应体）——与注释里「建连+响应头超时」的意图相悖。
+   - 现场证据：`[BUF-STREAM] buf-start …` → `ffmpeg 出流结束 signal=SIGKILL ms=13372 clientAborted=true` **精确 15.000s** 一对，反复出现；每次都在同一首歌的 13~15s 处断。
+   - 修：新增 `fetchHeadersWithTimeout()` —— 只给建连+响应头限时，`fetch` resolve 后立即 `clearTimeout` 解绑；body 阶段的停摆仍由既有的 `readWithStallGuard`（连续 N ms 无字节 ⇒ 显式错误）负责。外部 signal（客户端断开）监听保留。
+
+2. **解码器直连 raw 直通 + 允许 HTTP 重连 ⇒ 断流后从 0 重读**
+   - AirPlay 解码器的输入此前经 `resolvePipelineInput` 被包成 raw 直通（`/rest/dlna/stream/:tok?raw=1`），丢掉了整曲内存缓冲与「上游死亡 ⇒ 下游显式错误」契约；且 `decodeArgs` 对 http 输入**无条件**追加 `-reconnect_streamed 1`。
+   - 受控实验（230）：模拟「无 Content-Length 的 chunked 流被上游掐断」→ ffmpeg 日志 `Will reconnect … error=End of file` 连续 **19730 次**，每次请求都是 `Range: bytes=0-` ⇒ **从 0 重读**。听感正是「播到一半又从头开始」；若上游以 EOF 收尾则 exit 0 ⇒ 会话在 54s/264s 处报 IDLE ⇒ `idle_early` 切歌。
+   - 修：解码器输入改为**本机回环的完整出流管道**（`http://127.0.0.1:<port>/rest/airplay/stream/:token`，只换 origin，token 不变）—— 恢复整曲 membuf 缓冲 + 出流侧 C3 契约；并给 `DecodeRequest` 增加 `reconnect` 开关，**仅 AirPlay 传 false**（其它 http 链路缺省行为逐字不变）。
+
+3. **解码器僵尸进程（每首歌泄漏一个 18MB）**
+   - 上述重连风暴中 ffmpeg 阻塞在重连循环，`kill()`（SIGTERM）走不到检查点。实测：对一个已卡住的解码器发 SIGTERM，**20 分钟后仍存活**；容器内累积 12 个。
+   - 修：新增 `killDecoder()`（SIGKILL），in-proc 与 airplay 子进程的收尾路径统一走它。
+
+- **测试/守卫**：
+  - `tests/services/rawStreamCache.test.ts` 新增「响应头超时只约束头部」组：body 滴流 640ms 而头部超时 200ms ⇒ 内容必须完整（旧实现会被截断）；对照组「响应头迟迟不来」仍必须超时拒绝。反向变异（去掉 `clearTimeout`）判红。
+  - `tests/services/pipeline.test.ts` 新增 `reconnect:false` 契约（http 输入不带重连，缺省仍带）。
+  - `tests/airplay/controlOrchestration.test.ts` 新增 `toLoopbackAirPlayStreamUrl`（只换 origin / 非 airplay 命名空间不误伤）与 `killDecoder`（SIGKILL / 空句柄不炸）三例；既有 fork/seek 断言同步为「回环管道」形态。
+  - `backend/scripts/check-airplay-playback-chain.mjs` 扩到 **R1~R10**：R8 钉死「回环管道 + 禁重连 + fork 同口径」，R9 钉死「一律 SIGKILL、不得残留无参 `.kill()`」，R10 钉死「超时只到响应头、两入口都走 `fetchHeadersWithTimeout`」。反向变异 6 项（去掉 `reconnect:false` / 退回 SIGTERM / 退回 raw 包装 / 无条件重连 / 去掉 clearTimeout / 退回直接 fetch）**全部判红**，还原后全绿。
+- **240 实测（热补丁）**：修复前每 15.000s 断一次；修复后连续播放 **150s+ 不断**（两台设备进度单调推进、无 `stream done` / `idle_early`），解码器进程数稳定、不再增长，解码器命令行不再含 `-reconnect` 且输入为 `127.0.0.1` 的 `/rest/airplay/stream/`。
+- **影响面**：DLNA 同样受益于第 1 条（它也在用 raw 直通），但**未改变任何字节/响应形态**，只是不再被 15s 硬切；第 2/3 条仅作用于 AirPlay 解码器。
+
 ## [4.6.45] - 2026-10-20
 
 ### Fix / AirPlay1（RAOP）投屏连不上设备：内部取流被自家鉴权拦成 401

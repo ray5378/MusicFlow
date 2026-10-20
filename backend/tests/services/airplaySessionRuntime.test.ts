@@ -102,6 +102,9 @@ vi.mock("../../src/services/airplay/raop.js", () => ({ RaopPlayer: H.FakeRaopPla
 vi.mock("../../src/services/airplay/decoder.js", () => ({
   spawnDecoder: () => H.makeDecoder(),
   makeProducer: () => async () => null,
+  // 契约同步:会话收尾统一走 decode 层的 killDecoder(SIGKILL —— SIGTERM 对卡在
+  // 重连/阻塞写的 ffmpeg 无效,240 实测 20 分钟不退)。桩保留「被强杀」可观测性。
+  killDecoder: (ff: any) => { try { ff?.kill?.("SIGKILL"); } catch { /* ignore */ } },
 }));
 
 vi.mock("../../src/utils/logger.js", () => ({

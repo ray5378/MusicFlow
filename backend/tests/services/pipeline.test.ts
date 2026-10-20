@@ -63,6 +63,21 @@ describe("decodeArgs ①解码(跟随源)", () => {
     expect(http.indexOf("-probesize")).toBeLessThan(http.indexOf("-reconnect"));
   });
 
+  // 2026-10-20 240 实测:AirPlay 解码器吃的是「本机回环的完整出流管道」
+  // (`/rest/airplay/stream/:token`,无 Content-Length 的 chunked)。断开时 ffmpeg 拿不到
+  // 可续接的位置,`-reconnect_streamed 1` 的重连请求恒为 `Range: bytes=0-` ⇒ 从 0 重读
+  // (20 秒内 19730 次),听感「播到一半又从头开始」;重连风暴期间 SIGTERM 也杀不掉。
+  // ⇒ AirPlay 必须显式关掉重连;其它 http 链路缺省行为不变。
+  it("reconnect:false → http 输入也不带重连参数(AirPlay 回环管道专用);缺省仍带", () => {
+    const ap = decodeArgs({ input: "http://127.0.0.1:46400/rest/airplay/stream/tok", reconnect: false });
+    expect(ap.indexOf("-reconnect")).toBe(-1);
+    expect(ap.indexOf("-reconnect_streamed")).toBe(-1);
+    expect(ap.indexOf("-i")).toBeGreaterThan(-1);
+    // 对照组:同一个 http 输入不传 reconnect ⇒ 仍带(其它链路零变化)
+    const other = decodeArgs({ input: "http://127.0.0.1:46400/rest/airplay/stream/tok" });
+    expect(other.indexOf("-reconnect")).toBeGreaterThan(-1);
+  });
+
   it("headers/inputFormat 透传;af 在 -i 之后;forceRate/Channels 以输出选项追加", () => {
     const chain = "loudnorm=I=-14:TP=-2.0:LRA=10.0:offset=0.0:print_format=json";
     const a = decodeArgs({

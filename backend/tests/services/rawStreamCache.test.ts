@@ -48,6 +48,14 @@ async function startUpstream(opts: {
    */
   failFrom?: number;
   failFromTimes?: number;
+  /**
+   * 慢慢滴数据:响应头立即发,body 每 `everyMs` 写 `chunk` 字节。
+   * 用来验证「响应头超时」**不得**在 body 阶段继续生效(240 实测 raw 直通每 15.000s
+   * 被 `AbortSignal.timeout` 掐断一次,解码器表现为「播到一半停住 / 重连从头」)。
+   */
+  drip?: { chunk: number; everyMs: number };
+  /** 连响应头都不发(直到 `release()`):用来验证「建连+响应头超时」仍然生效。 */
+  holdHeaders?: boolean;
 }): Promise<Upstream> {
   const supportRange = opts.supportRange !== false;
   const ranges: Array<string | undefined> = [];
@@ -64,6 +72,12 @@ async function startUpstream(opts: {
     res.on("close", done);
     res.on("error", done);
     ranges.push(req.headers["range"] as string | undefined);
+    if (opts.holdHeaders) {
+      await gate;
+      res.writeHead(200, { "Content-Type": "audio/flac", "Content-Length": String(opts.payload.length) });
+      res.end(opts.payload);
+      return;
+    }
     if (opts.failFrom !== undefined) {
       const rm = /^bytes=(\d*)-/.exec((req.headers["range"] as string | undefined || "").trim());
       const st = rm && rm[1] ? Number(rm[1]) : 0;
@@ -117,6 +131,20 @@ async function startUpstream(opts: {
       res.flushHeaders();
       await gate;
       res.end(slice);
+      return;
+    }
+    if (opts.drip) {
+      (async () => {
+        let off = 0;
+        while (off < slice.length) {
+          if (res.destroyed) return;
+          const n = Math.min(opts.drip!.chunk, slice.length - off);
+          res.write(slice.subarray(off, off + n));
+          off += n;
+          await new Promise((r) => setTimeout(r, opts.drip!.everyMs));
+        }
+        res.end();
+      })();
       return;
     }
     if (opts.chunkWrite && slice.length > opts.chunkWrite) {
@@ -541,6 +569,32 @@ describe("续接遇到上游 5xx(240 真机出现过)", () => {
       try { await readAll(res); } catch { threw = true; }
       expect(threw).toBe(true); // 假 EOF 会让 sendspin 以为播完而自动切下一首
     } finally { await up.close(); }
+  });
+});
+
+describe("响应头超时只约束头部:不得在 body 阶段掐断长流(240 每 15.000s 断一次)", () => {
+  it("响应头及时返回后,body 可以持续超过 openTimeout 仍不中断", async () => {
+    // 头部超时压到 200ms;body 用 16 片 × 40ms ≈ 640ms 慢慢滴 ⇒ 远超超时。
+    const mod = await loadMod({ RAW_UPSTREAM_OPEN_TIMEOUT_MS: "200", RAW_STALL_TIMEOUT_MS: "5000" });
+    const payload = makePayload(64 * 1024);
+    const up = await startUpstream({ payload, drip: { chunk: 4 * 1024, everyMs: 40 } });
+    try {
+      const res = await mod.proxyRawRange({ url: up.url, rangeHeader: "bytes=0-" });
+      const body = await readAll(res);
+      expect(body.length).toBe(payload.length);
+      expect(Buffer.compare(body, payload)).toBe(0);
+    } finally { await up.close(); }
+  });
+
+  it("对照组:响应头迟迟不来时,超时仍然生效(不能因为放宽 body 而丢掉 TTFB 保护)", async () => {
+    const mod = await loadMod({ RAW_UPSTREAM_OPEN_TIMEOUT_MS: "150" });
+    const up = await startUpstream({ payload: makePayload(4096), holdHeaders: true });
+    try {
+      await expect(mod.proxyRawRange({ url: up.url, rangeHeader: "bytes=0-" })).rejects.toThrow();
+    } finally {
+      up.release();
+      await up.close();
+    }
   });
 });
 
