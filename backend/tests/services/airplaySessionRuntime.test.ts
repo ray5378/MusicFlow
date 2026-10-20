@@ -215,7 +215,13 @@ describe("AirplaySessionRuntime / 生命周期", () => {
     expect(S.logs.some((l) => l.level === "error" && l.msg === "airplay stream failed")).toBe(true);
     expect(rt.has("ap-1")).toBe(false);
     expect(S.players[0].calls).toContain("stop");
-    expect(hooks.onSessionEnded).toHaveBeenCalledWith("ap-1", undefined);
+    // 「IDLE 必带真实落点」契约(2026-10-20 任务 D):收尾一律透传
+    // current/positionSec/durationSec;失败路径无 loudnorm JSON ⇒ 不带 loudnessStderr。
+    expect(hooks.onSessionEnded).toHaveBeenCalledWith("ap-1", {
+      current: true,
+      positionSec: 0,
+      durationSec: 240,
+    });
   });
 
   it("流自然结束:拆会话、杀解码器并透传 loudnorm stderr 给 host", async () => {
@@ -229,6 +235,9 @@ describe("AirplaySessionRuntime / 生命周期", () => {
     expect(S.decoders[0].killed).toBe(true);
     expect(S.players[0].calls).toContain("stop");
     expect(hooks.onSessionEnded).toHaveBeenCalledWith("ap-1", {
+      current: true,
+      positionSec: 0,
+      durationSec: 240,
       loudnessStderr: '{"input_i":"-14.2"}',
     });
     // 收尾后再通知一次变更(用于推最终快照)
