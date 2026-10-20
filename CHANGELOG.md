@@ -2,6 +2,19 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.51] - 2026-10-21
+
+### Chore / 依赖安全升级(修复 security 工作流的 npm audit 硬门禁)
+
+4.6.50 发版后 `security` 工作流在 `npm audit --audit-level=high` 处红:两条生产依赖命中当日 advisory。仅升级依赖,不改业务逻辑。
+
+- **backend `music-metadata` `^11.14.0 → ^11.16.1`**:11.15.0 及以下命中 3 条 moderate(解析畸形文件可致 DoS);升到 11.16.1 仍属同一 major,`parseFile`/`parseBuffer` 调用零改动。
+- **backend `vite` `^7.0.0 → ^7.3.7`**(构建/测试工具,不进镜像):7.0.0~7.3.6 命中 3 条 high(`launch-editor` 相关);7.3.7 为 7.x 线内最新修复版,避免跨 8.x 与 `vitest@5.0.3` 的 peer 范围(`^6.4.0 || ^7.0.0 || ^8.0.0`)边界风险。
+- **frontend `vite` `^7.3.6 → ^7.3.7`**:同一条 high advisory 的前端命中。
+- **frontend `follow-redirects` 锁文件 `1.16.0 → 1.16.1`**(axios 传递依赖):修复跨源重定向时 credential 剥离失效(GHSA-q3jh-wrc6-jgq8,high)。
+- **行为变化(读标签更准)**:`music-metadata` 11.16 起把 FLAC 的 `DESCRIPTION`(ffmpeg 写 `comment=` 的落点)映射进 `common.comment`;11.14 读不到、只能得空串。这不是我们的分支逻辑,而是上游修了映射,效果是「下载后写入的 comment 现在能回读」。`sourceScannerMeta` 的字段全量映射用例同步改成断言原值 `A comment`,并在注释里写明版本依据;标签写入/回读链路的 `tagWriter`、`orchestrator.gaps` 用例复跑全绿。
+- **复核**:`cd backend && npm audit --audit-level=high` 与 `cd frontend && npm audit --audit-level=high`(官方 registry)均 `found 0 vulnerabilities`;后端 32 个守卫脚本全通过、`tsc --noEmit` 与前端 `vue-tsc --noEmit` 零错、后端全量 `vitest`(524 文件 / 7376 用例)全绿。
+
 ## [4.6.50] - 2026-10-21
 
 ### Fix / 230 双端实测暴露的四处状态不一致(离线端清不掉、状态词表、mDNS 主机、DLNA 陈旧事件)

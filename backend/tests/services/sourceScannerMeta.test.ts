@@ -87,8 +87,9 @@ describe("extractMetadataHeader / FLAC(Vorbis Comment)", () => {
     // 多值标签折叠成单串
     expect(meta.albumArtist).toBe("Album Artist");
     expect(meta.composer).toBe("Comp One; Comp Two");
-    // ffmpeg 把 comment 写成 DESCRIPTION,Vorbis 侧没有 COMMENT -> 空串而非 undefined
-    expect(meta.comment).toBe("");
+    // ffmpeg 把 comment 写成 DESCRIPTION(而非 COMMENT)。music-metadata 11.14 不映射 DESCRIPTION,
+    // 11.16 起会映射进 common.comment(配套升级见 CHANGELOG 4.6.51),故这里读到原值而非空串。
+    expect(meta.comment).toBe("A comment");
     // 解析成功不算不完整(WebDAV 据此决定不升档重取)
     expect(meta.incomplete).toBeUndefined();
   });
