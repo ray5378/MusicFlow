@@ -139,23 +139,52 @@ export async function stopAirPlaySession(deviceId: string): Promise<void> {
   await stopSession(deviceId);
 }
 
+/** 双协议互斥:让同一物理设备(同 host)的 DLNA 通道彻底让出音频输入。
+ *
+ *  必须做**两件事**,只做第一件会触发「二阶反杀」:
+ *    ① 对同 host 的 DLNA renderer 下发 SOAP Stop + 清内存媒体态(设备停止出流);
+ *    ② **冻结该 DLNA 队列的自动推进**(QueueController.stopPlayback)。
+ *
+ *  为什么 ② 不能省(2026-10-20 实测):只做 ① 时,设备 Stop 后经 GENA 上报 IDLE,
+ *  而 DLNA 队列仍是 active,PlaybackTracker 会把它判成「这首自然放完」→ advance →
+ *  重新 castToDevice;castToDevice 的双协议互斥再 TEARDOWN 掉刚建立的 AirPlay 会话。
+ *  用户可见症状 =「AirPlay 刚出声约 1 秒就被切走/断开」(实测 HiVi H5MKII:
+ *  首轮 AirPlay 仅 129 chunks / 1.0s 后即触发 `双协议互斥:DLNA 播放前停止同 host AirPlay 会话`)。
+ *
+ *  ② 必须**先于** ①:SOAP Stop 的 GENA 事件是异步回投的,先把队列冻结(并清 tracker
+ *  的 prev 状态,见 QueueController.stopPlayback),事件到达时才不会被误判成自然结束。
+ *  冻结而非 clear:队列内容保留,用户之后投回 DLNA 仍可原地续播,不丢歌单。
+ *
+ *  复用已有 dlnaPeerOfAirPlay(同 host 优先带 RenderingControl 的 DLNA renderer);
+ *  动态 import QueueController,避开 airplay↔player↔dlna 的静态循环依赖
+ *  (与同文件 reportAirPlayIdle / stopAirPlayService 同款姿势)。
+ */
+async function yieldSiblingDlnaForAirPlay(deviceId: string): Promise<void> {
+  const dlnaPeer = dlnaPeerOfAirPlay(deviceId);
+  if (!dlnaPeer) return;
+  try {
+    const { getQueueController } = await import("../player/index.js");
+    getQueueController().stopPlayback(`dlna:${dlnaPeer}`);
+  } catch (e) {
+    log.warn("双协议互斥:冻结同 host DLNA 队列失败(忽略)", { deviceId, dlnaPeer, err: (e as Error)?.message || e });
+  }
+  try {
+    await stopDevicePlayback(dlnaPeer);
+    log.info("双协议互斥:AirPlay 起播前停止同 host DLNA 播放并冻结其队列", { deviceId, dlnaPeer });
+  } catch (e) {
+    log.warn("双协议互斥:停止同 host DLNA 播放失败(忽略)", { deviceId, dlnaPeer, err: (e as Error)?.message || e });
+  }
+}
+
 async function startSession(opts: AirPlayCastOptions, seekSec?: number): Promise<void> {
   const dev = getAirPlayDevice(opts.deviceId);
   if (!dev) throw new Error("AirPlay 设备不在线或未发现");
 
-  // ===== 双协议互斥(同 host 的 DLNA 播放先行停止) =====
+  // ===== 双协议互斥(同 host 的 DLNA 播放先行停止并冻结其队列) =====
   // Linkplay/HiVi 类设备同时暴露 DLNA + AirPlay,音频输入互斥:若 DLNA 正在播放,
-  // AirPlay RAOP 起播会被设备输入抢占逻辑干扰(或设备停在 DLNA 通道 → 无声)。
-  // 复用已有 dlnaPeerOfAirPlay(同 host 优先带 RenderingControl 的 DLNA renderer)。
-  const dlnaPeer = dlnaPeerOfAirPlay(opts.deviceId);
-  if (dlnaPeer) {
-    try {
-      await stopDevicePlayback(dlnaPeer);
-      log.info("双协议互斥:AirPlay 起播前停止同 host DLNA 播放", { deviceId: opts.deviceId, dlnaPeer });
-    } catch (e) {
-      log.warn("双协议互斥:停止同 host DLNA 播放失败(忽略)", { deviceId: opts.deviceId, err: (e as Error)?.message || e });
-    }
-  }
+  // AirPlay RAOP 起播会被设备输入抢占逻辑干扰(或设备停在 DLNA 通道 → 无声);
+  // 且仅 SOAP Stop 不够——DLNA 队列会自动续播反杀,详见 yieldSiblingDlnaForAirPlay。
+  await yieldSiblingDlnaForAirPlay(opts.deviceId);
 
   await stopSession(opts.deviceId);
 
@@ -495,15 +524,8 @@ async function castViaChild(opts: AirPlayCastOptions): Promise<void> {
   const dev = getAirPlayDevice(opts.deviceId);
   if (!dev) throw new Error("AirPlay 设备不在线或未发现");
 
-  const dlnaPeer = dlnaPeerOfAirPlay(opts.deviceId);
-  if (dlnaPeer) {
-    try {
-      await stopDevicePlayback(dlnaPeer);
-      log.info("双协议互斥:AirPlay 起播前停止同 host DLNA 播放", { deviceId: opts.deviceId, dlnaPeer });
-    } catch (e) {
-      log.warn("双协议互斥:停止同 host DLNA 播放失败(忽略)", { deviceId: opts.deviceId, err: (e as Error)?.message || e });
-    }
-  }
+  // 与 in-proc 起播同一互斥口径(停 SOAP + 冻结 DLNA 队列),见 yieldSiblingDlnaForAirPlay。
+  await yieldSiblingDlnaForAirPlay(opts.deviceId);
 
   const baseUrl = opts.baseUrl || getEffectiveBaseUrl();
   if (!baseUrl) throw new Error("未确定播放流地址(DLNA_BASE_URL 或先进行一次投屏)");

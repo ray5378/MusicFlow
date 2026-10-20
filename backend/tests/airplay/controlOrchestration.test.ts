@@ -55,8 +55,10 @@ const S = vi.hoisted(() => {
     setDeviceMute: vi.fn(async () => undefined),
     stopDevicePlayback: vi.fn(async () => undefined),
     getPlayerController: { reportState: vi.fn(), unregisterAirPlayDevices: vi.fn() },
-    // stopAirPlayService 注销队列走的是 getQueueController,少它这条断言会假绿
-    getQueueController: { unregisterAirPlayDevices: vi.fn() },
+    // stopAirPlayService 注销队列走的是 getQueueController,少它这条断言会假绿。
+    // stopPlayback 是 AirPlay 起播互斥「冻结同 host DLNA 队列」的落点
+    // (见 yieldSiblingDlnaForAirPlay):少它的话冻结断言会静默假绿(替身漏洞)。
+    getQueueController: { unregisterAirPlayDevices: vi.fn(), stopPlayback: vi.fn() },
     getPeerManager: { reconcileAirPlayPeers: vi.fn(), removeAirPlayPeers: vi.fn() },
     reportPlaybackLoudness: vi.fn(),
     persist: null as any,
@@ -246,6 +248,7 @@ beforeEach(() => {
   S.getPlayerController.reportState.mockReset();
   S.getPlayerController.unregisterAirPlayDevices.mockReset();
   S.getQueueController.unregisterAirPlayDevices.mockReset();
+  S.getQueueController.stopPlayback.mockReset();
   S.getPeerManager.reconcileAirPlayPeers.mockReset();
   S.getPeerManager.removeAirPlayPeers.mockReset();
   sup.rpc.mockReset().mockImplementation(async () => undefined);
@@ -406,6 +409,65 @@ describe("起播编排(startSession / castToAirPlayDevice)", () => {
     ]);
     await C.castToAirPlayDevice(castOpts(d.id));
     expect(S.stopDevicePlayback).toHaveBeenCalledWith("dlna-on-same-host");
+  });
+
+  // ===== 二阶反杀(2026-10-20 实测复盘,见 scripts/check-airplay-dlna-mutex.mjs 顶部) =====
+  // 只停 SOAP 时:设备 Stop 后经 GENA 上报 IDLE,DLNA 队列仍 active → PlaybackTracker 判成
+  // 「自然放完」→ advance → 重新 castToDevice → 又把刚建立的 AirPlay 会话 TEARDOWN 掉。
+  // 用户可见症状 =「AirPlay 刚出声约 1 秒就被切走/断开」。修复 = 起播前同步冻结同 host DLNA 队列。
+  it("起播前必须冻结同 host DLNA 队列(DLNA 队列自动续播反杀 AirPlay 的根因)", async () => {
+    const d = dev({ host: "192.168.1.31" });
+    S.setDevices([d]);
+    S.getCachedDevices.mockReturnValue([
+      { id: "dlna-sib", location: "http://192.168.1.31/ctl", renderingControlUrl: "http://192.168.1.31/rc" },
+    ]);
+    await C.castToAirPlayDevice(castOpts(d.id));
+    // 队列按「带前缀的 playerId」冻结 —— 与 /v1/peers/:id/stop 停 dlna 端同款口径。
+    expect(S.getQueueController.stopPlayback).toHaveBeenCalledWith("dlna:dlna-sib");
+  });
+
+  it("冻结队列必须**先于** SOAP Stop(GENA 事件异步回投,冻晚了仍会被判自然结束)", async () => {
+    const d = dev({ host: "192.168.1.32" });
+    S.setDevices([d]);
+    S.getCachedDevices.mockReturnValue([
+      { id: "dlna-order", location: "http://192.168.1.32/ctl", renderingControlUrl: "http://192.168.1.32/rc" },
+    ]);
+    await C.castToAirPlayDevice(castOpts(d.id));
+    const freezeAt = S.getQueueController.stopPlayback.mock.invocationCallOrder[0];
+    const stopAt = S.stopDevicePlayback.mock.invocationCallOrder[0];
+    expect(freezeAt).toBeDefined();
+    expect(stopAt).toBeDefined();
+    expect(freezeAt).toBeLessThan(stopAt);
+  });
+
+  it("fork 起播路径同样冻结同 host DLNA 队列(两条起播口径不能分叉)", async () => {
+    S.fork = true;
+    const d = dev({ host: "192.168.1.33" });
+    S.setDevices([d]);
+    S.getCachedDevices.mockReturnValue([
+      { id: "dlna-fork", location: "http://192.168.1.33/ctl", renderingControlUrl: "http://192.168.1.33/rc" },
+    ]);
+    await C.castToAirPlayDevice(castOpts(d.id));
+    expect(S.getQueueController.stopPlayback).toHaveBeenCalledWith("dlna:dlna-fork");
+  });
+
+  it("冻结队列失败不能拖垮起播(与 SOAP Stop 同级容错)", async () => {
+    const d = dev({ host: "192.168.1.34" });
+    S.setDevices([d]);
+    S.getCachedDevices.mockReturnValue([
+      { id: "dlna-z", location: "http://192.168.1.34/ctl", renderingControlUrl: "http://192.168.1.34/rc" },
+    ]);
+    S.getQueueController.stopPlayback.mockImplementationOnce(() => { throw new Error("队列在忙"); });
+    await expect(C.castToAirPlayDevice(castOpts(d.id))).resolves.toBeTruthy();
+    // 冻结抛错也不能跳过 SOAP Stop:两条动作互相独立。
+    expect(S.stopDevicePlayback).toHaveBeenCalledWith("dlna-z");
+  });
+
+  it("同 host 无 DLNA peer → 不冻结任何队列(不能凭空停队列)", async () => {
+    S.setDevices([dev({ host: "192.168.1.35" })]);
+    S.getCachedDevices.mockReturnValue([]);
+    await C.castToAirPlayDevice(castOpts(devId()));
+    expect(S.getQueueController.stopPlayback).not.toHaveBeenCalled();
   });
 
   it("双协议互斥失败不能拖垮起播(只记日志继续)", async () => {

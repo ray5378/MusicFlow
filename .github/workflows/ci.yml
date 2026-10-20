@@ -61,6 +61,12 @@ name: ci
 #      自带 token 校验(失败 403)、出流族两处分类(慢请求预算 + 探针避让闸)同步认 AirPlay。
 #      破坏全是静默的:漏了 AirPlay 端 = 本机 ffmpeg 回环取流吃自家 401 → 0 字节 →
 #      设备全程收不到 RTP,用户感知就是「AirPlay 连不上设备」(2026-10-20 HiVi H5MKII 实测)。
+#  19. AirPlay ↔ DLNA 双协议互斥守卫(scripts/check-airplay-dlna-mutex.mjs)——AirPlay 起播
+#      必须走单一助手,同步做两件事:冻结同 host DLNA 队列(QueueController.stopPlayback,
+#      且先于 SOAP Stop)+ 下发 SOAP Stop;两个起播入口(in-proc/fork)口径不得分叉;
+#      反向(DLNA 起播停同 host AirPlay 会话)也必须仍在。破坏全是静默的:只停 SOAP 时
+#      DLNA 队列会自动续播反杀 AirPlay,用户感知就是「AirPlay 刚出声约 1 秒就被切走」
+#      (2026-10-20 HiVi H5MKII 实测二阶反杀)。
 # 镜像发布仍由 build.yml(v* tag)负责,与本 CI 互不影响。
 
 on:
@@ -202,6 +208,18 @@ jobs:
       - uses: actions/checkout@v4
       - name: 校验豁免清单单一真源、handler 自校验 token、出流族两处分类同步
         run: node backend/scripts/check-airplay-stream-auth.mjs
+
+  # 2026-10-20:AP1 修复后 AirPlay 已能出声,但首轮仅 129 chunks / 1.0s 就被打断 —— 只停了
+  # 同 host DLNA 的 SOAP,没冻结它的队列,于是 DLNA 队列自动续播重新 castToDevice,把刚建立
+  # 的 AirPlay 会话 TEARDOWN 掉。本 job 把「起播互斥必须同时冻队列 + 停 SOAP」钉死在 CI。
+  # 零依赖 node 脚本,秒级完成;每条断言都做过双向变异验证(改坏必红)。
+  airplay-dlna-mutex-guard:
+    name: "AirPlay ↔ DLNA 双协议互斥守卫(冻队列先于停 SOAP / 两入口不分叉 / 反向仍在)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 校验单一助手、冻结先于 SOAP Stop、in-proc/fork 两入口同步、反向互斥仍在
+        run: node backend/scripts/check-airplay-dlna-mutex.mjs
 
   # 2026-09-27:后端路由按业务域拆分后,7 处路径耦合的静态守卫全部静默失同步
   # (3 处假红 + 3 处假绿)。守卫盯的是源码内容,却没人盯「源码还在不在那个位置」——

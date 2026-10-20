@@ -17,12 +17,30 @@
   - `backend/src/middleware/metrics.ts` 两处出流族分类同步认 AirPlay：慢请求预算表新增 `"GET /rest/airplay/stream/:token": SLOW_MS_STREAM`（与 DLNA 同级，否则出流会按全局 1s 刷告警噪音）；`isStreamRequest()` 认 `/rest/airplay/stream/` 前缀（否则起播/切歌窗口内金丝雀探针仍在抢上游带宽与连接）。
 - **影响面**：DLNA 与服务端出流路径**零行为变化**（豁免清单只是多一条、且判定结果对 dlna/membuf 逐字一致）；变化仅限 AirPlay 取流从「被拦 401」变为「照常出流」。
 
+### Fix / AirPlay1 出声后约 1 秒被切走：同 host DLNA 队列自动续播反杀 AirPlay 会话（二阶）
+
+上述 401 修完、AirPlay 已能出声后，真机（HiVi H5MKII）复测又暴露**第二个静默故障**：首轮 AirPlay **仅 129 chunks / 1.0s** 即被打断，容器日志紧接着出现 `双协议互斥:DLNA 播放前停止同 host AirPlay 会话`。
+
+- **根因（服务端，`backend/src/services/airplay/control.ts`）**：HiVi 类 Linkplay 设备**同时**暴露 DLNA 与 AirPlay，音频输入互斥，故两个方向都做了「起播前停同 host 的另一协议」。但 AirPlay 起播侧的互斥**只做了半件事**：只对同 host 的 DLNA renderer 下发 SOAP `Stop`（`stopDevicePlayback`），**没有冻结它所在的 DLNA 队列**。于是 ——
+  1. 设备 Stop 后经 GENA 上报 `IDLE`；
+  2. DLNA 队列仍 `isActive`，`PlaybackTracker` 把它判成「这首**自然放完**」→ `advance`；
+  3. 队列自动续播重新 `castToDevice` → 落到 `services/dlna/control.ts` 的反向互斥 `stopAirPlaySessionsForHost(host)` →
+  4. 把**刚建立不到 1 秒**的 AirPlay 会话 TEARDOWN 掉。用户可见症状就是「AirPlay 刚出声就被切走/断开」。
+- **修（`backend/src/services/airplay/control.ts`）**：把「同 host DLNA 让出音频输入」收敛成**单一助手** `yieldSiblingDlnaForAirPlay(deviceId)`，同步做两件事、且**顺序锁定**：
+  1. **先**冻结该 DLNA 队列的自动推进 —— 动态 import `getQueueController().stopPlayback(\`dlna:<peerId>\`)`（与 `/v1/peers/:dlna/stop` 同款口径）。`stopPlayback` 正是为「已下发 Stop 却不许队列自动 advance」设计的既有机制（其文档即写明这条误判）；**冻结而非 `clear`**：队列内容保留，用户之后投回 DLNA 仍可原地续播，不丢歌单。
+  2. **后**下发 SOAP `Stop` + 清内存媒体态（`stopDevicePlayback`）。顺序不能反：SOAP Stop 的 GENA 事件是**异步回投**的，先冻队列（并清 tracker 的 `prev` 状态）才能保证事件到达时不被误判成自然结束。
+  - 两个起播入口口径**必须一致**：in-proc 的 `startSession` 与 fork 模式的 `castViaChild` 都改为只调该助手，撤掉两处重复的手写互斥块（避免两条路径再次分叉）。动态 import 避开 `airplay↔player↔dlna` 的静态循环依赖（与同文件既有 `reportAirPlayIdle` / `stopAirPlayService` 同款姿势）。
+- **影响面（严格限定同 host 有 DLNA 兄弟设备这一种拓扑）**：非 Linkplay 类纯 AirPlay 设备（无同 host DLNA peer）**完全不受影响**（不冻结、不碰任何队列）；反向互斥（DLNA 起播停同 host AirPlay 会话）**一字未动**。唯一行为变化是「AirPlay 起播时，同 host 的 DLNA 队列从『自动续播反杀』改为『就地冻结、可续播』」。
+- **不在本轮范围（记录在案）**：同 host 存在其它活动时推流节拍会变差（实测 `reanchors 12→83`、`maxGap 75→292ms`）有可闻爆音风险，属独立课题。
+
 ### Test / 回归守卫与用例
 
 - 新增 `backend/scripts/check-airplay-stream-auth.mjs`（5 组共 16 条断言）并挂 `ci.yml` 新 job `airplay-stream-auth-guard`：R1 豁免清单单一真源且**恰好三条**（增删/改名必红）；R2 `/rest/*` 门禁走 `isRestAuthExemptPath(c.req.path)`、仍 `authMiddleware` 兜底、**旧内联 `includes('/dlna/stream/')` 已彻底移除**、`/rest/api/*` 第二道门禁仍在；R3 `/airplay/stream/:token` handler 必须 `resolveAirPlaySession` 自校验 + 无效即 `403` + 复用 `serveCastStream(kind:"airplay")`（并反向校验 DLNA 对照实现未被改坏）；R4 出流族两处分类同步认 AirPlay 且无 `startsWith("/rest/")` 之类整面误判；R5 行为用例在册。每条断言均做双向变异验证（改坏必红，见下）。
 - 新增 `backend/tests/middleware/restExempt.test.ts`（7 条）：清单内容与顺序钉死、三条取流端放行、**AirPlay 回归锚点**、带查询串的真实取流形态、普通业务路径一律不放行（单曲流/封面/下载/登录/API）、裸 `/rest` 与空串不得放行、**前缀必须带尾斜杠**（`/streams` 不被当成 `/stream/`）。
 - 扩充 `backend/tests/middleware/metrics.test.ts`：预算表补 AirPlay 出流档断言；新增 `isStreamRequest` 独立 describe（4 条）—— 三条出流端命中、**AirPlay 回归锚点**、非出流请求（含 `/streams` 与 `/rest/api/*`）一律不命中、以及「AirPlay 出流 2000ms 不产生慢请求告警」的端到端行为断言。
 - 覆盖：`src/middleware/restExempt.ts` 落在 `vitest.config.ts` 的覆盖率统计范围内（`src/index.ts` 原本就排除），行为用例对其全量分支覆盖。
+- 新增 `backend/scripts/check-airplay-dlna-mutex.mjs`（5 组 9 条断言）并挂 `ci.yml` 新 job `airplay-dlna-mutex-guard`：R1 同 host DLNA 互斥只有**单一助手** `yieldSiblingDlnaForAirPlay` 一处实现，助手内**两件事都在**且**冻结先于 SOAP Stop**、且经**动态 import** 取 QueueController；R2 两个起播入口（`startSession` / `castViaChild`）**各调一次、共 2 处**；R3 **常量断言**：助手之外不得再出现任何裸 `stopDevicePlayback(...)`（防手写互斥绕过助手）；R4 反向互斥 `castToDevice → stopAirPlaySessionsForHost` 仍在；R5 `stopAirPlaySessionsForHost` 仍导出。每条断言均做双向变异验证（改坏必红，见下）。
+- 扩充 `backend/tests/airplay/controlOrchestration.test.ts`（+5 条，替身补 `getQueueController.stopPlayback` 并纳入 beforeEach 复位）：① 起播前**冻结**同 host DLNA 队列（`stopPlayback("dlna:<peer>")`）；② 冻结**先于** SOAP Stop（`invocationCallOrder` 断言顺序）；③ **fork 路径**同样冻结（两条入口不得分叉）；④ 冻结抛错**不拖垮起播**且不跳过 SOAP Stop；⑤ 同 host 无 DLNA peer 时**不冻结任何队列**。
 
 ## [4.6.44] - 2026-10-20
 
