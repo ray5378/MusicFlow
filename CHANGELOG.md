@@ -2,6 +2,19 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.50] - 2026-10-21
+
+### Fix / 230 双端实测暴露的四处状态不一致(离线端清不掉、状态词表、mDNS 主机、DLNA 陈旧事件)
+
+验收口径改为「**服务端与播放器两侧实际数据必须对得上**」:230 测试床上跑真实接收端(2× Apple-ALAC 解码的 shairport-sync、Sendspin PCM/FLAC SDK 播放器、sendspin-cpp 宿主、真实拉流的 DLNA mock),每条操作同时校验服务端 `state/position` 与播放器侧真实 PCM 能量 / 拉流字节 / relTime。
+
+- **① `/stop`、`/reset` 对离线播放端回 500 并跳过清队列**:离线设备(播放器未注册)的 `isActive` 队列因此常驻内存,被 tracker / preProbe 每秒推进(实测 `idle_early` 625 次),并干扰同 host 在线设备。改为「本地停止状态先落 → 设备停传输 best-effort → 队列始终 `clear`」,响应 `{success:true, transportError?}`。实测 11 台离线端 reset 全部 200,复核无残留。
+- **② 对外状态词表不统一**:AirPlay 回 `PAUSED / IDLE`、组回 `PAUSED`,而客户端 `peer.dart` 只认 `PLAYING / PAUSED_PLAYBACK / TRANSITIONING`(暂停会被显示成未播放)。在 `/v1/peers/:peerId/status` 出口统一归一(拷贝后再改,不污染共享对象)。
+- **③ mDNS 记录只有 `.local` 主机名、没有 A 记录时被当成可路由 host**:投播直接 `getaddrinfo ENOTFOUND`(容器内无 mDNS 解析),设备却显示在线。discovery 新增 `hostname → IPv4` 旁路表:同主机任一记录给出的 IP 可回填;拿不到可路由地址的设备**不登记**。实测 AP2 从必失败 → 正常出声(RMS -22 dB)。
+- **④ DLNA `/status` 被陈旧 GENA 覆盖**:上次 Stop 写进事件缓存的 `STOPPED` 会盖掉刚读到的 SOAP `PLAYING`(表现为「设备在播、接口说已停」)。加 15s 新鲜度闸;`castToDevice` 成功后同步事件缓存 `PLAYING`。
+- **测试/守卫**:`check-airplay-playback-chain.mjs` 扩到 **R1~R17**(R14 离线 stop/reset 容错、R15 状态词表归一(含组)、R16 mDNS 无 A 记录、R17 DLNA 陈旧事件);新增 `peerReset`(离线 cast 端 reset)、`peersRoutesContract`(stop best-effort、PAUSED/IDLE 归一、组归一、陈旧 GENA 不覆盖)、`discovery`(主机名回填/不登记)用例;`vitest` 133 + 127 + 21 全绿,反向变异判红。
+- **双端验证结果**:85 项操作(6 端 30 组有序流转 + DLNA 专属 14 组、前/后/归零/近尾拖动、5×250ms 连发 seek、暂停/恢复/停止、音量/静音、近结尾自动续播、分组同步)全部通过;其中 2 项首轮受一次外部容器重启影响,隔离复测后 **85/85**。播放器侧证据:AirPlay RMS −17…−33 dB、Sendspin 字节增量 1:1 实时、C++ 宿主 RMS −22…−30 dB、DLNA mock `relTime` 与服务端 `position` 差 < 0.6s(seek 后 mock `offset` 等于目标秒数)。
+
 ## [4.6.49] - 2026-10-21
 
 ### Fix / AirPlay 一直卡在同一首歌:客户端「流转播放 + 拖动进度」并发建会话（根因修复）

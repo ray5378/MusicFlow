@@ -637,37 +637,21 @@ app.post("/v1/peers/:peerId/stop", async (c) => {
   const peerId = decodePeerId(c);
   const parsed = parsePeerId(peerId);
   if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
-  if (parsed.kind === "dlna") {
+  if (isCastPeer(parsed)) {
+    // 本地停止状态**先落**(stopPlayback 幂等),设备停传输是 best-effort:
+    // 设备离线 / 播放器未注册("未注册的播放器")时不能再回 500 —— 否则离线端的
+    // isActive 队列既停不掉也清不掉,会一直被 tracker / preProbe / poll 反复推进
+    // (实测每秒刷 idle_early,并干扰同 host 的在线设备)。
+    getQueueController().stopPlayback(parsed.id);
+    let transportError: string | null = null;
     try {
-      getQueueController().stopPlayback(parsed.id);
-      await stopDevice(parsed.id);
-      return c.json({ success: true });
+      if (parsed.kind === "dlna") await stopDevice(parsed.id);
+      else await getQueueController().transport(parsed.id, "stop");
+    } catch (e: any) {
+      transportError = e?.message || String(e);
+      log.warn(`[stop] ${parsed.kind} ${parsed.id} 停传输失败(仍置停止): ${transportError}`);
     }
-    catch (e: any) { return c.json(apiInternalError(e), 500); }
-  }
-  if (parsed.kind === "group") {
-    try {
-      getQueueController().stopPlayback(parsed.id);
-      await getQueueController().transport(parsed.id, "stop");
-      return c.json({ success: true });
-    }
-    catch (e: any) { return c.json(apiInternalError(e), 500); }
-  }
-  if (parsed.kind === "airplay") {
-    try {
-      getQueueController().stopPlayback(parsed.id);
-      await getQueueController().transport(parsed.id, "stop");
-      return c.json({ success: true });
-    }
-    catch (e: any) { return c.json(apiInternalError(e), 500); }
-  }
-  if (parsed.kind === "sendspin") {
-    try {
-      getQueueController().stopPlayback(parsed.id);
-      await getQueueController().transport(parsed.id, "stop");
-      return c.json({ success: true });
-    }
-    catch (e: any) { return c.json(apiInternalError(e), 500); }
+    return c.json({ success: true, ...(transportError ? { transportError } : {}) });
   }
   if (parsed.kind === "local") return c.json(dispatchPeerCommand(peerId, "stop"));
   return c.json({ success: true });
@@ -693,19 +677,19 @@ app.post("/v1/peers/:peerId/reset", async (c) => {
     // 先停传输(与 /stop 同款分支),再 clear —— clear 内部还会清 items / 游标 /
     // isActive / ended / 洗牌序列 / 设备端 currentMedia / 预探测 / 定时暂停,
     // 并广播 media_changed 让所有客户端立刻清掉封面与歌词,不必等下一轮轮询。
+    // 与 /stop 同口径:传输 stop 是 best-effort,队列**必须**清掉。
+    // 离线设备(播放器未注册)在这里曾经回 500 并跳过 clear,导致幽灵队列常驻。
+    getQueueController().stopPlayback(parsed.id);
+    let transportError: string | null = null;
     try {
-      if (parsed.kind === "dlna") {
-        getQueueController().stopPlayback(parsed.id);
-        await stopDevice(parsed.id);
-      } else {
-        getQueueController().stopPlayback(parsed.id);
-        await getQueueController().transport(parsed.id, "stop");
-      }
-      getQueueController().clear(parsed.id);
+      if (parsed.kind === "dlna") await stopDevice(parsed.id);
+      else await getQueueController().transport(parsed.id, "stop");
     } catch (e: any) {
-      return c.json(apiInternalError(e), 500);
+      transportError = e?.message || String(e);
+      log.warn(`[reset] ${parsed.kind} ${parsed.id} 停传输失败(仍清队列): ${transportError}`);
     }
-    return c.json({ success: true });
+    getQueueController().clear(parsed.id);
+    return c.json({ success: true, ...(transportError ? { transportError } : {}) });
   }
 
   // local:清队列元数据 + 丢弃该端的状态上报(否则 /status 仍叠加旧 state / songId)。
@@ -936,14 +920,20 @@ app.get("/v1/peers/:peerId/status", async (c) => {
       const status = await getDeviceStatus(deviceId);
       const evt = getEventManager().getEventState(deviceId);
       if (evt) {
-        if (evt.state) status.state = evt.state;
+        // 新鲜度闸:GENA 事件只有在「不早于本次 SOAP 采样 15s」时才允许覆盖,
+        // 否则旧缓存(上一次 Stop 写的 STOPPED)会把刚读到的 PLAYING 盖掉 ——
+        // 230 实测表现为「设备 relTime 与服务端 position 完全一致,state 却对不上」。
+        // 无 updatedAt 的历史样本视为新鲜(向后兼容既有测试/外部注入)。
+        const evtAt = typeof evt.updatedAt === "number" ? evt.updatedAt : null;
+        const fresh = evtAt === null || evtAt >= (status.updatedAt ?? 0) - 15_000;
+        if (fresh && evt.state) status.state = evt.state;
         // NOTE: position/duration 一律用 SOAP 实时值(status 已含)。GENA 事件在播放中
         // 不会持续上报 RelTime,evt.position 会停在上次 seek/切歌的旧值;用它覆盖 SOAP 的真实
         // 递增 position 会把前端进度每轮询周期打回旧值,表现为进度不前进。故此处不覆盖 position/duration。
-        if (typeof evt.volume === "number") status.volume = evt.volume;
-        if (typeof evt.muted === "boolean") status.muted = evt.muted;
+        if (fresh && typeof evt.volume === "number") status.volume = evt.volume;
+        if (fresh && typeof evt.muted === "boolean") status.muted = evt.muted;
         // 事件驱动下 position 是 GENA 推送时的采样,updatedAt(EventState)比 SOAP 轮询时刻更贴近。
-        if (typeof evt.updatedAt === "number" && evt.updatedAt > 0) status.updatedAt = evt.updatedAt;
+        if (fresh && evtAt !== null && evtAt > 0) status.updatedAt = evtAt;
       }
       return c.json(status);
     } catch (e: any) { return c.json(apiInternalError(e), 500); }
@@ -961,11 +951,21 @@ app.get("/v1/peers/:peerId/status", async (c) => {
         if (typeof evt.muted === "boolean") status.muted = evt.muted;
         if (typeof evt.updatedAt === "number" && evt.updatedAt > 0) status.updatedAt = evt.updatedAt;
       }
+      // 与 airplay/sendspin 同一套对外词表:组长设备可能回 PAUSED / IDLE,
+      // 而客户端只认 PLAYING / PAUSED_PLAYBACK / STOPPED(peer.dart)。
+      if (status.state === "PAUSED") status.state = "PAUSED_PLAYBACK";
+      else if (status.state === "IDLE") status.state = "STOPPED";
       return c.json(status);
     } catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   if (parsed.kind === "airplay") {
-    return c.json(getAirPlayPeerStatus(parsed.id));
+    // 统一状态词表(与 dlna/sendspin/local 对齐):客户端 peer.dart 只认
+    // PLAYING / PAUSED_PLAYBACK / TRANSITIONING;AirPlay 内部的 PAUSED / IDLE
+    // 会让「已暂停」在 UI 上退化成「未在播」。翻译只在本 API 出口做(内部语义不变)。
+    const st: any = { ...getAirPlayPeerStatus(parsed.id) };
+    if (st.state === "PAUSED") st.state = "PAUSED_PLAYBACK";
+    else if (st.state === "IDLE") st.state = "STOPPED";
+    return c.json(st);
   }
   // sendspin:进程内播放器的实时状态(Position/Duration 由推流引擎驱动)。
   if (parsed.kind === "sendspin") {

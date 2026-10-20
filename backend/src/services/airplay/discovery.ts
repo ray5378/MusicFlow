@@ -179,10 +179,31 @@ function dropAp2(svc: Service): void {
   if (before !== dev.supportsAp2) emit({ type: "alive", device: dev });
 }
 
+/**
+ * mDNS 主机名 → IPv4 的旁路表。
+ *
+ * 为什么需要:bonjour 偶尔只给出 SRV 的 `host`(形如 `xxx.local`)而 **A 记录为空**
+ * (230 实测:同一台主机上两台 shairport,AP1 的记录带 IP、AP2 只带主机名)。
+ * 直接把 hostname 当 `host` 存下去 → 投播时 `getaddrinfo` 在容器里解析不了 `.local`
+ * (musl/Node 不查 mDNS)→ `cast FAILED: getaddrinfo ENOTFOUND`。
+ * 这里用「同主机任一记录给出的 IPv4」回填,既拿到可路由地址,也不必在容器里装 nss-mdns。
+ */
+const hostIps = new Map<string, string>();
+
+function ipv4Of(svc: Service): string {
+  return svc.addresses?.find((a: string) => /^\d+\.\d+\.\d+\.\d+$/.test(a)) || "";
+}
+
 function upsert(svc: Service, available = true): void {
   const txt: Record<string, string> = {};
   for (const k of Object.keys(svc.txt || {})) txt[k] = String(svc.txt[k]);
-  const addr = svc.addresses?.find((a) => /^\d+\.\d+\.\d+\.\d+$/.test(a)) || svc.host || "";
+  const ip = ipv4Of(svc);
+  const hostKey = String(svc.host || "").toLowerCase().replace(/\.$/, "");
+  if (ip && hostKey) hostIps.set(hostKey, ip);
+  const isIp = /^\d+\.\d+\.\d+\.\d+$/.test(String(svc.host || ""));
+  const addr = ip || hostIps.get(hostKey) || (isIp ? String(svc.host) : "");
+  // 没有可路由地址(只有解不了的 `.local`)→ 不登记:宁可等 A 记录,
+  // 也不要让一台「看起来在线、投播必 ENOTFOUND」的设备进列表。
   if (!addr || !svc.port) return;
   const id = deviceIdOf(svc);
   const et = txt.et || txt["et"] || "";

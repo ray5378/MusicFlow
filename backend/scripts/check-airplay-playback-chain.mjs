@@ -463,6 +463,89 @@ console.log("===== R13 seek 语义:默认完整重建 + seq 连续(禁止随机�
   );
 }
 
+console.log("===== R14 stop/reset 容错:离线设备也必须停得掉、清得掉 =====");
+{
+  const peers = stripComments(read("backend/src/routes/api/peers.ts"));
+  check(
+    "stop:cast 端统一走 best-effort(transport 抛错不回 500,但 stopPlayback 必落)",
+    /if \(isCastPeer\(parsed\)\) \{[\s\S]{0,400}?getQueueController\(\)\.stopPlayback\(parsed\.id\);[\s\S]{0,700}?transportError[\s\S]{0,300}?success: true/.test(peers),
+    "stop 分支仍是各 kind 各自 try/catch 500,离线设备会停不掉",
+  );
+  check(
+    "reset:传输失败后仍执行 clear(不得在 catch 里 return 500 跳过 clear)",
+    /reset[\s\S]{0,2600}?transportError[\s\S]{0,600}?getQueueController\(\)\.clear\(parsed\.id\)/.test(peers),
+    "reset 在传输抛错时跳过了 clear → 离线端 isActive 队列常驻",
+  );
+  check(
+    "**反向断言**:reset 不得再在 catch 里直接回 500 并跳过 clear",
+    !/catch \(e: any\) \{\s*return c\.json\(apiInternalError\(e\), 500\);\s*\}\s*return c\.json\(\{ success: true \}\);\s*\}\s*\/\/ local:清队列元数据/.test(peers),
+    "reset 仍有『抛错即 500 且不 clear』的旧分支",
+  );
+}
+
+console.log("===== R15 AirPlay 状态词表归一(与 dlna/sendspin/local 对齐) =====");
+{
+  const peers = stripComments(read("backend/src/routes/api/peers.ts"));
+  check(
+    "status 出口把 PAUSED → PAUSED_PLAYBACK",
+    /parsed\.kind === "airplay"[\s\S]{0,500}?st\.state === "PAUSED"[\s\S]{0,120}?PAUSED_PLAYBACK/.test(peers),
+    "AirPlay 的 PAUSED 未归一,客户端 peer.dart 会当成未在播",
+  );
+  check(
+    "status 出口把 IDLE → STOPPED",
+    /parsed\.kind === "airplay"[\s\S]{0,700}?st\.state === "IDLE"[\s\S]{0,120}?STOPPED/.test(peers),
+    "AirPlay 的 IDLE 未归一为 STOPPED",
+  );
+  check(
+    "归一必须是拷贝(不得改写共享状态对象)",
+    /\{\s*\.\.\.getAirPlayPeerStatus\(parsed\.id\)\s*\}/.test(peers),
+    "直接改动了 getAirPlayPeerStatus 返回的共享对象",
+  );
+  check(
+    "group 状态同样归一(PAUSED → PAUSED_PLAYBACK / IDLE → STOPPED)",
+    /status\.state === "PAUSED"[\s\S]{0,160}?PAUSED_PLAYBACK/.test(peers)
+      && /status\.state === "IDLE"[\s\S]{0,120}?STOPPED/.test(peers),
+    "组状态未归一,客户端会把暂停显示成未播放",
+  );
+}
+
+console.log("===== R16 mDNS 无 A 记录时不得把 `.local` 当可路由 host =====");
+{
+  const disc = stripComments(read("backend/src/services/airplay/discovery.ts"));
+  check(
+    "维护 hostname → IPv4 旁路表(同主机其它记录可回填)",
+    /hostIps\s*=\s*new Map/.test(disc) && /hostIps\.set\(/.test(disc),
+    "discovery 没有 hostIps 旁路表",
+  );
+  check(
+    "无可路由地址时不登记(不能把解不了的 .local 存成 host)",
+    /const addr = ip \|\| hostIps\.get\(hostKey\) \|\| \(isIp \? String\(svc\.host\) : ""\)/.test(disc)
+      && /if \(!addr \|\| !svc\.port\) return;/.test(disc),
+    "仍可能把裸 `.local` 主机名写成 dev.host",
+  );
+  check(
+    "**反向断言**:不得再直接 `\|\| svc.host \|\|` 兜底",
+    !/svc\.addresses\?\.find\([^\n]*\)\s*\|\|\s*svc\.host\s*\|\|/.test(disc),
+    "discovery 仍有 `addresses || svc.host ||` 的旧兜底",
+  );
+}
+
+console.log("===== R17 DLNA 状态一致性:陈旧 GENA 不得覆盖 SOAP =====");
+{
+  const peers = stripComments(read("backend/src/routes/api/peers.ts"));
+  const dlna = stripComments(read("backend/src/services/dlna/control.ts"));
+  check(
+    "status 路由对 GENA state 有新鲜度闸(15s)",
+    /const fresh = evtAt === null \|\| evtAt >= \(status\.updatedAt \?\? 0\) - 15_000;/.test(peers),
+    "缺少 GENA 新鲜度闸,旧 STOPPED 会盖掉 SOAP PLAYING",
+  );
+  check(
+    "castToDevice 成功后同步事件缓存 PLAYING",
+    /setTransportState\(opts\.deviceId, "PLAYING"\)/.test(dlna),
+    "castToDevice 未同步 PLAYING,缓存里会残留旧 STOPPED",
+  );
+}
+
 console.log("");
 if (failures.length) {
   console.log(`✗ AirPlay 播放链路时序守卫失败 ${failures.length} 项:`);

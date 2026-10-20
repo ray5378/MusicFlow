@@ -652,12 +652,20 @@ describe("传输控制 play / pause / stop", () => {
     resetPeersFakes();
     fns.pauseDevice.mockRejectedValueOnce(new Error("暂停失败"));
     expect((await post("/v1/peers/dlna:dev1/pause")).status).toBe(500);
+    // stop 的口径(2026-10-21 230 实测修订):**本地停止状态先落,设备停传输是
+    // best-effort**。离线设备(播放器未注册)必须仍能 stop 成功,否则其 isActive
+    // 队列既停不掉也清不掉,会一直被 tracker/preProbe 推进并干扰同 host 在线设备。
     resetPeersFakes();
     queueController.transport.mockRejectedValueOnce(new Error("停止失败"));
-    expect((await post("/v1/peers/airplay:ap1/stop")).status).toBe(500);
+    const apStop = await json(await post("/v1/peers/airplay:ap1/stop"));
+    expect(apStop.success).toBe(true);
+    expect(String(apStop.transportError || "")).toContain("停止失败");
+    expect(queueController.stopPlayback).toHaveBeenCalledWith("ap1");
     resetPeersFakes();
     fns.stopDevice.mockRejectedValueOnce(new Error("停止失败"));
-    expect((await post("/v1/peers/dlna:dev1/stop")).status).toBe(500);
+    const dnStop = await json(await post("/v1/peers/dlna:dev1/stop"));
+    expect(dnStop.success).toBe(true);
+    expect(queueController.stopPlayback).toHaveBeenCalledWith("dev1");
   });
 
   it("pause/stop 的 local 分支走定向下发(含 delivered 反馈)", async () => {
@@ -918,10 +926,15 @@ describe("POST /v1/peers/:peerId/reset", () => {
     expect(pm.clearLocalStatusReport).toHaveBeenCalledWith("local:u1");
   });
 
-  it("停止阶段抛错 → 500(不留下半清状态)", async () => {
+  it("停止阶段抛错 → 仍 200 且照常 clear(离线端幽灵队列必须清得掉)", async () => {
+    // 旧口径「抛错就 500、不 clear」在离线设备上会把 isActive 队列永久留在内存里
+    // (230 实测:每秒 idle_early + 干扰同 host 在线设备)。reset 的语义是「这个端
+    // 现在什么都没在播」,设备停传输失败不代表状态不能清。
     fns.stopDevice.mockRejectedValueOnce(new Error("停止失败"));
-    expect((await post("/v1/peers/dlna:dev1/reset")).status).toBe(500);
-    expect(queueController.clear).not.toHaveBeenCalled();
+    const b = await json(await post("/v1/peers/dlna:dev1/reset"));
+    expect(b.success).toBe(true);
+    expect(String(b.transportError || "")).toContain("停止失败");
+    expect(queueController.clear).toHaveBeenCalledWith("dev1");
   });
 
   it("peerId 非法 → 400", async () => {
@@ -979,9 +992,34 @@ describe("GET /v1/peers/:peerId/status", () => {
     expect(b.updatedAt).toBe(5);
   });
 
+  it("dlna:陈旧 GENA 事件不得覆盖新鲜的 SOAP 状态(旧 STOPPED 盖掉 PLAYING)", async () => {
+    const now = Date.now();
+    fns.getDeviceStatus.mockResolvedValueOnce({
+      state: "PLAYING", position: 5, duration: 100, volume: 30, muted: false, updatedAt: now,
+    });
+    // 60s 前那次 Stop 写进缓存的事件:不得再参与本次状态判定。
+    eventManager.getEventState.mockReturnValueOnce({
+      state: "STOPPED", position: 0, volume: 10, muted: true, updatedAt: now - 60_000,
+    });
+    const b = await json(await get("/v1/peers/dlna:dev1/status"));
+    expect(b.state).toBe("PLAYING");
+    expect(b.volume).toBe(30);
+    expect(b.muted).toBe(false);
+    expect(b.updatedAt).toBe(now);
+  });
+
   it("dlna:上游抛错 → 500", async () => {
     fns.getDeviceStatus.mockRejectedValueOnce(new Error("SOAP 超时"));
     expect((await get("/v1/peers/dlna:dev1/status")).status).toBe(500);
+  });
+
+  it("group:PAUSED / IDLE 归一成统一词表(客户端只认 UPnP 三态)", async () => {
+    fns.getGroupStatus.mockResolvedValueOnce({ state: "PAUSED", position: 3, duration: 9, volume: 20, muted: false });
+    fns.getGroupLeaderDeviceId.mockReturnValueOnce(null);
+    expect((await json(await get("/v1/peers/group:g1/status"))).state).toBe("PAUSED_PLAYBACK");
+    fns.getGroupStatus.mockResolvedValueOnce({ state: "IDLE", position: 0, duration: 9, volume: 20, muted: false });
+    fns.getGroupLeaderDeviceId.mockReturnValueOnce(null);
+    expect((await json(await get("/v1/peers/group:g1/status"))).state).toBe("STOPPED");
   });
 
   it("group:事件源取组长设备;抛错 → 500", async () => {
@@ -1001,6 +1039,18 @@ describe("GET /v1/peers/:peerId/status", () => {
   it("airplay:直接回传 peer 状态", async () => {
     fns.getAirPlayPeerStatus.mockReturnValueOnce({ state: "PLAYING", media: { songId: "s" } });
     expect(await json(await get("/v1/peers/airplay:ap1/status"))).toEqual({ state: "PLAYING", media: { songId: "s" } });
+  });
+
+  it("airplay:PAUSED / IDLE 在 API 出口归一成统一词表(客户端只认 UPnP 三态)", async () => {
+    fns.getAirPlayPeerStatus.mockReturnValueOnce({ state: "PAUSED", media: null });
+    expect((await json(await get("/v1/peers/airplay:ap1/status"))).state).toBe("PAUSED_PLAYBACK");
+    fns.getAirPlayPeerStatus.mockReturnValueOnce({ state: "IDLE", media: null });
+    expect((await json(await get("/v1/peers/airplay:ap1/status"))).state).toBe("STOPPED");
+    // 归一必须是拷贝:不得改写共享的内部状态对象。
+    const shared: Any = { state: "IDLE", media: null };
+    fns.getAirPlayPeerStatus.mockReturnValueOnce(shared);
+    await get("/v1/peers/airplay:ap1/status");
+    expect(shared.state).toBe("IDLE");
   });
 
   it("sendspin:PlayerState → 对外 state 四态映射", async () => {
@@ -1100,11 +1150,15 @@ describe("group / airplay / sendspin 的 pause / stop / volume 分支", () => {
     }
   });
 
-  it("stop:三端 transport 抛错各自 → 500", async () => {
+  it("stop:三端 transport 抛错仍 200(best-effort),并回传 transportError", async () => {
     for (const p of CAST) {
       resetPeersFakes();
       queueController.transport.mockRejectedValueOnce(new Error("停止失败"));
-      expect((await post(`/v1/peers/${p}/stop`)).status).toBe(500);
+      const b = await json(await post(`/v1/peers/${p}/stop`));
+      expect(b.success).toBe(true);
+      expect(String(b.transportError || "")).toContain("停止失败");
+      // 本地停止状态必须已落(离线端也要能被停掉)。
+      expect(queueController.stopPlayback).toHaveBeenCalledWith(p.split(":")[1]);
     }
   });
 

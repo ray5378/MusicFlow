@@ -242,3 +242,33 @@ describe("陈旧剔除", () => {
     expect(getAirPlayDevices().find((d) => d.id === "stale")!.available).toBe(false);
   });
 });
+
+describe("无 A 记录的 `.local` 主机(230 实测:同主机第二台接收端)", () => {
+  it("同主机已有一条带 IP 的记录 → 后续只有主机名的记录回填该 IP", () => {
+    startAirPlayDiscovery();
+    const b = M.browsers[0];
+    // 第一条:带 IPv4(AP1)。
+    b.emit("up", svc({
+      name: "AAA@AP1", fqdn: "AAA@AP1._raop._tcp.local",
+      host: "xyz5378.local", addresses: ["192.168.10.230"],
+    }));
+    expect(getAirPlayDevice("AAA")!.host).toBe("192.168.10.230");
+    // 第二条:同一主机名、**A 记录为空**(AP2 的真实形态)→ 必须回填同一个 IP。
+    b.emit("up", svc({
+      name: "BBB@AP2", fqdn: "BBB@AP2._raop._tcp.local",
+      host: "xyz5378.local", addresses: [],
+    }));
+    const d = getAirPlayDevice("BBB");
+    expect(d).toBeTruthy();
+    expect(d!.host).toBe("192.168.10.230");
+  });
+
+  it("主机名从未给出过 IP → 不登记(避免「在线但投播必 ENOTFOUND」的幽灵设备)", () => {
+    startAirPlayDiscovery();
+    M.browsers[0].emit("up", svc({
+      name: "CCC@Unknown", fqdn: "CCC@Unknown._raop._tcp.local",
+      host: "nowhere-unknown.local", addresses: [],
+    }));
+    expect(getAirPlayDevice("CCC")).toBeUndefined();
+  });
+});

@@ -224,6 +224,20 @@ describe("POST /v1/peers/:peerId/reset:刻意保留的东西", () => {
   });
 });
 
+describe("POST /v1/peers/:peerId/reset:离线 cast 端(播放器未注册)", () => {
+  it("传输抛错仍回 200,并继续执行 clear —— 幽灵队列必须清得掉", async () => {
+    const uid = seedUser();
+    // airplay:OFFLINE-DEV 没有注册播放器:transport('stop') 会抛「未注册的播放器」。
+    // 旧实现直接 500 并跳过 clear → 离线端的 isActive 队列常驻内存(230 实测每秒
+    // 刷 idle_early,还干扰同 host 在线设备)。新契约:success + transportError。
+    const res = await reset(uid, "airplay:OFFLINE-DEV", "web-rst-08");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.success).toBe(true);
+    expect(String(body.transportError || "")).toBeTruthy();
+  });
+});
+
 describe("POST /v1/peers/:peerId/reset:参数边界", () => {
   it("非法 peerId → 400", async () => {
     const uid = seedUser();

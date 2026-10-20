@@ -944,6 +944,11 @@ export async function castToDevice(opts: CastOptions): Promise<{ mediaUri: strin
     seekGeneration.delete(opts.deviceId);
   }
 
+  // 起播成功 → 事件缓存同步置 PLAYING。
+  // 为什么必须写:GENA 缓存里的旧 STOPPED(上一次 Stop 留下的)会在 /status 里
+  // 盖掉刚拿到的 SOAP PLAYING,表现是「设备在播、接口说已停」(230 实测:
+  // mock 的 relTime 与服务端 position 一致,唯独 state 一个 PLAYING 一个 STOPPED)。
+  getEventManager().setTransportState(opts.deviceId, "PLAYING");
   // Best-effort: subscribe to GENA events so we get push updates. If it
   // fails we silently fall back to polling (forcePoll stays true).
   getEventManager().subscribe(device).catch(() => {});
