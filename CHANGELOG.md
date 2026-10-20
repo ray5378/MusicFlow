@@ -93,6 +93,21 @@ D1(输出编码全局统一 FLAC)落地后暴露的**功能回退**:`decideTrans
 - 收紧 `backend/tests/services/transcode.test.ts`:两条旧用例(「源即 mp3 且码率达标 → 不转码」「仅 maxBitRate 且源码率不超标 → 原样返回」)改判为「必须转码」,镜像用例表同步更新并**重新定位** —— 该表只描述本服务端(MusicFlow)语义,不再与客户端 `_contractVectors` 逐项等同(后者描述**外部服务端**「源格式相同即可字节直传」的启发式,刻意分道:不为本服务端的 D1 去劣化外服务器的字节 seek)。
 - `check-audio-default-flac.mjs` 增补 3 条断言(共 18 条):**常量断言** `canUseOriginal` 不得再加回来、显式 format 分支恒 `should:true`、显式 maxBitRate 分支恒转 mp3;反向变异(把快路径加回去)判红 2 条,还原后全绿。
 
+## [4.6.47] - 2026-10-20
+
+### Feat / AirPlay 2 分级发现（课题 E2：能力识别，不改投屏路径）
+
+AirPlay 2（E2~E5）课题的第一阶段：让服务端能**区分**设备是否具备 AirPlay 2 能力，为后续 AP2 发送端（配对/加密/缓冲式推流/控制时钟）做准备。**本版不改投屏路径** —— 所有设备仍走既有 AP1/RAOP，行为与本版之前逐字一致。
+
+- **设备表来源不变**：`_raop._tcp` 仍是设备表的**唯一**来源；新增的 `_airplay._tcp` 浏览只用于给「已存在的」raop 设备打能力标记 `supportsAp2`。纯 AP2-only 广播**不会**造出设备（AP2 发送端未落地前它投不了，进表只会变成「点了报错」的死设备，还会污染 AP1 设备表）。
+- **判据不靠猜**：`supportsAp2 = 同时有 _airplay 记录 && protovers ≥ 1.1`。刻意**不**用某一个 features 位 —— 位定义必须由 230 接收器实测反证。`features/srcvers/protovers/gid/flags` 原样留存，供 E3 的握手/加密读取。
+- **deviceid 归一**：`_raop` 把 MAC 放在服务名前缀（`86BC3FFBA308@名字`），`_airplay` 放在 TXT `deviceid` 且常带冒号（`86:bc:3f:fb:a3:08`）—— 归一（去分隔符 + 大写）后两条记录才对齐；无法对齐的 `_airplay` 记录直接忽略（不按名字猜）。
+- **能力可撤**：`_airplay` 记录 down ⇒ 能力翻回 `false`，但设备**可用性**仍由 `_raop` 的 up/down 决定；插件关闭（stop）时清空能力表，避免下一轮启动残留旧能力。
+- **对外透出**：`GET /v1/airplay/devices` 增加 `supportsAp2` 与 `ap2{features,srcvers,protovers,gid,flags,model}`；renderer 的 `discover()` meta 同步带 `supportsAp2/ap2Protovers`。
+- **新增静态守卫** `backend/scripts/check-airplay-ap2-discovery.mjs`（挂 `ci.yml` 第 24 个 job，四组 16 条）：① 设备表唯一来源（`upsertAp2` 体内不得出现 `devices.set(`）；② 判据必须是「能力存在 && protovers ≥ 1.1」（不得写死 `true`）；③ `_airplay` down 必须走 `dropAp2` 撤能力、`_raop` down 仍只标离线；④ AP1 零回归（`cast()` 仍只调 `castToAirPlayDevice`，不得提前分流 AP2）。反向变异 4 项（`_airplay` 造设备 / 判据写死 true / down 不清能力 / dropAp2 不删表）**全部判红**，还原后逐字节一致。
+- **测试**：新增 `discoveryAp2.test.ts`（9 例：先到顺序、纯 AP2-only 不入表、protovers=1.0、缺 deviceid、down 撤能力、stop 清表、归一与版本判据）；同步既有 `discovery.test.ts` / `airplayDiscoveryTail.test.ts` 的句柄数（常驻 2 条、30s 续期各 1 条）。airplay 全套 **306 用例全过**。
+- **240 实测**：`MusicFlow-230-AP2`（shairport AP2）→ `supportsAp2=true / protovers=1.1 / features=0x401C4A00,0x5C340`；`HiVi H5MKII` 与 `MusicFlow-230-AP1`（纯 AP1）→ `false`；纯 AP2-only 的 `MusicFlow-230-AP2r` 按设计**不入表**。`/v1/peers` 的 AP1 投屏端与队列未受影响。
+
 ## [4.6.46] - 2026-10-20
 
 ### Fix / AirPlay 投屏到标准合规接收端完全放不出声：RAOP 请求行缺 `RTSP/1.0` 版本段
