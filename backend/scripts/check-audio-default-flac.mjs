@@ -119,9 +119,28 @@ check(
   "transcode.ts 的 mp3/aac 目标缺失(疑似越界改动)",
 );
 check(
-  "decideTranscode 的「可复用原始直传」判定仍在(未删)",
+  "decideTranscode 仍在",
   /function decideTranscode\(/.test(trans),
   "decideTranscode 不存在",
+);
+// D1(2026-10-20)起「不转码」= 管道默认出 FLAC —— 它既不可能复现客户端显式要求的 mp3/aac,
+// 也满足不了显式 maxBitRate 的带宽上限(选「流量节省 128」却拿到无损流)。故旧的
+// 「可复用原始直传」快路径(canUseOriginal)已整体删除:只要客户端**显式**给了格式或码率
+// 档位,就必须走显式转码,否则界面档位形同虚设。
+check(
+  "**常量断言**:decideTranscode 不得再出现「可复用原始直传」快路径(canUseOriginal)",
+  !trans.includes("canUseOriginal"),
+  "canUseOriginal 直传判定被加回来了(显式档位会重新落回默认 FLAC)",
+);
+check(
+  "显式 format 分支恒返回 should:true(不再按源格式/码率放行)",
+  /if \(fmt\) \{\s*return \{ should: true, format: fmt/.test(trans),
+  "显式 format 分支未恒定转码",
+);
+check(
+  "显式 maxBitRate 分支恒转 mp3(档位带宽上限必须落到实处)",
+  /if \(br > 0\) \{\s*return \{ should: true, format: "mp3"/.test(trans),
+  "显式 maxBitRate 分支未恒定转码",
 );
 
 console.log("");

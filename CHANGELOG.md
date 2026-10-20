@@ -51,6 +51,18 @@
 - **影响面**:客户端 / DLNA / AirPlay 中间流统一为 FLAC(AirPlay 解码侧因此多一次 FLAC 解码,CPU 略增、功能无影响);Sendspin 直接解码源字节,不消费该编码决策,**不受影响**;显式 `format=mp3|aac` 的转码路径(`decideTranscode` / `serveTranscodedSong`)行为不变。
 - **残留问题(记录在案,超出本任务允许改动面)**:`decideTranscode` 的「可复用原始直传」分支仍假设「管道输出 = 源格式」,当 `maxBitRate ≥ 源码率` 时(如高品质 320 遇 192kbps mp3、流量节省 128 遇 128kbps mp3)会落回默认 FLAC,出现「界面显示 320K/128K、实际是无损」的档位标签与实际不符;修它需改 `services/transcode.ts`(属公共段红线),本任务不动,待拍板。
 
+### Fix / 显式音质档位形同虚设:显式 format/maxBitRate 现在一律走显式转码
+
+D1(输出编码全局统一 FLAC)落地后暴露的**功能回退**:`decideTranscode` 仍保留「可复用原始直传」快路径,而「不转码」在 D1 之后已不再等于「直传源文件」—— 默认管道出的是 **FLAC**。后果有两层:
+
+- **显式格式不复现**:客户端显式请求 `format=mp3`、且源本就是 mp3 且码率达标时,快路径判定「无需转码」→ 实际返回 FLAC,与请求格式不符。
+- **带宽档位形同虚设**:只传 `maxBitRate`(高品质 320 / 标准 192 / 流量节省 128 三档即此类)且源码率不超上限时,同样落回默认 FLAC —— 用户为**省流量**选「流量节省 128」却拿到无损流,与界面档位**不符**(用户实测反馈)。
+
+- **修(`backend/src/services/transcode.ts::decideTranscode`)**:删除「可复用原始直传」快路径。只要客户端**显式**给出白名单格式(mp3/aac)或码率档位(`maxBitRate>0`)就一律走显式转码 —— 显式格式转该格式、只给码率档位则转 mp3 取该档位(沿用既有码率钳制 mp3≤320 / aac≤512 / 下限 64);两者都不传(「原始音质档」)/ `raw` / 白名单外格式才交默认管道出 FLAC(无损)。
+- **为什么不做「对应码率的 FLAC」**(实测否掉的方案):FLAC 是无损格式,**编码器没有可用的目标码率参数** —— 230 上 ffmpeg 6.1.1 实测 `-c:a flac` 分别加 `-b:a 128k / 320k / 900k`,输出字节数**完全相同**;能影响体积的只有压缩级别(level 0→12 约省 30%)与采样率(44100→22050 约省 37%,但砍高频、并非无损)。故「码率档位」只能由**有损编解码**落地,这是本方案回落到 mp3 的原因。
+- **影响面**:客户端 / DLNA / AirPlay 的 cast 路径默认**不传** format/maxBitRate → 一律走默认管道出 FLAC,**行为零变化**;只有「显式点档位 / 显式要求格式」的请求行为改变(从「落回 FLAC」变为「真的按档位转码」)。
+- **已知代价(记录在案)**:源格式与请求格式一致且码率达标时也会多做一次「同类转码」(如 mp3@320 源 + `format=mp3` + 320 档)。本项目自用、转码量小(见 `transcode.ts` 文件头设计决策:不做客户端透传),换取「界面档位与实际输出一致」是划算的。
+
 ### Test / 回归守卫与用例
 
 - 新增 `backend/scripts/check-airplay-stream-auth.mjs`（5 组共 16 条断言）并挂 `ci.yml` 新 job `airplay-stream-auth-guard`：R1 豁免清单单一真源且**恰好三条**（增删/改名必红）；R2 `/rest/*` 门禁走 `isRestAuthExemptPath(c.req.path)`、仍 `authMiddleware` 兜底、**旧内联 `includes('/dlna/stream/')` 已彻底移除**、`/rest/api/*` 第二道门禁仍在；R3 `/airplay/stream/:token` handler 必须 `resolveAirPlaySession` 自校验 + 无效即 `403` + 复用 `serveCastStream(kind:"airplay")`（并反向校验 DLNA 对照实现未被改坏）；R4 出流族两处分类同步认 AirPlay 且无 `startsWith("/rest/")` 之类整面误判；R5 行为用例在册。每条断言均做双向变异验证（改坏必红，见下）。
@@ -65,6 +77,9 @@
 
 - 新增 `backend/scripts/check-audio-default-flac.mjs`(15 条断言)并挂 `ci.yml` 新 job `audio-default-flac-guard`:五类源后缀 + 未知兜底一律 FLAC;DLNA 决策与公共决策同源;显式 `format=mp3|aac` 的转码路径仍在(未误删);`decideTranscode` 的直传判定仍在。两项反向变异(改回按源族旧分支 / 恢复 `ogg→mp3`)均判红,还原后逐字节一致。
 - 服务端测试:`tests/services/pipeline.test.ts` 补 `resolveChannelCodec` / `resolveDlnaOutput` 两组 9 用例;`tests/rest/dlnaOggFallback.test.ts` 全量改判 FLAC;`tests/routes/streamRemoteFallback.test.ts` 默认出流 mime 改判 `audio/flac`。客户端:`transcoded_stream_seek_test.dart` / `seek_reload_routing_test.dart` 新增「D1:未带 format + 服务端返回 FLAC」组(判定需 timeOffset、重拉地址带 timeOffset 且不带 format、绝不做源内字节 seek)。
+
+- 收紧 `backend/tests/services/transcode.test.ts`:两条旧用例(「源即 mp3 且码率达标 → 不转码」「仅 maxBitRate 且源码率不超标 → 原样返回」)改判为「必须转码」,镜像用例表同步更新并**重新定位** —— 该表只描述本服务端(MusicFlow)语义,不再与客户端 `_contractVectors` 逐项等同(后者描述**外部服务端**「源格式相同即可字节直传」的启发式,刻意分道:不为本服务端的 D1 去劣化外服务器的字节 seek)。
+- `check-audio-default-flac.mjs` 增补 3 条断言(共 18 条):**常量断言** `canUseOriginal` 不得再加回来、显式 format 分支恒 `should:true`、显式 maxBitRate 分支恒转 mp3;反向变异(把快路径加回去)判红 2 条,还原后全绿。
 
 ## [4.6.44] - 2026-10-20
 

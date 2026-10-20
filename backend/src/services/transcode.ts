@@ -1,9 +1,11 @@
 // ==================== 服务器端转码服务（OpenSubsonic /rest/stream 语义） ====================
 //
 // 客户端按 Subsonic 标准在 /rest/stream 上携带 format / maxBitRate / timeOffset：
-//   - 未要求白名单格式（未指定 / raw / 其它）→ 不进转码池，但仍走服务端实时管道
-//     （解码→响度归一→按源族编码；D9 已删除「原样直出原始文件」分支）；
-//   - format=mp3/aac → 实时转码到目标格式；maxBitRate 低于源码率时同时压码率；
+//   - 只传 format（白名单内 mp3/aac）或只传 maxBitRate → **一律走显式转码**：D1(2026-10-20)
+//     起「不转码」= 默认管道出 FLAC，既不可能复现客户端显式要求的 mp3/aac，也满足不了
+//     显式 maxBitRate 的带宽上限（选「流量节省 128」却拿到无损流）；
+//   - 两者都不传（原始音质档）/ format=raw / 白名单外格式 → 不进转码池，走服务端实时
+//     管道（解码→响度归一→默认 FLAC；D9 已删除「原样直出原始文件」分支）；
 //   - 转码流无法按字节 Range 断点续传，客户端改用 timeOffset 重新拉流 seek
 //     （对应服务器已对外宣告的 transcodeOffset OpenSubsonic 扩展）。
 //
@@ -70,9 +72,18 @@ export interface TranscodeDecision {
 /**
  * 依据 OpenSubsonic /rest/stream 参数与源文件信息判断是否需要转码，
  * 与 Navidrome / 客户端 shouldUseServerTimeOffsetSeek 的判定保持一致：
- *   - 请求了白名单格式且源格式不同，或源码率高于 maxBitRate → 转码；
- *   - 仅 maxBitRate（未指定格式）且源码率高于它 → 压码率（默认转 mp3）；
- *   - 否则不转码（should=false），仍走服务端实时管道，非原样直出（见文件头设计决策）。
+ *   - 显式请求白名单格式(mp3/aac) → 转该格式；
+ *   - 仅显式指定 maxBitRate（未指定格式） → 转 mp3、码率取该上限（压码率档位语义）；
+ *   - 两者都不传（原始音质档）/ raw / 白名单外格式 → 不转码（should=false），
+ *     仍走服务端实时管道 —— D1 起该管道**默认出 FLAC**，这正是「原始音质 = 无损」。
+ *
+ * ⚠ D1(2026-10-20「输出编码全局统一 FLAC」)之后，「不转码」不再等于「直传原始文件」：
+ * 管道默认出 FLAC，既不可能复现客户端显式要求的 mp3/aac（曾是「源格式相同就不转码」
+ * 的快路径），也满足不了显式 maxBitRate 的带宽上限。故旧的「可复用原始直传」判定
+ * 已整体删除：只要客户端**显式**给出格式或码率档位，就必须走显式转码。
+ * 副作用(已知)：源格式与请求格式一致、且码率达标时也会走一次「同类转码」
+ * （如 mp3@320 源 + format=mp3 + 320 档）；本项目自用、转码量小，换取「界面档位
+ * 与实际输出一致」是划算的（见文件头设计决策：不做客户端透传）。
  */
 export function decideTranscode(input: {
   requestedFormat?: string | null;
@@ -82,17 +93,17 @@ export function decideTranscode(input: {
 }): TranscodeDecision {
   const fmt = normalizeTargetFormat(input.requestedFormat ?? null);
   const br = normalizeBitRateKbps(input.maxBitRate ?? null);
-  const srcFmt = (input.sourceFormat || "").trim().toLowerCase().replace(/^\./, "");
   const src = normalizeBitRateKbps(input.sourceBitRate ?? null);
 
+  // 显式请求了白名单格式 → 必须转该格式(D1 后管道默认出 FLAC,无法复现源格式)。
   if (fmt) {
-    const canUseOriginal = srcFmt === fmt && (br === 0 || (src > 0 && br >= src));
-    if (canUseOriginal) return { should: false, format: null, bitrateKbps: 0 };
     return { should: true, format: fmt, bitrateKbps: effectiveBitrate(fmt, br, src) };
   }
-  if (br > 0 && src > br) {
+  // 只给了码率档位 → 必须按该档位转 mp3,否则拿到的是无损 FLAC,档位形同虚设。
+  if (br > 0) {
     return { should: true, format: "mp3", bitrateKbps: effectiveBitrate("mp3", br, src) };
   }
+  // 原始音质档(两者都不传)/ raw / 白名单外格式 → 交默认管道(FLAC 无损)。
   return { should: false, format: null, bitrateKbps: 0 };
 }
 

@@ -87,9 +87,9 @@ describe("decideTranscode（OpenSubsonic /rest/stream 语义）", () => {
     });
   });
 
-  it("请求 mp3 且源即 mp3、码率达标 → 直接用原文件，不转码", () => {
+  it("D1:请求 mp3 且源即 mp3、码率达标 → 仍转 mp3(管道默认出 FLAC,不复现源格式)", () => {
     expect(decideTranscode({ requestedFormat: "mp3", sourceFormat: "mp3", sourceBitRate: 320, maxBitRate: 320 })).toEqual({
-      should: false, format: null, bitrateKbps: 0,
+      should: true, format: "mp3", bitrateKbps: 320,
     });
   });
 
@@ -120,9 +120,9 @@ describe("decideTranscode（OpenSubsonic /rest/stream 语义）", () => {
     expect(d.bitrateKbps).toBe(192);
   });
 
-  it("仅 maxBitRate 但源码率不超标 → 原样返回", () => {
+  it("D1:仅 maxBitRate(源码率不超标) → 仍按档位转 mp3(档位必须落到实处)", () => {
     expect(decideTranscode({ sourceFormat: "flac", sourceBitRate: 900, maxBitRate: 1000 })).toEqual({
-      should: false, format: null, bitrateKbps: 0,
+      should: true, format: "mp3", bitrateKbps: 320,
     });
   });
 
@@ -137,9 +137,11 @@ describe("decideTranscode（OpenSubsonic /rest/stream 语义）", () => {
 });
 
 describe("共享契约表（与客户端 shouldUseServerTimeOffsetSeek 对齐，防链路漂移）", () => {
-  // 与 MusicFlow-client test/providers/transcoded_stream_seek_test.dart 的
-  // _contractVectors 完全一致：同一输入下 should 必须两边相同。
-  // 客户端侧 CI（transcode-chain.yml）与本文件互为镜像，任一侧改动判定逻辑都会各自失败。
+  // D1(2026-10-20)起本表只描述**本服务端(MusicFlow)语义**：只要客户端显式给了格式或
+  // 码率档位就必须转码；不再与 MusicFlow-client 的 _contractVectors 逐项等同 ——
+  // 后者描述的是**外部服务端(Navidrome 等)**的「源格式相同即可字节直传」启发式，
+  // 本服务端一律全通道管道化(客户端首行 if (serverPipelinedHttp) return true 命中),
+  // 两者刻意分道：保留外服务器分支可字节 seek 的既有行为，不因本服务端 D1 而劣化。
   const vectors: Array<{
     fmt: string | null;
     br: number | null;
@@ -150,16 +152,16 @@ describe("共享契约表（与客户端 shouldUseServerTimeOffsetSeek 对齐，
     { fmt: null, br: null, srcFmt: "flac", srcBr: 1011, expected: false },
     { fmt: "raw", br: null, srcFmt: "flac", srcBr: 1011, expected: false },
     { fmt: "mp3", br: 320, srcFmt: "flac", srcBr: 1011, expected: true },
-    { fmt: "mp3", br: 320, srcFmt: "mp3", srcBr: 192, expected: false },
-    { fmt: "mp3", br: null, srcFmt: "mp3", srcBr: 320, expected: false },
+    { fmt: "mp3", br: 320, srcFmt: "mp3", srcBr: 192, expected: true },
+    { fmt: "mp3", br: null, srcFmt: "mp3", srcBr: 320, expected: true },
     { fmt: "aac", br: null, srcFmt: "flac", srcBr: 1011, expected: true },
     { fmt: null, br: 192, srcFmt: "flac", srcBr: 1011, expected: true },
-    { fmt: null, br: 192, srcFmt: "mp3", srcBr: 128, expected: false },
-    { fmt: null, br: 1000, srcFmt: "flac", srcBr: 900, expected: false },
+    { fmt: null, br: 192, srcFmt: "mp3", srcBr: 128, expected: true },
+    { fmt: null, br: 1000, srcFmt: "flac", srcBr: 900, expected: true },
     { fmt: "mp3", br: 128, srcFmt: "mp3", srcBr: 320, expected: true },
     { fmt: "flac", br: null, srcFmt: "flac", srcBr: 1011, expected: false },
     { fmt: null, br: 192, srcFmt: "mp3", srcBr: 320000, expected: true },
-    { fmt: "aac", br: null, srcFmt: "aac", srcBr: 256, expected: false },
+    { fmt: "aac", br: null, srcFmt: "aac", srcBr: 256, expected: true },
   ];
   it.each(vectors)("fmt=$fmt br=$br src=$srcFmt srcbr=$srcBr → should=$expected", (v) => {
     expect(decideTranscode({
