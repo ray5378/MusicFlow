@@ -30,6 +30,7 @@ import {
   metricsMiddleware,
   getRequestMetrics,
   slowThresholdMs,
+  isStreamRequest,
   clientTag,
   SLOW_MS,
   SLOW_MS_COVER,
@@ -145,6 +146,8 @@ describe("慢请求阈值分级(A: 按路由豁免降噪)", () => {
     expect(slowThresholdMs("GET", "/rest/stream")).toBe(SLOW_MS_STREAM);
     expect(slowThresholdMs("GET", "/rest/stream.view")).toBe(SLOW_MS_STREAM);
     expect(slowThresholdMs("GET", "/rest/dlna/stream/:token")).toBe(SLOW_MS_STREAM);
+    // AirPlay 出流与 DLNA 同族:同样含最长 6s 有界首字节等待,预算必须同级(2026-10-20 补齐)。
+    expect(slowThresholdMs("GET", "/rest/airplay/stream/:token")).toBe(SLOW_MS_STREAM);
     // 没进覆盖表的接口一律保持全局底线 —— 分级是豁免已知的慢,不是抬高全局底线。
     expect(slowThresholdMs("GET", "/rest/getAlbumList")).toBe(SLOW_MS);
     expect(slowThresholdMs("GET", "/api/v1/library/songs")).toBe(SLOW_MS);
@@ -356,3 +359,53 @@ describe("真实流量首字节采样与 p95 告警(T03 出流 / T21 封面)", (
     expect(getRequestMetrics().ttfb.stream.samples).toBe(before);
   });
 });
+
+// 出流族判定(**入口级**标志):它在「请求进入时」就要生效 —— 探针避让闸据此让开
+// 起播/切歌窗口。漏认一条出流端 = 该协议起播时探针仍在上游抢带宽/连接,而现场表现只是
+// 「偶尔卡一下」,不会让任何既有用例变红(2026-10-20 AirPlay 端就漏了)。
+describe("出流族判定 isStreamRequest(探针避让闸的入口级标志)", () => {
+  it("三条出流端全部命中:单曲流 / DLNA token 流 / AirPlay token 流", () => {
+    expect(isStreamRequest("http://127.0.0.1:4533/rest/stream?id=x")).toBe(true);
+    expect(isStreamRequest("http://127.0.0.1:4533/rest/stream.view?id=x")).toBe(true);
+    expect(isStreamRequest("http://127.0.0.1:4533/rest/dlna/stream/abc")).toBe(true);
+    expect(
+      isStreamRequest("http://127.0.0.1:4533/rest/airplay/stream/9d0be59a?timeOffset=30"),
+    ).toBe(true);
+  });
+
+  it("回归锚点:AirPlay 取流端必须命中 —— 漏了它 = 起播窗口内探针仍在抢上游", () => {
+    expect(isStreamRequest("http://127.0.0.1:4533/rest/airplay/stream/deadbeef")).toBe(true);
+  });
+
+  it("非出流请求一律不命中(误判会静默让探针一直让开,等于关掉金丝雀)", () => {
+    const mustMiss = [
+      "http://127.0.0.1:4533/rest/getCoverArt?id=x",
+      "http://127.0.0.1:4533/rest/ping",
+      "http://127.0.0.1:4533/rest/api/v1/playlists",
+      "http://127.0.0.1:4533/rest/api/v1/sources",
+      // 前缀必须带尾斜杠:集合式同名前缀不算出流
+      "http://127.0.0.1:4533/rest/streams",
+      "http://127.0.0.1:4533/rest/dlna/streams/abc",
+      "http://127.0.0.1:4533/rest/airplay/streams/abc",
+    ];
+    for (const u of mustMiss) {
+      expect(isStreamRequest(u), u).toBe(false);
+    }
+  });
+
+  it("命中即登记避让(进入时判定,不等路由模板):AirPlay 出流请求会让探针安静", async () => {
+    let t = 1_700_000_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => t);
+    const app = new Hono();
+    app.use("*", metricsMiddleware);
+    app.get("/rest/airplay/stream/:token", (c) => {
+      t += 2000; // 出流档 7000ms 预算内,不该产生慢请求告警
+      return c.body("AUDIO", 200, { "content-type": "audio/mpeg" });
+    });
+    const beforeSlow = getRequestMetrics().slowCount;
+    const res = await app.request("/rest/airplay/stream/tok");
+    expect(res.status).toBe(200);
+    expect(getRequestMetrics().slowCount - beforeSlow).toBe(0);
+  });
+});
+

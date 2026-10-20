@@ -56,6 +56,11 @@ name: ci
 #      运行状态(scanRunner)以支撑前端实时进度、定时走 startSourceScan 且并发让渡不落标记、
 #      聚合接口 /v1/sources/scan-status、POST 与 PUT 同口径消毒定时两键、前端常驻轮询聚合
 #      接口与定时配置 UI。破坏全是静默的:前端「只有完成后才有最终态」、定时扫描悄悄不触发。
+#  18. `/rest/*` 鉴权豁免 + AirPlay 取流守卫(scripts/check-airplay-stream-auth.mjs)——
+#      豁免清单单一真源(middleware/restExempt.ts,恰好三条取流端)、被豁免的 handler 必须
+#      自带 token 校验(失败 403)、出流族两处分类(慢请求预算 + 探针避让闸)同步认 AirPlay。
+#      破坏全是静默的:漏了 AirPlay 端 = 本机 ffmpeg 回环取流吃自家 401 → 0 字节 →
+#      设备全程收不到 RTP,用户感知就是「AirPlay 连不上设备」(2026-10-20 HiVi H5MKII 实测)。
 # 镜像发布仍由 build.yml(v* tag)负责,与本 CI 互不影响。
 
 on:
@@ -185,6 +190,18 @@ jobs:
       - uses: actions/checkout@v4
       - name: 校验上线即刻入列的接线(去抖放开/补扫/节奏真源/反向语义)
         run: node backend/scripts/check-dlna-realtime.mjs
+
+  # `/rest/*` 鉴权豁免 + AirPlay 取流守卫(2026-10-20)。三条契约同时缺位就是「AirPlay 连不上
+  # 设备」这个静默故障:取流端没被全局鉴权豁免 → 本机 ffmpeg 回环拉取吃自家 401 → 0 字节 →
+  # 设备全程收不到 RTP;与此同时慢请求预算与探针避让闸也漏认它(告警噪音 + 起播窗口抢带宽)。
+  # 零依赖 node 脚本,秒级完成;每条断言都做过双向变异验证(改坏必红)。
+  airplay-stream-auth-guard:
+    name: "`/rest/*` 鉴权豁免 + AirPlay 取流守卫(豁免合法性/自校验/出流族分类)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 校验豁免清单单一真源、handler 自校验 token、出流族两处分类同步
+        run: node backend/scripts/check-airplay-stream-auth.mjs
 
   # 2026-09-27:后端路由按业务域拆分后,7 处路径耦合的静态守卫全部静默失同步
   # (3 处假红 + 3 处假绿)。守卫盯的是源码内容,却没人盯「源码还在不在那个位置」——

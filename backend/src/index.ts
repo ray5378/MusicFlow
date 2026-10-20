@@ -24,6 +24,7 @@ import {
 import { initDatabase, cleanupPlayHistory, sqlite, backfillGenres } from "./db/index.js";
 import { applyLogLevelFromSettings } from "./services/logSettings.js";
 import { authMiddleware } from "./middleware/auth.js";
+import { isRestAuthExemptPath } from "./middleware/restExempt.js";
 import { registerBuiltinPlugins } from "./plugins/builtins.js";
 import { discoverExternalPlugins } from "./plugins/discovery.js";
 import { startPluginHotReload } from "./plugins/hotReload.js";
@@ -110,13 +111,18 @@ app.use("/rest/*", async (c, next) => {
   //  - dlna/stream/:token: pulled by DLNA renderers (TVs, speakers) which
   //    have no way to authenticate; access is gated by a short-lived cast
   //    token that maps to a songId inside the route handler itself.
+  //  - airplay/stream/:token(2026-10-20 修复):由**本机 ffmpeg 解码器**回环
+  //    拉取(services/airplay/control.ts 经 resolvePipelineInput 包装),同样带不上
+  //    鉴权头;信任模型与 dlna/stream/:token 完全一致 —— 短时效会话 token 由
+  //    /rest/airplay/stream/:token 的 handler 自校验(失败 403)。此前清单漏了这一项,
+  //    内部取流被自家鉴权拦成 401 → ffmpeg 拿 0 字节 → 设备全程收不到 RTP,
+  //    用户可见症状就是「AirPlay1 连不上设备」(实测 HiVi H5MKII)。
+  //  - membuf/:token(batch44):整曲内存缓冲的回环取流端,16 字节随机 token,
+  //    信任模型与 dlna/stream/:token 相同(仅本机回环消费,token 即凭证)。
   // getCoverArt 曾在此放行(封面 <img> 带不上请求头),但 OpenSubsonic 规范要求
   // 其鉴权,前端已在封面 URL 上附加 ?token= 查询参数,故改走 authMiddleware。
-  const p = c.req.path;
-  // c.req.path 是完整路径(含 /rest 前缀),所以用 includes/endsWith 匹配
-  // membuf/:token(batch44):整曲内存缓冲的回环取流端,16 字节随机 token,
-  //   信任模型与 dlna/stream/:token 相同(仅本机回环消费,token 即凭证)。
-  if (p.includes("/dlna/stream/") || p.includes("/membuf/")) return next();
+  // 判定口径与清单见 middleware/restExempt.ts(c.req.path 是完整路径,含 /rest 前缀)。
+  if (isRestAuthExemptPath(c.req.path)) return next();
   return authMiddleware(c, next);
 });
 app.route("/rest", restRoutes);

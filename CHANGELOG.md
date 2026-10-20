@@ -2,6 +2,28 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.45] - 2026-10-20
+
+### Fix / AirPlay1（RAOP）投屏连不上设备：内部取流被自家鉴权拦成 401
+
+用户实测：AirPlay1 投屏到 **HiVi H5MKII**（`192.168.10.30:4515`，mDNS `00226CFFA0C0@HiVi H5MKII`、`et=0,1` 支持 RSA）始终连不上。**先诊断后改动**，逐段排查后确认**设备侧完全正常**，断点在服务端内部：
+
+- **设备侧取证（全部正常，排除设备/网络嫌疑）**：mDNS 只广播 `_raop._tcp`（端口 `4515`，`cn=1`/`sr=44100`/`ss=16`/`ch=2`，与客户端常量一致），不广播 `_airplay._tcp`（纯 AP1 设备）；`4515` 端口 OPEN 而 `5000/7000` refused；`OPTIONS` → `200 OK`（`Public` 列出 ANNOUNCE/SETUP/RECORD/FLUSH…）；`GET /info` → `200`。**握手通道与 RSA 通告均无问题**。
+- **根因（服务端，`backend/src/index.ts`）**：`/rest/*` 全局鉴权门禁的豁免清单只写了 `/dlna/stream/` 与 `/membuf/`，**漏了 `/airplay/stream/`**。AirPlay 本机 ffmpeg 解码器经 `resolvePipelineInput` 把取流地址包装成回环 URL 后拉取，**结构上带不上任何鉴权头**，于是被自家中间件拦成 `401 Unauthorized`。容器日志逐条印证：`[auth] WARN 认证失败 … path=/rest/airplay/stream/<token>` → ffmpeg `exit code=8 … Server returned 401` → `producer stdout end: totalBytes=0 (0.0s audio)` → `[RAOP] stream done: 0 chunks / 0.0s`。**0 字节出流，设备自然收不到 RTP**。
+  - 路由 handler 本身是健全的：`restRoutes.get("/airplay/stream/:token")` 内 `resolveAirPlaySession(token)` 自校验、失败 `403`，与 DLNA 端同款 —— 缺的只是外层门禁那一行豁免。
+- **修（最小、不改任何出流语义）**：
+  - 新增 `backend/src/middleware/restExempt.ts`：把豁免清单抽成**单一真源** `REST_AUTH_EXEMPT_MARKERS`（`/dlna/stream/`、**`/airplay/stream/`**、`/membuf/`）与 `isRestAuthExemptPath()`，判定口径沿用既有 `includes`（不引入更严的前缀匹配，避免同类条目语义分叉）；`/rest/api/*` 的第二道 `authMiddleware` 保持不变，豁免放松**不透穿到 API 面**。
+  - `backend/src/index.ts` 的 `/rest/*` 门禁改走 `isRestAuthExemptPath(c.req.path)`，撤掉内联硬编码（避免两套判定并存）。
+  - `backend/src/middleware/metrics.ts` 两处出流族分类同步认 AirPlay：慢请求预算表新增 `"GET /rest/airplay/stream/:token": SLOW_MS_STREAM`（与 DLNA 同级，否则出流会按全局 1s 刷告警噪音）；`isStreamRequest()` 认 `/rest/airplay/stream/` 前缀（否则起播/切歌窗口内金丝雀探针仍在抢上游带宽与连接）。
+- **影响面**：DLNA 与服务端出流路径**零行为变化**（豁免清单只是多一条、且判定结果对 dlna/membuf 逐字一致）；变化仅限 AirPlay 取流从「被拦 401」变为「照常出流」。
+
+### Test / 回归守卫与用例
+
+- 新增 `backend/scripts/check-airplay-stream-auth.mjs`（5 组共 16 条断言）并挂 `ci.yml` 新 job `airplay-stream-auth-guard`：R1 豁免清单单一真源且**恰好三条**（增删/改名必红）；R2 `/rest/*` 门禁走 `isRestAuthExemptPath(c.req.path)`、仍 `authMiddleware` 兜底、**旧内联 `includes('/dlna/stream/')` 已彻底移除**、`/rest/api/*` 第二道门禁仍在；R3 `/airplay/stream/:token` handler 必须 `resolveAirPlaySession` 自校验 + 无效即 `403` + 复用 `serveCastStream(kind:"airplay")`（并反向校验 DLNA 对照实现未被改坏）；R4 出流族两处分类同步认 AirPlay 且无 `startsWith("/rest/")` 之类整面误判；R5 行为用例在册。每条断言均做双向变异验证（改坏必红，见下）。
+- 新增 `backend/tests/middleware/restExempt.test.ts`（7 条）：清单内容与顺序钉死、三条取流端放行、**AirPlay 回归锚点**、带查询串的真实取流形态、普通业务路径一律不放行（单曲流/封面/下载/登录/API）、裸 `/rest` 与空串不得放行、**前缀必须带尾斜杠**（`/streams` 不被当成 `/stream/`）。
+- 扩充 `backend/tests/middleware/metrics.test.ts`：预算表补 AirPlay 出流档断言；新增 `isStreamRequest` 独立 describe（4 条）—— 三条出流端命中、**AirPlay 回归锚点**、非出流请求（含 `/streams` 与 `/rest/api/*`）一律不命中、以及「AirPlay 出流 2000ms 不产生慢请求告警」的端到端行为断言。
+- 覆盖：`src/middleware/restExempt.ts` 落在 `vitest.config.ts` 的覆盖率统计范围内（`src/index.ts` 原本就排除），行为用例对其全量分支覆盖。
+
 ## [4.6.44] - 2026-10-20
 
 ### Perf / 首页提速收尾：聚合缓存冷启动预热 + 首页并排随机池改走全量轻量接口

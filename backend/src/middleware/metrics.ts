@@ -130,6 +130,9 @@ const SLOW_MS_BY_ROUTE: Record<string, number> = {
   "POST /rest/stream": SLOW_MS_STREAM,
   "POST /rest/stream.view": SLOW_MS_STREAM,
   "GET /rest/dlna/stream/:token": SLOW_MS_STREAM,
+  // AirPlay 出流与 DLNA 同属「设计上含最长 6s 有界首字节等待」的出流族,预算必须同级,
+  // 否则 streamTtfb 采样到了、慢请求告警却按全局 1s 刷屏。2026-10-20 补齐。
+  "GET /rest/airplay/stream/:token": SLOW_MS_STREAM,
 };
 
 /**
@@ -145,6 +148,9 @@ export function isStreamRequest(url: string): boolean {
   const p = new URL(url).pathname;
   if (p === "/rest/stream" || p === "/rest/stream.view") return true;
   if (p.startsWith("/rest/dlna/stream/")) return true;
+  // AirPlay 自铸 token 的取流端同样是「播放活动」:起播/切歌时它一被 ffmpeg 拉取,
+  // 探针就该让开。此前只认 dlna → AirPlay 起播窗口内探针仍在抢带宽/上游连接。
+  if (p.startsWith("/rest/airplay/stream/")) return true;
   return false;
 }
 
