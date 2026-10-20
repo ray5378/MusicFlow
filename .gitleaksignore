@@ -66,3 +66,13 @@ e93716473d708ade584975930d84c56d04094151:refs/music-assistant-server/music_assis
 90d1d98238747fd4316ddf37cb0511196179ef57:backend/tests/plugins/pluginCrypto.test.ts:generic-api-key:67
 bcf9e037043542c94b2b392fdb5016b08382706b:backend/tests/utils/qrcode.test.ts:generic-api-key:42
 bcf9e037043542c94b2b392fdb5016b08382706b:backend/tests/utils/qrcode.test.ts:generic-api-key:48
+
+# ── 豁免 3:测试替身里的 32 位十六进制占位串(generic-api-key 误报) ──────────
+#   backend/tests/middleware/restExempt.test.ts 第 14 行曾有一个 32 位十六进制字面量,
+#   常量名叫 TOKEN(关键词命中)且字面量熵 3.656(generic-api-key 的熵阈值之上),
+#   于是被规则「token 关键词 + 相邻引号高熵串」命中。
+#   它只是「取流端路径段」的测试占位符,**不是凭据**。该文件当前工作区已改为
+#   低熵、且不含关键词的 PATH_SLUG(见该文件第 12-14 行注释),新提交不会再触发;
+#   但 2ffd0d2 这个提交已在 git 历史里(本次 push 才首次推上远端),只能按指纹精确豁免。
+#   ⚠ 遵循本文件既有教训:注释里不复写任何「关键词 + 引号字符串」形态的原文。
+2ffd0d2a1e2851354767fbae626a3f456e385a77:backend/tests/middleware/restExempt.test.ts:generic-api-key:14

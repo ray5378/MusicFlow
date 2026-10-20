@@ -11,7 +11,9 @@ import {
   isRestAuthExemptPath,
 } from "../../src/middleware/restExempt.js";
 
-const TOKEN = "9d0be59a808ce020d2c52d4c5ce33ff6";
+// 路径段占位符:刻意用低熵值、且名字不带 token/secret 类关键词 ——
+// 否则会被 gitleaks 的 generic-api-key 规则误判成密钥(2026-10-20 实测)。
+const PATH_SLUG = "sample-path-segment";
 
 describe("isRestAuthExemptPath —— `/rest/*` 鉴权豁免清单", () => {
   it("清单恰好是三条取流端(内容与顺序都钉死;增删必须同步改守卫与本用例)", () => {
@@ -23,18 +25,18 @@ describe("isRestAuthExemptPath —— `/rest/*` 鉴权豁免清单", () => {
   });
 
   it("三条取流端在真实路径形态下全部放行(含 /rest 前缀)", () => {
-    expect(isRestAuthExemptPath(`/rest/dlna/stream/${TOKEN}`)).toBe(true);
-    expect(isRestAuthExemptPath(`/rest/airplay/stream/${TOKEN}`)).toBe(true);
-    expect(isRestAuthExemptPath(`/rest/membuf/${TOKEN}`)).toBe(true);
+    expect(isRestAuthExemptPath(`/rest/dlna/stream/${PATH_SLUG}`)).toBe(true);
+    expect(isRestAuthExemptPath(`/rest/airplay/stream/${PATH_SLUG}`)).toBe(true);
+    expect(isRestAuthExemptPath(`/rest/membuf/${PATH_SLUG}`)).toBe(true);
   });
 
   it("回归锚点:AirPlay 取流端必须放行 —— 漏了它 = 401 = 设备收不到 RTP(HiVi H5MKII 实测)", () => {
-    expect(isRestAuthExemptPath(`/rest/airplay/stream/${TOKEN}`)).toBe(true);
+    expect(isRestAuthExemptPath(`/rest/airplay/stream/${PATH_SLUG}`)).toBe(true);
   });
 
   it("真实取流形态(带查询串)同样放行:AirPlay 的 timeOffset 与 DLNA raw 流", () => {
-    expect(isRestAuthExemptPath(`/rest/airplay/stream/${TOKEN}?timeOffset=30`)).toBe(true);
-    expect(isRestAuthExemptPath(`/rest/dlna/stream/${TOKEN}?raw=1`)).toBe(true);
+    expect(isRestAuthExemptPath(`/rest/airplay/stream/${PATH_SLUG}?timeOffset=30`)).toBe(true);
+    expect(isRestAuthExemptPath(`/rest/dlna/stream/${PATH_SLUG}?raw=1`)).toBe(true);
   });
 
   it("普通业务路径一律不放行(豁免只覆盖取流端,不是整个 /rest 面)", () => {
