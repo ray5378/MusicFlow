@@ -34,4 +34,27 @@ describe("createAirPlaySession:同 (songId,deviceId) 复用 token", () => {
     const b = createAirPlaySession("aps-song-5", "aps-dev-5", BASE);
     expect(resolveAirPlaySession(b.token)).toEqual({ songId: "aps-song-5", deviceId: "aps-dev-5" });
   });
+
+  // 2026-10-20(现网三条现象定位配套):媒体地址恒定性是 tracker 判据的前提,
+  // 单看「两次相同」不足以锁住 —— seek 重投 / 自动续播重投都可能连续取流多次。
+  it("同歌同设备连续取流 N 次 → token 与 streamUrl 全程恒定(媒体地址恒定)", () => {
+    const first = createAirPlaySession("aps-song-6", "aps-dev-6", BASE);
+    const all = [first];
+    for (let i = 0; i < 5; i++) all.push(createAirPlaySession("aps-song-6", "aps-dev-6", BASE));
+    for (const s of all) {
+      expect(s.token).toBe(first.token);
+      expect(s.streamUrl).toBe(first.streamUrl);
+    }
+    // 恒定的是对外地址 —— protocolPlayer.pollState 的 mediaUri 与 playMedia 返回的
+    // mediaUri 必须同源,否则同曲会被 tracker 判成 track_changed。
+    expect(first.streamUrl).toBe(`${BASE}/rest/airplay/stream/${first.token}`);
+  });
+
+  it("换歌后再换回同一首 → 仍复用该曲自己的 token(同曲身份恒定,不误判换歌)", () => {
+    const a1 = createAirPlaySession("aps-song-7", "aps-dev-7", BASE);
+    const b = createAirPlaySession("aps-song-8", "aps-dev-7", BASE);
+    const a2 = createAirPlaySession("aps-song-7", "aps-dev-7", BASE);
+    expect(b.token).not.toBe(a1.token);      // 真换歌必变 → track_changed 可达
+    expect(a2.token).toBe(a1.token);          // 换回来仍是同一地址 → 不误判
+  });
 });

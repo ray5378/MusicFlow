@@ -21,6 +21,7 @@ import { getAirPlayDevice, getAirPlayDevices, onAirPlayEvent, startAirPlayDiscov
 import { getEffectiveBaseUrl, getCachedDevices, setDeviceVolume, setDeviceMute, stopDevicePlayback } from "../dlna/control.js";
 import { sqlite } from "../../db/index.js";
 import { createAirPlaySession } from "./session.js";
+import type { AirplaySessionEndInfo } from "./sessionRuntime.js";
 import { createLogger } from "../../utils/logger.js";
 
 // 解码/缓冲层(ffmpeg spawn + 有界 PCM 队列 + 音量 dB 换算)已抽到 ./decoder.ts ——
@@ -243,10 +244,13 @@ async function startSession(opts: AirPlayCastOptions, seekSec?: number): Promise
  *   - Normal end (whole track played / stream failed / stopped): remove the
  *     session, kill the decoder, TEARDOWN the RTSP session and close the RTP
  *     sockets — otherwise the socket leaks and the device keeps serving
- *     concurrent sessions (multiple timing loops) that interfere and stutter —
- *     then report IDLE to the PlayerController so QueueController auto-advances
- *     without waiting for the 5s fallback poll. The single IDLE is fine: a
- *     stop by QueueController resets tracker first, so no false ended.
+ *     concurrent sessions (multiple timing loops) that interfere and stutter.
+ *     Then report IDLE **only if this session is still the device's current
+ *     session** (stillCurrent): a superseded session's IDLE belongs to the
+ *     *previous* track and would make the tracker treat the freshly cast track
+ *     as "already ended" (切歌刚下去就被切走 / 曲目乱跳). The IDLE carries the
+ *     real end position/duration so QueueController auto-advances without
+ *     waiting for the 5s fallback poll.
  *   - seekReplace: an in-place seek owns the session; keep it + sockets alive,
  *     kill only the (old) decoder. */
 function runStream(active: ActiveSession, session: RaopSession): void {
@@ -262,36 +266,41 @@ function runStream(active: ActiveSession, session: RaopSession): void {
         try { ff.kill(); } catch { /* ignore */ }
         return;
       }
-      if (sessions.get(active.deviceId) === active) {
+      // ⚠️ 必须在 delete **之前**判定,且这是整个收尾的关键一步(2026-10-20 现网定位):
+      // 被「新起播」(startSession → stopSession → 新会话入表)或「显式 stop」取代后,
+      // 旧会话的 finalizer 仍会跑到这里。若照旧无条件上报 IDLE,这条 IDLE 属于**上一首**,
+      // 与刚建立的新会话共用同一个 playerId `airplay:<deviceId>` → tracker 会把新曲
+      // 判成「已结束」→ 误切歌/刚切过去就被切走(用户观感「切歌无效 / 曲目乱跳」)。
+      // stillCurrent=false 时只做资源收尾,上报交给新会话。
+      const stillCurrent = sessions.get(active.deviceId) === active;
+      if (stillCurrent) {
         sessions.delete(active.deviceId);
       }
       try { ff.kill(); } catch { /* ignore */ }
       // 会话自然结束(整首播完 / 失败)也必须拆掉 RTP socket 并发 TEARDOWN,
       // 否则 socket 泄漏,设备同时维护多个并发会话(多个 timing 循环),互相干扰导致卡顿。
       active.player.stop().catch(() => {});
-      // 会话结束(整首播完 / 中途失败 / 被 stop):立即向 PlayerController 上报 IDLE。
-      // 等效于 DLNA 的 GENA 事件 —— 让 QueueController 无需等下一次 5s fallback poll
-      // 就能感知"这首已结束"并自动切下一首(接近无缝续播)。
-      // ===== 注意用动态 import 避免静态循环依赖 =====
-      import("../player/index.js").then(({ getPlayerController }) => {
-        getPlayerController().reportState({
-          playerId: `airplay:${active.deviceId}`,
-          playbackState: PlaybackState.IDLE,
-          position: 0,
-          duration: 0,
-          updatedAt: Date.now(),
-        });
-      }).catch((e) => {
-        log.error("reportState IDLE 上报失败", { deviceId: active.deviceId, err: (e as Error)?.message || e });
-      });
-      // P0-4 AirPlay 落点:自然结束/失败/被 stop 统一走这里(seek 原地换解码器不走,
-      // 上面 seekReplace 分支已提前 return)。stderr 无 JSON(被杀/失败)即 false。
+      // 会话结束(整首播完 / 中途失败 / 被 stop)统一走 handleAirplaySessionEnded:
+      // 由它上报 IDLE(等效 DLNA 的 GENA —— 让 QueueController 无需等下一次 5s fallback
+      // poll 就能自动切下一首)+ 落 P0-4 响度。这里**不再**另发一条 IDLE:
+      // 旧实现既在 finalizer 内联上报、又在 handleAirplaySessionEnded 里再上报一次;
+      // 更糟的是内联那条把 position 写死 0 —— tracker 的结束判据要靠真实落点
+      // (位置 ≥ 时长−容差)才判 advance,写死 0 时末次 5s 轮询一旦错过就退化成 idle_early。
+      // seek 原地换解码器不走这里(上面 seekReplace 分支已提前 return)。
+      const endPos = Math.max(0, Number(active.player.positionSec) || 0);
+      const endDur = active.duration || Math.max(0, Number(active.player.durationSec) || 0);
       void handleAirplaySessionEnded(
         active.deviceId,
         (active.ffmpeg as any)?.stderrText?.() ?? "",
+        undefined,
+        { current: stillCurrent, positionSec: endPos, durationSec: endDur },
       );
     });
   active.streamPromise = p;
+  // 会话一建立(RTSP RECORD 已完成、解码器已起、节拍开始)就**主动**上报 PLAYING,
+  // 不等下一次 5s 兜底轮询 —— 见 reportAirPlayPlaying 的完整论证。
+  reportAirPlayPlaying(active.deviceId, active.streamUrl, active.player.positionSec,
+    active.duration || active.player.durationSec);
 }
 
 // ==================== 设备持久化(airplay_devices) ====================
@@ -470,14 +479,17 @@ let hostStarting: Promise<void> | null = null;
 
 /** 会话结束后向 PlayerController 上报 IDLE(等价 DLNA 的 GENA 事件):
  *  让 QueueController 不必等下一次 5s fallback poll 就能感知"这首已结束"并自动续播。
- *  fork 模式下由子进程的 sessionEnded 事件触发。 */
-function reportAirPlayIdle(deviceId: string): void {  // ===== 注意用动态 import 避免静态循环依赖 =====
+ *  fork 模式下由子进程的 sessionEnded 事件触发。
+ *
+ *  positionSec/durationSec 必须是**真实落点** —— 写死 0 会让 tracker 的结束判据
+ *  (位置 ≥ 时长−容差 → advance)只能靠"末次轮询恰好落在结尾附近"才能成立。 */
+function reportAirPlayIdle(deviceId: string, positionSec = 0, durationSec = 0): void {  // ===== 注意用动态 import 避免静态循环依赖 =====
   import("../player/index.js").then(({ getPlayerController }) => {
     getPlayerController().reportState({
       playerId: `airplay:${deviceId}`,
       playbackState: PlaybackState.IDLE,
-      position: 0,
-      duration: 0,
+      position: Math.max(0, positionSec),
+      duration: Math.max(0, durationSec),
       updatedAt: Date.now(),
     });
   }).catch((e) => {
@@ -485,19 +497,74 @@ function reportAirPlayIdle(deviceId: string): void {  // ===== 注意用动态 i
   });
 }
 
+/** 会话**建立**(RTSP RECORD 完成、解码器已起、节拍开始)后立即主动上报 PLAYING。
+ *
+ *  ── 为什么必须主动上报,而不是等 5s 兜底轮询(2026-10-20 现网定位,一次修掉三条现象) ──
+ *  AirPlay 的 PLAYING 只有两个可能来源:① 本函数(会话建立时);② QueueController 的
+ *  5s 兜底轮询(dlna/control.ts/createAirPlayProtocolPlayer.pollState)。而轮询在
+ *  `advancing` 期间被 `pollAllDevices` 整台跳过,cast 返回后
+ *  `resetTracker/armOptimisticTimeout` 与下一次轮询之间又可能跨过整整一个 5s 周期。
+ *  于是乐观窗口(PlayerController.armOptimisticTimeout:只由一条 PLAYING 关闭)
+ *  常常先超时,连锁出三条用户可见缺陷:
+ *    ① 窗口 5s 未关 → 直接判 `stalled` → QueueController 重投**当前曲**(从头再来)
+ *       ⇒「同一首没播完就从头循环 / 重复播放同一首」;
+ *    ② 自然结束的 IDLE 上报被**仍开着**的乐观窗口吞掉
+ *       (PlayerController.reportState 的 `窗口内忽略 IDLE(等待 PLAYING 确认)`)
+ *       ⇒「当前曲放完不自动下一首」;
+ *    ③ 反复的 5s stalled 重投会长期占用 QueueController 的 `advancing` 闸,期间
+ *       外部切歌(next / play-from)被 `if (advancing.has(id)) return` 静默吞掉
+ *       ⇒「不接受外部切歌指令(客户端/网页切歌无效)」。
+ *  mediaUri 一并上报(与 DLNA pollState 的 TrackURI 对齐):tracker 的
+ *  「PLAYING 且 uri 变 = 换歌」判据对 AirPlay 才**可达**,不再是恒不可达的死判据。
+ *
+ *  时序:本函数在 runStream 挂载推流后**同步**调用;playCurrent 随后还会
+ *  resetTracker —— 传进来的这条 PLAYING 与上一首 token 不同,可能被判 track_changed,
+ *  但紧接着的 resetTracker 会 clearPending 把它清掉,不会误切歌(见 playCurrent 注释)。 */
+function reportAirPlayPlaying(deviceId: string, streamUrl: string, positionSec: number, durationSec: number): void {
+  // ===== 动态 import 避免静态循环依赖(与 reportAirPlayIdle 同款姿势) =====
+  import("../player/index.js").then(({ getPlayerController }) => {
+    getPlayerController().reportState({
+      playerId: `airplay:${deviceId}`,
+      playbackState: PlaybackState.PLAYING,
+      position: Math.max(0, positionSec),
+      duration: Math.max(0, durationSec),
+      mediaUri: streamUrl,
+      updatedAt: Date.now(),
+    });
+  }).catch((e) => {
+    log.error("reportState PLAYING 上报失败", { deviceId, err: (e as Error)?.message || e });
+  });
+}
+
+/** 当前曲的取流地址(供 protocolPlayer.pollState 的 mediaUri 用)。
+ *  与 DLNA `pollState().mediaUri = GetPositionInfo.TrackURI` 对齐;取自 lastCast
+ *  (同一 (songId, deviceId) 的 token 复用,见 session.ts —— 同曲 seek 重投地址不变,
+ *  不会误判 track_changed;真换歌 token 必变)。 */
+export function getAirPlayMediaUri(deviceId: string): string | undefined {
+  return lastCast.get(deviceId)?.streamUrl;
+}
+
 /**
  * AirPlay 会话结束统一出口(P0-4 落点,导出供单测):
- * 1) 上报 IDLE(原 reportAirPlayIdle 语义,队列自动续播);
+ * 1) 上报 IDLE(带真实落点,让队列自动续播)—— 仅当该会话**仍是当前会话**;
  * 2) 按 lastCast 取 songId,用解码器 stderr 交 reportPlaybackLoudness
  *    (本地/WebDAV 行入库,网络行丢弃;无 JSON/无曲均为 false)。
  * in-proc 由 runStream finally 调;fork 由子进程 sessionEnded 事件调。
+ *
+ *  endInfo.current === false(会话已被新起播/显式 stop 取代)→ **抑制**这条过期 IDLE:
+ *  它属于上一首,却与新会话共用同一个 playerId,会把刚建立的新曲判成"已结束"。
  */
 export async function handleAirplaySessionEnded(
   deviceId: string,
   loudnessStderr = "",
   songIdHint?: string,
+  endInfo?: AirplaySessionEndInfo,
 ): Promise<void> {
-  reportAirPlayIdle(deviceId);
+  if (endInfo && endInfo.current === false) {
+    log.info("airplay 会话已被新会话/显式 stop 取代,抑制过期 IDLE(不上报状态)", { deviceId });
+  } else {
+    reportAirPlayIdle(deviceId, endInfo?.positionSec ?? 0, endInfo?.durationSec ?? 0);
+  }
   try {
     const songId = songIdHint ?? lastCast.get(deviceId)?.songId;
     if (!songId || !loudnessStderr) return;
@@ -512,8 +579,10 @@ async function ensureAirplayHost(): Promise<void> {
   if (airplaySupervisor.isRunning()) return;
   hostStarting ??= (async () => {
     airplaySupervisor.setHooks({
-      onSessionEnded: (deviceId, loudnessStderr) =>
-        void handleAirplaySessionEnded(deviceId, loudnessStderr ?? ""),
+      // 子进程把 sessionEnded 的落点与「是否仍是当前会话」一并带回来:current=false
+      // 时由 handleAirplaySessionEnded 抑制过期 IDLE(见其注释)。
+      onSessionEnded: (deviceId, info) =>
+        void handleAirplaySessionEnded(deviceId, info?.loudnessStderr ?? "", undefined, info),
     });
     await airplaySupervisor.start();
   })().finally(() => { hostStarting = null; });
@@ -558,6 +627,10 @@ async function castViaChild(opts: AirPlayCastOptions): Promise<void> {
     durationSec: opts.durationSec,
     streamUrl,
   });
+  // fork 路径同样要**主动**上报 PLAYING:子进程里会话已建立(cast RPC 返回 = RTSP
+  // RECORD 完成),但主进程侧会话表是空的 —— 5s 兜底轮询此刻只会读到 IDLE。
+  // 与 in-proc 的 runStream 上报同语义,见 reportAirPlayPlaying 的论证。
+  reportAirPlayPlaying(opts.deviceId, streamUrl, opts.seekSec ?? 0, opts.durationSec ?? 0);
 }
 
 export async function pauseAirPlay(deviceId: string): Promise<void> {

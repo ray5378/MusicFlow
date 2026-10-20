@@ -27,11 +27,18 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
     const holder: { ctl: AirplayChildController | null } = { ctl: null };
     const runtime = new AirplaySessionRuntime({
       // 会话结束 → 通知主进程上报 IDLE(等价 DLNA 的 GENA,让队列无需等 5s 轮询)。
+      // 一并带上「落点 + 是否仍是当前会话」:被新起播/stop 取代的旧会话(current=false)
+      // 由主进程抑制其过期 IDLE,避免把刚建立的新曲判成"已结束"。
       // 附解码器 stderr(P0-4 解析 loudnorm 用;被杀/失败时无 JSON,主进程侧即 false)。
       onSessionEnded: (deviceId, info) =>
-        send(info?.loudnessStderr
-          ? { t: "sessionEnded", deviceId, loudnessStderr: info.loudnessStderr }
-          : { t: "sessionEnded", deviceId }),
+        send({
+          t: "sessionEnded",
+          deviceId,
+          current: info.current,
+          positionSec: info.positionSec,
+          durationSec: info.durationSec,
+          ...(info.loudnessStderr ? { loudnessStderr: info.loudnessStderr } : {}),
+        }),
       onChanged: () => holder.ctl?.requestSnapshot(),
     });
     super({

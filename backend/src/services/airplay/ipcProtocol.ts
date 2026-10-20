@@ -11,7 +11,10 @@ import type { HostToChild, ChildToHost, StateEnvelope } from "../rendererHost/ip
 import type { AirplaySessionMirrorRow } from "./sessionRuntime.js";
 
 // 业务侧常用的载荷类型从一处透出(type-only,运行时无 import)。
-export type { AirplayCastArgs, AirplaySessionMirrorRow, AirplayRuntimeHooks } from "./sessionRuntime.js";
+export type { AirplayCastArgs, AirplaySessionMirrorRow, AirplayRuntimeHooks, AirplaySessionEndInfo } from "./sessionRuntime.js";
+// 注意:`export type {...} from` 只做重导出、**不引入本地绑定**,下面 AirplayChildEvent 仍要
+// 在当前作用域用到 AirplaySessionEndInfo,故必须再补一条 import type(2026-10-20 修 tsc)。
+import type { AirplaySessionEndInfo } from "./sessionRuntime.js";
 
 /** state 快照载荷(平铺进信封)。 */
 export interface AirplaySnapshot {
@@ -24,8 +27,11 @@ export interface AirplayReadyInfo {
 }
 
 /** 子进程 → 主进程的业务事件。
- *  sessionEnded 可附解码器全量 stderr(P0-4 解析 loudnorm 用,截断传,无则省略)。 */
-export type AirplayChildEvent = { t: "sessionEnded"; deviceId: string; loudnessStderr?: string };
+ *  sessionEnded 现在带上 `current` / `positionSec` / `durationSec`(见 AirplaySessionEndInfo):
+ *  主进程据此判断该上报 IDLE 还是**抑制**过期 IDLE(被新起播/显式 stop 取代的旧会话
+ *  不得污染新曲的 tracker),并用真实落点驱动自动续播。
+ *  loudnessStderr 可附解码器全量 stderr(P0-4 解析 loudnorm 用,截断传,无则省略)。 */
+export type AirplayChildEvent = { t: "sessionEnded"; deviceId: string } & AirplaySessionEndInfo;
 
 /** 主进程 → 子进程:除通用 req/stop 外无附加消息。 */
 export type AirplayHostExtra = never;

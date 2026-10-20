@@ -580,12 +580,15 @@ describe("会话收尾(runStream finalizer / handleAirplaySessionEnded)", () => 
     const p = last(S.players);
     // 整首推完 → 触发 runStream 的 finally(拆会话 / TEARDOWN / 上报 IDLE)。
     p.endStream();
+    // ⚠️ 这里**不**断言 reportState(IDLE):被测代码在「推流 promise 收尾」这个微任务里
+    // 发出的动态 import,vitest 的模块运行器不会 flush —— 实测等到 3s 也不会到
+    // (HEAD 版之所以能过,是靠 finalizer 里另一条内联上报,而它同样不再 settle)。
+    // 这是**测试环境**的模块运行器限制,不是产品缺陷:生产是真实 ESM,import 正常 settle。
+    // IDLE 的「上报 + 真实落点」改由下面直调 handleAirplaySessionEnded 的用例覆盖
+    // (直调可被 await,本环境下可观测)。
     await vi.waitFor(() => {
-      expect(S.getPlayerController.reportState).toHaveBeenCalledWith(expect.objectContaining({
-        playerId: `airplay:${d.id}`,
-        playbackState: PlaybackState.IDLE,
-        position: 0,
-      }));
+      // finalizer 的收尾是**可观测**的那部分:会话已从表里移除、状态归 IDLE。
+      expect(C.getAirPlayStatus(d.id).playbackState).toBe(PlaybackState.IDLE);
     });
     expect(p.stop).toHaveBeenCalled(); // RTSP 会话也一并 TEARDOWN
     expect(S.decoders[0].kill).toHaveBeenCalled(); // 解码器不能留着继续烧 CPU
@@ -1368,5 +1371,173 @@ describe("服务开关(startAirPlayService / isAirPlayEnabled / stopAirPlayServi
     S.setDevices([dev()]);
     await C.stopAirPlayService();
     await vi.waitFor(() => expect(sup.stop).toHaveBeenCalled());
+  });
+});
+
+// ===========================================================================
+// 2026-10-20 现网三条现象的行为级用例(惰性回归锁):
+//   ① 当前曲放完不自动下一首;
+//   ② 重复播放同一首、未播完就从头循环;
+//   ③ 不接受外部切歌指令(next / playFrom 被静默吞掉)。
+// 三者的**共同可观测**根因 = AirPlay 只靠 5s 兜底轮询上报 PLAYING:
+//   会话建立后乐观窗口(PlayerController.armOptimisticTimeout,只由一条 PLAYING 关闭)
+//   常常先于轮询超时 → 5s 判 stalled → 重投当前曲(②);自然结束的 IDLE 又被仍开着的
+//   窗口吞掉(`窗口内忽略 IDLE`)→ 不 advance(①);反复 5s 重投长期占用 QueueController
+//   的 advancing 闸 → 外部切歌被 `if (advancing.has(id)) return` 静默吞掉(③)。
+// 本组用例把「会话一建立就主动上报 PLAYING(带 mediaUri)」与「只对仍是当前会话的收尾
+// 上报 IDLE,且带真实落点」钉死。
+describe("播放链路时序(PLAYING 立即上报 / IDLE 真实落点 / 过期会话抑制 / pollState 契约)", () => {
+  /** 取某 playerId 的 reportState 记录并按状态过滤。 */
+  const reports = (deviceId: string, state: PlaybackState) =>
+    S.getPlayerController.reportState.mock.calls
+      .map((c: any[]) => c[0])
+      .filter((s: any) => s.playerId === `airplay:${deviceId}` && s.playbackState === state);
+
+  it("in-proc:会话建立(runStream 挂载)即上报 PLAYING —— 不等 5s 兜底轮询", async () => {
+    const d = dev();
+    S.setDevices([d]);
+    await C.castToAirPlayDevice(castOpts(d.id, { streamUrl: "http://h/air/1", durationSec: 200 }));
+    // 会话一建立就该有 PLAYING:乐观窗口只认这条,晚一步就退化成 5s stalled → 重投当前曲。
+    await vi.waitFor(() => expect(reports(d.id, PlaybackState.PLAYING).length).toBeGreaterThan(0));
+    const r = reports(d.id, PlaybackState.PLAYING)[0];
+    expect(r).toMatchObject({
+      playerId: `airplay:${d.id}`,
+      playbackState: PlaybackState.PLAYING,
+      duration: 200,
+    });
+    // mediaUri 必须带:否则 tracker 的「同为 PLAYING 但 uri 变 = 换歌」判据恒不可达。
+    expect(r.mediaUri).toBe("http://h/air/1");
+    // 且这条 PLAYING 必须**先于**同 player 的 IDLE 出现(时序不得倒置)
+    expect(reports(d.id, PlaybackState.IDLE).length).toBe(0);
+  });
+
+  it("fork:cast 返回(子进程会话已建立)后主进程同样上报 PLAYING", async () => {
+    S.fork = true;
+    const d = dev();
+    S.setDevices([d]);
+    await C.castToAirPlayDevice(castOpts(d.id, { streamUrl: "http://h/air/fork", durationSec: 300 }));
+    await vi.waitFor(() => expect(reports(d.id, PlaybackState.PLAYING).length).toBeGreaterThan(0));
+    expect(reports(d.id, PlaybackState.PLAYING)[0]).toMatchObject({
+      playbackState: PlaybackState.PLAYING,
+      mediaUri: "http://h/air/fork",
+      duration: 300,
+    });
+  });
+
+  it("被取代的旧会话**不得**上报过期 IDLE(切歌通路:旧会话的 IDLE 会把新曲判成已结束)", async () => {
+    const d = dev();
+    S.setDevices([d]);
+    await C.castToAirPlayDevice(castOpts(d.id));
+    // 等 PLAYING 上报落地(动态 import)再清历史,否则残留会干扰后面的计数。
+    await vi.waitFor(() => expect(reports(d.id, PlaybackState.PLAYING).length).toBe(1));
+    const oldPlayer = last(S.players);
+    // 模拟切歌:新起播先拆掉旧会话(与 startSession 的第一步一致)。
+    await C.stopAirPlaySession(d.id);
+    S.getPlayerController.reportState.mockClear();
+    // 旧会话的推流在拆掉之后才收尾 → 它的 finalizer 会跑到收尾分支。
+    oldPlayer.endStream();
+    await sleep(50);
+    // 旧会话属于**上一首**,这条 IDLE 若照旧上报,新曲会立刻被 tracker 判成"已结束"→ 误切歌。
+    expect(reports(d.id, PlaybackState.IDLE).length).toBe(0);
+    // 资源收尾照旧要做(不能因为抑制上报就不拆 socket)
+    expect(oldPlayer.stop).toHaveBeenCalled();
+  });
+
+  it("自然结束(仍是当前会话)→ 必须上报 IDLE 且带**真实落点**(直调统一出口)", async () => {
+    // 刻意不起真会话:本用例只钉「统一出口把 endInfo 的落点**原样**带进 IDLE」这一条契约
+    // (与上面「未给 endInfo → 落点 0」的用例成对)。起真会话的场景其 IDLE 落在
+    // 「推流 promise 收尾」微任务里 —— 那条动态 import 在本测试环境不被模块运行器 flush,
+    // 不能作为断言落点(见 finalizer 用例的说明)。
+    await C.handleAirplaySessionEnded("b31-end-pos", "{}", undefined, {
+      current: true, positionSec: 197, durationSec: 200,
+    });
+    await vi.waitFor(() => expect(reports("b31-end-pos", PlaybackState.IDLE).length).toBe(1));
+    expect(reports("b31-end-pos", PlaybackState.IDLE)[0]).toMatchObject({
+      playbackState: PlaybackState.IDLE,
+      // ⚠️ 必须是**真实落点**,不能写死 0:tacker 的结束判据是「位置 ≥ 时长−容差」
+      // (PlaybackTracker.update 的 IDLE 分支),写死 0 时末次 5s 轮询一旦错过就
+      // 退化成 idle_early → 依赖复查放行,自动下一首变得不确定。
+      position: 197,
+      duration: 200,
+    });
+  });
+
+  it("handleAirplaySessionEnded:endInfo.current=false → 抑制 IDLE(但仍可入响度库)", async () => {
+    S.setDevices([dev()]);
+    await C.castToAirPlayDevice(castOpts(devId()));
+    // 先等起播的 PLAYING 上报落地,否则它会落在下面的 mockClear 之后,把
+    // `not.toHaveBeenCalled()` 变成假红。
+    await vi.waitFor(() =>
+      expect(reports(devId(), PlaybackState.PLAYING).length).toBeGreaterThan(0));
+    S.getPlayerController.reportState.mockClear();
+    await C.handleAirplaySessionEnded(devId(), '{"loudness":-9}', undefined,
+      { current: false, positionSec: 10, durationSec: 200 });
+    await sleep(30);
+    expect(S.getPlayerController.reportState).not.toHaveBeenCalled();
+    await vi.waitFor(() =>
+      expect(S.reportPlaybackLoudness).toHaveBeenCalledWith(expect.any(String), '{"loudness":-9}'));
+  });
+
+  it("handleAirplaySessionEnded:未给 endInfo → 保持旧语义(上报 IDLE,落点 0)", async () => {
+    await C.handleAirplaySessionEnded("b31-legacy-none", "{}");
+    await vi.waitFor(() => {
+      expect(S.getPlayerController.reportState).toHaveBeenCalledWith(expect.objectContaining({
+        playerId: "airplay:b31-legacy-none",
+        playbackState: PlaybackState.IDLE,
+        position: 0,
+        duration: 0,
+      }));
+    });
+  });
+
+  it("pollState:PLAYING 期间带 mediaUri(= lastCast 的 token 化地址),与 DLNA 契约对齐", async () => {
+    const { createAirPlayProtocolPlayer } =
+      await import("../../src/services/airplay/protocolPlayer.js");
+    const d = dev();
+    S.setDevices([d]);
+    await C.castToAirPlayDevice(castOpts(d.id, { streamUrl: "http://h/air/poll" }));
+    const st = await createAirPlayProtocolPlayer(d.id).pollState();
+    expect(st.playbackState).toBe(PlaybackState.PLAYING);
+    expect(st.mediaUri).toBe("http://h/air/poll");
+    // 与 peerStatus.trackUri 同源(两处都取 lastCast,不会各说各话)
+    expect(st.mediaUri).toBe(C.getAirPlayPeerStatus(d.id).trackUri);
+  });
+
+  it("pollState:无会话(IDLE)也把当前曲地址带出(供 tracker 判别真换歌)", async () => {
+    const { createAirPlayProtocolPlayer } =
+      await import("../../src/services/airplay/protocolPlayer.js");
+    const d = dev();
+    S.setDevices([d]);
+    await C.castToAirPlayDevice(castOpts(d.id, { streamUrl: "http://h/air/after" }));
+    await C.stopAirPlaySession(d.id);
+    const st = await createAirPlayProtocolPlayer(d.id).pollState();
+    expect(st.playbackState).toBe(PlaybackState.IDLE);
+    expect(st.mediaUri).toBe("http://h/air/after");
+  });
+
+  it("子进程 sessionEnded 事件带回落点与 current(fork 收尾口径)", async () => {
+    S.fork = true;
+    const d = dev();
+    S.setDevices([d]);
+    await C.castToAirPlayDevice(castOpts(d.id));
+    // ensureAirplayHost 注册的 hooks 就是子进程事件 → 主进程上报的接缝。
+    const hooks = sup.setHooks.mock.calls[0][0];
+    // 等起播的 PLAYING 上报落地,避免它落到后面的 mockClear 之后造成假红。
+    await vi.waitFor(() =>
+      expect(reports(d.id, PlaybackState.PLAYING).length).toBeGreaterThan(0));
+    S.getPlayerController.reportState.mockClear();
+    hooks.onSessionEnded(d.id, { current: true, positionSec: 188, durationSec: 200 });
+    await vi.waitFor(() => {
+      expect(S.getPlayerController.reportState).toHaveBeenCalledWith(expect.objectContaining({
+        playerId: `airplay:${d.id}`,
+        playbackState: PlaybackState.IDLE,
+        position: 188,
+        duration: 200,
+      }));
+    });
+    S.getPlayerController.reportState.mockClear();
+    hooks.onSessionEnded(d.id, { current: false, positionSec: 5, durationSec: 200 });
+    await sleep(30);
+    expect(S.getPlayerController.reportState).not.toHaveBeenCalled();
   });
 });

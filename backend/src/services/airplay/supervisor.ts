@@ -18,6 +18,7 @@ import type {
   AirplayReadyInfo,
   AirplayChildEvent,
   AirplaySessionMirrorRow,
+  AirplaySessionEndInfo,
 } from "./ipcProtocol.js";
 
 const CHILD_ENTRY = resolveChildEntry(import.meta.url);
@@ -27,9 +28,10 @@ export interface AirplayMirror {
 }
 
 export interface AirplayHostHooks {
-  /** 会话结束(整首播完 / 失败 / 被停):主进程上报 IDLE,让队列自动续播。
-   *  loudnessStderr 为解码器全量 stderr(P0-4 解析 loudnorm 用),可空。 */
-  onSessionEnded?: (deviceId: string, loudnessStderr?: string) => void;
+  /** 会话结束(整首播完 / 失败 / 被停):主进程据此上报 IDLE,让队列自动续播。
+   *  info 携带落点 + `current`(是否仍是该设备的当前会话);current=false 时
+   *  主进程必须**抑制**这条过期 IDLE —— 它属于上一首,会污染新曲的 tracker。 */
+  onSessionEnded?: (deviceId: string, info?: AirplaySessionEndInfo) => void;
 }
 
 class AirplaySupervisor extends RendererHostSupervisor<
@@ -53,7 +55,9 @@ class AirplaySupervisor extends RendererHostSupervisor<
       },
       onEvent: (ev, hooks) => {
         if (ev.t === "sessionEnded") {
-          try { hooks.onSessionEnded?.(ev.deviceId, ev.loudnessStderr); } catch { /* 上报失败不拖垮桥 */ }
+          // ev 本身就是 AirplaySessionEndInfo 的形状(current/positionSec/durationSec/
+          // loudnessStderr),原样交给主进程,不再只挑 loudnessStderr 传。
+          try { hooks.onSessionEnded?.(ev.deviceId, ev); } catch { /* 上报失败不拖垮桥 */ }
         }
       },
     });

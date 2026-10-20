@@ -73,10 +73,30 @@ interface ActiveSession {
   healthTimer?: ReturnType<typeof setInterval> | null;
 }
 
+/** 会话结束信息(子进程 finalizer → hooks → 主进程上报链路共用)。
+ *
+ *  为什么必须带 `current`(2026-10-20 现网定位):会话被「新起播」或「显式 stop」
+ *  取代后,旧会话的 finalizer 仍会跑到收尾分支。它上报的 IDLE 属于**上一首**,
+ *  却与新会话共用同一个 `airplay:<deviceId>` playerId → tracker 会把刚建立的新曲
+ *  判成「已结束」→ 误切歌 / 刚切过去就被切走。主进程据此**抑制**过期 IDLE。
+ *  positionSec/durationSec 是结束时的**真实落点**:IDLE 必须携带它,否则
+ *  QueueController 的结束判据(位置 ≥ 时长−容差)只能靠"末次 5s 轮询恰好在结尾附近"
+ *  才成立,漏一拍就退化成 idle_early。 */
+export interface AirplaySessionEndInfo {
+  /** 是否仍是该设备的当前会话(未被子进程侧新起播 / stop 取代)。 */
+  current: boolean;
+  /** 结束时的内容落点(秒)。 */
+  positionSec: number;
+  /** 该曲已知时长(秒;未知为 0)。 */
+  durationSec: number;
+  /** 解码器 stderr 全量(尾部,上限 64KB;P0-4 解析 loudnorm 用);无则省略。 */
+  loudnessStderr?: string;
+}
+
 export interface AirplayRuntimeHooks {
   /** 会话结束(整首播完 / 失败 / 被 stop):主进程据此上报 IDLE 让队列自动续播。
-   *  info.loudnessStderr 为解码器全量 stderr(P0-4 用,无则省略)。 */
-  onSessionEnded?: (deviceId: string, info?: { loudnessStderr?: string }) => void;
+   *  info.current=false 表示会话已被取代 → 主进程必须抑制过期 IDLE。 */
+  onSessionEnded?: (deviceId: string, info: AirplaySessionEndInfo) => void;
   /** 任何影响快照的变更(起播 / 暂停 / 恢复 / seek / 结束),用于触发快照推送。 */
   onChanged?: () => void;
 }
@@ -162,7 +182,12 @@ export class AirplaySessionRuntime {
           this.hooks.onChanged?.();
           return;
         }
-        if (this.sessions.get(active.deviceId) === active) {
+        // ⚠️ 必须在 delete **之前**判定「本会话是否仍是该设备的当前会话」(与 in-proc
+        // 的 runStream finalizer 同口径):被新起播/显式 stop 取代的旧会话,其
+        // sessionEnded 属于**上一首**;主进程若照旧上报 IDLE,会把刚建立的新曲
+        // 判成"已结束"→ 误切歌 / 刚切过去就被切走。
+        const stillCurrent = this.sessions.get(active.deviceId) === active;
+        if (stillCurrent) {
           this.sessions.delete(active.deviceId);
         }
         active.ended = true;
@@ -173,7 +198,12 @@ export class AirplaySessionRuntime {
         // P0-4:把解码器 stderr 带给主进程解析 loudnorm(子进程不碰 DB)。
         // 被 stop/失败时无 JSON,主进程侧解析失败即 false,不影响续播。
         const loudnessStderr = (ff as any)?.stderrText?.() ?? "";
-        this.hooks.onSessionEnded?.(active.deviceId, loudnessStderr ? { loudnessStderr } : undefined);
+        this.hooks.onSessionEnded?.(active.deviceId, {
+          current: stillCurrent,
+          positionSec: Math.max(0, Number(active.player.positionSec) || 0),
+          durationSec: active.duration || Math.max(0, Number(active.player.durationSec) || 0),
+          ...(loudnessStderr ? { loudnessStderr } : {}),
+        });
         this.hooks.onChanged?.();
       });
     active.streamPromise = p;

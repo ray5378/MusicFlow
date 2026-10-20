@@ -15,6 +15,7 @@ import { createLogger } from "../../utils/logger.js";
 const log = createLogger("AirPlay");
 import {
   castToAirPlayDevice,
+  getAirPlayMediaUri,
   getAirPlayStatus,
   pauseAirPlay,
   resumeAirPlay,
@@ -68,6 +69,12 @@ export function createAirPlayProtocolPlayer(deviceId: string): ProtocolPlayer {
         playbackState: s.playbackState as PlaybackState,
         position: s.position,
         duration: s.duration,
+        // 与 DLNA 对齐(dlna/control.ts 的 pollState 带 GetPositionInfo.TrackURI):
+        // PLAYING 期间必须带 mediaUri,否则 tracker 的「同为 PLAYING 但 uri 变 = 换歌」
+        // 判据对 AirPlay **恒不可达**(设备侧真换歌检测形同虚设)。
+        // 取 lastCast 的 token 化地址 —— 同一 (songId, deviceId) 复用 token(见 session.ts),
+        // 同曲 seek 重投地址不变,不会误判 track_changed;真换歌 token 必变。
+        mediaUri: getAirPlayMediaUri(deviceId),
         updatedAt: s.updatedAt,
       };
     },

@@ -63,6 +63,15 @@ D1(输出编码全局统一 FLAC)落地后暴露的**功能回退**:`decideTrans
 - **影响面**:客户端 / DLNA / AirPlay 的 cast 路径默认**不传** format/maxBitRate → 一律走默认管道出 FLAC,**行为零变化**;只有「显式点档位 / 显式要求格式」的请求行为改变(从「落回 FLAC」变为「真的按档位转码」)。
 - **已知代价(记录在案)**:源格式与请求格式一致且码率达标时也会多做一次「同类转码」(如 mp3@320 源 + `format=mp3` + 320 档)。本项目自用、转码量小(见 `transcode.ts` 文件头设计决策:不做客户端透传),换取「界面档位与实际输出一致」是划算的。
 
+### Fix / AirPlay 三条现网缺陷同源:会话建立未主动上报 PLAYING(乐观窗口先超时)
+
+用户实测三条现象:① 当前曲放完**不自动下一首**;② **重复播放同一首**,且**未播完就从头循环**;③ **不接受外部切歌指令**(客户端/网页切歌无效)。三条**同源**。
+
+- **根因(`backend/src/services/airplay/control.ts`)**:AirPlay 的 PLAYING 只可能来自 5s 兜底轮询(`dlna/control.ts::createAirPlayProtocolPlayer.pollState`),而轮询在 `advancing` 期间被整台跳过、cast 返回后与下一次轮询之间又可能跨满一个 5s 周期。于是 `PlayerController.armOptimisticTimeout` 的乐观窗口(只由一条 PLAYING 关闭)**常常先超时**,连锁:① 5s 判 `stalled` → QueueController 重投**当前曲**(从头再来);② 自然结束的 IDLE 被仍开着的窗口吞掉(`窗口内忽略 IDLE`)→ 不 advance;③ 反复重投长期占用 `advancing` 闸 → 外部切歌被静默吞掉。
+- **修**:① 新增 `reportAirPlayPlaying()`,在**会话建立**(RTSP RECORD 完成、解码器起、节拍开始)时立即上报 PLAYING,in-proc(`runStream`)与 fork(`castViaChild`)两条路径都主动上报,不再等 5s 轮询;并带上 `mediaUri`(`getAirPlayMediaUri`,与 DLNA `pollState.TrackURI` 对齐)——否则 tracker 的「同为 PLAYING 但 uri 变 = 换歌」判据对 AirPlay **恒不可达**。② `reportAirPlayIdle()` 改为携带**真实落点**(`positionSec`/`durationSec`):旧实现写死 `0`,而 tracker 的结束判据是「位置 ≥ 时长 − 容差」,写死 0 时末次轮询一旦错过就退化成 `idle_early`。③ 会话收尾统一走 `handleAirplaySessionEnded`,并**抑制过期 IDLE**:被新起播/显式 stop 取代的旧会话(`current=false`)上报的 IDLE 属于**上一首**,却与新会话共用同一个 `playerId` `airplay:<deviceId>` —— 照旧上报会把刚建立的新曲判成「已结束」(观感「刚切过去就被切走 / 曲目乱跳」);`stillCurrent` 必须在 `sessions.delete` **之前**判定。④ 撤掉 finalizer 里那条与统一出口重复的内联 IDLE(旧实现一次收尾发两条)。
+- **影响面**:严格限定 `services/airplay/**`(含 fork 子进程 `sessionRuntime.ts`、IPC 事件载荷 `ipcProtocol.ts`/`childMain.ts`/`supervisor.ts`、`protocolPlayer.ts`);DLNA / Sendspin / 客户端与公共出流段**零改动**。
+- **测试环境说明(记录在案)**:被测代码在「推流 promise 收尾」微任务里发出的动态 import,vitest 的模块运行器不会 flush(实测等 3s 也不到);生产是真实 ESM,不受影响。故 finalizer 用例改断言**可观测**部分(会话移除 / TEARDOWN / 解码器收掉),IDLE 的「上报 + 真实落点」改由**直调统一出口**的用例覆盖。
+
 ### Test / 回归守卫与用例
 
 - 新增 `backend/scripts/check-airplay-stream-auth.mjs`（5 组共 16 条断言）并挂 `ci.yml` 新 job `airplay-stream-auth-guard`：R1 豁免清单单一真源且**恰好三条**（增删/改名必红）；R2 `/rest/*` 门禁走 `isRestAuthExemptPath(c.req.path)`、仍 `authMiddleware` 兜底、**旧内联 `includes('/dlna/stream/')` 已彻底移除**、`/rest/api/*` 第二道门禁仍在；R3 `/airplay/stream/:token` handler 必须 `resolveAirPlaySession` 自校验 + 无效即 `403` + 复用 `serveCastStream(kind:"airplay")`（并反向校验 DLNA 对照实现未被改坏）；R4 出流族两处分类同步认 AirPlay 且无 `startsWith("/rest/")` 之类整面误判；R5 行为用例在册。每条断言均做双向变异验证（改坏必红，见下）。
@@ -77,6 +86,9 @@ D1(输出编码全局统一 FLAC)落地后暴露的**功能回退**:`decideTrans
 
 - 新增 `backend/scripts/check-audio-default-flac.mjs`(15 条断言)并挂 `ci.yml` 新 job `audio-default-flac-guard`:五类源后缀 + 未知兜底一律 FLAC;DLNA 决策与公共决策同源;显式 `format=mp3|aac` 的转码路径仍在(未误删);`decideTranscode` 的直传判定仍在。两项反向变异(改回按源族旧分支 / 恢复 `ogg→mp3`)均判红,还原后逐字节一致。
 - 服务端测试:`tests/services/pipeline.test.ts` 补 `resolveChannelCodec` / `resolveDlnaOutput` 两组 9 用例;`tests/rest/dlnaOggFallback.test.ts` 全量改判 FLAC;`tests/routes/streamRemoteFallback.test.ts` 默认出流 mime 改判 `audio/flac`。客户端:`transcoded_stream_seek_test.dart` / `seek_reload_routing_test.dart` 新增「D1:未带 format + 服务端返回 FLAC」组(判定需 timeOffset、重拉地址带 timeOffset 且不带 format、绝不做源内字节 seek)。
+
+- 新增 `backend/scripts/check-airplay-playback-chain.mjs`(R1~R7)并挂 `ci.yml` 新 job `airplay-playback-chain-guard`:会话建立即主动上报 PLAYING(in-proc/fork 两条路径)/ `reportAirPlayIdle` 带 `positionSec`/`durationSec` 参数 / 抑制分支 `endInfo.current === false` 时**不上报**、else 支才上报 / `stillCurrent` 判定**先于** `sessions.delete`(顺序不得倒置)/ fork 侧 `sessionRuntime` + IPC 载荷 + supervisor 同口径 / `pollState` 必带 `mediaUri: getAirPlayMediaUri(deviceId)` 且**不得**为加它而删掉 playbackState/position/duration。反向变异(摘掉 mediaUri / 去掉抑制分支)判红。
+- 扩充 `backend/tests/airplay/controlOrchestration.test.ts`:新增「播放链路时序」组(PLAYING 即时上报 in-proc + fork、被取代会话抑制过期 IDLE、IDLE 真实落点、fork 事件载荷带落点与 current、`pollState` 带 `mediaUri` 且与 `peerStatus.trackUri` 同源)。airplay 全套 296 用例全绿。
 
 - 收紧 `backend/tests/services/transcode.test.ts`:两条旧用例(「源即 mp3 且码率达标 → 不转码」「仅 maxBitRate 且源码率不超标 → 原样返回」)改判为「必须转码」,镜像用例表同步更新并**重新定位** —— 该表只描述本服务端(MusicFlow)语义,不再与客户端 `_contractVectors` 逐项等同(后者描述**外部服务端**「源格式相同即可字节直传」的启发式,刻意分道:不为本服务端的 D1 去劣化外服务器的字节 seek)。
 - `check-audio-default-flac.mjs` 增补 3 条断言(共 18 条):**常量断言** `canUseOriginal` 不得再加回来、显式 format 分支恒 `should:true`、显式 maxBitRate 分支恒转 mp3;反向变异(把快路径加回去)判红 2 条,还原后全绿。
