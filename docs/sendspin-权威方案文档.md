@@ -1044,6 +1044,42 @@ python3 -m venv /tmp/sendspin-venv
 
 > **忠实协议客户端**：`backend/scripts/sendspin-client-sim.mjs <server_id> <psk_hex>`（Noise KKpsk2 responder，直连 `:38927/sendspin`），用于「真实 WebSocket 全连路」验证而非仅进程内单测。
 
+### 7.7.1 真实播放器三实现（230 测试床，2026-10-21 实测）
+
+> 与 7.7 的「模拟器」互补：模拟器只统计字节，**不验证是否真出声**。下面三种实现均把音频真正落到输出端，可量测。
+
+| 实现 | 启动方式 | 输出 | 用途 |
+|---|---|---|---|
+| **PCM(SDK)** | `sendspin-real-player.py ws://…/sendspin pcm <fifo> MF-230-Real-PCM` | 原始 s16le/48k → FIFO | 验证 PCM 协商 + 推流不丢帧 |
+| **FLAC(SDK)** | `sendspin-real-player.py ws://…/sendspin flac <fifo> MF-230-Real-FLAC` | SDK 解码 FLAC→PCM → FIFO | 验证 FLAC 编解码与时间线 |
+| **C++(sendspin-cpp)** | 见下方构建命令 | PortAudio → ALSA | 第三方独立实现互操作 |
+
+依赖：
+
+```bash
+python3 -m venv /tmp/sendspin-venv
+/tmp/sendspin-venv/bin/pip install "aiosendspin==9.1.1" av
+```
+
+C++ 宿主播放器（官方 sendspin-cpp，PortAudio 输出）：
+
+```bash
+cd /workspace/sendspin-cpp
+cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j4
+# 用 file 插件把输出落盘量测（也可指向 hw:Loopback,0,2）
+ALSA_CONFIG_PATH=/root/asound_cpp.conf \
+  ./build/examples/basic_client/basic_client -u ws://192.168.10.240:38927/sendspin -l debug "MF-230-CPP-Player"
+```
+
+三项实测结果（2026-10-21）：
+
+- **真实出声**：PCM 均值 −20.6 dB / 峰值 −4.0 dB；FLAC 解码后 −20.4 dB / −4.0 dB；C++（音量 100）−18.5 dB / −4.9 dB。
+- **流转**：三端两两组合 6/6 通过（含 PCM↔FLAC 跨编码、C++ 与 SDK 互转）。
+- **拖动**：三端 × 前跳/回跳/归零 9/9 通过；`[timeline] jump` 证明客户端时间线随服务端 seek 重锚。
+- **并发**：C++ 端 `transfer + seek` 并发 3/3 通过，无 `[QueueController][timeout]`。
+- **注意**：C++ 示例上报 `volume=0`，需先 `POST /v1/peers/sendspin:basic-client-example/volume {"volume":100}` 再量测，否则输出近似静音（−49 dB）。
+- **协议差异**：C++ 客户端握手为 legacy 明文（`legacy unencrypted client`），会出现 `Unhandled server message type: server/activate`，但注册/推流/seek 均正常；SDK 客户端走 Noise 加密。
+
 ## 7.8 最低成本的取证顺序（下次照这个走）
 
 1. **先问设备**：连一次 6053，dump 实体与 `featureFlags` —— 先搞清楚它到底能干什么。
