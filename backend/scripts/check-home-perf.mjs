@@ -161,8 +161,8 @@ mustMatch(
 mustCount(
   HOMEPRELOAD,
   /permMiddleware\(PERM\./,
-  2,
-  "聚合接口必须同时挂 LIBRARY_BROWSE 与 PLAYLIST_VIEW 两道权限门（少挂即变成无鉴权的隐通道）",
+  3,
+  "聚合接口 + 全量歌单池接口必须共挂 3 道权限门（preload 的 LIBRARY_BROWSE + PLAYLIST_VIEW，以及 playlist-pool 的 PLAYLIST_VIEW；少挂即变成无鉴权的隐通道）",
 );
 for (const [fn, why] of [
   ["buildSongsPage", "歌曲列表预热必须复用 buildSongsPage（重写查询会与服务端真源漂移）"],
@@ -302,13 +302,18 @@ mustMatch(
   "外壳卸载时必须置位 playerPeersDisposed 并清掉延迟定时器（登出后 <1s 卸载,悬挂回调仍会打 /v1/peers）",
 );
 
-// ---------- R6 聚合缓存预热提速 + 指数退避（recommend.ts，2026-10-19） ----------
+// ---------- R6 聚合缓存预热提速 + 指数退避 + 冷启动分档（recommend.ts，2026-10-19/20） ----------
 //
 // 首轮预热原为 TTL/2 = 150s：进程刚启动的那段时间里，首页首开只能走请求路径冷拉，
 // 用户恰好在这段窗口打开首页就是「慢」。改为启动后 ~4s 就预热一轮，之后仍按 TTL/2
 // 周期续命。失败退避同步从固定 60s 改为指数（3s 起、封顶 60s）：上游故障时既不
-// 死等 60s，也不会被前端轮询瞬间打爆。破坏同样是静默的（首轮又变回 150s / 退避又
-// 退回固定 60s 都不报错、不红任何动态用例），故一并钉死。
+// 死等 60s，也不会被前端轮询瞬间打爆。
+//
+// 2026-10-20 追加「冷启动也预热」并**分档 re-arm**：无缓存时，推荐类插件已就绪 → 直接
+// kick 一轮后台聚合（把实测 1.6~16.6s 的沙箱冷启动挪到无人等待窗口）；插件未注册 →
+// 绝不预热（否则会把「空频道」当成真值写进缓存并保留整个 TTL=5min，首页空 5 分钟），
+// 降到冷档短周期重试。破坏全是静默的（首轮又变回 150s / 退避退回固定 60s / 丢掉冷档
+// 判定 都不报错、不红任何动态用例），故一并钉死。
 mustMatch(
   RECOMMEND,
   /export const RECOMMEND_WARMER_INITIAL_MS = 4 \* 1000;/,
@@ -316,8 +321,23 @@ mustMatch(
 );
 mustMatch(
   RECOMMEND,
-  /tick\(RECOMMEND_CACHE_TTL_MS \/ 2\);/,
-  "首轮之后必须按 TTL/2 周期重新 re-arm（只热一次 = 缓存随后又过期，用户请求命中不到未过期缓存）",
+  /let nextDelayMs = RECOMMEND_CACHE_TTL_MS \/ 2;/,
+  "首轮之后必须按 TTL/2 周期重新 re-arm 为稳态档（只热一次 = 缓存随后又过期，用户请求命中不到未过期缓存）",
+);
+mustMatch(
+  RECOMMEND,
+  /export const RECOMMEND_WARMER_COLD_RETRY_MS = 15 \* 1000;/,
+  "冷档重试常量 RECOMMEND_WARMER_COLD_RETRY_MS 必须存在且为秒级（插件就绪前必须短周期重试）",
+);
+mustMatch(
+  RECOMMEND,
+  /if \(!warmRecommendCacheOnce\(\)\) nextDelayMs = RECOMMEND_WARMER_COLD_RETRY_MS;/,
+  "分档必须由 warmRecommendCacheOnce 的返回值驱动：丢掉它 = 冷启动空频道落库缺陷回归（首页空 5 分钟）",
+);
+mustMatch(
+  RECOMMEND,
+  /export function warmRecommendCacheOnce\(/,
+  "warmRecommendCacheOnce 必须导出（否则冷启动预热无法被单测/守卫确定性驱动）",
 );
 mustNotMatch(
   RECOMMEND,
@@ -337,9 +357,123 @@ mustNotMatch(
   "旧的固定 60s 退避常量 RECOMMEND_REFRESH_BACKOFF_MS 必须删除（防止两套退避逻辑并存/误用）",
 );
 
+// ---------- R7 首页全量歌单池索引（playlists.ts，2026-10-20） ----------
+//
+// 首页「并排随机」此前调 /v1/playlists?pageSize=200 拉「全量」，而生产库有 873 个歌单、
+// 服务端单页上限 500 —— 随机池实际只覆盖最新约 200 个，其余 673 个**永不出现**（真实
+// 缺陷）。改为服务端常驻一份最瘦索引（id+name+songCount）并一次返回全量池。破坏仍是
+// 静默的：索引没预热/没挂常驻缓存不报错；可见性过滤写错则会把他人私密歌单泄漏给普通用户。
+mustMatch(
+  PLAYLISTS,
+  /export const PLAYLIST_POOL_TTL_MS = 60 \* 1000;/,
+  "歌单池索引必须有短 TTL 常量（60s）：过期即重建，新增歌单最迟一分钟内进池",
+);
+mustMatch(
+  PLAYLISTS,
+  /export function buildPlaylistPool\(/,
+  "playlists.ts 必须导出 buildPlaylistPool（供 /v1/home/playlist-pool 复用，重写查询会与真源漂移）",
+);
+mustMatch(
+  PLAYLISTS,
+  /export function startPlaylistPoolWarmer\(/,
+  "缺少 startPlaylistPoolWarmer：启动预热是让首个首页请求免付全表扫描的唯一手段",
+);
+mustMatch(
+  PLAYLISTS,
+  /startPlaylistPoolWarmer\(\);/,
+  "startPlaylistPoolWarmer 必须在模块加载期被调用（只定义/导出等于没启动，首个首页请求照旧自付冷扫描）",
+);
+mustMatch(
+  PLAYLISTS,
+  /e\.owner === \(user\?\.id \?\? ""\) \|\| e\.pub/,
+  "普通用户可见性必须按「自己 + 公开 + 导入」过滤：漏掉即向普通用户泄漏他人私密歌单",
+);
+mustMatch(
+  PLAYLISTS,
+  /pub: r\.isPublic === 1 \|\| r\.sourceUrl != null,/,
+  "pub 判定必须与 buildPlaylistsPage 的 SQL 逐字对齐（eq(isPublic,1) + isNotNull(sourceUrl)）：放宽成 !!r.isPublic 会在 isPublic 出现非 0/1 脏值时向普通用户多放歌单",
+);
+mustMatch(
+  PLAYLISTS,
+  /visible\.map\(\(e\) => \(\{ id: e\.id, name: e\.name, songCount: e\.songCount \}\)\)/,
+  "响应项必须只投影 id/name/songCount：owner/pub 是内部可见性判定列，外泄会扩大隐私面",
+);
+mustMatch(
+  PLAYLISTS,
+  /readPlaylistPoolEntries\(opts\?\.force === true\)/,
+  "buildPlaylistPool 必须支持 force 跳过 TTL 缓存：否则「重新生成漫游」后新歌单最迟 60s 才进并排随机池",
+);
+mustMatch(
+  PLAYLISTS,
+  /\}, PLAYLIST_POOL_WARMER_INITIAL_MS\);/,
+  "启动预热必须是单发定时器（延迟用 PLAYLIST_POOL_WARMER_INITIAL_MS）",
+);
+mustNotMatch(
+  PLAYLISTS,
+  /tick\(\)/,
+  "启动预热不得做递归 re-arm：索引重建 <2ms，周期预热既无收益又会在每个 import 本模块的测试进程里常驻定时器",
+);
+
+// ---------- R8 首页全量歌单池接口与前端接线（homePreload.ts + Home/index.vue，2026-10-20） ----------
+mustMatch(
+  HOMEPRELOAD,
+  /app\.get\("\/v1\/home\/playlist-pool"/,
+  "必须注册 GET /v1/home/playlist-pool（首页全量歌单池的唯一来源）",
+);
+mustMatch(
+  HOMEPRELOAD,
+  /app\.use\("\/v1\/home\/playlist-pool", permMiddleware\(PERM\.PLAYLIST_VIEW\)\)/,
+  "全量歌单池接口必须挂 PLAYLIST_VIEW 权限门（少挂即变成无鉴权的隐通道）",
+);
+mustMatch(
+  HOMEPRELOAD,
+  /buildPlaylistPool\(/,
+  "歌单池接口必须复用 buildPlaylistPool（另写一份查询会与服务端真源漂移）",
+);
+mustMatch(
+  HOMEPRELOAD,
+  /const force = c\.req\.query\("refresh"\) === "1";/,
+  "歌单池接口必须支持 ?refresh=1 强制重建（「重新生成漫游」后新歌单需立刻进池）",
+);
+mustMatch(
+  HOMEPRELOAD,
+  /buildPlaylistPool\(user, \{ force \}\)/,
+  "歌单池接口必须把 refresh 透传给 buildPlaylistPool（传丢了 force 就退化成空转）",
+);
+mustMatch(
+  HOME,
+  /\/rest\/api\/v1\/home\/playlist-pool/,
+  "Home 并排随机池必须改走轻量全量接口 /rest/api/v1/home/playlist-pool",
+);
+mustMatch(
+  HOME,
+  /\?refresh=1/,
+  "Home 手动刷新必须带 ?refresh=1 跳过服务端索引 TTL 缓存（否则新歌单最迟 60s 才进并排随机池）",
+);
+mustMatch(
+  HOME,
+  /loadPlaylists\(true\)/,
+  "「重新生成漫游」必须调用 loadPlaylists(true)（带 force），不能用默认的缓存命中路径",
+);
+mustNotMatch(
+  HOME,
+  /\/rest\/api\/v1\/playlists\b/,
+  "Home 不得再调分页 /v1/playlists（pageSize=200 会把全量随机池截到最新约 200 个，缺陷回归）",
+);
+mustNotMatch(
+  HOME,
+  /pageSize: 200/,
+  "Home 不得再出现 pageSize=200 截断",
+);
+mustMatch(
+  HOME,
+  /coverArt: `pl-\$\{p\.id\}`/,
+  "歌单池响应不含 coverArt，Home 必须按 pl-<id> 派生封面（否则首屏封面整块消失）",
+);
+
 if (errors.length) {
   console.error(`✗ 首页性能优化链路守卫失败：${errors.length} 项违规（共 ${checks} 条断言）`);
   for (const e of errors) console.error("  ✗ " + e);
   process.exit(1);
 }
-console.log(`✅ 首页性能优化链路守卫通过：${checks} 条断言全部成立（冷启动预热 / 聚合预热接口 / 封面懒加载+首屏 eager / 收藏在途去重 / 首屏外呼分层 / 聚合缓存预热提速+指数退避）。`);
+console.log(`✅ 首页性能优化链路守卫通过：${checks} 条断言全部成立（冷启动预热 / 聚合预热接口 / 封面懒加载+首屏 eager / 收藏在途去重 / 首屏外呼分层 / 聚合缓存预热提速+指数退避+冷启动分档+冷档不落空缓存 / 全量歌单池索引(单发预热+exact 可见性口径)+轻量接口+?refresh=1 强制重建）。`);

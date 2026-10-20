@@ -2,6 +2,33 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.44] - 2026-10-20
+
+### Perf / 首页提速收尾：聚合缓存冷启动预热 + 首页并排随机池改走全量轻量接口
+
+承接 4.6.42/4.6.43 的首页提速，落地两处「把慢活挪到无人等待窗口」与一处真实缺陷修复。
+
+- **服务端 `backend/src/routes/api/recommend.ts`：聚合缓存「冷启动也预热」+ 分档 re-arm**
+  - 4.6.42 只把首轮预热提前到启动后 4s，但预热判定仍要求「该 cacheKey 已有缓存」——进程刚启动时内存与 DB 都没有聚合缓存，首页首开依旧走请求路径冷拉（平台精选要串起 go-music-dl 与各榜单插件的沙箱外呼，实测单插件冷启动 **1.6~16.6s**）。
+  - 现提取 `warmRecommendCacheOnce()` 并导出：有缓存且过期 → 后台单飞刷新；**无任何缓存（冷启动）且推荐类插件已就绪 → 也 kick 一轮后台聚合**，首页首开通常直接命中缓存、不再吃 `pending` + 8s×18 轮询。
+  - **插件未注册时绝不预热**：`apiRoutes` 早于插件注册挂载，首轮 tick 可能跑在插件就绪前，此时聚合会因无插件返回「空频道且无 primaryError」，被当成稳态结果写进缓存并保留整个 TTL(5min) —— **首页会空 5 分钟**。故未就绪时 `warmRecommendCacheOnce()` 返回 `false`，预热器降到冷档 `RECOMMEND_WARMER_COLD_RETRY_MS = 15s` 短周期重试；就绪后回到 `TTL/2` 稳态档。
+  - **冷启动空结果绝不落库（覆盖审查发现）**：上一条只堵住「插件未注册」，但「插件已注册、`recommend()` 返回空且无 `primaryError`」时仍会被照写成稳态缓存 —— 同样把首页空字段锁满整个 TTL。故 `refreshRecommendCacheInBackground` 新增 `opts.cold`：**冷启动(无旧缓存)时空 `channels` 一律记入失败退避、不落库**（保留 `pending` 语义，由前端轮询与预热冷档重试兜住）；非冷启动的过期刷新保持原语义（仅 `primaryError` 才不覆盖，空结果视为「今日无内容」）。
+  - 新增测试钩子 `__awaitRecommendWarmerForTest()`（等本轮在途刷新 settle）/ `__resetRecommendWarmerForTest()`（清定时器，供多档时序用例独立驱动）。
+- **服务端 `backend/src/routes/api/playlists.ts` + `homePreload.ts`：常驻「最瘦歌单索引」+ `GET /v1/home/playlist-pool`**
+  - 首页「并排随机」此前调 `/v1/playlists?pageSize=200` 拉「全量」，而服务端单页上限 **500**、生产库已有 **873** 个歌单 —— 随机池实际只覆盖最新约 **200** 个，其余 **673 个永不出现**（真实缺陷）。
+  - 新增进程内常驻索引：每条只留 `id + name + songCount`（封面由前端按 `pl-<id>` 派生，交给既有懒加载），**TTL 60s 懒刷新、不挂歌单变更钩子**、启动后 4s **单发预热一轮**（`unref`，不阻进程退出）。索引内部额外存 `owner/pub` 两列但**不进响应体**，读出时按与 `buildPlaylistsPage` **逐字对齐**的口径过滤（`pub = isPublic===1 || sourceUrl!=null`，管理员全见；普通用户仅见「自己 + 公开 + 导入」），避免向普通用户泄漏他人私密歌单。
+  - 新接口 `GET /v1/home/playlist-pool` 挂 `PLAYLIST_VIEW` 权限门，复用 `buildPlaylistPool`，一次返回全量池；**支持 `?refresh=1` 强制跳过索引 TTL 缓存**（供首页「重新生成漫游」后立刻拿到新歌单，避免旧实现直查 DB → 池缓存 60s 的可见回归）。
+  - 启动预热改为**单发定时器**而非递归 re-arm：索引重建实测 <2ms（873 行只投影 6 列），周期预热既无收益，又会在每个 import 本模块的测试进程里常驻一个永远待触发的定时器。
+- **Web 首页 `frontend/src/views/Home/index.vue`**：`loadPlaylists()` 由 `/rest/api/v1/playlists?pageSize=200` 改为 `/rest/api/v1/home/playlist-pool`，映射为 `{id,name,songCount,coverArt:'pl-'+id}` —— 一次拿到全量 873 并**修掉 pageSize=200 截断**，模板接线（首屏 eager/`fetchpriority="high"`、下半屏 `v-lazy-cover`）零改动。`refreshRoam()` 的手动刷新改调 `loadPlaylists(true)`（带 `?refresh=1`）。
+
+### Test / 回归守卫与用例
+
+- 新增 `backend/tests/qa_perf/playlistPool.test.ts`（9 条）：只投影 `{id,name,songCount}`（不外泄 owner/pub）、管理员全见 / 普通用户仅见「自己+公开+导入」、**与 `buildPlaylistsPage` 逐用户对拍（含未登录 `undefined` 与非 0/1 脏值 `isPublic`，防两套可见性口径漂移）**、**`force=true` 跳过 TTL 缓存**、TTL 内复用缓存、超 TTL 重建后新歌单进池、空库安全返回空池、预热后首个请求直接命中。
+- 新增 `backend/tests/qa_perf/recommendWarmerCold.test.ts`（6 条）：覆盖 `warmRecommendCacheOnce` 五条分支（无缓存+未就绪 → false 且不落缓存 / 无缓存+已就绪 → 外呼一次并把**真实频道**写入缓存 / **无缓存+已就绪但聚合为空 → 不落库** / 有新鲜缓存 → 不重复外呼 / 有过期缓存 → 单飞刷新）。
+- 扩充 `backend/tests/routes/recommendWarmerBackoff.test.ts`（4 → 7 条）：新增冷档常量与「双档 re-arm」时序用例（插件未注册 → `RECOMMEND_WARMER_COLD_RETRY_MS`；插件已就绪 → `TTL/2` 且幂等），并用 `vi.mock` 把「插件发现」入口换成受控假体，使两档都确定性可测（不依赖真实注册表/DB）。
+- `frontend/e2e/home-first-paint-covers.spec.ts`：首页数据 mock 由 `/v1/playlists` 换到 `/v1/home/playlist-pool`（按真实响应契约只回 `{id,name,songCount}`）。
+- `backend/scripts/check-home-perf.mjs`：R2 权限门计数 `2 → 3`（新增 playlist-pool 的 `PLAYLIST_VIEW`）；R6 断言随分档改写（钉 `warmRecommendCacheOnce` 导出、冷档常量、`if (!warmRecommendCacheOnce()) nextDelayMs = …` 分档驱动）；**新增 R7**（歌单池索引 9 条：TTL 常量 / `buildPlaylistPool` 导出 / 预热器定义与模块级调用 / 可见性过滤 / **`pub` 判定逐字对齐 SQL** / 只投影三字段 / **`force` 旁路** / **单发预热延迟** / **不得递归 re-arm(`tick()`)**）与 **R8**（接口与前端接线 10 条：路由注册 / 权限门 / 复用 `buildPlaylistPool` / **`refresh` 透传** / Home 改走轻量接口 / 不得再出现 `/rest/api/v1/playlists` 与 `pageSize: 200` / **`?refresh=1` 与 `loadPlaylists(true)`** / 封面按 `pl-<id>` 派生）。共 **76** 条断言。
+
 ## [4.6.43] - 2026-10-19
 
 ### Fix / CI 覆盖率门禁偶发红修复：QQ 节流队列被假时钟卡死

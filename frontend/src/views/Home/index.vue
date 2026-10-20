@@ -239,7 +239,8 @@ async function refreshRoam() {
     // 结果仅在任务完成时携带(每日/本地/漫游各生成一张歌单),耗时通常秒级。
     await waitAsyncTask(taskId, { timeoutMs: 600000 });
     ElMessage.success(t("home.roamRegenerated"));
-    await Promise.all([loadPlaylists(), loadHomeCards()]);
+    // 显式刷新:带 force 跳过服务端索引 TTL 缓存,新生成的歌单立刻进并排随机池。
+    await Promise.all([loadPlaylists(true), loadHomeCards()]);
   } catch (e: any) {
     ElMessage.error(formatApiError(e, t("home.refreshFailed")));
   } finally {
@@ -373,12 +374,22 @@ function placeholderHomeCount() {
   return Array.from({ length: need }, (_, i) => i + 1);
 }
 
-async function loadPlaylists() {
+async function loadPlaylists(force = false) {
   try {
-    // 拉全量歌单(含各平台导入歌单)以便按平台分组;后台每日同步会产生 60+ 平台歌单。
-    const res = await api.get("/rest/api/v1/playlists", { params: { page: 1, pageSize: 200 } });
-    playlists.value = res.data.items || [];
-    // 首页无专辑区块,不再拉专辑。
+    // 拉全量歌单最小投影(id/name/songCount):服务端常驻索引一次给全量池。
+    // 旧实现走 /v1/playlists?pageSize=200,而生产库有 873 个歌单、服务端单页上限 500,
+    // 导致并排随机池实际只覆盖最新约 200 个(真实缺陷);轻量接口不受分页上限约束。
+    // 封面按 pl-<id> 派生后由模板懒加载,故响应体刻意不带 coverArt。
+    // force=true(?refresh=1)跳过服务端索引 TTL 缓存:手动「重新生成漫游」后新歌单立刻进池。
+    const res = await api.get(
+      "/rest/api/v1/home/playlist-pool" + (force ? "?refresh=1" : "")
+    );
+    playlists.value = (res.data.items || []).map((p: any) => ({
+      id: p.id,
+      name: p.name,
+      songCount: p.songCount || 0,
+      coverArt: `pl-${p.id}`,
+    }));
   } catch {
     playlists.value = [];
   }

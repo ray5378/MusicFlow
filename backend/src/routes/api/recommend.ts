@@ -234,6 +234,7 @@ function refreshRecommendCacheInBackground(
   providerId: string,
   rp: ReturnType<typeof firstEnabledByCapability>,
   rpList: any[],
+  opts?: { cold?: boolean },
 ): void {
   if (recommendRefreshInflight.has(cacheKey)) return;
   const f = recommendColdFailAt.get(cacheKey);
@@ -246,9 +247,14 @@ function refreshRecommendCacheInBackground(
   };
   const task = (async () => {
     const { channels, primaryError } = await fetchRecommendChannels(providerId, rp, rpList);
-    if (primaryError && channels.length === 0) {
+    // 冷启动(无旧缓存)时**空 channels 也绝不当稳态落库**:插件已注册但 recommend() 返回空
+    // 且无 primaryError(如插件配置/上游为空)时,若照写会被当成稳态结果锁住整个 TTL(5min),
+    // 首页空 5 分钟。故冷启动一律走失败退避 —— 保留 pending 语义,由前端轮询/预热冷档重试兜住。
+    // 非冷启动(已有缓存)保持原语义:仅 primaryError 才不覆盖,空结果视为「今日无内容」。
+    if (channels.length === 0 && (primaryError || opts?.cold === true)) {
       const backoffMs = markFailure();
-      console.warn(`[RECOMMEND] 后台拉取失败(${Math.round(backoffMs / 1000)}s 指数退避): ${primaryError}`);
+      const why = primaryError || "聚合结果为空(冷启动不落空缓存)";
+      console.warn(`[RECOMMEND] 后台拉取失败(${Math.round(backoffMs / 1000)}s 指数退避): ${why}`);
       return;
     }
     recommendColdFailAt.delete(cacheKey);
@@ -266,33 +272,76 @@ function refreshRecommendCacheInBackground(
 // ==================== 周期性预热刷新 ====================
 // 模式与 services/dailyScheduler.ts 一致:递归 setTimeout、finally 里 re-arm、
 // 异常不断链。首轮用较短初始延迟(启动后 4s)尽早把首页聚合缓存暖起来 —— 否则
-// 首次预热要等到 TTL/2(150s)后,期间首页首开全靠请求路径冷拉,打不开得快;
-// 之后间隔 = TTL/2:用户请求几乎总能命中未过期缓存。只预热「已有缓存」
-// 的 key(说明首页被用过);冷启动不做无谓外呼。定时器 unref,不阻进程退出。
+// 首次预热要等到 TTL/2(150s)后,期间首页首开全靠请求路径冷拉,开不快;
+// 之后间隔 = TTL/2:用户请求几乎总能命中未过期缓存。定时器 unref,不阻进程退出。
+//
+// 2026-10-20 起**冷启动也预热**(此前「只预热已有缓存的 key、冷启动不做无谓外呼」):
+// 进程刚启动时内存与 DB 都没有聚合缓存,首页首开必然走请求路径冷拉 —— 而这正是
+// 最慢的一次(平台精选聚合要串起 go-music-dl + 各榜单插件的沙箱外呼,实测单插件
+// 冷启动 1.6~16.6s)。改为启动后首轮就把这轮外呼挪到「无人等待窗口」里跑,首页首开
+// 通常直接命中缓存,不再吃 pending + 8s×18 轮询。
+// 但**插件未注册时绝不预热**:apiRoutes 在 plugins 之前挂载,首轮 tick 可能早于插件
+// 注册;此时 fetchRecommendChannels 会因无插件返回空频道且无 primaryError,被
+// refreshRecommendCacheInBackground 当成稳态结果写进缓存并保留整个 TTL(5min)——
+// 首页会空 5 分钟。故未就绪时改用短周期(见 RECOMMEND_WARMER_COLD_RETRY_MS)重试,
+// 就绪后才回到 TTL/2 稳态周期。
 export const RECOMMEND_WARMER_INITIAL_MS = 4 * 1000;
+/** 冷启动(无任何缓存)且推荐类插件尚未注册时的重试周期。 */
+export const RECOMMEND_WARMER_COLD_RETRY_MS = 15 * 1000;
 let recommendWarmerTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** 跑一轮预热判定(导出以便单测/守卫直接驱动,不必真等定时器):
+ *  - 有缓存(内存或 DB 回灌)且已过期 → 后台单飞刷新;
+ *  - 无任何缓存(冷启动)→ 仅当推荐类插件已就绪才 kick 一轮后台聚合;
+ *    未就绪则**不 kick**(否则会把「空频道」写成稳态缓存,见上方注释)。
+ *  返回「本轮之后是否已处于可稳态」(插件就绪 或 已有缓存):定时器据此选下一档延迟。 */
+export function warmRecommendCacheOnce(): boolean {
+  // 用当前插件集重算 cacheKey(插件增删后旧 key 自然不再预热,由内存清理兜底)。
+  const rp = firstEnabledByCapability("recommend");
+  const providerId = rp?.manifest.id || "";
+  const rpList = getEnabledByCapability("recommendPlaylist");
+  const rpSigs = rpList.map((p: any) => p.manifest.id).sort().join(",");
+  const cacheKey = providerId + "|" + rpSigs;
+  // B3(2026-10-15):内存 miss 时回退读 DB 落库缓存——进程重启后若首页曾被用过,
+  // DB 里有 last-good,照常预热刷新,重启不再冷。
+  const entry = recommendCache.get(cacheKey) ?? readAggCacheDb(cacheKey);
+  if (entry) {
+    if (Date.now() - entry.ts >= RECOMMEND_CACHE_TTL_MS) {
+      refreshRecommendCacheInBackground(cacheKey, providerId, rp, rpList);
+    }
+    return true;
+  }
+  // 冷启动:插件就绪才发起,避免空频道落库(见上方注释)。
+  const pluginsReady = !!rp || rpList.length > 0;
+  if (pluginsReady) refreshRecommendCacheInBackground(cacheKey, providerId, rp, rpList, { cold: true });
+  return pluginsReady;
+}
+
+/** 测试钩子:等待本轮所有后台刷新 settle(预热是 fire-and-forget,断言缓存前必须先等)。 */
+export function __awaitRecommendWarmerForTest(): Promise<void> {
+  return Promise.all([...recommendRefreshInflight.values()]).then(() => undefined);
+}
+
+/** 测试钩子:停掉并清空周期预热定时器,让各用例互不干扰地独立驱动调度。 */
+export function __resetRecommendWarmerForTest(): void {
+  if (recommendWarmerTimer) {
+    clearTimeout(recommendWarmerTimer as any);
+    recommendWarmerTimer = null;
+  }
+}
 
 export function startRecommendCacheWarmer(): void {
   if (recommendWarmerTimer) return;
   const tick = (delayMs: number) => {
     recommendWarmerTimer = setTimeout(() => {
+      // 默认稳态档:TTL/2。冷启动且插件未就绪时降到短重试档(见常量注释)。
+      let nextDelayMs = RECOMMEND_CACHE_TTL_MS / 2;
       try {
-        // 用当前插件集重算 cacheKey(插件增删后旧 key 自然不再预热,由内存清理兜底)。
-        const rp = firstEnabledByCapability("recommend");
-        const providerId = rp?.manifest.id || "";
-        const rpSigs = getEnabledByCapability("recommendPlaylist").map((p: any) => p.manifest.id).sort().join(",");
-        const cacheKey = providerId + "|" + rpSigs;
-        // B3(2026-10-15):内存 miss 时回退读 DB 落库缓存——进程重启后若首页曾被用过,
-        // DB 里有 last-good,照常预热刷新,重启不再冷。DB 里也没有(从未访问过)则跳过,
-        // 保留「冷启动不做无谓外呼」的既有哲学;用户首次访问时由请求路径 kick 冷启动。
-        const entry = recommendCache.get(cacheKey) ?? readAggCacheDb(cacheKey);
-        if (entry && Date.now() - entry.ts >= RECOMMEND_CACHE_TTL_MS) {
-          refreshRecommendCacheInBackground(cacheKey, providerId, rp, getEnabledByCapability("recommendPlaylist"));
-        }
+        if (!warmRecommendCacheOnce()) nextDelayMs = RECOMMEND_WARMER_COLD_RETRY_MS;
       } catch (e: any) {
         console.warn("[RECOMMEND] SWR 预热失败:", e?.message || e);
       } finally {
-        tick(RECOMMEND_CACHE_TTL_MS / 2); // re-arm(在 finally,异常也不能断链)
+        tick(nextDelayMs); // re-arm(在 finally,异常也不能断链)
       }
     }, delayMs);
     recommendWarmerTimer?.unref?.();
@@ -438,7 +487,8 @@ app.get("/v1/recommend", async (c) => {
   // 无任何缓存(冷启动,2026-10-15 B2 起不再阻塞):立即返回空频道 + pending:true,
   // 后台 single-flight 拉取(成功 write-through 落 DB,失败走指数退避)。前端收到
   // pending 后轮询重试,数据到位自动填充——首页打开路径从此零阻塞外呼。
-  refreshRecommendCacheInBackground(cacheKey, providerId, rp, rpList);
+  // cold=true:空结果绝不落库(否则首页空缓存锁整个 TTL,见 refreshRecommendCacheInBackground)。
+  refreshRecommendCacheInBackground(cacheKey, providerId, rp, rpList, { cold: true });
   return c.json({ success: true, channels: [], providerId, pending: true });
 });
 

@@ -126,6 +126,112 @@ export function buildPlaylistsPage(qp: {
   return { total, page, pageSize, items };
 }
 
+// ==================== 常驻歌单索引(首页并排随机池,2026-10-20) ====================
+// 背景:首页「并排随机」需要从全部歌单里随机抽。此前前端调 /v1/playlists?pageSize=200
+// 拉「全量」——而服务端单页上限 500、生产库已有 873 个歌单,于是随机池实际只覆盖
+// 最新约 200 个,其余 673 个永不出现(真实缺陷)。改由本模块常驻一份「最瘦索引」:
+// 每条只留 id + name + songCount(封面由 id 派生 pl-<id>,交给客户端懒加载),
+// 一次返回全量池,前端不再分页、不再截断。
+//
+// 常驻策略:进程内缓存 + 短 TTL 懒刷新,**不挂歌单变更钩子**——歌单增删后最迟 TTL 内
+// 生效,首页随机池对「迟到几十秒」不敏感,省掉每条歌单写路径都来通知索引的复杂度。
+// 启动后预热一轮,让首个首页请求不必自己付全表扫描的钱(实测 873 行投影 5 列 <2ms)。
+//
+// 可见性:索引额外存 owner/pub 两列(**不进响应体**),读出时按与 buildPlaylistsPage
+// 相同的口径过滤——管理员全见;普通用户仅见「自己 + 公开 + 导入(sourceUrl 非空)」,
+// 否则会向普通用户泄漏他人私密歌单。
+export const PLAYLIST_POOL_TTL_MS = 60 * 1000;
+/** 启动后多久做第一次索引预热(与 recommend 预热器同档,避开启动瞬间的资源争用)。 */
+export const PLAYLIST_POOL_WARMER_INITIAL_MS = 4 * 1000;
+
+type PlaylistPoolEntry = {
+  id: string;
+  name: string;
+  songCount: number;
+  owner: string;
+  pub: boolean;
+};
+
+let playlistPoolCache: { ts: number; entries: PlaylistPoolEntry[] } | null = null;
+let playlistPoolTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** 读常驻索引(超过 TTL 则同步重建)。单次全表 SELECT 只投影 6 列,重建成本远低于
+ *  一次 HTTP 往返,故不为它引入后台刷新/单飞那套复杂度。
+ *  force=true 时跳过 TTL 缓存强制重建(供「重新生成漫游」这类显式刷新拿到最新歌单)。 */
+function readPlaylistPoolEntries(force = false): PlaylistPoolEntry[] {
+  if (!force && playlistPoolCache && Date.now() - playlistPoolCache.ts < PLAYLIST_POOL_TTL_MS) {
+    return playlistPoolCache.entries;
+  }
+  const rows = db
+    .select({
+      id: playlists.id,
+      name: playlists.name,
+      songCount: playlists.songCount,
+      owner: playlists.ownerId,
+      isPublic: playlists.isPublic,
+      sourceUrl: playlists.sourceUrl,
+    })
+    .from(playlists)
+    .all();
+  const entries = rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    songCount: r.songCount || 0,
+    owner: r.owner || "",
+    // pub 的口径必须与 buildPlaylistsPage 的 SQL 逐字对齐(`eq(isPublic, 1)` + `isNotNull(sourceUrl)`):
+    // 放宽成 `!!r.isPublic`(非 0 即真)一旦 isPublic 出现非 0/1 的脏值,就会向普通用户多放歌单。
+    pub: r.isPublic === 1 || r.sourceUrl != null,
+  }));
+  playlistPoolCache = { ts: Date.now(), entries };
+  return entries;
+}
+
+/** 按当前用户可见性过滤后返回全量最小投影池({id,name,songCount})——供首页一次性拿到全量。
+ *  opts.force=true 跳过索引 TTL 缓存强制重建(见 readPlaylistPoolEntries)。 */
+export function buildPlaylistPool(
+  user: { id?: string; isAdmin?: boolean } | undefined,
+  opts?: { force?: boolean },
+): { total: number; items: { id: string; name: string; songCount: number }[] } {
+  const all = readPlaylistPoolEntries(opts?.force === true);
+  const visible = user?.isAdmin
+    ? all
+    : all.filter((e) => e.owner === (user?.id ?? "") || e.pub);
+  const items = visible.map((e) => ({ id: e.id, name: e.name, songCount: e.songCount }));
+  return { total: items.length, items };
+}
+
+/** 预热一轮索引(供启动预热器与单测复用)。 */
+export function warmPlaylistPoolOnce(): void {
+  readPlaylistPoolEntries();
+}
+
+/** 测试钩子:清空索引缓存与定时器,让各用例互不干扰地覆盖 TTL 懒刷新口径。 */
+export function __resetPlaylistPoolForTest(): void {
+  playlistPoolCache = null;
+  if (playlistPoolTimer) {
+    clearTimeout(playlistPoolTimer as any);
+    playlistPoolTimer = null;
+  }
+}
+
+// 启动预热:只在启动后预热一轮(单发定时器 + unref,不阻进程退出),**不做周期 re-arm**——
+// 索引重建实测 <2ms(873 行只投影 6 列),过期后的首个首页请求自付这点成本即可;常驻周期
+// 定时器既无收益,又会在每个 import 本模块的测试进程里留下永远待触发的定时器(噪声)。
+export function startPlaylistPoolWarmer(): void {
+  if (playlistPoolTimer) return;
+  playlistPoolTimer = setTimeout(() => {
+    playlistPoolTimer = null; // 单发:触发后清句柄,便于测试钩子与幂等判断。
+    try {
+      warmPlaylistPoolOnce();
+    } catch (e: any) {
+      console.warn("[PLAYLIST-POOL] 索引预热失败:", e?.message || e);
+    }
+  }, PLAYLIST_POOL_WARMER_INITIAL_MS);
+  playlistPoolTimer?.unref?.();
+}
+
+startPlaylistPoolWarmer();
+
 export function registerPlaylists(app: Hono): void {
 app.use("/v1/playlist-search", permMiddleware(PERM.LIBRARY_SEARCH));
 

@@ -63,8 +63,16 @@ const PLAYLISTS = Array.from({ length: 8 }, (_, i) => ({
 
 /** 注入首页所需的确定性数据(仅拦 5 个首页取数端点,其余仍走真实后端)。 */
 async function mockHomeData(page: Page) {
-  await page.route(/\/rest\/api\/v1\/playlists(\?|$)/, (r) =>
-    r.fulfill({ json: { items: PLAYLISTS, total: PLAYLISTS.length } }),
+  // 首页并排随机池已改走轻量接口(2026-10-20):只回 id/name/songCount,
+  // 不含 coverArt(封面由前端按 pl-<id> 派生),故这里按真实响应契约构造假数据。
+  await page.route(/\/rest\/api\/v1\/home\/playlist-pool$/, (r) =>
+    r.fulfill({
+      json: {
+        success: true,
+        total: PLAYLISTS.length,
+        items: PLAYLISTS.map((p) => ({ id: p.id, name: p.name, songCount: p.songCount })),
+      },
+    }),
   );
   await page.route(/\/rest\/api\/v1\/home\/playlist-count$/, (r) => r.fulfill({ json: { count: 8 } }));
   await page.route(/\/rest\/api\/v1\/recommend\/home-cards$/, (r) => r.fulfill({ json: { cards: [] } }));
