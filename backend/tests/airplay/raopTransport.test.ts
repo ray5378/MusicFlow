@@ -424,3 +424,18 @@ describe("stream():实时节拍推流", () => {
     expect(ts1).toBe((ts0 + CHUNK_LEN) >>> 0);
   });
 });
+
+// ===========================================================================
+// 2026-10-22 fork 模式真机:`seek` 报 `airplay rpc 超时: cast (25000ms)`。
+// 根因之一:sendRtsp 在等响应期间连接被关闭时**只 clearTimeout、不 reject**,
+// Promise 永不 settle ⇒ 子进程的 stop()/cast() 永久挂起。这里钉死「必须 reject」。
+describe("sendRtsp:等待响应期间连接关闭必须立刻 reject(不得永久挂起)", () => {
+  it("对端 close → reject socket closed", async () => {
+    const { anyP } = await connected();
+    // 不排任何回复:请求写出去后处于等待态。
+    const pending = anyP.sendRtsp("FLUSH", null, null);
+    const sock = H.tcpSockets[H.tcpSockets.length - 1];
+    sock.destroy(); // FakeTcp.destroy() 会 emit("close")
+    await expect(pending).rejects.toThrow(/socket closed/);
+  });
+});

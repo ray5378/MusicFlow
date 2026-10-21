@@ -25,6 +25,7 @@ const H = vi.hoisted(() => {
   const state = {
     players: [] as any[],
     decoders: [] as any[],
+    spawnCalls: [] as any[],
     streams: [] as FakeStream[],
     logs: [] as { level: string; msg: string }[],
     connectImpl: null as null | (() => Promise<any>),
@@ -41,6 +42,7 @@ const H = vi.hoisted(() => {
     durationSec = 0;
     realtimeStats: any = null;
     preparedSeek: number[] = [];
+    startPositions: number[] = [];
     volumeDb: number[] = [];
     constructor(opts: any) {
       this.opts = opts;
@@ -61,6 +63,10 @@ const H = vi.hoisted(() => {
       this.isStreaming = false;
       if (state.stopImpl) return state.stopImpl();
     }
+    forceClose(): void {
+      this.calls.push("forceClose");
+      this.isStreaming = false;
+    }
     pause(): void {
       this.calls.push("pause");
       this.isPaused = true;
@@ -73,6 +79,10 @@ const H = vi.hoisted(() => {
       this.calls.push(`prepareSeek:${seekSec}`);
       this.preparedSeek.push(seekSec);
       if (state.prepareSeekImpl) return state.prepareSeekImpl(seekSec);
+    }
+    setStartPosition(seekSec: number): void {
+      this.calls.push(`setStartPosition:${seekSec}`);
+      this.startPositions.push(seekSec);
     }
     setVolumeDb(db: number): void {
       this.calls.push(`setVolumeDb:${db}`);
@@ -100,7 +110,10 @@ const H = vi.hoisted(() => {
 vi.mock("../../src/services/airplay/raop.js", () => ({ RaopPlayer: H.FakeRaopPlayer }));
 
 vi.mock("../../src/services/airplay/decoder.js", () => ({
-  spawnDecoder: () => H.makeDecoder(),
+  spawnDecoder: (input: string, seek?: number, opts?: any) => {
+    H.state.spawnCalls.push({ input, seek, opts });
+    return H.makeDecoder();
+  },
   makeProducer: () => async () => null,
   // 契约同步:会话收尾统一走 decode 层的 killDecoder(SIGKILL —— SIGTERM 对卡在
   // 重连/阻塞写的 ffmpeg 无效,240 实测 20 分钟不退)。桩保留「被强杀」可观测性。
@@ -147,6 +160,7 @@ function castArgs(over: Record<string, unknown> = {}) {
 beforeEach(() => {
   S.players.length = 0;
   S.decoders.length = 0;
+  S.spawnCalls.length = 0;
   S.streams.length = 0;
   S.logs.length = 0;
   S.connectImpl = null;
@@ -189,6 +203,56 @@ describe("AirplaySessionRuntime / 生命周期", () => {
     expect(first.calls).toContain("stop");
     expect(rt.activeIds()).toEqual(["ap-1"]);
     expect(S.players).toHaveLength(2);
+  });
+
+  it("cast 带 seekSec:偏移编进服务端回环流,解码器不再对 live 流做 -ss", async () => {
+    const rt = new AirplaySessionRuntime();
+    await rt.cast(castArgs({
+      streamUrl: "http://127.0.0.1:46400/rest/airplay/stream/tok1",
+      seekSec: 12.5,
+    }));
+
+    expect(S.spawnCalls).toHaveLength(1);
+    expect(S.spawnCalls[0].input).toContain("timeOffset=12.5");
+    // 关键:解码器第二个参数(seekSec)必须为空 —— 对 live FLAC 做 -ss 会落在帧中间,
+    // 产出残帧 ⇒ 设备有进度但不响。
+    expect(S.spawnCalls[0].seek).toBeUndefined();
+    // RTP 时间线仍按内容位置重锚(上报位置不从 0 起算)。
+    expect(S.players[0].startPositions).toEqual([12.5]);
+  });
+
+  it("收尾卡住不会挂死 RPC:超时后强制关闭传输并返回", async () => {
+    process.env.AIRPLAY_STOP_DEADLINE_MS = "20";
+    try {
+      const rt = new AirplaySessionRuntime();
+      await rt.cast(castArgs());
+      S.stopImpl = () => new Promise<void>(() => { /* 模拟设备不答 TEARDOWN */ });
+      const t0 = Date.now();
+      await rt.stop("ap-1");
+      expect(Date.now() - t0).toBeLessThan(1000);
+      expect(S.players[0].calls).toContain("forceClose");
+      expect(S.logs.some((l) => l.msg.includes("收尾超时"))).toBe(true);
+      expect(rt.has("ap-1")).toBe(false);
+    } finally {
+      delete process.env.AIRPLAY_STOP_DEADLINE_MS;
+    }
+  });
+
+  it("旧会话收尾卡住时,新 cast 仍在上限内完成(RPC 不被占死)", async () => {
+    process.env.AIRPLAY_STOP_DEADLINE_MS = "20";
+    try {
+      const rt = new AirplaySessionRuntime();
+      await rt.cast(castArgs());
+      S.stopImpl = () => new Promise<void>(() => { /* 旧会话不退 */ });
+      const t0 = Date.now();
+      await rt.cast(castArgs({ streamUrl: "http://x/tok2" }));
+      expect(Date.now() - t0).toBeLessThan(1000);
+      expect(S.players[0].calls).toContain("forceClose");
+      expect(rt.activeIds()).toEqual(["ap-1"]);
+      expect(S.players).toHaveLength(2);
+    } finally {
+      delete process.env.AIRPLAY_STOP_DEADLINE_MS;
+    }
   });
 
   it("RTSP 握手失败:回滚已建连接并向上抛错,会话不入表", async () => {

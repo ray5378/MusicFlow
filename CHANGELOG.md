@@ -2,6 +2,39 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.70] - 2026-10-22
+
+### Feature / AirPlay 改为默认独立子进程（与 Sendspin 对齐）
+
+**背景**：AirPlay 的 7.98ms 墙钟推流节拍此前跑在主进程（`defaultFork: false`）。前端请求 /
+批量任务占住事件循环时，RTP 发包被打散（现场 `reanchors=400/5s、maxGap≈2s`），听感卡顿。
+Sendspin 早已是独立子进程，AirPlay 却仍与主进程共用事件循环。
+
+**修复（fork 路径三处挂死 + 一处对齐）**：
+1. **RTSP 连接关闭必须 reject**：`sendRtsp` 等响应期间对端 close/error 时旧实现只
+   `clearTimeout`，Promise 永不 settle ⇒ 子进程 `player.stop()`/`cast()` 永久挂起
+   （现场 `airplay rpc 超时: cast (25000ms)`）。现在 close/error 一律 reject 并摘监听器。
+2. **子进程收尾硬上限**：`AirplaySessionRuntime.stop()` 用 `STOP_DEADLINE_MS=4s`
+   （`AIRPLAY_STOP_DEADLINE_MS` 可覆盖）包住 `player.stop()`；超时 `forceClose()`
+   立刻关 socket/RTP 端口，保证 RPC 一定回包。
+3. **追赶发包让出事件循环**：每追发 16 包 `setImmediate` 一次，避免微任务把子进程
+   IPC/RTSP 响应饿死。
+4. **fork 落位与 in-proc 对齐**：子进程 `cast`/`seek` 的偏移编进服务端回环流
+   `?timeOffset=N`，`spawnDecoder(url, undefined)`，不对 live FLAC 做 `-ss`。
+5. `airplay/mode.ts` 的 `defaultFork` 翻为 **true**；排障可 `MUSICFLOW_AIRPLAY_INPROC=1` 回落。
+
+**真机回归（240 + HiVi H5MKII，fork 默认）**：起播 / seek 60 / 暂停→`/play` 恢复 /
+音量 40（转发同 host DLNA）/ 停止 / 主卧→HiVi 流转 + reset 源端 / AP→DL→AP 快速往返，
+设备 `getPlayerStatus` 全程 `play` 且 `curpos` 前进；无 `rpc 超时`、无 `RAOP connect 总超时`。
+前端负载隔离实测（本地曲，24 并发请求 × 15s）：`chunks` 增量 2381（≈125.3/s），
+`reanchors` / `maxGap` / `loss` 增量全部为 0。
+
+**回归守卫**：`check-airplay-playback-chain.mjs` 新增 **R30**（默认 fork / close reject /
+forceClose / 收尾上限 / fork 偏移 / 让出事件循环）；新增
+`tests/services/airplaySessionRuntime.test.ts` 3 例（偏移、收尾超时、旧会话卡住时新 cast 仍完成）
+与 `tests/airplay/raopTransport.test.ts` 1 例（连接关闭必须 reject）。
+`tsc --noEmit` 0；AirPlay 相关 3 文件 134 例通过。
+
 ## [4.6.69] - 2026-10-22
 
 ### Fix / 4.6.68 CI 红:双协议互斥守卫「助手内冻结队列」失明

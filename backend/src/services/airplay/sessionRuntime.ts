@@ -19,6 +19,34 @@ const log = createLogger("AIRPLAY");
 const HEALTH_LOG_INTERVAL_MS = 15_000;
 const HEALTH_WARN_GAP_MS = 50;
 
+/** 单会话收尾(RTSP TEARDOWN + 关 socket)的硬上限。
+ *
+ *  为什么子进程必须自己有上限:主进程 in-proc 路径用 `withDeadline(4s)` 包住旧会话
+ *  收尾;子进程的 `cast` RPC 若直接 `await player.stop()`,一旦设备/连接卡住,RPC
+ *  就永远不回 → 主进程序列闸被占满 ⇒ 后续 seek/stop 全部 `rpc 超时`(2026-10-22 真机)。
+ *  超时后强制关传输,保住 RPC 应答。 */
+const STOP_DEADLINE_MS = 4_000;
+
+function stopDeadlineMs(): number {
+  const v = Number(process.env.AIRPLAY_STOP_DEADLINE_MS);
+  return Number.isFinite(v) && v > 0 ? v : STOP_DEADLINE_MS;
+}
+
+/** 把起播/seek 偏移编进服务端回环流(与主进程 `withPlaybackOffset` 同口径)。
+ *  子进程不能 import control.ts(会拖进 DB/DLNA/peer),故在这里做同一件事:
+ *  解码器吃一条**从头就正确**的流,绝不对 live FLAC 做 `-ss`(残帧 ⇒ 无声)。 */
+function withOffset(url: string, seekSec?: number): string {
+  if (seekSec === undefined || !Number.isFinite(seekSec) || seekSec <= 0) return url;
+  try {
+    const u = new URL(url);
+    if (!u.pathname.startsWith("/rest/airplay/stream/")) return url;
+    u.searchParams.set("timeOffset", String(Math.round(seekSec * 1000) / 1000));
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
 /** 镜像给主进程的会话态(读侧只用这些字段,够 getAirPlayStatus/peerStatus 用)。 */
 export interface AirplaySessionMirrorRow {
   deviceId: string;
@@ -132,7 +160,9 @@ export class AirplaySessionRuntime {
     if (a.seekSec !== undefined && Number.isFinite(a.seekSec) && a.seekSec > 0) {
       player.setStartPosition(a.seekSec);
     }
-    const ff = spawnDecoder(a.streamUrl, a.seekSec, { rowId: a.songId });
+    // 偏移编进**服务端回环流**(与主进程 withPlaybackOffset 同口径):解码器吃一条
+    // 从头就正确的流,绝不对 live FLAC 做 `-ss`(残帧 ⇒ invalid sync code / 无声)。
+    const ff = spawnDecoder(withOffset(a.streamUrl, a.seekSec), undefined, { rowId: a.songId });
     const active: ActiveSession = {
       deviceId: a.deviceId,
       player,
@@ -198,7 +228,8 @@ export class AirplaySessionRuntime {
         killDecoder(ff);
         // 会话自然结束(整首播完 / 失败)也必须拆掉 RTP socket 并发 TEARDOWN,
         // 否则 socket 泄漏,设备同时维护多个并发会话(多个 timing 循环),互相干扰导致卡顿。
-        active.player.stop().catch(() => {});
+        // 收尾同样走上限:finalizer 本身不等它,但绝不能让半死连接长期占着 RTP 端口。
+        void this.stopPlayerBounded(active);
         // P0-4:把解码器 stderr 带给主进程解析 loudnorm(子进程不碰 DB)。
         // 被 stop/失败时无 JSON,主进程侧解析失败即 false,不影响续播。
         const loudnessStderr = (ff as any)?.stderrText?.() ?? "";
@@ -245,8 +276,29 @@ export class AirplaySessionRuntime {
     s.ended = true;
     this.stopHealthLog(s);
     try { killDecoder(s.ffmpeg); } catch { /* ignore */ }
-    await s.player.stop().catch(() => {});
+    await this.stopPlayerBounded(s);
     this.hooks.onChanged?.();
+  }
+
+  /** 有上限的会话收尾:TEARDOWN 卡住时强制关传输,保证 RPC 一定回包。
+   *  返回 true 表示正常收尾,false 表示超时后强制关闭。 */
+  private async stopPlayerBounded(s: ActiveSession): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), stopDeadlineMs());
+      timer.unref?.();
+    });
+    try {
+      const r = await Promise.race([s.player.stop().catch(() => null), timeout]);
+      if (r === null) {
+        log.warn(`airplay 会话收尾超时(${stopDeadlineMs()}ms),强制关闭传输`, { deviceId: s.deviceId });
+        s.player.forceClose();
+        return false;
+      }
+      return true;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   async stopAll(): Promise<void> {
@@ -309,7 +361,7 @@ export class AirplaySessionRuntime {
     // The finalizer raced and tore the session down anyway → 交给调用方重播。
     if (this.sessions.get(deviceId) !== s) return false;
 
-    s.ffmpeg = spawnDecoder(s.streamUrl, t, { rowId: s.songId });
+    s.ffmpeg = spawnDecoder(withOffset(s.streamUrl, t), undefined, { rowId: s.songId });
     this.runStream(s, s.session);
     if (wasPaused) s.player.pause();
     this.hooks.onChanged?.();

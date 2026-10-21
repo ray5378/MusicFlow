@@ -999,6 +999,46 @@ console.log("===== R29 DLNA Stop 不得误杀同 host AirPlay 输出(流转后 r
     "互斥让位被反向守卫挡住:DLNA 不停 ⇒ AirPlay 起播后设备仍占着 DLNA 输入",
   );
 }
+console.log("===== R30 AirPlay 独立子进程(与 sendspin 对齐):默认 fork + RPC 不得被收尾挂死 =====");
+{
+  const modeG = stripComments(read("backend/src/services/airplay/mode.ts"));
+  const raopG = stripComments(read("backend/src/services/airplay/raop.ts"));
+  const rtG = stripComments(read("backend/src/services/airplay/sessionRuntime.ts"));
+  check(
+    "AirPlay 默认 fork(defaultFork: true),与 sendspin 同为独立子进程",
+    /defaultFork:\s*true/.test(modeG),
+    "默认仍是 in-proc:主进程事件循环被前端/批量任务占住时 7.98ms RTP 节拍被打散",
+  );
+  check(
+    "RTSP 等待响应期间连接关闭必须 reject(不得只 clearTimeout)",
+    /const onClose = \(\) => bad\(new Error\(`RTSP \$\{method\} failed: socket closed`\)\)/.test(raopG)
+      && /sock\.once\("close", onClose\)/.test(raopG),
+    "close 只清定时器:Promise 永不 settle ⇒ 子进程 cast/stop RPC 永久挂起(25s 超时)",
+  );
+  check(
+    "RaopPlayer 提供 forceClose(收尾超时的传输层强制释放)",
+    /forceClose\(\): void \{/.test(raopG),
+    "缺少强制关闭出口,收尾卡住时只能干等",
+  );
+  check(
+    "子进程会话收尾有硬上限(STOP_DEADLINE_MS + stopPlayerBounded)",
+    /const STOP_DEADLINE_MS = 4_000/.test(rtG)
+      && /private async stopPlayerBounded\(/.test(rtG)
+      && /s\.player\.forceClose\(\)/.test(rtG),
+    "子进程 await player.stop() 无上限:设备不答 TEARDOWN 时 cast RPC 永不回包",
+  );
+  check(
+    "子进程 cast/seek 的偏移编进服务端流且解码器不做 -ss(与 in-proc 同口径)",
+    /spawnDecoder\(withOffset\(a\.streamUrl, a\.seekSec\), undefined/.test(rtG)
+      && /spawnDecoder\(withOffset\(s\.streamUrl, t\), undefined/.test(rtG),
+    "fork 路径对 live FLAC 做 -ss:残帧 ⇒ 有进度无声",
+  );
+  check(
+    "推流追赶时必须让出事件循环(每 16 包 setImmediate)",
+    /if \(\+\+burst >= 16\)/.test(raopG) && /setImmediate\(r\)/.test(raopG),
+    "微任务连续发包会饿死子进程 IPC/RTSP 响应处理",
+  );
+}
 console.log("");
 if (failures.length) {
   console.log(`✗ AirPlay 播放链路时序守卫失败 ${failures.length} 项:`);

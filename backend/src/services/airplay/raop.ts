@@ -398,6 +398,30 @@ export class RaopPlayer {
       const req = Buffer.concat([Buffer.from(method + head, "latin1"), extraBody ?? Buffer.from(payload, "latin1")]);
 
       let buf = "";
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const sock = this.socket;
+      if (!sock) { reject(new Error("RTSP socket closed")); return; }
+      const onClose = () => bad(new Error(`RTSP ${method} failed: socket closed`));
+      const onErr = (e: unknown) => bad(e instanceof Error ? e : new Error(String(e)));
+      const cleanup = () => {
+        if (timer) { clearTimeout(timer); timer = null; }
+        sock.off("data", onData);
+        sock.off("close", onClose);
+        sock.off("error", onErr);
+      };
+      const ok = (v: { status: number; headers: Record<string, string>; body: string }) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(v);
+      };
+      const bad = (e: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(e);
+      };
       const onData = (chunk: Buffer) => {
         buf += chunk.toString("latin1");
         const idx = buf.indexOf("\r\n\r\n");
@@ -427,23 +451,22 @@ export class RaopPlayer {
         }
         finish();
         function finish() {
-          if (status >= 200 && status < 300) resolve({ status, headers: headersOut, body: headBody.slice(0, clen) });
-          else reject(new Error(`RTSP ${method} failed: ${firstLine}${headBody ? " — " + headBody.slice(0, 120) : ""}`));
+          if (status >= 200 && status < 300) ok({ status, headers: headersOut, body: headBody.slice(0, clen) });
+          else bad(new Error(`RTSP ${method} failed: ${firstLine}${headBody ? " — " + headBody.slice(0, 120) : ""}`));
         }
       };
-      const sock = this.socket;
-      if (!sock) { reject(new Error("RTSP socket closed")); return; }
       sock.on("data", onData);
       sock.write(req);
       const waitMs = rtspTimeoutFor(
         method,
         this.handshakeDeadline > 0 ? this.handshakeDeadline - Date.now() : null,
       );
-      const t = setTimeout(() => {
-        sock.off("data", onData);
-        reject(new Error(`RTSP ${method} timeout(${waitMs}ms)`));
-      }, waitMs);
-      sock.once("close", () => clearTimeout(t));
+      timer = setTimeout(() => bad(new Error(`RTSP ${method} timeout(${waitMs}ms)`)), waitMs);
+      // ★ 连接在等响应期间被关闭/出错:**必须 reject**,不能只 clearTimeout。
+      //   旧实现只 `close → clearTimeout`,Promise 永不 settle ⇒ 子进程里的
+      //   stop()/cast() 永久挂起(fork 模式 seek 报 `rpc 超时: cast (25000ms)`)。
+      sock.once("close", onClose);
+      sock.once("error", onErr);
     });
   }
 
@@ -749,6 +772,12 @@ export class RaopPlayer {
     this.startNtp = ntpNow();
     let idx = 0;
     let firstSyncSent = false;
+    // 追赶(burst)时连续发送的包数:每 16 包让出一次事件循环。
+    // 子进程里 RPC/IPC/RTSP 响应都靠事件循环的 poll 阶段;若 producer 的 10s
+    // jitter buffer 一直有货,`await producer()` 只走微任务,连续数百包会把
+    // 消息处理饿死(fork 模式 seek 的 RPC 超时根因之一)。16 包≈128ms 音频,
+    // 让出一次 setImmediate 对发流节拍无可感知影响。
+    let burst = 0;
     while (this.streaming && !this.destroying) {
       if (this.paused) {
         // Freeze the RTP clock while paused: no chunks go out, so idx (and thus
@@ -760,11 +789,16 @@ export class RaopPlayer {
       const now = performance.now();
       const delay = target - now;
       if (delay > 0) {
+        burst = 0;
         await new Promise((r) => setTimeout(r, delay));
       } else {
         // Fell behind (decode/scheduling): send immediately to catch up with
         // the real clock — timestamps stay continuous (no jumps, no holes).
         this.stats.reanchors++;
+        if (++burst >= 16) {
+          burst = 0;
+          await new Promise((r) => setImmediate(r));
+        }
       }
       this.headTs = (this.startTs + idx * CHUNK_LEN) >>> 0;
       const pcm = await this.producer();
@@ -860,7 +894,20 @@ export class RaopPlayer {
     if (this.socket && !this.socket.destroyed) {
       try { await this.sendRtsp("TEARDOWN", null, null); } catch { /* ignore */ }
     }
-    this.socket?.destroy();
+    this.forceClose();
+  }
+
+  /** 强制关闭传输层(不等 TEARDOWN 响应)。
+   *
+   *  收尾超时兜底专用:子进程里的 RPC(cast/stop)不能因为一条不答 TEARDOWN 的
+   *  设备连接被永久挂住 —— `AirplaySessionRuntime.stop()` 用硬上限包住 `stop()`,
+   *  超时后调用本方法立刻释放 socket/RTP 端口。幂等。 */
+  forceClose(): void {
+    this.destroying = true;
+    this.streaming = false;
+    this.paused = false;
+    if (this.syncTimer) { clearInterval(this.syncTimer); this.syncTimer = null; }
+    try { this.socket?.destroy(); } catch { /* ignore */ }
     for (const s of [this.ctrlSocket, this.timeSocket, this.audioSocket]) {
       try { s?.close(); } catch { /* ignore */ }
     }
