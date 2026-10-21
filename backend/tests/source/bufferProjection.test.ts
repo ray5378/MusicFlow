@@ -118,6 +118,9 @@ beforeEach(() => {
   calls = [];
   totalBytes = 2 * MB;
   gapMs = 0;
+  // 本文件只锁「投影早退」本身:关掉 2026-10-21 新增的「大文件跳过整曲缓冲」,
+  // 否则 56MB 用例会在阈值判定处立即直通,测不到投影窗口。(那条阈值另有专测。)
+  process.env.STREAM_BUFFER_SKIP_OVER_MB = "0";
   ph.probeOk.mockReset();
   ph.probeOk.mockImplementation(async () => true);
   ph.active = true;
@@ -128,6 +131,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   delete process.env.STREAM_BUFFER_HEAD_WAIT_MS;
+  delete process.env.STREAM_BUFFER_SKIP_OVER_MB;
 });
 
 /** 轮询等待条件成立(超时即失败)。 */

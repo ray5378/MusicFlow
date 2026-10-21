@@ -834,6 +834,66 @@ console.log("===== R26 慢源熔断:DLNA 25s 窗口 + 跨曲连跳上限 =====")
     "无跨曲熔断:整段不可播时会把整圈走完并拖死事件循环",
   );
 }
+console.log("===== R27 flow 起播不得被整队预解析阻塞 + 大文件直通 + 负缓存失效 =====");
+{
+  const restG = stripComments(read("backend/src/routes/rest/index.ts"));
+  const flowG = stripComments(read("backend/src/services/audio/flow.ts"));
+  const prefG = stripComments(read("backend/src/services/source/prefetchCache.ts"));
+  // 240 现场(2026-10-21):DLNA 拉 /rest/dlna/stream 后 12s 收不到任何响应头,
+  // 根因是 serveFlowQueue 起播前 for 循环解析整条队列(上限 200 首)。
+  check(
+    "flow 只同步解析首曲,其余候选懒解析(禁止起播前整队解析)",
+    /candidates\.map\([\s\S]{0,400}resolve: resolveFlowItem\(cand\)/.test(restG)
+      && /const first = items\[0\] \? await items\[0\]\.resolve!\(\)/.test(restG)
+      && !/for \(const cand of candidates\) \{\s*const row = db\.select\(\)\.from\(songs\)/.test(restG),
+    "又在起播前逐首解析整条队列:首字节被推迟 10~400s,设备 25s 超时后反复重投",
+  );
+  check(
+    "flow 会话在上一首播放期间预解析下一首",
+    /void resolveItem\(index \+ 1\)/.test(flowG) && /const resolveItem = \(index: number\)/.test(flowG),
+    "下一首在曲尾才开始解析:过渡点停顿甚至断流",
+  );
+  check(
+    "flow 起播预热前 3 首(并行、不阻塞首字节)",
+    /for \(let i = 1; i < Math\.min\(items\.length, 3\); i\+\+\) void resolveItem\(i\)/.test(flowG),
+    "设备倍速预读时第 2 首 1~2s 就到:只靠曲内解析来不及,接缝会干等探测",
+  );
+  check(
+    "flow 连续流实时节流(队列下标不跑到实际播放前面)",
+    /export const FLOW_REALTIME_LEAD_SEC = 5;/.test(flowG)
+      && /flowRealtimeLeadMs\(\)/.test(flowG)
+      && /await paceSleep\(dueMs\)/.test(flowG),
+    "编码器以远超实时速度推进:DLNA 贪婪读 → 27s 就推完 236s 的第一首,界面一直跳下一首",
+  );
+  check(
+    "flow 解析失败跳过时先把上一曲 carry 吐出去",
+    /if \(!item\) \{[\s\S]{0,240}await emitTail\(carry\)/.test(flowG),
+    "跳过不可用曲目时丢掉上一曲尾部一个过渡窗口(静默少一段音频)",
+  );
+  check(
+    "大文件(超阈值)跳过整曲缓冲直接直通",
+    /export const STREAM_BUFFER_SKIP_OVER_MB = 20;/.test(restG)
+      && /streamBufferSkipOverBytes\(\)/.test(restG)
+      && /sizeHint\?: number/.test(restG)
+      && /prog\.sizeBytes > skipOverBytes/.test(restG),
+    "大文件仍先起整曲缓冲:白等 1.5~8s 才回退,首字节更慢",
+  );
+  check(
+    "预取 too-small 不立即判死:先换源、再重试一次,且不写负缓存",
+    /const tooSmallRetry: any\[\] = \[\]/.test(prefG)
+      && /verdict\.reason === "too-small"[\s\S]{0,300}return "toosmall"/.test(prefG)
+      && /for \(const cand of tooSmallRetry\)/.test(prefG)
+      && /重试仍 too-small ⇒ 不记负缓存/.test(prefG),
+    "too-small 直接写 5 分钟负缓存:一次上游截断就让队列把整首歌判跳",
+  );
+  check(
+    "整曲字节完整拿到后失效该曲负缓存(预取 + 播放两条链路)",
+    /evictStreamFallbackCache\(cand\.id\)/.test(prefG)
+      && /if \(songId !== cand\.id\) evictStreamFallbackCache\(songId\)/.test(prefG)
+      && /evictStreamFallbackCache\(songId\)/.test(restG),
+    "成功可播后仍留着旧负缓存:队列继续判跳",
+  );
+}
 console.log("");
 if (failures.length) {
   console.log(`✗ AirPlay 播放链路时序守卫失败 ${failures.length} 项:`);

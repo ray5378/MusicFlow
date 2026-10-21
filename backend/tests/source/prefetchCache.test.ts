@@ -514,12 +514,15 @@ describe("⑦ 完整性判官", () => {
     expect(getCachedPlayability(ROW_W.id)).toBe("unplayable");
   });
 
-  it("(e) 过小文件(<64KB):判死", async () => {
+  it("(e) 过小文件(<64KB):不登记;重试一次仍过小 ⇒ 不写负缓存(弱信号交给播放侧探测)", async () => {
     mode = "tiny";
     await prefetchSong(ROW_W.id);
     await quiesce();
+    expect(calls.length).toBe(2); // 首抓 + 重试一次(2026-10-21)
     expect(prefetchHit(ROW_W.id)).toBeNull();
-    expect(getCachedPlayability(ROW_W.id)).toBe("unplayable");
+    // too-small 是弱信号(240 实测同一首随后播放整曲缓冲成功):不写 5 分钟「无源」,
+    // 否则 QueueController.judgePlayable 会直接判跳。
+    expect(getCachedPlayability(ROW_W.id)).toBe("unknown");
   });
 
   it("(f) env PREFETCH_INTEGRITY_OFF=1:整体关闭判官,试听片段也正常登记(一键回退)", async () => {

@@ -37,7 +37,7 @@ import { decideTranscode, spawnTranscoder, TRANSCODE_MIME } from "../../services
 // 类型专用导入（编译期擦除，不引入运行时依赖；实现体一律动态 import，见各出流函数）。
 import type { ChannelCodec } from "../../services/audio/pipeline.js";
 import type { FadeConfig } from "../../services/audio/fades.js";
-import type { FlowItem } from "../../services/audio/flow.js";
+import type { FlowItem, FlowItemResolved } from "../../services/audio/flow.js";
 import type { PipelineChannel } from "../../services/audio/pipelineSwitches.js";
 import { createLogger } from "../../utils/logger.js";
 import { sendToUser } from "../../services/ws/index.js";
@@ -1896,26 +1896,44 @@ async function serveFlowQueue(
   // ⚠️ 不能写 `opts.flowChannel ?? "http"`：`null` 是有意义的值（=不带滤镜链），
   // 只有「没传」(undefined) 才回落到缺省的 http 通道。
   const flowChannel: PipelineChannel | null = opts.flowChannel === undefined ? "http" : opts.flowChannel;
-  const items: FlowItem[] = [];
-  for (const cand of candidates) {
+  // ★ 2026-10-21：**只同步解析第一首**，其余曲目交给 flow.ts 在上一首播放期间懒解析。
+  //   此前在这里 for 循环解析全部候选（默认上限 200 首），每首都要
+  //   resolvePreferredSong（WebDAV HEAD 探测 / 组内换源）+ resolveTranscodeInput
+  //   （插件换链），240 实测把 /rest/dlna/stream 的首字节推迟 12~400s：
+  //   设备 25s 等不到 PLAYING 就重投 → 新会话又从第一首解析 → 越堆越慢、事件循环被拖垮。
+  //   懒解析后起播只等第一首，队列推进时逐首后台解析。
+  const resolveFlowItem = (cand: { songId: string }) => async (): Promise<FlowItemResolved | null> => {
     const row = db.select().from(songs).where(eq(songs.id, cand.songId)).get();
-    if (!row) continue;
+    if (!row) return null;
     const resolved = await resolvePreferredSong(row);
     const input = await resolveTranscodeInput(c, resolved, { buffering: false });
-    if (!input) continue;
-    items.push({
-      key: resolved.id,
+    if (!input) return null;
+    return {
       input: input.source,
       ...(input.headers ? { headers: input.headers } : {}),
       af: await resolveFlowAf(resolved, opts.dspPeerId, flowChannel),
-      title: cand.title || resolved.title || "",
-      artist: cand.artist || resolved.artist || "",
-      ...(typeof cand.duration === "number" && cand.duration > 0 ? { durationSec: cand.duration } : {}),
-    });
-  }
-  // 首曲解析失败（文件丢失 / 源全挂）→ 交回单曲管道走它既有的 404 与换源处理，
-  // 不在这里另造一套语义。首曲必须成功，否则会话从"第二首"开始播 = 用户点了没反应。
-  if (items.length < 2 || items[0].key !== opts.songId) return null;
+      key: resolved.id,
+    };
+  };
+  const items: FlowItem[] = candidates.map((cand) => ({
+    key: cand.songId,
+    input: "",
+    ...(cand.title ? { title: cand.title } : {}),
+    ...(cand.artist ? { artist: cand.artist } : {}),
+    ...(typeof cand.duration === "number" && cand.duration > 0 ? { durationSec: cand.duration } : {}),
+    resolve: resolveFlowItem(cand),
+  }));
+  // 首曲必须**现在就**解析成功（否则整条会话无意义，交回单曲管道走它既有的 404/换源）。
+  const first = items[0] ? await items[0].resolve!() : null;
+  if (!first || first.key !== opts.songId) return null;
+  items[0] = {
+    ...items[0],
+    input: first.input,
+    ...(first.headers ? { headers: first.headers } : {}),
+    af: first.af ?? [],
+    key: first.key,
+  };
+  log.info(`[flow] ${opts.songId} 首曲解析完成 → 起流（队列候选 ${items.length} 首，其余懒解析）`);
 
   const startIndex = snapshot.items.findIndex((it) => it.songId === opts.songId);
   // ICY 当前标题：由 onItemStart 改写，装帧器每个间隔现读一次（见 icyFrameStream）。
@@ -2027,12 +2045,18 @@ export async function resolveTranscodeInput(
   }
   // ② 本地直读(本地磁盘行 / web 行已缓存到本地的文件)—— 不经内存缓冲层。
   const localPath = await resolveLocalFilePath(song);
-  if (localPath) return { source: localPath };
+  if (localPath) {
+    // 本地文件确实存在 = 可播的硬证据:失效预取/探针留下的负缓存,避免队列误判跳歌。
+    void import("../../services/source/online/streamFallback.js")
+      .then((m) => m.evictStreamFallbackCache(song.id))
+      .catch(() => { /* 缓存失效失败不影响出流 */ });
+    return { source: localPath };
+  }
   // ③ 网络源(web 插件直链 / WebDAV)—— 与后台预取共用同一份推导(networkInput.ts)。
   const net = await resolveNetworkInput(song);
   if (!net) return null; // 无可用源 ⇒ 调用方显式失败
   if (opts?.buffering !== false) {
-    const buffered = await bufferNetworkSource(song.id, net.url, net.headers, c);
+    const buffered = await bufferNetworkSource(song.id, net.url, net.headers, c, song.size);
     if (buffered === null) return null; // 显式失败 ⇒ 调用方 fail,客户端走既有跳歌/重试
     if (buffered) return buffered;      // membuf 回环 URL
     // undefined ⇒ 回退直通(旧行为)
@@ -2078,6 +2102,33 @@ export function headWaitCeilingMs(sizeKnown: boolean): number {
 }
 
 /**
+ * 冷路径整曲缓冲的**大小跳过阈值**(MB,2026-10-21 用户拍板方案②)。
+ *
+ * 已知总字节超过它 ⇒ **连试都不试**,直接回退直通:
+ *   - 大文件按在线源实测速度(0.85~2.3MB/s)必然在 8s 有界等待内攒不齐,先起一次
+ *     整曲下载只会白等/白占预算,还要等「投影早退」才退出(实测浪费 1.5s,慢源更久);
+ *   - 直通的首字节只受上游首包影响,对小缓冲设备反而更稳;
+ *   - **预取命中不受影响**:命中时在 resolveTranscodeInput 第 ① 步就返回了,根本
+ *     走不到这里。所以「大文件也可能秒开」的路径仍然由后台预取保留。
+ *
+ * 默认 20MB(≈ 6 分钟 FLAC / 12 分钟 320k MP3,整曲缓冲对它们没有收益)。
+ * env `STREAM_BUFFER_SKIP_OVER_MB` 可覆盖;填 0(或负数/非法 → 默认)表示关闭跳过逻辑。
+ */
+export const STREAM_BUFFER_SKIP_OVER_MB = 20;
+const MB_BYTES = 1024 * 1024;
+
+/** 生效阈值(字节)。0 = 关闭「大文件跳过整曲缓冲」。非法值按默认处理。 */
+export function streamBufferSkipOverBytes(): number {
+  const raw = process.env.STREAM_BUFFER_SKIP_OVER_MB;
+  let mb = STREAM_BUFFER_SKIP_OVER_MB;
+  if (raw !== undefined && raw !== "") {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= 0) mb = n; // 显式 0 = 关闭
+  }
+  return mb > 0 ? Math.floor(mb * MB_BYTES) : 0;
+}
+
+/**
  * 整曲内存缓冲(网络源共用入口,WEBDAV 与插件/在线源同享)。
  * batch44(D):取流失败不走「快速失败」,而是**挂起本请求**进入长窗口自动重试
  * (前 1 分钟每 10s → 之后每 60s → 总窗口 30min,常量化可配;同曲并发请求
@@ -2101,6 +2152,7 @@ async function bufferNetworkSource(
   url: string,
   headers: Record<string, string>,
   c: any,
+  sizeHint?: number,
 ): Promise<{ source: string } | null | undefined> {
   // batch44(D · 用户最终拍板):新流取流失败 ⇒ **挂起本请求**进入长窗口自动重试
   // (前 1 分钟每 10s → 之后每 60s → 总窗口 30min;参数常量化 env 可配;同曲并发
@@ -2136,6 +2188,20 @@ async function bufferNetworkSource(
     }
   }
 
+  // ---- 2026-10-21 方案②:大文件直接直通(连整曲缓冲都不试)----
+  // 放在**搭车之后**:预取正在飞时先等它(零上游,且 WebDAV 预取实测 20MB+/s);
+  // 没有在途预取才按阈值跳过冷下载 —— 已知总字节(曲库 size,WebDAV 行常有值)
+  // 超过阈值必然等不满,先起冷下载只会白占预算并多耗 1.5s~8s 才回退。
+  const skipOver = streamBufferSkipOverBytes();
+  const hint = typeof sizeHint === "number" && sizeHint > 0 ? sizeHint : 0;
+  if (skipOver > 0 && hint > skipOver) {
+    log.info(
+      `[membuf] ${songId} 已知 ${(hint / MB_BYTES).toFixed(1)}MB > ${(skipOver / MB_BYTES).toFixed(0)}MB 阈值` +
+        ` ⇒ 跳过整曲缓冲,直接直通(首字节优先)`,
+    );
+    return undefined;
+  }
+
   // ---- a. 冷路径:single-flight 共享循环 + 投影感知的有界等待 ----
   // batch44-R(首字节优先):缓冲 promise vs 有界等待 race。等待赢 ⇒ return undefined
   // 走本函数既有的「回退直通」路径(见上),**不等、不取消**:fetchSongWithRetryWindow
@@ -2145,7 +2211,7 @@ async function bufferNetworkSource(
   // 由 boundedBufferWait 驱动:固定上界(分档)+ 投影早退双判据。
   const key = `song:${songId}`;
   const fetchP = fetchSongWithRetryWindow(key, url, headers, { signal: c?.req?.raw?.signal });
-  const outcome = await boundedBufferWait(key, fetchP, Date.now());
+  const outcome = await boundedBufferWait(key, fetchP, Date.now(), skipOver);
   let r: Awaited<typeof fetchP> | undefined;
   if (outcome.kind === "result") r = outcome.r;
   if (r === undefined) {
@@ -2161,6 +2227,11 @@ async function bufferNetworkSource(
       return undefined;
     }
     log.info(`[membuf] ${songId} 整曲缓冲 ${r.bytes}B/${Math.round(r.ms)}ms attempts=${r.attempts} → 内存回环供流`);
+    // 整曲字节完整拿到 = 这首歌确实可播的硬证据:失效预取/探针留下的负缓存,
+    // 避免 QueueController 依过期「无源」判定继续跳歌。
+    void import("../../services/source/online/streamFallback.js")
+      .then((m) => m.evictStreamFallbackCache(songId))
+      .catch(() => { /* 缓存失效失败不影响出流 */ });
     return { source: `${loopbackBase()}/rest/membuf/${token}` };
   }
   log.warn(`[membuf] ${songId} 整曲缓冲未成 kind=${r.kind}${isBufferedDeadKind(r.kind) ? " ⇒ 显式失败" : " ⇒ 回退直通"}`, {
@@ -2220,6 +2291,7 @@ async function boundedBufferWait<T>(
   key: string,
   fetchP: Promise<T>,
   startedAt: number,
+  skipOverBytes: number = 0,
 ): Promise<{ kind: "result"; r: T } | { kind: "timeout" }> {
   const { retryLoopProgress, shouldBailEarly, PROJECTION_TICK_MS } =
     await import("../../services/source/bufferedFetch.js");
@@ -2233,6 +2305,16 @@ async function boundedBufferWait<T>(
     };
     const tick = setInterval(() => {
       const prog = retryLoopProgress(key);
+      // ⓪ 大文件跳过(2026-10-21 方案②):上游一报出 Content-Length 就判 ——
+      //    已知总字节超阈值 ⇒ 不必等投影观测窗口(≥1.2s)也不必等满 8s,立即直通。
+      if (skipOverBytes > 0 && prog?.sizeBytes && prog.sizeBytes > skipOverBytes) {
+        log.info(
+          `[membuf] ${key} 上游总大小 ${(prog.sizeBytes / MB_BYTES).toFixed(1)}MB > ` +
+            `${(skipOverBytes / MB_BYTES).toFixed(0)}MB 阈值 ⇒ 跳过整曲缓冲,立即直通`,
+        );
+        finish({ kind: "timeout" });
+        return;
+      }
       const ceiling = headWaitCeilingMs(!!prog?.sizeBytes);
       if (Date.now() - startedAt >= ceiling) {
         finish({ kind: "timeout" });

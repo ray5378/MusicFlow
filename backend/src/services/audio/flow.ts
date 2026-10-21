@@ -47,17 +47,60 @@ export const FLOW_DEFAULT_SAMPLE_RATE = 48000;
 export const FLOW_DEFAULT_CHANNELS = 2;
 /** 预取提前量（秒）：距本曲结束还有「过渡时长 + 此值」时拉起下一路解码，避免接缝处停顿。 */
 export const FLOW_PREFETCH_MARGIN_SEC = 2;
+/**
+ * flow 连续流的**实时节流**允许提前量（秒，2026-10-21）。
+ *
+ * 不节流时编码器会以远超实时的速度把整条队列推进 HTTP 流：DLNA 设备（本机千兆、
+ * 固件用 curl 贪婪读）实测 21s 内就吃完了 236s 的第一首 → `flowAdvance` 把队列
+ * 推到第 3 首，而音箱实际还在播第 1 首（用户观感 =「界面一直跳下一首」）。
+ * 按「已发出的音频秒数 − 墙钟秒数」做背压，只允许领先 LEAD 秒：
+ *   - 队列下标与实际播放的偏差从「几分钟」收敛到 LEAD + 过渡窗口（≈6s）；
+ *   - 设备侧缓冲与 Node 侧在飞字节都有界（不会把整条队列先编码完）。
+ * 解码慢于实时（慢源）时 `dueMs<=0`，不额外等待 —— 不改变既有时序。
+ * env `FLOW_REALTIME_LEAD_SEC` 可覆盖；0 = 关闭节流（恢复旧的尽快出流）。
+ */
+export const FLOW_REALTIME_LEAD_SEC = 5;
+/** 生效提前量（毫秒）。非法/缺省 → 默认；显式 0 = 关闭。 */
+function flowRealtimeLeadMs(): number {
+  const raw = process.env.FLOW_REALTIME_LEAD_SEC;
+  if (raw !== undefined && raw !== "") {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= 0) return n * 1000;
+  }
+  return FLOW_REALTIME_LEAD_SEC * 1000;
+}
 /** 缺省输出编码（与 DLNA/HTTP 通道的通用兜底一致）。 */
 export const FLOW_DEFAULT_CODEC: ChannelCodec = { codec: "mp3", bitrateKbps: 320, container: "mp3", mime: "audio/mpeg" };
+
+export interface FlowItemResolved {
+  /** **已合规**输入（本地路径或回环 token URL，SPEC §1.8）。 */
+  input: string;
+  headers?: Record<string, string>;
+  /** 该曲的响度 af 链（**已算定**，P3-4）。 */
+  af?: string[];
+  /** 换源后的实际行 id（缺省沿用 `FlowItem.key`）。 */
+  key?: string;
+}
 
 export interface FlowItem {
   /** 稳定 key（`songs.id` 或 `remote:...`）：回写测量用。 */
   key: string;
-  /** **已合规**输入（本地路径或回环 token URL，SPEC §1.8）。 */
+  /** **已合规**输入（本地路径或回环 token URL，SPEC §1.8）。空串 = 尚未解析，起播前走 `resolve`。 */
   input: string;
   headers?: Record<string, string>;
   /** 该曲的响度 af 链（**已算定**，P3-4）。空数组 = 不做响度处理。 */
-  af: string[];
+  af?: string[];
+  /**
+   * **懒解析**（2026-10-21）：`input` 为空时，在「本曲即将起播」前调用一次。
+   * 返回 null = 该曲当前不可用（源全挂/文件丢失），会话跳过它继续下一首。
+   *
+   * 为什么必须懒解析：一次 flow 会话可能覆盖整条队列（200 首）。起播前逐首
+   * `resolvePreferredSong` + `resolveTranscodeInput`（会做 WebDAV 探测 / 插件换链）
+   * 实测能把首字节推迟 20~400s（240 现场：DLNA 设备 25s 等不到 PLAYING 就重投，
+   * 新会话再解析一遍，越堆越慢）。现在只同步解析第一首，其余在上一首播放期间
+   * 后台解析（见 run 里的 `void resolveItem(index + 1)`），起播只受首曲影响。
+   */
+  resolve?: () => Promise<FlowItemResolved | null>;
   title?: string;
   artist?: string;
   /** 曲长（秒）：仅用于提前预取下一路解码；未知时退化为「过渡那一刻才拉」。 */
@@ -312,9 +355,39 @@ export async function startFlowSession(items: FlowItem[], opts: FlowOptions = {}
     for (const d of [...live]) killDecoder(d);
   };
 
-  /** 写混合结果到编码 stdin，带背压与中止联动。 */
+  /** 实时节流的起点（第一次真正写出时取，排除 ffmpeg 冷启动的偏差）。 */
+  let paceStartAt = 0;
+  /** 可被 abort 立即唤醒的 sleep（节流等待不能拖慢停止/切歌）。 */
+  const paceSleep = (ms: number): Promise<void> =>
+    new Promise<void>((resolve) => {
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        cancel.signal.removeEventListener("abort", done);
+        resolve();
+      };
+      const timer = setTimeout(done, ms);
+      cancel.signal.addEventListener("abort", done, { once: true });
+    });
+
+  /** 写混合结果到编码 stdin，带背压、**实时节流**与中止联动。 */
   const writeOut = async (buf: Buffer): Promise<void> => {
     if (aborted || buf.length === 0) return;
+    // ★ 实时节流（2026-10-21）：只允许领先墙钟 LEAD 秒。`stats.emittedFrames` 由
+    //   调用方在写之前累加（emit / emitTail / 交叉淡入），这里直接换算成音频秒数。
+    //   缺失此节流时设备贪婪读 → 编码器瞬间跑完整条队列 → flowAdvance 把界面推到
+    //   几分钟之后（真机实测 27s 时队列已到第 2 首，而第 1 首有 236s）。
+    if (paceStartAt === 0) paceStartAt = Date.now();
+    const leadMs = flowRealtimeLeadMs();
+    if (leadMs > 0) {
+      const dueMs = (stats.emittedFrames / sampleRate) * 1000 - (Date.now() - paceStartAt) - leadMs;
+      if (dueMs > 0) {
+        await paceSleep(dueMs);
+        if (aborted) throw new FlowAbort();
+      }
+    }
     const stdin = enc.stdin;
     if (!stdin.writable) throw new FlowAbort();
     if (!stdin.write(buf)) {
@@ -358,22 +431,86 @@ export async function startFlowSession(items: FlowItem[], opts: FlowOptions = {}
     await writeOut(buf);
   };
 
+  // ---------- 懒解析（2026-10-21）----------
+  // `undefined` = 未解析；`null` = 解析失败/无源（跳过该曲）；FlowItem = 已就绪。
+  // 同一首只解析一次：`resolving` 去重，`resolved` 缓存 —— 预取点与循环开头都会调用。
+  const resolved: Array<FlowItem | null | undefined> = new Array(items.length).fill(undefined);
+  const resolving = new Map<number, Promise<FlowItem | null>>();
+  const resolveItem = (index: number): Promise<FlowItem | null> => {
+    if (index < 0 || index >= items.length) return Promise.resolve(null);
+    const cached = resolved[index];
+    if (cached !== undefined) return Promise.resolve(cached);
+    const inflight = resolving.get(index);
+    if (inflight) return inflight;
+    const raw = items[index];
+    if (raw.input) {
+      resolved[index] = raw;
+      return Promise.resolve(raw);
+    }
+    if (!raw.resolve) {
+      resolved[index] = null;
+      return Promise.resolve(null);
+    }
+    const p = raw
+      .resolve()
+      .then((r) => {
+        const out: FlowItem | null = r
+          ? {
+              ...raw,
+              input: r.input,
+              ...(r.headers ?? raw.headers ? { headers: r.headers ?? raw.headers } : {}),
+              af: r.af ?? raw.af ?? [],
+              key: r.key ?? raw.key,
+            }
+          : null;
+        resolved[index] = out;
+        return out;
+      })
+      .catch((e: any) => {
+        log.debug("flow 懒解析失败(跳过该曲)", { index, key: raw.key, error: e?.message || String(e) });
+        resolved[index] = null;
+        return null;
+      })
+      .finally(() => resolving.delete(index));
+    resolving.set(index, p);
+    return p;
+  };
+
   const run = async (): Promise<void> => {
     if (items.length === 0) {
       try { enc.stdin.end(); } catch { /* 已关 */ }
       return;
     }
+    // 预热前几首(2026-10-21):设备(尤其 DLNA 音箱)常以 2~5 倍速预读这条流,
+    // 第 2 首可能在起播后 1~2s 内就轮到 —— 只靠「本曲起播时解析下一首」来不及。
+    // 这里在**不阻塞起播**的前提下把前 3 首的解析并行拉起;失败各自有兜底(跳过)。
+    for (let i = 1; i < Math.min(items.length, 3); i++) void resolveItem(i);
     /** 上一曲扣住的尾段（过渡窗口，未播出）。 */
     let carry: Buffer = Buffer.alloc(0);
     /** 提前拉起的下一路（两路并存的第二路）。 */
     let prefetched: { index: number; dec: Decoder; iter: AsyncIterator<Buffer> } | null = null;
 
     for (let index = 0; index < items.length; index++) {
-      const item = items[index];
+      // 懒解析：解析失败 ⇒ 该曲跳过，但**先把上一曲扣住的尾段吐出去**
+      // （否则最后 1 个过渡窗口的音频会静默丢失）。
+      const item = await resolveItem(index);
+      if (!item) {
+        if (carry.length > 0) {
+          await emitTail(carry);
+          carry = Buffer.alloc(0);
+        }
+        stats.skipped++;
+        log.warn("flow 曲目不可用(源解析失败),已跳过", { index, key: items[index]?.key, title: items[index]?.title });
+        opts.onItemEnd?.(index, items[index], "", false);
+        continue;
+      }
       currentIndex = index;
       opts.onItemStart?.(index, item);
+      // 起播时就把**下一首**放进后台解析：整首歌的时间足够完成 WebDAV 探测/换链，
+      // 过渡点只等分母（不再在曲尾才开始解析 → 接缝停顿甚至断流）。
+      if (index + 1 < items.length) void resolveItem(index + 1);
 
-      // 上一环没预取到（无时长信息 / 上一路提前 EOF）→ 过渡那一刻才拉第二路。
+      // 上一环没预取到（无时长信息 / 上一路提前 EOF / 解析慢）→ 过渡那一刻才拉第二路。
       if (index > 0 && !prefetched) {
         const d = await spawnDecoder(item);
         prefetched = { index, dec: d, iter: iterOf(d.proc.stdout) };
@@ -460,7 +597,9 @@ export async function startFlowSession(items: FlowItem[], opts: FlowOptions = {}
       const startNext = async (): Promise<void> => {
         if (prefetchStarted || nextIndex >= items.length) return;
         prefetchStarted = true;
-        const d = await spawnDecoder(items[nextIndex]);
+        const nextItem = await resolveItem(nextIndex);
+        if (!nextItem) return; // 下一环开头会跳过（并先把本曲 carry 吐出去）
+        const d = await spawnDecoder(nextItem);
         prefetched = { index: nextIndex, dec: d, iter: iterOf(d.proc.stdout) };
       };
       // 预取点：距本曲结束还有「过渡窗口 + margin」时。没有时长信息则为 -1（不预取，

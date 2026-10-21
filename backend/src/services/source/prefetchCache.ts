@@ -455,85 +455,137 @@ async function doPrefetch(songId: string): Promise<void> {
   // 自带 AbortController + 兜底计时器：预取没人会 abort 它，不能泄漏。
   const ctrl = new AbortController();
   const guard = setTimeout(() => ctrl.abort(), prefetchDeadlineMs() + PREFETCH_GUARD_GRACE_MS);
-  let evaluated = 0; // 真拿到完整字节并过了判官的候选数
-  let dead = 0; // 其中判死的数量
-  try {
-    for (const cand of candidates) {
-      // 闸门 4：超单文件上限必然 too-big，白取一趟（每个候选各判一次）。
-      const csize = typeof cand.size === "number" && cand.size > 0 ? cand.size : 0;
-      if (csize > prefetchMaxFileBytes()) continue;
-      // 闸门 3（候选循环内复判：在途字节会随抓取增长）。
-      const estimate = csize > 0 ? csize : PREFETCH_ASSUMED_BYTES;
-      if (bufferedInFlightBytes() + estimate > budgetBytes * prefetchBudgetRatio()) {
-        log.debug(`[prefetch] ${songId} 预算闸门拦下 cand=${cand.id} inFlight=${bufferedInFlightBytes()} est=${estimate}`);
-        continue;
-      }
-      // 与出流**共用同一份** URL 推导（见 networkInput.ts）—— 喂候选行。
-      const net = await resolveNetworkInput(cand);
-      if (!net) continue;
-      const r = await fetchWholeSongBuffered(net.url, net.headers, {
-        signal: ctrl.signal,
-        retries: 0,
-        deadlineMs: prefetchDeadlineMs(),
-        stallMs: prefetchStallMs(),
-      });
-      if (!r.ok) {
-        // 静默：kind 不写任何可播性缓存（那是 PreProbe 的地盘）。
-        log.debug(`[prefetch] ${songId} cand=${cand.id} 未成 kind=${r.kind}${r.err ? ` err=${r.err}` : ""}`);
-        continue;
-      }
-      // ---- 完整性判官（红线 3 的唯一例外，理由见文件头）----
-      // 依据是「整首字节已在手里」这个硬事实：判死 ⇒ 不登记 + 记无源负缓存 + 换下一个候选。
-      if (icfg.enabled) {
-        const expectedSec = candidateDurationSec(cand, row);
-        const verdict = await judgePrefetchedBuffer(r.buf, expectedSec);
-        if (verdict.dead) {
-          evaluated++;
-          dead++;
-          sf?.markUnplayable(cand.id); // 逐个记：出流侧换源/探测/判跳都读这份负缓存
-          const act = verdict.actualSec !== undefined ? ` 实际${Math.round(verdict.actualSec)}s` : "";
-          const exp = verdict.expectedSec !== undefined ? ` 期望${Math.round(verdict.expectedSec)}s` : "";
-          log.info(
-            `[prefetch] ${songId} cand=${cand.id} 完整性判死 reason=${verdict.reason}${act}${exp}` +
-              ` ⇒ 记无源负缓存（不登记预取）`,
-          );
-          continue; // 换源：试候选链里的下一个
-        }
-        evaluated++;
-      }
-      const token = registerMemStream(r.buf, undefined, { songId: resolvedId, prefetched: true });
-      // 驱逐不掉（全是正在消费的在用条目）→ 放弃登记，绝不踢正在播的那条。
-      if (!token) {
-        log.debug(`[prefetch] ${songId} cand=${cand.id} 注册表无空位，放弃登记（不驱逐在用条目）`);
-        return;
-      }
-      if (!loopbackBaseRef) {
-        log.debug(`[prefetch] ${songId} cand=${cand.id} 取不到 loopbackBase，放弃索引`);
-        return;
-      }
-      const entry: PrefetchEntry = {
-        token,
-        url: `${loopbackBaseRef()}/rest/membuf/${token}`,
-        bytes: r.bytes,
-        at: Date.now(),
-      };
-      // 双写：候选 id + 解析后 id。出流侧 resolvePreferredSong 永远解析到 resolvedId，
-      // 而 membuf 里存的是**内容**（ffmpeg 不关心字节来自组内哪一行）⇒ 两个 key 同指一条。
-      bySong.set(cand.id, entry);
-      if (cand.id !== resolvedId) {
-        bySong.set(resolvedId, entry);
-        log.info(`[prefetch] ${songId} 换源成功：首选 ${resolvedId} 不可用，改用组内候选 ${cand.id}`);
-      }
-      alias.set(songId, resolvedId);
-      log.info(`[prefetch] ${songId} → ${resolvedId} 预取完成 ${r.bytes}B/${Math.round(r.ms)}ms → 切过去即零上游`);
-      return;
+  // 真拿到完整字节并过了判官的候选（按 id 去重：too-small 的候选会被重试一次，
+  // 不能用自增计数，否则「全候选判死」的判断会算重）。
+  const evaluatedIds = new Set<string>();
+  const deadIds = new Set<string>();
+  /**
+   * too-small 重试队列（2026-10-21 用户拍板）。
+   *
+   * 判据背景：too-small（<64KB）几乎都是**上游一次截断/错误页**，不是「这首歌只有
+   * 试听片段」—— 240 实测同一首预取拿到 <64KB，几分钟后播放路径整曲缓冲 1.93MB
+   * 成功。此前直接 `markUnplayable`（TTL 5 分钟）会让 `QueueController.judgePlayable`
+   * 把整首歌判跳，正是「一直跳下一首」的放大器。
+   *
+   * 现在的顺序：主链先把**同曲其他源**全部试完（真正的换源），都没成才回到这里
+   * 把 too-small 的候选**再抓一次**；重试仍 too-small **也不写负缓存**（弱信号，
+   * 交给播放侧 probe 用 404/403 做硬判定），避免一次上游截断把整首歌判跳。
+   */
+  const tooSmallRetry: any[] = [];
+
+  /** 抓一个候选并判定/登记。ok = 已登记；dead = 内容判死；toosmall = 可重试；skip = 闸门/取流失败。 */
+  const attempt = async (cand: any): Promise<"ok" | "dead" | "toosmall" | "skip"> => {
+    // 闸门 4：超单文件上限必然 too-big，白取一趟（每个候选各判一次）。
+    const csize = typeof cand.size === "number" && cand.size > 0 ? cand.size : 0;
+    if (csize > prefetchMaxFileBytes()) return "skip";
+    // 闸门 3（候选循环内复判：在途字节会随抓取增长）。
+    const estimate = csize > 0 ? csize : PREFETCH_ASSUMED_BYTES;
+    if (bufferedInFlightBytes() + estimate > budgetBytes * prefetchBudgetRatio()) {
+      log.debug(`[prefetch] ${songId} 预算闸门拦下 cand=${cand.id} inFlight=${bufferedInFlightBytes()} est=${estimate}`);
+      return "skip";
     }
-    // 全候选都判死（evaluated>0 且 dead===evaluated===candidates.length：每个候选都
-    // 真拿到了完整字节且都判死）⇒ 把**队列行 id** 也标上。judgePlayable/客户端
-    // 「无可用源」判定按**队列行 id** 查（QueueController.judgePlayable），不标这一条
-    // 的后果是播 30s 试听片段而不是跳下一首。有候选没被评估（取流失败/闸门拦下）时
-    // 不标 —— 知识不完整，不能把「未知」当「死」（红线同 streamFallback 2026-09-11）。
-    if (dead > 0 && dead === evaluated && evaluated === candidates.length && songId !== resolvedId) {
+    // 与出流**共用同一份** URL 推导（见 networkInput.ts）—— 喂候选行。
+    const net = await resolveNetworkInput(cand);
+    if (!net) return "skip";
+    const r = await fetchWholeSongBuffered(net.url, net.headers, {
+      signal: ctrl.signal,
+      retries: 0,
+      deadlineMs: prefetchDeadlineMs(),
+      stallMs: prefetchStallMs(),
+    });
+    if (!r.ok) {
+      // 静默：kind 不写任何可播性缓存（那是 PreProbe 的地盘）。
+      log.debug(`[prefetch] ${songId} cand=${cand.id} 未成 kind=${r.kind}${r.err ? ` err=${r.err}` : ""}`);
+      return "skip";
+    }
+    // ---- 完整性判官（红线 3 的唯一例外，理由见文件头）----
+    // 依据是「整首字节已在手里」这个硬事实：判死 ⇒ 不登记 + 记无源负缓存 + 换下一个候选。
+    if (icfg.enabled) {
+      const expectedSec = candidateDurationSec(cand, row);
+      const verdict = await judgePrefetchedBuffer(r.buf, expectedSec);
+      if (verdict.dead) {
+        evaluatedIds.add(cand.id);
+        const act = verdict.actualSec !== undefined ? ` 实际${Math.round(verdict.actualSec)}s` : "";
+        const exp = verdict.expectedSec !== undefined ? ` 期望${Math.round(verdict.expectedSec)}s` : "";
+        if (verdict.reason === "too-small") {
+          // 先不判死、不写负缓存：主链走完其他源后再重试一次（见 tooSmallRetry）。
+          log.info(
+            `[prefetch] ${songId} cand=${cand.id} 判 too-small${act}${exp} ⇒ 暂不记负缓存（稍后重试一次）`,
+          );
+          return "toosmall";
+        }
+        deadIds.add(cand.id);
+        sf?.markUnplayable(cand.id); // 逐个记：出流侧换源/探测/判跳都读这份负缓存
+        log.info(
+          `[prefetch] ${songId} cand=${cand.id} 完整性判死 reason=${verdict.reason}${act}${exp}` +
+            ` ⇒ 记无源负缓存（不登记预取）`,
+        );
+        return "dead";
+      }
+      evaluatedIds.add(cand.id);
+    }
+    const token = registerMemStream(r.buf, undefined, { songId: resolvedId, prefetched: true });
+    // 驱逐不掉（全是正在消费的在用条目）→ 放弃登记，绝不踢正在播的那条。
+    if (!token) {
+      log.debug(`[prefetch] ${songId} cand=${cand.id} 注册表无空位，放弃登记（不驱逐在用条目）`);
+      return "skip";
+    }
+    if (!loopbackBaseRef) {
+      log.debug(`[prefetch] ${songId} cand=${cand.id} 取不到 loopbackBase，放弃索引`);
+      return "skip";
+    }
+    const entry: PrefetchEntry = {
+      token,
+      url: `${loopbackBaseRef()}/rest/membuf/${token}`,
+      bytes: r.bytes,
+      at: Date.now(),
+    };
+    // 双写：候选 id + 解析后 id。出流侧 resolvePreferredSong 永远解析到 resolvedId，
+    // 而 membuf 里存的是**内容**（ffmpeg 不关心字节来自组内哪一行）⇒ 两个 key 同指一条。
+    bySong.set(cand.id, entry);
+    if (cand.id !== resolvedId) {
+      bySong.set(resolvedId, entry);
+      log.info(`[prefetch] ${songId} 换源成功：首选 ${resolvedId} 不可用，改用组内候选 ${cand.id}`);
+    }
+    alias.set(songId, resolvedId);
+    // ★ 2026-10-21：整曲字节已完整拿到 = 这首歌**确实可播**的硬证据 —— 主动失效
+    //   此前写下的负缓存。只清**这份内容实际来自的行**(cand) 与**队列行**
+    //   (judgePlayable 的判跳键)；不要清 resolvedId —— 它可能是刚被判死的兄弟源，
+    //   清掉会让下一轮预取/探测重复去试一个已知坏的源。
+    const { evictStreamFallbackCache } = await import("./online/streamFallback.js");
+    evictStreamFallbackCache(cand.id);
+    if (songId !== cand.id) evictStreamFallbackCache(songId);
+    log.info(`[prefetch] ${songId} → ${resolvedId} 预取完成 ${r.bytes}B/${Math.round(r.ms)}ms → 切过去即零上游`);
+    return "ok";
+  };
+  try {
+    // 第一轮：候选链按原顺序（首选 + 组内其他网络源），too-small 先挂起。
+    for (const cand of candidates) {
+      const out = await attempt(cand);
+      if (out === "ok") return;
+      if (out === "toosmall") tooSmallRetry.push(cand);
+    }
+    // 第二轮：其他源都没成，too-small 的候选再抓一次（只此一次）。
+    for (const cand of tooSmallRetry) {
+      const out = await attempt(cand);
+      if (out === "ok") return;
+      if (out === "dead") {
+        deadIds.add(cand.id);
+        sf?.markUnplayable(cand.id);
+        log.info(`[prefetch] ${songId} cand=${cand.id} 重试判死 ⇒ 记无源负缓存`);
+      } else if (out === "toosmall") {
+        // ★ 重试仍 too-small **不写负缓存**（2026-10-21）：它只是「这次拿到的字节
+        //   太小」这一个弱信号 —— 240 实测同一首预取两次 <64KB、播放路径几分钟后
+        //   整曲缓冲 1.93MB 成功。写 5 分钟「无源」会让 judgePlayable 直接判跳，
+        //   正是「一直跳下一首」的放大器。真死假死交给播放侧 probe(404/403 才是硬证据)。
+        log.info(`[prefetch] ${songId} cand=${cand.id} 重试仍 too-small ⇒ 不记负缓存（弱信号，交给播放侧探测）`);
+      }
+    }
+    // 全候选都判死（每个候选都真拿到了完整字节且都判死）⇒ 把**队列行 id** 也标上。
+    // judgePlayable/客户端「无可用源」判定按**队列行 id** 查（QueueController.judgePlayable），
+    // 不标这一条的后果是播 30s 试听片段而不是跳下一首。有候选没被评估（取流失败/
+    // 闸门拦下）时不标 —— 知识不完整，不能把「未知」当「死」（红线同 streamFallback 2026-09-11）。
+    if (deadIds.size > 0 && deadIds.size === evaluatedIds.size && evaluatedIds.size === candidates.length && songId !== resolvedId) {
       sf?.markUnplayable(songId);
       log.info(`[prefetch] ${songId} 全部 ${candidates.length} 个候选源均判死 ⇒ 记队列行负缓存（跳下一首）`);
     }

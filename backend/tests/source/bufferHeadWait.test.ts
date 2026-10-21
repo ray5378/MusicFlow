@@ -27,7 +27,9 @@ import {
   resolveTranscodeInput,
   STREAM_BUFFER_HEAD_WAIT_MS,
   STREAM_BUFFER_HEAD_WAIT_UNKNOWN_MS,
+  STREAM_BUFFER_SKIP_OVER_MB,
   headWaitCeilingMs,
+  streamBufferSkipOverBytes,
 } from "../../src/routes/rest/index.js";
 
 // 与 prefetchCache.test.ts 同款 hoisted mock:探活/播放优选可确定性触发,不摸真实
@@ -124,6 +126,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   delete process.env.STREAM_BUFFER_HEAD_WAIT_MS;
+  delete process.env.STREAM_BUFFER_SKIP_OVER_MB;
 });
 
 /** 轮询等待条件成立(不用 vi.waitUntil,避免版本差异;超时即失败)。 */
@@ -177,6 +180,26 @@ describe("batch44-R:整曲缓冲有界等待(首字节优先)", () => {
     const src = await resolveTranscodeInput({}, ROW_W, { buffering: true });
     expect(src?.source).toBe(hit); // 预取命中 ⇒ 直接内存回环,零上游往返
     expect(calls.length).toBe(1);
+  });
+
+  it("(d) 已知总字节超阈值 ⇒ 连整曲缓冲都不起,直接直通(方案②)", async () => {
+    process.env.STREAM_BUFFER_SKIP_OVER_MB = "1"; // ROW_W.size = 5MB > 1MB
+    const src = await resolveTranscodeInput({}, ROW_W, { buffering: true });
+    expect(calls.length).toBe(0); // 一次上游都没打:不浪费 1.5~8s
+    expect(src?.source).toContain("/rest/dlna/stream/"); // 既有直通通道
+    expect(src?.source).not.toContain("/rest/membuf/");
+  });
+
+  it("(e) 阈值 0 = 关闭跳过;默认 20MB 时 5MB 仍走整曲缓冲", async () => {
+    process.env.STREAM_BUFFER_SKIP_OVER_MB = "0";
+    expect(streamBufferSkipOverBytes()).toBe(0);
+    const src = await resolveTranscodeInput({}, ROW_W, { buffering: true });
+    expect(calls.length).toBe(1);
+    expect(src?.source).toContain("/rest/membuf/");
+
+    delete process.env.STREAM_BUFFER_SKIP_OVER_MB;
+    expect(streamBufferSkipOverBytes()).toBe(STREAM_BUFFER_SKIP_OVER_MB * 1024 * 1024);
+    expect(STREAM_BUFFER_SKIP_OVER_MB).toBe(20);
   });
 });
 
