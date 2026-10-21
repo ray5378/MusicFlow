@@ -2,6 +2,15 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.60] - 2026-10-21
+
+### Fix / 4.6.59 的 CI 红:在线删除用 CONFLICT 而非 INVALID_PARAM 配 409
+
+4.6.59 的 `DELETE /v1/sendspin/devices/:clientId` 在「设备在线」分支写了 `apiError(BusinessErrorCode.INVALID_PARAM, …), 409`,与 D10 源码守卫「一个 code 只对应一个状态码」冲突(INVALID_PARAM=400),`ci` 与 `build-and-push` 因此报红(527 个测试文件中仅 `tests/routes/apiErrorStatus.test.ts` 1 例失败,7394 例通过)。
+
+- 改用 `BusinessErrorCode.CONFLICT`(映射 409),响应仍是「设备当前在线,不能删除…」,对外行为不变(真机实测 409)。
+- 复跑:`apiErrorStatus`、`deleteOfflineDevice`、`tsc`、`vue-tsc`、i18n 守卫全绿。
+
 ## [4.6.59] - 2026-10-21
 
 ### Feat / 离线的 Sendspin 播放器可在前端手动删除

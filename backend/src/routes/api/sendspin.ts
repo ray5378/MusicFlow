@@ -145,7 +145,7 @@ app.delete("/v1/sendspin/devices/:clientId", permMiddleware(PERM.RENDERER_MANAGE
   const { sendspinDeleteOfflineDevice } = await import("../../services/sendspin/index.js");
   const r = await sendspinDeleteOfflineDevice(clientId);
   if (r === "online") {
-    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.sendspin.deleteOnline"), 409);
+    return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.sendspin.deleteOnline"), 409);
   }
   if (r === "not-found") {
     return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.renderer.deviceNotFound"), 404);
