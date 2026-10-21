@@ -38,7 +38,21 @@ export const dlnaRendererManifest: PluginManifest = {
   description: "通过 DLNA/UPnP 将音乐投屏到局域网内的音箱、电视等播放设备",
   capabilities: ["renderer"],
   defaultEnabled: true,
-  configSchema: [],
+  // 插件详情弹窗的配置表单完全由 configSchema 驱动(前端零改动)。
+  // 2026-10-21:默认关闭「大文件直通」—— 网络源先整曲缓冲,完整性判官(试听/
+  // 截断)才能拿到整首字节;需要更快的首字节时用户可在这里手动打开。
+  configSchema: [
+    {
+      key: "largeFileDirect",
+      label: "大文件直通（仅 DLNA）",
+      type: "switch",
+      default: false,
+      help:
+        "默认关闭：网络源先整曲下载到内存，可判定试听/截断文件，且起播后不受上游抖动影响。" +
+        "开启后，已知大小超过 20MB 的歌曲会跳过整曲缓冲直接播放（首字节更快，但会错过完整性判定）；" +
+        "仅影响 DLNA 投屏，不影响客户端 / AirPlay 出流。",
+    },
+  ],
   // 插件侧 i18n 字典:默认文案即中文,故 zh 省略、只补 en。前端按当前界面语言取用。
   i18n: {
     en: {
@@ -54,8 +68,15 @@ Casts music via DLNA/UPnP to speakers, TVs and other playback devices on the LAN
 3. Playback state (playing / paused / position / volume) is synced back to the server.
 
 ### Notes
-- No configuration needed (empty \`configSchema\`), enabled by default;
+- The only option is "Large-file direct streaming (DLNA only)", **off by default**: network sources are fully buffered first so preview/truncated files can be detected;
 - Devices appear in the client's cast list once they respond on the LAN.`,
+      fields: {
+        largeFileDirect: {
+          label: "Large-file direct streaming (DLNA only)",
+          help:
+            "Off by default: network sources are fully buffered first, so preview/truncated files can be judged and playback is immune to upstream jitter. When on, songs known to exceed 20MB skip the whole-song buffer (faster first byte, but no integrity check). DLNA casts only — client/AirPlay streaming is unaffected.",
+        },
+      },
     },
   },
   documentation: `### 功能介绍

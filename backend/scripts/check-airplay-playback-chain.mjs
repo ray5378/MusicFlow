@@ -870,13 +870,29 @@ console.log("===== R27 flow 起播不得被整队预解析阻塞 + 大文件直�
     /if \(!item\) \{[\s\S]{0,240}await emitTail\(carry\)/.test(flowG),
     "跳过不可用曲目时丢掉上一曲尾部一个过渡窗口(静默少一段音频)",
   );
+  const dlnaG = stripComments(read("backend/src/services/plugin/renderers/dlna.ts"));
   check(
-    "大文件(超阈值)跳过整曲缓冲直接直通",
+    "大文件直通默认关闭:只有 DLNA 插件开关 + DLNA 链路同时满足才生效",
     /export const STREAM_BUFFER_SKIP_OVER_MB = 20;/.test(restG)
-      && /streamBufferSkipOverBytes\(\)/.test(restG)
-      && /sizeHint\?: number/.test(restG)
+      && /streamBufferSkipOverBytes\(pluginEnabled: boolean = false\)/.test(restG)
+      && /getPluginConfig\(DLNA_RENDERER_ID\)\?\.largeFileDirect === true/.test(restG)
+      && /largeFileDirect: ctx\.kind === "dlna"/.test(restG)
       && /prog\.sizeBytes > skipOverBytes/.test(restG),
-    "大文件仍先起整曲缓冲:白等 1.5~8s 才回退,首字节更慢",
+    "大文件直通又变成默认/全通道生效:完整音源(判官前提)会被跳过",
+  );
+  check(
+    "DLNA 插件详情弹窗提供「大文件直通」开关(默认 false)",
+    /key: "largeFileDirect"[\s\S]{0,160}type: "switch"[\s\S]{0,160}default: false/.test(dlnaG),
+    "用户没有手动开启大文件直通的入口,或默认被打开",
+  );
+  check(
+    "播放路径复用预取判官:preview/not-audio 判死+负缓存,too-small 只回退直通",
+    /prefetchIntegrityConfig\(\)\.enabled/.test(restG)
+      && /judgePrefetchedBuffer\(r\.buf, expectedSec/.test(restG)
+      && /verdict\.reason === "too-small"[\s\S]{0,220}return undefined/.test(restG)
+      && /markUnplayable\(songId\)/.test(restG)
+      && /⇒ 记无源负缓存 \+ 显式失败/.test(restG),
+    "播放路径没有判官,或把 too-small 当硬死(会导致误跳歌)",
   );
   check(
     "预取 too-small 不立即判死:先换源、再重试一次,且不写负缓存",

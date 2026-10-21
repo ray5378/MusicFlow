@@ -5,7 +5,9 @@
 // 循环(缓冲落地后下一个请求 join 在途循环即可命中)。本文件三条用例:
 //   (a) 缓冲在 head-wait 内完成 ⇒ 行为与改造前完全一致(membuf 回环供流);
 //   (b) 缓冲超 head-wait ⇒ ~N ms 返回直通 URL,后台循环仍在跑且可被 join 命中;
-//   (c) prefetchHit 命中路径零等待,不受 head-wait 影响。
+//   (c) prefetchHit 命中路径零等待,不受 head-wait 影响;
+//   (d)(e) 大文件直通:默认关闭(全缓冲),只有 DLNA 插件开关+DLNA 链路才生效;
+//   (f)(g)(h) 播放路径完整性判官:preview/not-audio 判死并跳,too-small 直通不记负缓存。
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
 import { sqlite } from "../../src/db/index.js";
 import {
@@ -24,6 +26,10 @@ import {
   retryLoopKeysForTest,
 } from "../../src/services/source/bufferedFetch.js";
 import {
+  clearStreamFallbackCache,
+  getCachedPlayability,
+} from "../../src/services/source/online/streamFallback.js";
+import {
   resolveTranscodeInput,
   STREAM_BUFFER_HEAD_WAIT_MS,
   STREAM_BUFFER_HEAD_WAIT_UNKNOWN_MS,
@@ -31,6 +37,12 @@ import {
   headWaitCeilingMs,
   streamBufferSkipOverBytes,
 } from "../../src/routes/rest/index.js";
+
+// 判官用的 metadata:默认 200s(与库内基准一致 ⇒ 不判死);各用例单独覆写。
+const mm = vi.hoisted(() => ({ duration: 200 }));
+vi.mock("music-metadata", () => ({
+  parseBuffer: async () => ({ format: { duration: mm.duration, bitrate: 0, container: "flac" }, common: {} }),
+}));
 
 // 与 prefetchCache.test.ts 同款 hoisted mock:探活/播放优选可确定性触发,不摸真实
 // 文件系统 / 不发 HEAD。⚠ localSourceProbe 只**部分** mock —— 保留真实的 parseSongPath,
@@ -60,7 +72,7 @@ vi.mock("../../src/services/plugin/core/playPreference.js", async (importOrigina
 const MB = 1024 * 1024;
 const DAV_ORIGIN = "http://127.0.0.1:18778";
 
-const ROW_W = { id: "hw-w", type: "local", path: "w:hwsrc:/dav/a.flac", size: 5 * MB, url: null, streamHeaders: null, cachePath: null };
+const ROW_W = { id: "hw-w", type: "local", path: "w:hwsrc:/dav/a.flac", size: 5 * MB, duration: 200, url: null, streamHeaders: null, cachePath: null };
 
 // ---------------- 假上游 ----------------
 type Mode = "ok" | "500";
@@ -69,6 +81,10 @@ let calls: Array<{ url: string }> = [];
 /** 第一路取流是否卡住(证明 head-wait 超时后共享循环没有被取消)。 */
 let blockFirst = false;
 let releaseFirst: () => void = () => {};
+/** 假上游返回的字节数(>64KB 才过 too-small 档;判官用例会单独改小/改 HTML)。 */
+let payloadBytes = 128 * 1024;
+/** true = 返回「HTML 错误页当 200」(判官 magic 档)。 */
+let htmlPayload = false;
 
 function installFetchStub(): void {
   vi.stubGlobal("fetch", vi.fn(async (url: any, _init: any) => {
@@ -80,9 +96,10 @@ function installFetchStub(): void {
       return { status: 500, headers: { get: () => null }, body: { cancel: async () => {} } };
     }
     let i = 0;
-    // 合法 FLAC 头 + 128KB 填充：预取完整性判官会检查它（4KB 垃圾会被判死），
-    // 真实 parseBuffer 对假头解析失败 => 判官保守放过，本文件语义不变。
-    const chunks = [Buffer.concat([Buffer.from("fLaC", "latin1"), Buffer.alloc(128 * 1024, 0)])];
+    // 合法 FLAC 头 + 填充(或 HTML 错误页)。metadata 由 music-metadata mock 控制。
+    const head = htmlPayload ? Buffer.from("<html><body>403 Forbidden</body></html>", "utf8") : Buffer.from("fLaC", "latin1");
+    const body = Buffer.concat([head, Buffer.alloc(Math.max(1, payloadBytes - head.length), 0x20)]);
+    const chunks = [body];
     return {
       status: 200,
       headers: { get: (_: string) => null },
@@ -116,6 +133,10 @@ beforeEach(() => {
   mode = "ok";
   blockFirst = false;
   releaseFirst = () => {};
+  payloadBytes = 128 * 1024;
+  htmlPayload = false;
+  mm.duration = 200;
+  clearStreamFallbackCache();
   ph.probeOk.mockReset();
   ph.probeOk.mockImplementation(async () => true);
   ph.active = true;
@@ -182,24 +203,51 @@ describe("batch44-R:整曲缓冲有界等待(首字节优先)", () => {
     expect(calls.length).toBe(1);
   });
 
-  it("(d) 已知总字节超阈值 ⇒ 连整曲缓冲都不起,直接直通(方案②)", async () => {
+  it("(d) DLNA 开关打开 + 已知总字节超阈值 ⇒ 连整曲缓冲都不起,直接直通", async () => {
     process.env.STREAM_BUFFER_SKIP_OVER_MB = "1"; // ROW_W.size = 5MB > 1MB
-    const src = await resolveTranscodeInput({}, ROW_W, { buffering: true });
+    const src = await resolveTranscodeInput({}, ROW_W, { buffering: true, largeFileDirect: true });
     expect(calls.length).toBe(0); // 一次上游都没打:不浪费 1.5~8s
     expect(src?.source).toContain("/rest/dlna/stream/"); // 既有直通通道
     expect(src?.source).not.toContain("/rest/membuf/");
   });
 
-  it("(e) 阈值 0 = 关闭跳过;默认 20MB 时 5MB 仍走整曲缓冲", async () => {
-    process.env.STREAM_BUFFER_SKIP_OVER_MB = "0";
-    expect(streamBufferSkipOverBytes()).toBe(0);
-    const src = await resolveTranscodeInput({}, ROW_W, { buffering: true });
+  it("(e) 默认关闭:HTTP 链路即便 env=1 也全缓冲;阈值只有 DLNA 开关+链路才生效", async () => {
+    // 未传 largeFileDirect(HTTP / AirPlay 链路)⇒ 即便 env 给了阈值也必须整曲缓冲。
+    process.env.STREAM_BUFFER_SKIP_OVER_MB = "1";
+    const http = await resolveTranscodeInput({}, ROW_W, { buffering: true });
     expect(calls.length).toBe(1);
-    expect(src?.source).toContain("/rest/membuf/");
+    expect(http?.source).toContain("/rest/membuf/");
 
+    // 阈值函数:清掉 env 后再验证"默认关"语义(env 是运维覆盖,优先级最高)。
     delete process.env.STREAM_BUFFER_SKIP_OVER_MB;
-    expect(streamBufferSkipOverBytes()).toBe(STREAM_BUFFER_SKIP_OVER_MB * 1024 * 1024);
+    expect(streamBufferSkipOverBytes(false)).toBe(0);
+    expect(streamBufferSkipOverBytes(true)).toBe(STREAM_BUFFER_SKIP_OVER_MB * 1024 * 1024);
     expect(STREAM_BUFFER_SKIP_OVER_MB).toBe(20);
+    process.env.STREAM_BUFFER_SKIP_OVER_MB = "0";
+    expect(streamBufferSkipOverBytes(true)).toBe(0);
+  });
+
+  it("(f) 播放路径判官:试听片段(实际 30s vs 期望 200s)⇒ 判死 + 负缓存 + 显式失败", async () => {
+    mm.duration = 30;
+    const src = await resolveTranscodeInput({}, ROW_W, { buffering: true });
+    expect(src).toBeNull();                       // 显式失败 ⇒ 客户端跳下一首
+    expect(getCachedPlayability(ROW_W.id)).toBe("unplayable");
+    expect(prefetchHit(ROW_W.id)).toBeNull();     // 判死的缓存不登记
+  });
+
+  it("(g) 播放路径判官:HTML 错误页当 200(>64KB)⇒ not-audio 判死 + 负缓存", async () => {
+    htmlPayload = true;
+    const src = await resolveTranscodeInput({}, ROW_W, { buffering: true });
+    expect(src).toBeNull();
+    expect(getCachedPlayability(ROW_W.id)).toBe("unplayable");
+  });
+
+  it("(h) 播放路径判官:too-small 是弱信号 ⇒ 不判死、不记负缓存、回退直通", async () => {
+    payloadBytes = 1024; // <64KB
+    const src = await resolveTranscodeInput({}, ROW_W, { buffering: true });
+    expect(src?.source).toContain("/rest/dlna/stream/"); // 落既有直通通道
+    expect(src?.source).not.toContain("/rest/membuf/");
+    expect(getCachedPlayability(ROW_W.id)).toBe("unknown"); // 绝不能误标无源
   });
 });
 

@@ -2,6 +2,38 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.64] - 2026-10-21
+
+### Fix / 默认全缓冲 + 播放路径补完整性判官 + DLNA 插件「大文件直通」开关
+
+4.6.63 把「大文件直通」做成了默认 20MB 生效。复核后按用户拍板调整为：
+
+- **默认改为全部整曲缓冲**：`STREAM_BUFFER_SKIP_OVER_MB` 保留 20（建议阈值），但默认不生效（阈值 0）。覆盖范围 0~100MB 网络源；>100MB 的整轨镜像仍受 `fetchWholeSongBuffered` 的 100MB 硬顶保护、照旧直通（预取也不会抓）。
+- **播放路径复用预取判官**：整曲缓冲成功后、登记 membuf 前调用 `judgePrefetchedBuffer`（与预取同一套判据）：
+  - `preview`（实际时长比曲库短 >15s）/ `not-audio`（HTML/JSON 错误页）⇒ `markUnplayable` + 显式失败（客户端跳下一首）；
+  - `too-small`（<64KB）是弱信号（240 实测同曲随后 1.93MB 成功）⇒ 不判死、不写负缓存，回退直通，避免播放路径没有重试/换源兜底时误跳歌；
+  - 判官总开关沿用「媒体获取」页的 `prefetch.settings.integrityEnabled`。
+- **DLNA 插件详情弹窗新增开关**：`dlna-renderer` 的 `configSchema` 加 `largeFileDirect`（`switch`，默认 `false`，帮助文案说明"仅 DLNA、开启后 >20MB 直通、会错过完整性判定"）。前端插件详情弹窗由 `configSchema` 驱动，**零前端改动**；配置走现有 `PUT /v1/plugins/:id`。
+- **作用域严格限定 DLNA**：`resolveTranscodeInput` 新增 `largeFileDirect` 入参，只有 `serveCastStream(kind="dlna")` 传 `true`；HTTP `/rest/stream` 与 AirPlay 始终全缓冲（即便运维 env 给了阈值也不生效）。
+- **240 运行时关闭 FLOW 连续流**（`crossfade.mode=disabled`）：换取逐首管道 —— 每首歌都整曲缓冲 + 判官、设备元数据/队列下标准确；失去 1s 交叉淡入，歌间有小接缝。
+
+### 真机复测（240 主卧 DLNA）
+
+- **关闭 FLOW 后逐首管道**：40s 曲 ×3，`currentIndex` 0→1→2，每首独立 cast、全程 PLAYING；歌间有数秒重新投屏接缝（用户已接受，换取完整判定与准确元数据）。
+- **默认全缓冲**：88MB WebDAV 曲先尝试整曲缓冲，但 88MB@3.3MB/s 无法在 8s 有界等待内完成 ⇒ 投影早退（1.5s）后回退直通；**插件开关打开后立即直通**（日志 `已知 83.9MB > 20MB 阈值`），关闭后恢复全缓冲。
+- **播放路径判官**：网易《琵琶曲》上游本次返回 <64KB（too-small 弱信号）⇒ 按设计回退直通、不记负缓存；`preview`/`not-audio` 判死由单测覆盖。
+- **插件配置下发**：`GET /v1/plugins` 的 `configSchema` 已含 `largeFileDirect`（switch，默认 false），插件详情弹窗可直接开关、保存后即时生效。
+
+### 仍待处理/边界
+
+- 默认全缓冲只对「能在 8s 内缓冲完」的 0~100MB 文件保证播放前判官；更大/更慢的文件仍会在投影早退后直通，判官只能靠后台预取（≤100MB）完成。>100MB 的整轨镜像不整曲缓冲、预取也不抓。
+- FLOW 关闭是 240 的运行时设置（`crossfade.mode=disabled`），不是代码强制；以后在音频页重新开启 crossfade 会恢复 flow（并失去逐首判官覆盖）。
+
+### 回归守卫/测试
+
+- `check-airplay-playback-chain.mjs` **R27** 更新：默认关闭 + DLNA 开关/链路双条件 + 插件 `configSchema` 开关 + 播放路径判官（preview/not-audio 判死、too-small 直通）。
+- `tests/source/bufferHeadWait.test.ts` 新增 (d)(e)(f)(g)(h)：DLNA 开关生效、HTTP 链路不受 env 影响、preview 判死、not-audio 判死、too-small 直通不记负缓存；`tsc` 0。
+
 ## [4.6.63] - 2026-10-21
 
 ### Fix / 240「一直跳下一首」真正根因:flow 起播前逐首解析整条队列(首字节 12~400s)

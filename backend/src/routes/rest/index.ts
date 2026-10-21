@@ -24,12 +24,18 @@ import { dailyRecommendTag } from "../../services/pluginAccess.js";
 import { refreshPlaylistCounts } from "../../services/plugin/shared.js";
 import { resolveCastToken, resolveCastSession, resolveRawStreamToken, loopbackBase, loopbackRawStreamUrl } from "../../services/dlna/control.js";
 import { isBlockedCoverProxyUrl } from "../../utils/ssrf.js";
-import { findFallbackStream, resolveRemoteStreamUrl } from "../../services/source/online/streamFallback.js";
+import { findFallbackStream, resolveRemoteStreamUrl, markUnplayable } from "../../services/source/online/streamFallback.js";
 import { resolvePreferredSong } from "../../services/source/preferredSource.js";
 // 出流与后台预取**共用同一份**源解析推导(见 services/source/networkInput.ts 文件头)。
 import { resolveLocalFilePath, resolveNetworkInput, getWebDAVUrl } from "../../services/source/networkInput.js";
 import { parseSongPath } from "../../utils/localSourceProbe.js";
-import { prefetchHit, prefetchInFlight, bindLoopbackBase } from "../../services/source/prefetchCache.js";
+import {
+  bindLoopbackBase,
+  judgePrefetchedBuffer,
+  prefetchHit,
+  prefetchInFlight,
+  prefetchIntegrityConfig,
+} from "../../services/source/prefetchCache.js";
 import { getConfiguredProvider } from "../../services/source/online/index.js";
 import { permMiddleware } from "../../middleware/auth.js";
 import { PERM, hasPerm } from "../../services/access.js";
@@ -2028,10 +2034,13 @@ async function serveFlowQueue(
 //   - dead / stalled / error ⇒ 返回 null ⇒ 调用方显式失败(客户端走既有跳歌/重试,不发僵尸 200)。
 // opts.buffering === false 跳过缓冲:seek 重拉(timeOffset>0)走 rawStreamCache 缓存路径更省;
 // flow 连续流逐曲解析,串行整曲下载会拖垮过渡延迟 —— 均由调用方显式传入。
+// opts.largeFileDirect === true 允许「大文件直通」(2026-10-21):**只有 DLNA 投屏**
+// 会按 DLNA 渲染器插件里的开关传 true;HTTP /rest/stream 与 AirPlay 一律不传
+// (默认 false = 全部整曲缓冲),避免插件里的设置意外影响其它通道。
 export async function resolveTranscodeInput(
   c: any,
   song: any,
-  opts?: { buffering?: boolean },
+  opts?: { buffering?: boolean; largeFileDirect?: boolean },
 ): Promise<{ source: string; headers?: Record<string, string> } | null> {
   // ① 后台预取命中 ⇒ 直接内存回环供流(零上游)。
   //    放在**最前面**:命中时连源解析(DB 读 media_sources / 空直链的兜底解析,后者可能带
@@ -2056,7 +2065,15 @@ export async function resolveTranscodeInput(
   const net = await resolveNetworkInput(song);
   if (!net) return null; // 无可用源 ⇒ 调用方显式失败
   if (opts?.buffering !== false) {
-    const buffered = await bufferNetworkSource(song.id, net.url, net.headers, c, song.size);
+    const buffered = await bufferNetworkSource(
+      song.id,
+      net.url,
+      net.headers,
+      c,
+      song.size,
+      song.duration,
+      opts?.largeFileDirect === true,
+    );
     if (buffered === null) return null; // 显式失败 ⇒ 调用方 fail,客户端走既有跳歌/重试
     if (buffered) return buffered;      // membuf 回环 URL
     // undefined ⇒ 回退直通(旧行为)
@@ -2102,30 +2119,39 @@ export function headWaitCeilingMs(sizeKnown: boolean): number {
 }
 
 /**
- * 冷路径整曲缓冲的**大小跳过阈值**(MB,2026-10-21 用户拍板方案②)。
+ * 冷路径整曲缓冲的**大小跳过阈值**(MB,2026-10-21 最终口径:**默认关闭**)。
  *
- * 已知总字节超过它 ⇒ **连试都不试**,直接回退直通:
- *   - 大文件按在线源实测速度(0.85~2.3MB/s)必然在 8s 有界等待内攒不齐,先起一次
- *     整曲下载只会白等/白占预算,还要等「投影早退」才退出(实测浪费 1.5s,慢源更久);
- *   - 直通的首字节只受上游首包影响,对小缓冲设备反而更稳;
- *   - **预取命中不受影响**:命中时在 resolveTranscodeInput 第 ① 步就返回了,根本
- *     走不到这里。所以「大文件也可能秒开」的路径仍然由后台预取保留。
+ * 背景:上一版(v4.6.63)默认 20MB 直通,实测与用户目标冲突 ——
+ *   ① 直通会跳过「完整音源」，而完整性判官(试听/截断)必须拿到整首字节才能判；
+ *   ② 快源(WebDAV 实测 20MB/s 级)大文件其实 1~2s 就能缓冲完，直通反而失去
+ *      「起播后不受上游抖动影响」的稳定性；
+ *   ③ 音量为归一与直通无关(实测直通曲的 ffmpeg 仍带 loudnorm)，但用户要求
+ *      默认全缓冲 + 可手动开启，故阈值保留、默认 0(关闭)。
  *
- * 默认 20MB(≈ 6 分钟 FLAC / 12 分钟 320k MP3,整曲缓冲对它们没有收益)。
- * env `STREAM_BUFFER_SKIP_OVER_MB` 可覆盖;填 0(或负数/非法 → 默认)表示关闭跳过逻辑。
+ * 现在的语义:
+ *   - **默认全缓冲**(0~100MB，100MB 是 `fetchWholeSongBuffered` 的单文件硬顶)；
+ *   - 只有 DLNA 渲染器插件的详情弹窗里把「大文件直通」开关打开(`largeFileDirect`),
+ *     且本次出流是 **DLNA 链路**(`resolveTranscodeInput` 的 `largeFileDirect` 入参)
+ *     时，才对「已知大小 > 20MB」的曲目跳过整曲缓冲；
+ *   - env `STREAM_BUFFER_SKIP_OVER_MB` 仍可覆盖(运维/测试):显式 0 = 关闭，
+ *     正数 = 该 MB 阈值(仍需 DLNA 开关+链路同时满足)。
+ *   - 预取命中不受影响(命中时第 ① 步就返回了)。
  */
 export const STREAM_BUFFER_SKIP_OVER_MB = 20;
 const MB_BYTES = 1024 * 1024;
 
-/** 生效阈值(字节)。0 = 关闭「大文件跳过整曲缓冲」。非法值按默认处理。 */
-export function streamBufferSkipOverBytes(): number {
+/**
+ * 生效阈值(字节)。0 = 不做大文件直通(默认)。
+ * @param pluginEnabled DLNA 渲染器插件里的开关是否为开(只有 true 才启用阈值)
+ */
+export function streamBufferSkipOverBytes(pluginEnabled: boolean = false): number {
+  // env 是运维覆盖:显式给了就按 env(0 = 强制关闭)。
   const raw = process.env.STREAM_BUFFER_SKIP_OVER_MB;
-  let mb = STREAM_BUFFER_SKIP_OVER_MB;
   if (raw !== undefined && raw !== "") {
     const n = Number(raw);
-    if (Number.isFinite(n) && n >= 0) mb = n; // 显式 0 = 关闭
+    if (Number.isFinite(n) && n >= 0) return n > 0 ? Math.floor(n * MB_BYTES) : 0;
   }
-  return mb > 0 ? Math.floor(mb * MB_BYTES) : 0;
+  return pluginEnabled ? Math.floor(STREAM_BUFFER_SKIP_OVER_MB * MB_BYTES) : 0;
 }
 
 /**
@@ -2153,6 +2179,8 @@ async function bufferNetworkSource(
   headers: Record<string, string>,
   c: any,
   sizeHint?: number,
+  expectedSec?: number,
+  allowLargeFileDirect: boolean = false,
 ): Promise<{ source: string } | null | undefined> {
   // batch44(D · 用户最终拍板):新流取流失败 ⇒ **挂起本请求**进入长窗口自动重试
   // (前 1 分钟每 10s → 之后每 60s → 总窗口 30min;参数常量化 env 可配;同曲并发
@@ -2188,16 +2216,23 @@ async function bufferNetworkSource(
     }
   }
 
-  // ---- 2026-10-21 方案②:大文件直接直通(连整曲缓冲都不试)----
+  // ---- 2026-10-21:大文件直通(默认关闭,仅 DLNA 开关+DLNA 链路同时满足)----
   // 放在**搭车之后**:预取正在飞时先等它(零上游,且 WebDAV 预取实测 20MB+/s);
-  // 没有在途预取才按阈值跳过冷下载 —— 已知总字节(曲库 size,WebDAV 行常有值)
-  // 超过阈值必然等不满,先起冷下载只会白占预算并多耗 1.5s~8s 才回退。
-  const skipOver = streamBufferSkipOverBytes();
+  // 没有在途预取才按阈值跳过冷下载。默认 `allowLargeFileDirect=false` ⇒ 阈值 0
+  // ⇒ 全部整曲缓冲(用户拍板:完整音源是完整性判官的前提)。
+  // 开关来源:DLNA 渲染器插件详情弹窗 `largeFileDirect`(configSchema switch)。
+  let skipOver = 0;
+  if (allowLargeFileDirect) {
+    const { getPluginConfig } = await import("../../plugins/registry.js");
+    const { DLNA_RENDERER_ID } = await import("../../services/plugin/renderers/dlna.js");
+    const pluginOn = getPluginConfig(DLNA_RENDERER_ID)?.largeFileDirect === true;
+    skipOver = streamBufferSkipOverBytes(pluginOn);
+  }
   const hint = typeof sizeHint === "number" && sizeHint > 0 ? sizeHint : 0;
   if (skipOver > 0 && hint > skipOver) {
     log.info(
       `[membuf] ${songId} 已知 ${(hint / MB_BYTES).toFixed(1)}MB > ${(skipOver / MB_BYTES).toFixed(0)}MB 阈值` +
-        ` ⇒ 跳过整曲缓冲,直接直通(首字节优先)`,
+        ` ⇒ 跳过整曲缓冲,直接直通(首字节优先,DLNA 插件开关已开)`,
     );
     return undefined;
   }
@@ -2219,6 +2254,32 @@ async function bufferNetworkSource(
     return undefined;
   }
   if (r.ok) {
+    // ---- 2026-10-21:播放路径补完整性判官(与预取同一套判据)----
+    // 一整首字节已经在手里 ⇒ 可以判「试听片段 / 截断 / 假成功(HTML 错误页)」。
+    // 判死后**不登记 membuf**;动作按判据分两类:
+    //   - not-audio / preview:硬结论 ⇒ markUnplayable + 返回 null(显式失败,
+    //     客户端/队列走既有跳下一首);
+    //   - too-small:弱信号(上游一次截断/错误页,240 实测同曲随后 1.93MB 成功),
+    //     播放路径没有预取的重试/换源兜底 ⇒ **不判死、不写负缓存**,回退直通。
+    if (prefetchIntegrityConfig().enabled) {
+      const verdict = await judgePrefetchedBuffer(r.buf, expectedSec && expectedSec > 0 ? expectedSec : 0);
+      if (verdict.dead) {
+        const actual = verdict.actualSec !== undefined ? ` 实际${Math.round(verdict.actualSec)}s` : "";
+        const expected = verdict.expectedSec !== undefined ? ` 期望${Math.round(verdict.expectedSec)}s` : "";
+        if (verdict.reason === "too-small") {
+          log.warn(
+            `[membuf] ${songId} 整曲缓冲判 too-small${actual}${expected}(弱信号) ⇒ 回退直通(不登记/不记负缓存)`,
+          );
+          return undefined;
+        }
+        markUnplayable(songId);
+        log.warn(
+          `[membuf] ${songId} 整曲缓冲完整性判死 reason=${verdict.reason}${actual}${expected}` +
+            ` ⇒ 记无源负缓存 + 显式失败(客户端跳下一首)`,
+        );
+        return null;
+      }
+    }
     const token = registerMemStream(r.buf);
     if (!token) {
       // 注册表腾不出空位,且**不能**驱逐正在消费的在用条目(踢掉 = 正在播的流断掉)。
@@ -2571,7 +2632,11 @@ async function serveCastStream(
     sourceBitRate: resolvedSong.bitRate,
   });
   if (transcode.should && transcode.format) {
-    const input = await resolveTranscodeInput(c, resolvedSong, { buffering: timeOffset === 0 });
+    const input = await resolveTranscodeInput(c, resolvedSong, {
+      buffering: timeOffset === 0,
+      // 大文件直通只对 DLNA 投屏开放(插件详情弹窗开关);AirPlay 不传。
+      largeFileDirect: ctx.kind === "dlna",
+    });
     if (input) {
       return serveTranscodedSong(c, input, {
         format: transcode.format,
@@ -2589,7 +2654,11 @@ async function serveCastStream(
   try {
     const { resolveDlnaOutput } = await import("../../services/audio/pipeline.js");
     const castCodec = resolveDlnaOutput(resolvedSong.suffix);
-    const input = await resolveTranscodeInput(c, resolvedSong, { buffering: timeOffset === 0 });
+    const input = await resolveTranscodeInput(c, resolvedSong, {
+      buffering: timeOffset === 0,
+      // 同上:大文件直通仅 DLNA;AirPlay 一律全缓冲(判定覆盖完整)。
+      largeFileDirect: ctx.kind === "dlna",
+    });
     if (!input) return c.text("No playable stream", 404);
     if ((resolvedSong.type || "local") !== "web") {
       const parsedLocal = parseSongPath(resolvedSong.path);
