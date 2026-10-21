@@ -2,6 +2,15 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.65] - 2026-10-21
+
+### Fix / 4.6.64 CI 红:DLNA 渲染器 manifest 契约仍断言「零配置」
+
+4.6.64 给 `dlna-renderer` 的 `configSchema` 加了「大文件直通」开关，`tests/plugins/renderersPlugin.test.ts` 仍断言 `configSchema === []`，全量测试 1 例失败（其余 7404 例通过；`build-and-push` 因 `ci` 失败未发布）。
+
+- 测试改为断言「configSchema 仅一个 `switch` 字段 `largeFileDirect`，默认 `false`」；
+- 无运行时改动，功能与 4.6.64 一致。
+
 ## [4.6.64] - 2026-10-21
 
 ### Fix / 默认全缓冲 + 播放路径补完整性判官 + DLNA 插件「大文件直通」开关

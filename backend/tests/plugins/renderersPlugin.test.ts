@@ -109,13 +109,18 @@ beforeEach(() => {
 });
 
 describe("DLNA 渲染器插件 manifest(适配层契约,不是设备实现)", () => {
-  it("id/type/capabilities 与「默认开启、零配置」约定", () => {
+  it("id/type/capabilities 与「默认开启、仅大文件直通一个开关」约定", () => {
     expect(DLNA_RENDERER_ID).toBe("dlna-renderer");
     expect(dlnaRendererManifest.id).toBe("dlna-renderer");
     expect(dlnaRendererManifest.type).toBe("renderer");
     expect(dlnaRendererManifest.capabilities).toEqual(["renderer"]);
     expect(dlnaRendererManifest.defaultEnabled).toBe(true);
-    expect(dlnaRendererManifest.configSchema).toEqual([]);
+    // 2026-10-21:插件详情弹窗新增「大文件直通(仅 DLNA)」开关,默认关闭。
+    expect(dlnaRendererManifest.configSchema).toHaveLength(1);
+    const field = dlnaRendererManifest.configSchema[0];
+    expect(field.key).toBe("largeFileDirect");
+    expect(field.type).toBe("switch");
+    expect(field.default).toBe(false);
     expect(dlnaRendererPlugin.manifest).toBe(dlnaRendererManifest);
   });
 
