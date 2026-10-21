@@ -177,6 +177,31 @@ jobs:
           if [ "$miss" -eq 0 ]; then echo "OK: 过渡期不报 stopped(silentState 收尾)在位"; fi
           exit "$miss"
 
+      # —— P4：暂停中 seek 必须仍保持暂停（2026-10-21 真机实锤）——
+      # GroupPump.seek() 内部为锚定新位置会 `if (paused) resume()`，紧随其后的
+      # playCore 又会新建一个未暂停的泵 —— 两条路都会把「暂停中拖进度」变成
+      # 「开始播放」。用户语义：拖动只改位置，暂停态不变（与 DLNA / AirPlay 一致）。
+      # seekCore 必须在**每个返回点**用 wasPaused 兜回 pauseCore，漏一处就静默回退。
+      - name: "Guard P4 - seek while paused stays paused"
+        shell: bash
+        run: |
+          miss=0
+          if ! grep -qF 'const wasPaused = !!g.paused;' backend/src/services/sendspin/playerCore.ts; then
+            echo "::error::P4 回归:seekCore 缺少 wasPaused 快照(暂停中 seek 会变成开始播放)"
+            miss=1
+          fi
+          n=$(grep -cF 'if (wasPaused) pauseCore(srv, clientId);' backend/src/services/sendspin/playerCore.ts)
+          if [ "$n" -lt 3 ]; then
+            echo "::error::P4 回归:seekCore 的三个返回点(无在播 / 起播窗口 / 重建流后)都必须补回暂停,当前命中 $n 处"
+            miss=1
+          fi
+          if [ "$(grep -cF '(保持暂停)' backend/src/services/sendspin/playerCore.ts)" -lt 1 ]; then
+            echo "::error::P4 回归:重建流日志缺少「(保持暂停)」标记,真机排障会失去判据"
+            miss=1
+          fi
+          if [ "$miss" -eq 0 ]; then echo "OK: 暂停中 seek 保持暂停在位"; fi
+          exit "$miss"
+
       - name: Upload guard log on failure
         if: failure()
         uses: actions/upload-artifact@v4

@@ -664,9 +664,15 @@ export function seekCore(srv: SendspinServer | null, clientId: string, seconds: 
     // opts.clamp),否则「切歌后立刻拖到靠后位置」会被上一首时长裁短(240:140s→114s)。
     // 收口改由本轮 play() 拿到新歌时长后完成(见 GroupPump.play 的起播期间 seek 分支)。
     const busy = pump.busy;
+    // ★ 记住暂停态:GroupPump.seek 内部会 `if (paused) resume()`(为了让旧循环
+    //   继续锚定新位置),再叠加下面 playCore 的完整重建流 —— 两条路都会把
+    //   「暂停中拖进度」变成「开始播放」。用户语义必须是:拖动只改位置,
+    //   暂停态保持不变(与 DLNA/AirPlay 一致)。故在每个返回点前恢复暂停。
+    const wasPaused = !!g.paused;
     pump.seek(seconds, { clamp: !busy && !!cur });
     if (!cur) {
       // 无在播曲(空闲):位置已记忆,下一次起播消费 —— MA resume_with_position 语义。
+      if (wasPaused) pauseCore(srv, clientId);
       return;
     }
     // ★ 起播窗口内(音源还没就绪,但**已有一次 play 在飞**):只记起播位置,由那次 play
@@ -676,6 +682,8 @@ export function seekCore(srv: SendspinServer | null, clientId: string, seconds: 
     //   → 从 0 重投 → frozen → 放行切歌(240 日志 12:31 实锤)。
     if (busy) {
       log.debug(`[Sendspin][seekCore] ${clientId} 起播窗口内 → 只记起播位置,不再起第二个 play`);
+      // 同上:pump.seek 可能已经把暂停中的旧循环 resume 了,这里补回暂停。
+      if (wasPaused) pauseCore(srv, clientId);
       return;
     }
     // ② play_index 等价:走完整起播路径重建流(同一首歌、新起点)。
@@ -699,7 +707,9 @@ export function seekCore(srv: SendspinServer | null, clientId: string, seconds: 
     } else {
       playCore(srv, clientId, item, onFailed, clampedMs);
     }
-    log.debug(`[Sendspin][seekCore] ${clientId} 已走完整起播路径重建流 ${Date.now() - t0}ms`);
+    // 暂停中 seek:重建流后立刻恢复暂停(playCore 会把 pump 的 paused 置回 false)。
+    if (wasPaused) pauseCore(srv, clientId);
+    log.debug(`[Sendspin][seekCore] ${clientId} 已走完整起播路径重建流 ${Date.now() - t0}ms${wasPaused ? "(保持暂停)" : ""}`);
     return;
   }
   ephemeralOrReal(srv, clientId).positionMs = Math.max(0, seconds * 1000);

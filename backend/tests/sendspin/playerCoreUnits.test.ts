@@ -392,6 +392,22 @@ describe("seekCore:三条走向", () => {
     expect(p.play).not.toHaveBeenCalled();
   });
 
+  it("暂停中 seek → 重建流后仍保持暂停(不得偷偷开始播放)", () => {
+    // 用户语义:拖动只改位置,暂停态保持不变(与 DLNA/AirPlay 一致)。
+    // GroupPump.seek 内部会 resume 旧循环,playCore 又会新建未暂停的泵 ——
+    // 两处都必须被 seekCore 的「保留暂停」兜回来。
+    const srv = makeSrv();
+    const g = srv.group("d3");
+    g.current = { songId: "s1", durationMs: 200_000 };
+    g.paused = true;
+    const p = eng.pumpFor(srv, g);
+
+    seekCore(srv as any, "d3", 40);
+    expect(p.play).toHaveBeenCalledTimes(1);     // 仍然重建流(位置要落位)
+    expect(p.pause).toHaveBeenCalled();          // 但重建后必须回到暂停
+    expect(g.paused).toBe(true);
+  });
+
   it("ug: 用户组 → 走 playGroupCore,成员取组内 clientId", () => {
     const srv = makeSrv();
     const c1 = makeConn("m1");

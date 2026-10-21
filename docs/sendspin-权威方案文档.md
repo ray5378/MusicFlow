@@ -1366,6 +1366,68 @@ docker restart musicflow
 
 ---
 
+# 第十二部分：2026-10-21 全量验收（230 模拟播放器 + es客厅）与暂停中 seek 修复
+
+> 方法学对齐 `docs/airplay-权威方案文档.md`：**服务端状态 + 播放器侧真实输出**双端对账，
+> 每个操作都要求「状态正确 + 进度真实前进/停止 +（有本地 PCM 的端）确有音频数据」。
+
+## 12.1 测试床
+
+| 端 | 类型 | 接入 | 播放器侧判据 |
+|---|---|---|---|
+| `MF-230-Real-PCM` | 230 模拟（aiosendspin SDK，PCM） | `ws://192.168.10.240:38927/sendspin` | `/root/ss_pcm_out.pcm` 字节增量（192000 B/s）+ RMS > -60dB |
+| `MF-230-Real-FLAC` | 230 模拟（SDK，FLAC） | 同上 | `/root/ss_flac_out.pcm`（SDK 解码后的 PCM）同上 |
+| `MF-230-CPP-Player` | 230 模拟（sendspin-cpp） | 同上 | ALSA `file` 插件持续写/截断，**只认状态 + 进度** |
+| `es客厅` | 真实设备 | 设备侧自动发现 | `/status` 的 `position` 真实推进 + `state` |
+
+判据来源：`GET /rest/api/v1/peers/:id/status`（state / position / volume / muted）、
+`GET /rest/api/v1/peers/:id/queue`（currentIndex / playMode / items）。
+
+## 12.2 用例矩阵（每端 11 项，共 44 项；组播 6 项）
+
+起播、暂停、恢复、seek、连续快速 seek（100→40→70）、**暂停中 seek → 恢复**、next、prev、
+音量/静音、自然结束自动下一首、停止。
+
+组播（`SS-FULLTEST`，es客厅 + PCM + FLAC + C++）：建组、起播、组 seek（成员进度 spread）、
+暂停/恢复、音量、停止。
+
+## 12.3 复现的真实缺陷：暂停中拖进度 → 自动开始播放
+
+**现象**：设备处于暂停态时拖动进度条，`state` 立刻变成 `PLAYING` 并开始出声（四端全部复现）。
+
+**根因（两条路叠加）**：
+
+1. `GroupPump.seek()` 为了让旧循环锚定新位置，内部会 `if (paused) resume()`；
+2. 随后 `seekCore` 在非起播窗口走**完整重建流**（`playCore`），新建的泵默认未暂停。
+
+任一条都会把「暂停中拖进度」变成「开始播放」，与用户语义（拖动只改位置）及 DLNA / AirPlay 行为不一致。
+
+**修复**：`seekCore` 先快照 `const wasPaused = !!g.paused;`，在**三个返回点**补回 `pauseCore`：
+
+- 无在播曲（仅记忆位置）；
+- 起播窗口内（`busy`，只记起播位置）；
+- 重建流之后（日志追加 `(保持暂停)` 便于真机排障）。
+
+**回归守卫**：`sendspin-guard.yml` **P4** —— `wasPaused` 快照在位、`if (wasPaused) pauseCore(srv, clientId);` 计数 ≥3、
+日志标记在位；单测 `tests/sendspin/playerCoreUnits.test.ts` 新增「暂停中 seek → 重建流后仍保持暂停」。
+
+## 12.4 结果
+
+- 四端 × 11 项 + 组播 6 项全部 PASS；组 seek 后各成员进度 `spread = 0`。
+- 唯一一次 `PCM seek` 报 FAIL（`pcm=0.0s`）经 `/root/ss_seek_probe.py` 逐秒采样复测：
+  seek 后首秒写入 13.80s、随后稳定 1.00s/s、`position` 1:1 前进 —— **测量窗口假阴性**，非产品问题。
+- 自动化下一首需等播放器 overrun 宽限（实测约 12s），验收等待窗口取 22s；窗口取 5s 会误判。
+
+## 12.5 复用脚本（230 主机）
+
+| 脚本 | 用途 |
+|---|---|
+| `/root/ss_full_test2.py` | 全量矩阵（50 例），按显示名解析 clientId，自动恢复音量 |
+| `/root/ss_seek_probe.py` | seek 后逐秒采样，判定「真出声」而非只看状态 |
+| `/root/ss_trace.py` / `/root/ss_next_probe.py` | next / seek-pause / 自动下一首的日志追踪 |
+| `/root/restart_players.sh` | 重启三台模拟播放器（PCM / FLAC / C++） |
+
+
 # 附录
 
 ## A. 设备配置（ESP32-S3，**已脱敏**）

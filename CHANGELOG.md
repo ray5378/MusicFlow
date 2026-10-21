@@ -2,6 +2,18 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.58] - 2026-10-21
+
+### Fix / Sendspin 暂停中拖进度会变成「开始播放」(230 模拟播放器 + es客厅真机全量验收)
+
+按 AirPlay 的双端对账方法对 Sendspin 链路做全量验收(230 主机三台模拟播放器:SDK-PCM / SDK-FLAC / sendspin-cpp,加真实设备 `es客厅`),过程中定位到一个真实缺陷:
+
+- **根因**:`seekCore` 在暂停态收到 seek 时,`GroupPump.seek()` 内部为了让旧循环锚定新位置会先 `if (paused) resume()`,紧随其后走完整起播路径的 `playCore()` 又新建一个未暂停的泵 —— **两条路都会把「暂停中拖进度」变成「开始播放」**,与「拖动只改位置、暂停态不变」的用户语义以及 DLNA / AirPlay 的既有行为都不一致。真机四端(PCM / FLAC / C++ / es客厅)全部可复现。
+- **修复**:`seekCore` 先快照 `wasPaused = !!g.paused`,在**三个返回点**(无在播曲 / 起播窗口内 / 重建流之后)分别补回 `pauseCore`;重建流日志追加 `(保持暂停)` 标记,便于真机排障。位置落点仍走原有重建流路径,`clamp` 语义不变。
+- **回归守卫**:`sendspin-guard.yml` 新增 **P4** —— `wasPaused` 快照必须存在、`if (wasPaused) pauseCore(srv, clientId);` 计数 ≥3(三个返回点漏一处即静默回退)、日志标记在位;`tests/sendspin/playerCoreUnits.test.ts` 新增「暂停中 seek → 重建流后仍保持暂停」1 例。
+- **真机全量验收(50 例)**:起播 / 暂停 / 恢复 / seek / 连续快速 seek / 暂停中 seek→恢复 / next / prev / 音量 / 静音 / 自然结束自动下一首 / 停止,在 **PCM、FLAC、C++、es客厅** 四端全部 PASS;组播(es客厅 + PCM + FLAC + C++,seek 后成员进度 spread=0)同一套用例全 PASS。唯一一次 `PCM seek` 报 FAIL,经逐秒采样复测确认是测量窗口造成的假阴性(seek 后首秒写入 13.80s、随后稳定 1.00s/s,position 1:1 前进),不是产品问题。
+- **验证环境**:230 模拟播放器经 `ws://192.168.10.240:38927/sendspin` 接入;判据为服务端 `/status` + `/queue` 双端对账,SDK 端另加 PCM 字节增量(192000 B/s)与 RMS(> -60dB);C++ 的 ALSA file 插件持续写/截断文件,只认状态+进度。
+
 ## [4.6.57] - 2026-10-21
 
 ### Revert / 移除「启动 120s 内忽略第一笔音量」的兜底(用户否决)
