@@ -1,7 +1,6 @@
 // 自动生成 —— 由 index.ts 物理拆分而来（peers 域，35 条路由）。零逻辑改动。
 import type { Hono } from "hono";
 import { createLogger } from "../../utils/logger.js";
-import { shouldIgnoreBootVolumeEcho } from "../../services/player/bootVolumeGuard.js";
 import {
   BusinessErrorCode,
   apiErrorStatus,
@@ -791,12 +790,10 @@ app.post("/v1/peers/:peerId/seek", async (c) => {
  *  载荷 = 当前快照 + 本次 patch:fork 模式下主进程镜像可能尚未随 RPC 刷新,
  *  以本次写入值为准可避免广播出旧值。非 sendspin / 解析失败静默跳过。 */
 
+// 音量/静音写入口的观测日志(排查"谁在什么时候把音量改成了多少"的唯一入口)。
+// 不在这里做任何"按来源/时间窗丢弃请求"的过滤:那是不可接受的语义 —— 用户在
+// 重启后任何时刻通过 HA 调音量都必须生效。
 const log = createLogger("peers");
-
-// 进程启动时刻:启动窗口守卫的基准(本模块在监听前完成路由注册,≈ 进程启动)。
-// 见 services/player/bootVolumeGuard.ts 顶部的现场记录。
-const SERVER_BOOT_AT = Date.now();
-const bootEchoSeen = new Set<string>();
 
 app.post("/v1/peers/:peerId/volume", async (c) => {
   const peerId = decodePeerId(c);
@@ -810,12 +807,6 @@ app.post("/v1/peers/:peerId/volume", async (c) => {
   if (typeof volume !== "number") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsVolume"), 400);
   const ua = c.req.header("user-agent") || "";
   log.info(`[peer-volume] ${peerId} <- ${volume} ua=${ua || "-"}`);
-  if (shouldIgnoreBootVolumeEcho({ now: Date.now(), bootAt: SERVER_BOOT_AT, ua, peerId, op: "volume", seen: bootEchoSeen })) {
-    // HA 实体重建时回放旧 volume_level(实测启动 ~31s 一笔)。忽略这笔不伤任何
-    // 用户操作:实体回放只发生一次,之后的写入(用户主动调)照常生效。
-    log.warn(`[peer-volume] 忽略启动期 HA 音量回放 ${peerId} <- ${volume}(保留持久值)`);
-    return c.json({ success: true, ignored: "boot-volume-echo" });
-  }
   if (parsed.kind === "dlna") {
     try { await setDeviceVolume(parsed.id, volume); return c.json({ success: true }); }
     catch (e: any) { return c.json(apiInternalError(e), 500); }
@@ -889,10 +880,6 @@ app.post("/v1/peers/:peerId/mute", async (c) => {
   if (typeof muted !== "boolean") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsMuted"), 400);
   const ua = c.req.header("user-agent") || "";
   log.info(`[peer-mute] ${peerId} <- ${muted} ua=${ua || "-"}`);
-  if (shouldIgnoreBootVolumeEcho({ now: Date.now(), bootAt: SERVER_BOOT_AT, ua, peerId, op: "mute", seen: bootEchoSeen })) {
-    log.warn(`[peer-mute] 忽略启动期 HA 静音回放 ${peerId} <- ${muted}(保留持久值)`);
-    return c.json({ success: true, ignored: "boot-mute-echo" });
-  }
   if (parsed.kind === "dlna") {
     try { await setDeviceMute(parsed.id, muted); return c.json({ success: true }); }
     catch (e: any) { return c.json(apiInternalError(e), 500); }
