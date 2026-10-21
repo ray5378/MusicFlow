@@ -135,6 +135,26 @@ app.put("/v1/sendspin/devices/:clientId/disabled", permMiddleware(PERM.RENDERER_
   return c.json({ success: true, disabled });
 });
 
+// 删除一台**离线**的 Sendspin 设备(仅离线行提供入口,对齐 DLNA DELETE /v1/dlna/devices/:id):
+// 与「禁用」「解绑」的区别——禁用可恢复、解绑要求设备在线且只清配置;删除是彻底移除
+// 档案(音量/禁用/6053 密钥)+ 配对记录 + 改名/隐藏偏好 + 队列 + 群组成员 + 拨号记忆。
+// 在线设备拒绝(409):删除不可撤销,设备正在播时请先禁用/断开。
+app.delete("/v1/sendspin/devices/:clientId", permMiddleware(PERM.RENDERER_MANAGE), async (c) => {
+  const clientId = c.req.param("clientId")!;
+  if (!clientId) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.sendspin.needsClientId"), 400);
+  const { sendspinDeleteOfflineDevice } = await import("../../services/sendspin/index.js");
+  const r = await sendspinDeleteOfflineDevice(clientId);
+  if (r === "online") {
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.sendspin.deleteOnline"), 409);
+  }
+  if (r === "not-found") {
+    return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.renderer.deviceNotFound"), 404);
+  }
+  // 广播设备列表变化(WS → 卡片 / Web 刷新),与禁用端点同款。
+  try { getEventManager().emitDeviceListChanged(getCachedDevices().length); } catch { /* ignore */ }
+  return c.json({ success: true });
+});
+
 // ==================== ESPHome 6053(每台设备各自一把密钥)====================
 //
 // 背景:ESPHome 每台设备的 `api.encryption.key` 都是各自生成的,一把全局密钥只能

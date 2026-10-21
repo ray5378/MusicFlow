@@ -954,6 +954,7 @@
     "renameFailed": "Rename failed",
     "deviceDeleted": "Deleted device \"{name}\"",
     "deleteFailed": "Delete failed",
+    "sendspinDeleteConfirm": "Delete offline device \"{name}\"? This permanently removes its saved profile (volume/disabled/ESPHome key), pairing record, renames & hidden preferences, and queue, and removes it from all groups; it must be re-discovered/re-paired to use again.",
     "disabledNamed": "Disabled \"{name}\"",
     "enabledNamed": "Enabled \"{name}\"",
     "hiddenMsg": "Hidden (no longer shown in my player switching popup; not disabled; others can still use it)",

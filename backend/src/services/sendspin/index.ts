@@ -627,6 +627,65 @@ export async function sendspinSetDisabled(clientId: string, disabled: boolean): 
   return true;
 }
 
+/** 删除一台**离线** Sendspin 设备(前端「删除」按钮,仅离线行可见)。
+ *
+ *  与两个既有语义的区别:
+ *   - 禁用(`sendspinSetDisabled`):行还在,随时可恢复;
+ *   - 解绑(`sendspinUnpair`):设备**在线**,只清配置痕迹,连接与行都保留;
+ *   - 删除(本函数):设备**离线**,把服务端为它保存的一切**连同行一起**抹掉 ——
+ *     持久档案(音量/静音/禁用/6053 密钥与端口)、配对记录、所有用户的改名/隐藏
+ *     偏好、播放队列、群组成员关系、peer 占位行,以及「记住的拨号目标」。
+ *     下次要用必须重新发现/配对。
+ *
+ *  在线设备一律拒绝(返回 "online"):删除不可撤销,设备正在播放时用户应先
+ *  禁用/断开再删。判据取 peer 行的 available —— 主进程权威,fork 模式下子进程
+ *  注册/断连也会同步到这里(见 startSendspinService 的 onActivated/onClosed)。
+ *
+ *  为什么还要遗忘拨号目标:离线行可能来自「添加播放器」记住的 host:port;
+ *  只删设备档案的话,自动发现/重拨下一轮又会把它拨回来 —— 用户会觉得「删不掉」。 */
+export async function sendspinDeleteOfflineDevice(
+  clientId: string,
+): Promise<"deleted" | "not-found" | "online"> {
+  if (!clientId) return "not-found";
+  const { getDeviceDisabled, getDeviceLastHost, listKnownDeviceIds, purgeDeviceArtifacts } =
+    await import("./deviceState.js");
+  // 单测/服务未启动时 pmSingleton 可能为 null —— 冷路径(用户点删除)动态兜底,不建静态边。
+  const pm = pmSingleton ?? (await import("../peer.js")).getPeerManager();
+  const peerId = `sendspin:${clientId}`;
+  if (pm?.get(peerId)?.available) return "online";
+
+  const known =
+    !!pm?.get(peerId) ||
+    getDeviceDisabled(clientId) ||
+    listKnownDeviceIds().includes(clientId);
+  if (!known) return "not-found";
+
+  // host 必须在清档案**之前**读:purge 会把整行删掉。
+  const lastHost = getDeviceLastHost(clientId);
+
+  // 1. 配对记录(内含一次 purge;fork 走 RPC,子进程同语义)。
+  try { await sendspinUnpair(clientId); } catch { /* 无配对/子进程未运行都不影响删除 */ }
+  // 2. 兜底清档案 + 所有用户的改名/隐藏偏好(没有配对记录时 unpair 会提前返回)。
+  try { purgeDeviceArtifacts(clientId); } catch { /* ignore */ }
+  // 3. 播放队列 / 群组成员 / peer 占位行 —— 删除是「这台设备不存在了」,与解绑的边界不同。
+  try { qcSingleton?.clear(clientId); } catch { /* ignore */ }
+  try {
+    const { getGroupManager } = await import("../group/index.js");
+    getGroupManager().removeDeviceFromAllGroups(clientId);
+  } catch { /* 组管理器未就绪时忽略 */ }
+  try { pm?.removeSendspinPeer(clientId); } catch { /* ignore */ }
+  // 4. 记住的拨号目标(按 last_host 匹配;端口未知,逐个遗忘)。
+  if (lastHost) {
+    try {
+      for (const t of await listDialTargets()) {
+        if (t.host === lastHost) await forgetDialTarget(t.host, t.port);
+      }
+    } catch { /* 目标列表不可读时忽略 */ }
+  }
+  log.info(`[sendspin] 已删除离线设备 ${clientId}(host=${lastHost || "-"})`);
+  return "deleted";
+}
+
 /** 解除配对(fork 经 RPC 在子进程执行):删配对记录 + 断开该客户端现存连接
  *  (下次连回落 sentinel,走重新配对/批准 —— 与子进程内 unpair op 同语义)。 */
 export async function sendspinUnpair(clientId: string): Promise<boolean> {

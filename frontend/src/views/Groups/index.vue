@@ -397,6 +397,21 @@
                   <el-button size="small" type="danger" plain><MfIcon name="Link2Off" />{{ t('groups.sendspinUnpair') }}</el-button>
                 </template>
               </el-popconfirm>
+              <!-- 删除(仅离线行,有 clientId):彻底移除设备档案/配对/改名/队列/群组。
+                   与「解绑」的区别:解绑给在线设备用、只清配置;删除是「这台设备不再
+                   存在」,在线时后端会拒绝(用户须先禁用/等它离线)。 -->
+              <el-popconfirm
+                v-if="canManage && dev.clientId"
+                :title="t('groups.sendspinDeleteConfirm', { name: deviceDisplayName({ clientId: dev.clientId, name: dev.name }, `sendspin:${dev.clientId}`) })"
+                :confirm-button-text="t('common.delete')"
+                :cancel-button-text="t('common.cancel')"
+                width="320"
+                @confirm="deleteSendspinDevice(dev)"
+              >
+                <template #reference>
+                  <el-button size="small" type="danger" plain><MfIcon name="Trash2" />{{ t('groups.delete') }}</el-button>
+                </template>
+              </el-popconfirm>
             </template>
           </div>
         </div>
@@ -1539,6 +1554,26 @@ async function unbindSendspin(dev: any): Promise<void> {
     await loadSendspinClients();
   } catch (e: any) {
     ElMessage.error(apiErrorText(e, t("common.operationFailed")));
+  }
+}
+
+/** 删除**离线** Sendspin 设备(在线设备后端会 409 拒绝)。
+ *
+ *  与两个相邻操作的区别:
+ *   - 禁用:行保留、随时可恢复;
+ *   - 解绑:设备在线,只清配置、连接与行都保留;
+ *   - 删除:彻底移除 —— 服务端档案(音量/禁用/6053 密钥)、配对记录、改名/隐藏
+ *     偏好、播放队列、群组成员与拨号记忆一并清掉,设备需重新发现/配对才会回来。 */
+async function deleteSendspinDevice(dev: any): Promise<void> {
+  if (!dev?.clientId) return;
+  const name = deviceDisplayName({ clientId: dev.clientId, name: dev.name }, `sendspin:${dev.clientId}`);
+  try {
+    await api.delete(`/rest/api/v1/sendspin/devices/${encodeURIComponent(dev.clientId)}`);
+    ElMessage.success(t("groups.deviceDeleted", { name }));
+    await loadSendspinClients();
+    await loadGroups(); // 删除会把它移出所有群组,组列表需要刷新
+  } catch (e: any) {
+    ElMessage.error(apiErrorText(e, t("groups.deleteFailed")));
   }
 }
 

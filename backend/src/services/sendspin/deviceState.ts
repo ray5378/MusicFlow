@@ -271,6 +271,22 @@ export function saveDeviceHost(clientId: string, host: string): void {
   }
 }
 
+/** 读某设备最后一次出现的 host(无行/未记录 → 空串)。
+ *  用途:「删除离线设备」时要把「记住的拨号目标」(dial_targets 按 host+port 存)
+ *  一并遗忘 —— 否则删完这条记录,自动发现下一轮又会把同一台设备拨回来。 */
+export function getDeviceLastHost(clientId: string): string {
+  try {
+    if (!clientId) return "";
+    const row = sqlite
+      .prepare("SELECT last_host FROM sendspin_device_state WHERE client_id = ?")
+      .get(clientId) as any;
+    return typeof row?.last_host === "string" ? row.last_host : "";
+  } catch (e: any) {
+    log.warn(`[device-state] 读 host ${clientId} 失败: ${e?.message || e}`);
+    return "";
+  }
+}
+
 /** 该 host 是否属于**被用户禁用**的设备 —— 自动发现/拨号的守卫。
  *
  *  为什么要:用户禁用一台设备后它仍在广播 mDNS,自动发现(或音流的名单补枪)

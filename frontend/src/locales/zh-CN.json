@@ -954,6 +954,7 @@
     "renameFailed": "重命名失败",
     "deviceDeleted": "已删除设备「{name}」",
     "deleteFailed": "删除失败",
+    "sendspinDeleteConfirm": "删除离线设备「{name}」？将彻底移除服务端保存的设备档案(音量/禁用/6053 密钥)、配对记录、改名与隐藏偏好、播放队列，并移出所有群组；下次使用需重新发现/配对。",
     "disabledNamed": "已禁用「{name}」",
     "enabledNamed": "已启用「{name}」",
     "hiddenMsg": "已隐藏(不再显示在我的播放器切换弹窗;未禁用,他人仍可用)",
