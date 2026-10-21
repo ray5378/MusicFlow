@@ -584,7 +584,7 @@ console.log("===== R18 流转接续:起播即落位 + 建会话硬预算(HiVi �
   );
   check(
     "transfer 到 AirPlay:把源进度交给本次 cast",
-    /const inCastPos = parsedTo\.kind === "airplay" && !borrow\.armed/.test(peers)
+    /const inCastPos = !borrow\.armed[\s\S]{0,260}?parsedTo\.kind === "airplay"/.test(peers)
       && /Math\.round\(inCastPos \* 1000\)/.test(peers),
     "transfer 仍走「先起播、再 seek」",
   );
@@ -767,6 +767,51 @@ console.log("===== R24 音量/静音写入口径统一 + 永久观测日志 ====
     (peers.match(/const body = await c\.req\.json\(\)\.catch/g) || []).length >= 1
       && !/kind === "dlna"\) \{\n    const \{ volume \} = await c\.req\.json/.test(peers),
     "分支内又各自解析 body:全局策略/日志会再次漏改",
+  );
+}
+console.log("===== R25 同设备双协议流转(AirPlay <-> DLNA):落点/互斥/资源回收 =====");
+{
+  const peersG = stripComments(read("backend/src/routes/api/peers.ts"));
+  const dlnaG = stripComments(read("backend/src/services/dlna/control.ts"));
+  const restG = stripComments(read("backend/src/routes/rest/index.ts"));
+  check(
+    "流转识别同设备双身份(AirPlay host == DLNA location host)",
+    /isSamePhysicalDevice/.test(peersG) && /listAirPlayDevices\(\)/.test(peersG) && /new URL\(dl\.location\)/.test(peersG),
+    "同设备流转会被当成两台设备:起播互斥停掉源端后读不到进度",
+  );
+  check(
+    "流转起点在任何起播/互斥动作之前定格(srcPosEarly)",
+    /const srcPosEarly = askPosition \?\? \(sameDevice \? await readPeerPositionSeconds/.test(peersG)
+      && /const inCastPos = !borrow\.armed[\s\S]{0,260}srcPosEarly/.test(peersG),
+    "落点在源端被互斥停掉之后才读:会恒为 0(真机=流转后从头播)",
+  );
+  check(
+    "DLNA playMedia 把 startMs 编进 timeOffset(起播即落位)",
+    /async playMedia\(item: QueueItem, baseUrl: string, startMs = 0\)/.test(dlnaG)
+      && /timeOffset: startSec/.test(dlnaG),
+    "DLNA 忽略 startMs:流转/续播只能从 0 秒拉流",
+  );
+  check(
+    "DLNA 起播基线带上 timeOffset(进度不归零)",
+    /const startOffsetSec = Math\.max\(0, Math\.round\(Number\(opts\.timeOffset\)/.test(dlnaG)
+      && /pos: startOffsetSec/.test(dlnaG),
+    "带进度投流后进度条从 0 重新爬",
+  );
+  check(
+    "DLNA 起播前先冻结同 host AirPlay 队列,再停会话(防 IDLE->advance 反杀)",
+    /getQueueController\(\)\.stopPlayback\(`airplay:\$\{d\.id\}`\)[\s\S]{0,900}?await stopAirPlaySession\(d\.id\)/.test(ap),
+    "只停会话不冻队列:AirPlay 端会把 IDLE 判成自然结束并重新 cast,把 DLNA 反杀(真机=主卧 0 秒不出声)",
+  );
+  check(
+    "flow 会话把下游取消接到 session.abort()(释放解码器槽)",
+    /killOnCancel\(NodeReadable\.toWeb\(session\.stream as any\), \(\) => session\.abort\(\)\)/.test(restG),
+    "设备切歌后旧 flow 会话继续占转码槽:出流首字节越来越慢,DLNA 反复卡死",
+  );
+  check(
+    "同一设备的新 flow 会话接管旧会话(防旧连接迟迟不关)",
+    /const activeFlowAborts = new Map<string, \(\) => void>\(\)/.test(restG)
+      && /activeFlowAborts\.get\(opts\.deviceId\)/.test(restG),
+    "缺每设备单会话约束:旧会话残留时新会话只能排队",
   );
 }
 console.log("");

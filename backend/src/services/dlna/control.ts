@@ -858,7 +858,7 @@ export async function castToDevice(opts: CastOptions): Promise<{ mediaUri: strin
   const albumArtUri = opts.coverArt ? `${opts.baseUrl}/rest/getCoverArt?id=${encodeURIComponent(opts.coverArt)}&size=500` : undefined;
   const metadata = buildDidlLite({ title: opts.title, artist: opts.artist, album: opts.album, uri: streamUrl, mime: opts.mime, albumArtUri });
 
-  log.info(`[cast] ${opts.deviceId}: BEGIN songId=${opts.songId} title="${opts.title}"`);
+  log.info(`[cast] ${opts.deviceId}: BEGIN songId=${opts.songId} title="${opts.title}" seek=${Math.max(0, Math.round(Number(opts.timeOffset) || 0))}s`);
   // Reset the "next enqueued" flag — a fresh SetAVTransportURI clears the device's next slot.
   runtimeOf(opts.deviceId).nextEnqueued = false;
   // 记住本次投屏参数(剥离 timeOffset,它只对这一次起播有效),供后续 seek 重建流复用。
@@ -922,8 +922,12 @@ export async function castToDevice(opts: CastOptions): Promise<{ mediaUri: strin
     } catch { return 0; }
   })();
   mediaDuration.set(opts.deviceId, castDuration);
+  // 起播锚点 = timeOffset(流转/带进度起播)与 0(普通起播)。基线若不带上这个偏移,
+  // 设备又不报 RelTime(HiVi/MUZO 恒回 0)时,进度会从 0 重新爬 —— 用户看到
+  // 「流转后在播 17 秒外的音频,进度条却从 0 开始」。
+  const startOffsetSec = Math.max(0, Math.round(Number(opts.timeOffset) || 0));
   positionEstimates.set(opts.deviceId, {
-    pos: 0,
+    pos: startOffsetSec,
     at: Date.now(),
     dur: castDuration,
     trackUri: streamUrl,
@@ -1698,10 +1702,16 @@ export function createDlnaProtocolPlayer(deviceId: string): ProtocolPlayer {
   const playerId = `dlna:${deviceId}`;
   return {
     playerId,
-    async playMedia(item: QueueItem, baseUrl: string, _startMs = 0) {
+    async playMedia(item: QueueItem, baseUrl: string, startMs = 0) {
+      // ★ 起播即落位:QueueController 传的是**毫秒**起点(流转 / 带进度起播),
+      //   必须编进流 URL 的 timeOffset(秒),否则设备从 0 秒拉流 ——
+      //   真机表现就是「从 AirPlay 流转回主卧后,歌从头开始 / 进度回到 0」。
+      //   与 AirPlay 的 playMedia(startMs) 同语义,不再依赖起播后二次 seek。
+      const startSec = Math.max(0, Math.round(Number(startMs) || 0) / 1000);
       const { mediaUri } = await castToDevice({
         songId: item.songId, title: item.title, artist: item.artist, album: item.album,
         mime: item.mime, deviceId, baseUrl, coverArt: item.coverArt,
+        ...(startSec > 0 ? { timeOffset: startSec } : {}),
       });
       return { mediaUri };
     },

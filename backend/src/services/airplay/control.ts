@@ -246,13 +246,26 @@ async function stopSession(deviceId: string): Promise<void> {
 
 /** 双协议互斥:停止与指定 host 同址的 AirPlay 会话(RAOP TEARDOWN)。
  *  DLNA cast 前调用——Linkplay/HiVi 类设备音频输入互斥,残留 AirPlay 会话
- *  会占用音频通道导致 DLNA 无声。返回被停止的会话 deviceId 列表。 */
+ *  会占用音频通道导致 DLNA 无声。返回被停止的会话 deviceId 列表。
+ *
+ *  ⚠️ 必须**先冻结 AirPlay 队列,再停会话**(与 yieldSiblingDlnaForAirPlay 对称)。
+ *  只停会话时:设备回 IDLE ⇒ 该端 tracker 判成「这首自然放完」⇒ advance ⇒ 重新
+ *  castToAirPlayDevice,把刚建立的 DLNA 会话又反杀 —— 用户可见 =「流转到主卧后
+ *  一直 0 秒不出声,HiVi 反而又播起来了」(2026-10-21 真机复现)。 */
 export async function stopAirPlaySessionsForHost(host: string): Promise<string[]> {
   const stopped: string[] = [];
   if (!host) return stopped;
   const h = host.toLowerCase();
   for (const d of getAirPlayDevices()) {
     if (d.host && d.host.toLowerCase() === h && hasActiveSession(d.id)) {
+      // ① 先冻结队列:挡住 IDLE → advance → 重新 cast 的二阶反杀。
+      try {
+        const { getQueueController } = await import("../player/index.js");
+        getQueueController().stopPlayback(`airplay:${d.id}`);
+      } catch (e: any) {
+        log.warn("双协议互斥:冻结同 host AirPlay 队列失败(忽略)", { deviceId: d.id, err: e?.message || e });
+      }
+      // ② 再停会话(TEARDOWN + kill ffmpeg)。
       await stopAirPlaySession(d.id);
       stopped.push(d.id);
     }

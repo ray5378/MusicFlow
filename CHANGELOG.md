@@ -2,6 +2,30 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.61] - 2026-10-21
+
+### Fix / 主卧(DLNA)播放卡顿反复切歌 + 同一台设备 AirPlay↔DLNA 队列流转
+
+用户升级到 4.6.60 后反馈主卧(DLNA,与 HiVi 同一台设备)播放异常。现场定位到两条相互放大的缺陷:
+
+**① flow 连续流会话不随客户端断开而中止 → 转码槽泄漏(卡顿主因)**
+
+`serveFlowQueue` 只监听 `c.req.raw.signal`,没有像单曲管道那样用 `killOnCancel` 绑定响应取消。DLNA 设备快速切歌后旧 HTTP 请求虽已断开,会话仍在等 flow 转码槽:现场 38 个 ffmpeg、`kind=flow limit=8 queue=22`、出流首字节 150~330s,设备因等不到数据反复 `TRANSITIONING` → 5s 乐观窗口判 stalled → 连卡 2 次放行切歌 → 再产生新会话,形成「越切越卡」的正反馈。
+
+- flow 响应流改为 `killOnCancel(toWeb(session.stream), () => session.abort())`,下游取消即中止会话、释放解码器槽;
+- 新增每设备 `activeFlowAborts` 单会话约束:新会话接管时先中止旧的(部分固件切 URI 后旧连接迟迟不关,只靠 cancel 不够)。
+- 真机复测:mock DLNA 连续 8 次 next 后 `ffmpeg=2`、转码排队 0、仍 `PLAYING pos=6`(修复前 38/22 且持续卡死)。
+
+**② 同设备双协议流转:落点丢失与互斥反杀**
+
+HiVi(AirPlay)与主卧(DLNA)是同一台设备的两个 peer,流转时目标端起播的互斥会立刻停掉源端,原实现的两处问题导致「转到主卧后从头播 / 0 秒不出声」:
+
+- 流转路由:新增 `isSamePhysicalDevice`(AirPlay host == DLNA location host);**同设备流转的源端进度在任何起播/互斥动作之前定格**(`srcPosEarly`),DLNA 目标也走「起播即落位」;跨设备仍保持原口径。
+- DLNA `playMedia` 此前**忽略 startMs**(`_startMs`),流转只能从 0 秒拉流;现按 `timeOffset=N` 编进流 URL,并把设备位置基线初始化为该偏移(设备不报 RelTime 时进度条不再从 0 重爬)。
+- 反向互斥(`stopAirPlaySessionsForHost`)补上**先冻结 AirPlay 队列、再停会话**:只停会话时设备回 IDLE 会被 AirPlay 端判成自然结束 → advance → 重新 cast,把刚建立的 DLNA 会话反杀(真机:主卧一直 0 秒,HiVi 又播起来)。
+- **真机双向验收**:主卧播到 12.6s → 流转 HiVi 从 13.0s 继续(队列 295/idx 33 不变);HiVi 播到 16.95s → 流转回主卧,设备拉 `?timeOffset=17` 并从 17.0s 播到 25.9s,AirPlay 侧 `STOPPED` 不再反抢。
+- **回归守卫**:`check-airplay-playback-chain.mjs` 新增 **R25**(同设备识别/落点定格/DLNA timeOffset/基线偏移/冻结后再停/flow 取消与单会话),并同步更新「transfer 到 AirPlay 落位」的旧断言;`tsc` 0、流转+互斥相关 5 文件 270 例通过。
+
 ## [4.6.60] - 2026-10-21
 
 ### Fix / 4.6.59 的 CI 红:在线删除用 CONFLICT 而非 INVALID_PARAM 配 409

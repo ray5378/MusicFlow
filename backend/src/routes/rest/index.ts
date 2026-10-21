@@ -1858,6 +1858,15 @@ async function resolveFlowAf(
  * 只有一首 / 首曲解析不出输入），调用方**必须**回退 `servePipelinedSong`。
  * 回退不是"绕过管道"：逐首仍是完整六段（D9），只是没有重叠窗口。
  */
+/** 每台设备只保留一个 flow 会话:新会话(设备重新拉流)到达时先中止旧的。
+ *
+ *  与 killOnCancel 是两道保险:后者依赖 HTTP 层真的发出 cancel;部分固件切换
+ *  SetAVTransportURI 后旧连接迟迟不关闭(或半开),只靠 cancel 会让旧会话一直占着
+ *  flow 槽 —— 设备同一时刻只能播一条流,所以「新替旧」在语义上永远成立。
+ *  2026-10-21 240 现场:快速切歌后 20+ 个旧会话留在转码队列,flow 池 8 槽被占满,
+ *  后续出流首字节 200s+,DLNA 设备等不到数据 → 反复 TRANSITIONING/卡死切歌。 */
+const activeFlowAborts = new Map<string, () => void>();
+
 async function serveFlowQueue(
   c: any,
   opts: {
@@ -1956,14 +1965,26 @@ async function serveFlowQueue(
     return new Response(null, { status: 499 });
   }
   signal.addEventListener("abort", onAbort, { once: true });
+  // 同一台设备的新会话接管:旧会话先中止(释放它占的 flow 槽),再挂新钩子。
+  const prevAbort = activeFlowAborts.get(opts.deviceId);
+  if (prevAbort && prevAbort !== onAbort) {
+    try { prevAbort(); } catch { /* 旧会话已收敛 */ }
+  }
+  activeFlowAborts.set(opts.deviceId, onAbort);
   // 会话结束（自然放完 / 中止）→ 摘掉 flow 所有权，否则该设备的切歌决策被永久吞掉。
   void session.done.then(() => {
     signal.removeEventListener("abort", onAbort);
     qm.setFlowOwned(opts.deviceId, false);
+    if (activeFlowAborts.get(opts.deviceId) === onAbort) activeFlowAborts.delete(opts.deviceId);
   });
 
   const { Readable: NodeReadable } = await import("node:stream");
-  let webStream: any = NodeReadable.toWeb(session.stream as any);
+  // ★ 客户端断开(设备切 URI / 停读)必须传导成 abort:
+  //   toWeb 的 cancel 只会 destroy(enc.stdout),而 flow 槽位挂在**解码器**上,
+  //   encoder 退出不会释放它们;只依赖 c.req.raw.signal 时,Node 侧连接关闭并不
+  //   总会置 aborted(240 实测:一次快速切歌后 20+ 个会话留在转码队列,首字节 200s+)。
+  //   与单曲管道同款:killOnCancel 把「下游取消」直接接到 session.abort()。
+  let webStream: any = killOnCancel(NodeReadable.toWeb(session.stream as any), () => session.abort());
   const metaint = opts.icyMetaint ?? 0;
   if (metaint > 0) webStream = icyFrameStream(webStream, metaint, () => metadata);
 

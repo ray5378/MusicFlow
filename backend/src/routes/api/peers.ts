@@ -252,6 +252,34 @@ app.post("/v1/peers/:peerId/queue/play", async (c) => {
 //
 // Body: { from: string }  from = 源端完整对外 peerId
 
+/** 同一台物理设备的双协议身份(AirPlay 与 DLNA 两个 peer)。
+ *
+ *  判据 = AirPlay 设备 host 与 DLNA renderer 的 location hostname 相同 —— 与双协议互斥
+ *  (yieldSiblingDlnaForAirPlay / stopAirPlaySessionsForHost)用的是同一套映射。
+ *
+ *  为什么流转要单独识别:这两个 peer 是**同一台设备**,目标端起播时的互斥会把源端
+ *  立刻停掉(AirPlay→DLNA 停同 host AirPlay;DLNA→AirPlay 冻结同 host DLNA 队列),
+ *  之后再读源端进度只会读到 0 —— 起播落点必须在互斥发生**之前**定格。 */
+async function isSamePhysicalDevice(fromPeerId: string, toPeerId: string): Promise<boolean> {
+  const a = parsePeerId(fromPeerId);
+  const b = parsePeerId(toPeerId);
+  if (!a || !b) return false;
+  const airPlayId = a.kind === "airplay" ? a.id : b.kind === "airplay" ? b.id : null;
+  const dlnaId = a.kind === "dlna" ? a.id : b.kind === "dlna" ? b.id : null;
+  if (!airPlayId || !dlnaId) return false;
+  try {
+    const { listAirPlayDevices } = await import("../../services/airplay/control.js");
+    const { getDevice } = await import("../../services/dlna/control.js");
+    const ap = listAirPlayDevices().find((d) => d.id === airPlayId);
+    const dl = getDevice(dlnaId);
+    if (!ap?.host || !dl?.location) return false;
+    return new URL(dl.location).hostname.toLowerCase() === ap.host.toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
+
 app.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
   const toPeerId = decodePeerId(c);
   const { from, position: requestedPosition } = await c.req.json().catch(() => ({} as any));
@@ -290,8 +318,13 @@ app.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
   const parsedTo = parsePeerId(toPeerId);
   if (!parsedTo) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   // ── 进度对齐:目标端出声的位置与流转前对齐(秒级) ────────────────────────
-  // 读数**放在起播之后**:起播(尤其 DLNA 投递)要花 1~3s,这期间源端仍在播,
-  // 读得越晚越贴近目标端真正出声的那一刻。
+  // ★ 同一台设备的双协议流转(AirPlay ↔ DLNA):目标端起播时的互斥会**停掉源端**
+  //   (AirPlay→DLNA 停同 host AirPlay;DLNA→AirPlay 冻结同 host DLNA 队列),
+  //   之后再读源端进度只会读到 0 —— 落点必须在任何起播动作之前定格。
+  //   跨设备流转仍按旧口径:AirPlay 目标在起播前读一次;DLNA 目标在起播后读
+  //   (起播要 1~3s,读得越晚越贴近目标端真正出声的时刻)。
+  const sameDevice = await isSamePhysicalDevice(fromPeerId, toPeerId);
+  const srcPosEarly = askPosition ?? (sameDevice ? await readPeerPositionSeconds(fromPeerId) : null);
   let landedPosition: number | null = null;
   if (isCastPeer(parsedTo)) {
     // 流转目标是被托管成员 → 先脱离活跃组(MA ensure_player_ungrouped)。
@@ -301,12 +334,14 @@ app.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
     //   武装必须在起播**之前**:起播那一步的 playCore 会消费它。
     const borrow = await tryArmSendspinBorrow(fromPeerId, toPeerId, askPosition);
     let startedIdx: number | null = null;
-    // ★ AirPlay 目标:起点必须在**这一次** cast 里落位(playMedia 的 startMs),
-    //   不能再走「先起播、再 seek」—— 那是同一设备上的第二次完整建会话,HiVi/Linkplay
-    //   这类单会话设备会在第二次 RECORD 上永久等待(2026-10-21 真机:流转接续失败)。
-    //   sendspin 借流自带落点,不需要本值。
-    const inCastPos = parsedTo.kind === "airplay" && !borrow.armed
-      ? (askPosition ?? await readPeerPositionSeconds(fromPeerId))
+    // ★ AirPlay / 同设备 DLNA 目标:起点必须在**这一次** cast 里落位(playMedia 的 startMs),
+    //   不能再走「先起播、再 seek」—— 对 AirPlay 是同一设备上的第二次完整建会话,
+    //   HiVi/Linkplay 这类单会话设备会在第二次 RECORD 上永久等待(2026-10-21 真机);
+    //   对同设备 DLNA 则是源端已被互斥停掉、晚读数恒为 0。sendspin 借流自带落点。
+    const inCastPos = !borrow.armed
+      ? (parsedTo.kind === "airplay"
+          ? (askPosition ?? await readPeerPositionSeconds(fromPeerId))
+          : srcPosEarly)
       : null;
     try {
       startedIdx = await getQueueManager().playFrom(
@@ -325,10 +360,13 @@ app.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
     if (handedOver) {
       landedPosition = borrow.positionSeconds ?? null;
     } else if (inCastPos !== null && inCastPos > 0) {
-      // 起播即落位(AirPlay):**不再补 seek**,避免第二次建会话。
+      // 起播即落位(AirPlay / 同设备 DLNA):**不再补 seek**,避免第二次建会话。
       landedPosition = inCastPos;
     } else {
-      const pos = askPosition ?? await readPeerPositionSeconds(fromPeerId);
+      // 晚读数优先(跨设备时更贴近目标端真正出声的时刻);同设备场景源端已被互斥
+      // 停掉、晚读数恒为 0 → 用起播前的定格值兜底。
+      const late = askPosition ?? await readPeerPositionSeconds(fromPeerId);
+      const pos = late !== null && late > 0 ? late : srcPosEarly;
       if (pos !== null && pos > 0 && await seekPeerToSeconds(toPeerId, pos)) landedPosition = pos;
     }
   } else {
