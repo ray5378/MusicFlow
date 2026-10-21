@@ -2631,9 +2631,16 @@ async function serveCastStream(
     sourceFormat: resolvedSong.suffix,
     sourceBitRate: resolvedSong.bitRate,
   });
+  // AirPlay 的 seek 重拉走本路由(回环流 + timeOffset)。web 源(插件直链)上游
+  // 不支持 Range,服务端 -ss 必须落在**可定位的 membuf** 上 —— 否则 ffmpeg 在
+  // 非可寻址的 raw 流上定位失败(240 实测 netease: timeOffset=60 直接 0 字节、
+  // Invalid data)。所以 AirPlay + web + timeOffset>0 也要先整曲缓冲;
+  // DLNA 保持旧口径(seek 直通更快,失败由设备侧重拉兜底)。
+  const airplaySeekNeedsBuffer =
+    ctx.kind === "airplay" && timeOffset > 0 && (resolvedSong.type || "local") === "web";
   if (transcode.should && transcode.format) {
     const input = await resolveTranscodeInput(c, resolvedSong, {
-      buffering: timeOffset === 0,
+      buffering: timeOffset === 0 || airplaySeekNeedsBuffer,
       // 大文件直通只对 DLNA 投屏开放(插件详情弹窗开关);AirPlay 不传。
       largeFileDirect: ctx.kind === "dlna",
     });
@@ -2655,7 +2662,7 @@ async function serveCastStream(
     const { resolveDlnaOutput } = await import("../../services/audio/pipeline.js");
     const castCodec = resolveDlnaOutput(resolvedSong.suffix);
     const input = await resolveTranscodeInput(c, resolvedSong, {
-      buffering: timeOffset === 0,
+      buffering: timeOffset === 0 || airplaySeekNeedsBuffer,
       // 同上:大文件直通仅 DLNA;AirPlay 一律全缓冲(判定覆盖完整)。
       largeFileDirect: ctx.kind === "dlna",
     });

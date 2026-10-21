@@ -154,6 +154,32 @@ export function toLoopbackAirPlayStreamUrl(streamUrl: string): string {
 }
 
 /**
+ * 把起播偏移编进**服务端回环流** URL(2026-10-22)。
+ *
+ * ⚠️ 绝不能让 AirPlay 解码器在 live FLAC 管线上用 `-ss` 做输入定位:
+ * 该响应是 chunked、不可寻址的编码流,`-ss` 会落在**帧中间** ——
+ * 240 实测同一 token:`-ss 60` 只出 72B 且 `[flac] invalid sync code`,
+ * `-ss 200` 为 0B;设备端表现就是「队列/进度都对、但一点声音都没有」,
+ * 用户再拖一次进度(重建会话)有时又能响(取决于落点是否恰好对齐帧)。
+ *
+ * 正确做法:偏移交给 `/rest/airplay/stream/:token?timeOffset=N` 的**服务端管道**,
+ * `-ss` 落在可定位的源(本地文件 / WebDAV Range / membuf)上;解码器从 0 开始吃
+ * 一条**从一开始就正确**的流。AirPlay 的 seek 重建与起播落位共用这一条。
+ */
+export function withPlaybackOffset(streamUrl: string, seekSec?: number): string {
+  if (seekSec === undefined || !Number.isFinite(seekSec) || seekSec <= 0) return streamUrl;
+  try {
+    const u = new URL(streamUrl);
+    if (!u.pathname.startsWith("/rest/airplay/stream/")) return streamUrl;
+    // 保留毫秒精度(流转落点常见 7.702s);服务端 decodeArgs 的 -ss 接受小数。
+    u.searchParams.set("timeOffset", String(Math.round(seekSec * 1000) / 1000));
+    return u.toString();
+  } catch {
+    return streamUrl;
+  }
+}
+
+/**
  * 设备级串行闸(2026-10-21 240 现网「流转 + 拖动进度」卡死根因)。
  *
  * 客户端流转播放与拖动进度的时序是**并发**的:transfer 先 `playFrom`(占住
@@ -346,7 +372,9 @@ async function startSession(opts: AirPlayCastOptions, seekSec?: number): Promise
   if (!baseUrl) throw new Error("未确定播放流地址(DLNA_BASE_URL 或先进行一次投屏)");
   const streamUrl = opts.streamUrl || createAirPlaySession(opts.songId, opts.deviceId, baseUrl).streamUrl;
   // 解码器吃**回环管道**(整曲缓冲 + 上游死亡⇒显式错误),不吃 raw 直通:见 toLoopbackAirPlayStreamUrl。
-  const feedUrl = toLoopbackAirPlayStreamUrl(streamUrl);
+  // ★ 起播偏移编进 URL(`?timeOffset=N`),由**服务端管道**做 -ss —— 绝不让解码器
+  //   在 live FLAC 流上用 -ss(帧中间起读 ⇒ invalid sync code、无声;见 withPlaybackOffset)。
+  const feedUrl = toLoopbackAirPlayStreamUrl(withPlaybackOffset(streamUrl, seekSec));
 
   const player = new RaopPlayer({ host: dev.host, port: dev.port, pk: dev.pk, et: dev.et });
   let session: RaopSession;
@@ -370,7 +398,7 @@ async function startSession(opts: AirPlayCastOptions, seekSec?: number): Promise
   if (seekSec !== undefined && Number.isFinite(seekSec) && seekSec > 0) {
     player.setStartPosition(seekSec);
   }
-  const ff = spawnDecoder(feedUrl, seekSec, {
+  const ff = spawnDecoder(feedUrl, undefined, {
     rowId: opts.songId,
   });
   // ⚠️ 这里**不要**再 makeProducer(ff):runStream 内部会建唯一一份 producer。
@@ -939,7 +967,9 @@ async function seekUnlocked(deviceId: string, seconds: number): Promise<void> {
   }
 
   // 重播输入同样走回环管道(同上:raw 直通会假 EOF/从头重连);回环地址幂等直通。
-  s.ffmpeg = spawnDecoder(s.feedUrl, t, {
+  // 原地 seek 也要把偏移编进 feed URL(服务端 -ss),绝不在 live FLAC 流上做 -ss。
+  s.feedUrl = toLoopbackAirPlayStreamUrl(withPlaybackOffset(s.streamUrl, t));
+  s.ffmpeg = spawnDecoder(s.feedUrl, undefined, {
     rowId: lastCast.get(deviceId)?.songId,
   });
   runStream(s, s.session);

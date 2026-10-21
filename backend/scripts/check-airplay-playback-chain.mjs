@@ -288,15 +288,16 @@ check(
   "回环化实现未按「同 path/token 只换 origin」写",
 );
 check(
-  "in-proc 起播:spawnDecoder 首参是 feedUrl(回环管道),不是 raw 包装结果",
-  /const\s+feedUrl\s*=\s*toLoopbackAirPlayStreamUrl\(streamUrl\)/.test(ap)
-    && /spawnDecoder\(feedUrl,/.test(ap),
-  "起播路径未见 spawnDecoder(feedUrl, ...)",
+  "in-proc 起播:spawnDecoder 首参是 feedUrl(回环管道 + 服务端 timeOffset),不是 raw 包装结果",
+  /const\s+feedUrl\s*=\s*toLoopbackAirPlayStreamUrl\(withPlaybackOffset\(streamUrl, seekSec\)\)/.test(ap)
+    && /spawnDecoder\(feedUrl, undefined/.test(ap),
+  "起播路径未见 spawnDecoder(feedUrl, undefined, ...)",
 );
 check(
-  "原地 seek 重建解码器同样用 s.feedUrl(不得退回 streamUrl/raw)",
-  /spawnDecoder\(s\.feedUrl,\s*t,/.test(ap),
-  "seek 重建解码器未使用 s.feedUrl",
+  "原地 seek 重建解码器同样用重编 timeOffset 的 s.feedUrl(不得退回 streamUrl/raw/-ss)",
+  /s\.feedUrl\s*=\s*toLoopbackAirPlayStreamUrl\(withPlaybackOffset\(s\.streamUrl, t\)\)/.test(ap)
+    && /spawnDecoder\(s\.feedUrl,\s*undefined,/.test(ap),
+  "seek 重建解码器未使用 s.feedUrl 或又退回 -ss",
 );
 check(
   "**反向断言**:control.ts 不得再用 resolvePipelineInput 包装 AirPlay 出流地址",
@@ -908,6 +909,30 @@ console.log("===== R27 flow 起播不得被整队预解析阻塞 + 大文件直�
       && /if \(songId !== cand\.id\) evictStreamFallbackCache\(songId\)/.test(prefG)
       && /evictStreamFallbackCache\(songId\)/.test(restG),
     "成功可播后仍留着旧负缓存:队列继续判跳",
+  );
+}
+console.log("===== R28 AirPlay 流转/seek 落位:偏移走服务端回环流,不在 live FLAC 上 -ss =====");
+{
+  const apG = stripComments(read("backend/src/services/airplay/control.ts"));
+  const restG = stripComments(read("backend/src/routes/rest/index.ts"));
+  check(
+    "起播偏移编进 feed URL(timeOffset),解码器不再对 live FLAC 做 -ss",
+    /export function withPlaybackOffset\(streamUrl: string, seekSec\?: number\)/.test(apG)
+      && /withPlaybackOffset\(streamUrl, seekSec\)/.test(apG)
+      && /spawnDecoder\(feedUrl, undefined/.test(apG),
+    "解码器在不可寻址的 FLAC 管线上 -ss:帧中间起读 ⇒ invalid sync code / 0 字节 ⇒ 有进度没声音",
+  );
+  check(
+    "原地 seek 同样重编 feedUrl 且不做 -ss",
+    /withPlaybackOffset\(s\.streamUrl, t\)/.test(apG) && /spawnDecoder\(s\.feedUrl, undefined/.test(apG),
+    "原地 seek 仍在 live 流上 -ss:拖动进度后无声/杂音",
+  );
+  check(
+    "AirPlay + web 源 seek 先整曲缓冲(服务端 -ss 落在可定位的 membuf)",
+    /airplaySeekNeedsBuffer/.test(restG)
+      && /ctx\.kind === "airplay" && timeOffset > 0 && \(resolvedSong\.type \|\| "local"\) === "web"/.test(restG)
+      && /buffering: timeOffset === 0 \|\| airplaySeekNeedsBuffer/.test(restG),
+    "web 直链不支持 Range:服务端 -ss 直接失败(timeOffset=60 返回 Invalid data / 0 字节)",
   );
 }
 console.log("");

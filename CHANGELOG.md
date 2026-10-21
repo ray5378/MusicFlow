@@ -2,6 +2,35 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.66] - 2026-10-22
+
+### Fix / 主卧(DLNA)→HiVi(AirPlay) 流转:队列/进度都对，但设备不出声
+
+**根因**：AirPlay 解码器把起播偏移用 `-ss N` 做**输入定位**，而输入是
+`/rest/airplay/stream/:token` 的 **live FLAC 管线**（chunked、不可寻址）。`-ss` 会落在
+编码帧中间，解码器拿到的是残帧。240 实测同一 token：
+- `-ss 60` 只出 **72B**，stderr `[flac] invalid sync code / decode_frame() failed`；
+- `-ss 200` 为 **0B**。
+设备端表现正是「队列和进度都流转过来了，但一点声音都没有」；用户再拖一次进度
+（重建会话）偶尔能响，取决于新落点是否恰好对齐帧边界。
+
+**修复**：
+1. `airplay/control.ts` 新增 `withPlaybackOffset()`：把起播偏移编进**服务端回环流**
+   URL（`/rest/airplay/stream/:token?timeOffset=N`），由服务端管道在**可定位的源**
+   （本地文件 / WebDAV Range / membuf）上做 `-ss`；解码器从 0 开始吃一条从头就正确的流。
+   起播落位与原地 seek 两条路径都改用它，**解码器不再对 live FLAC 做 -ss**。
+2. `/rest/airplay/stream`（`serveCastStream` 的 AirPlay 分支）：web 源 + `timeOffset>0`
+   也先整曲缓冲 —— 插件直链不支持 Range，服务端 `-ss` 会直接 `Invalid data`（实测
+   `timeOffset=60` 0 字节）；缓冲成 membuf 后可定位。DLNA 保持旧口径（seek 直通）。
+3. 真机复测（240，主卧 DLNA → HiVi AirPlay）：解码命令已是
+   `-i http://127.0.0.1:46400/rest/airplay/stream/<token>?timeOffset=4.158` 且**无 `-ss`**；
+   AirPlay 状态 PLAYING、位置持续前进；同一首 web 曲在 `timeOffset=0/60/200/263`
+   各出 3s PCM（529200B），不再有残帧错误。
+
+**回归守卫**：`check-airplay-playback-chain.mjs` 新增 **R28**（偏移走 feed URL / 原地 seek
+重编 URL / web 源 seek 整曲缓冲），并同步更新原「spawnDecoder(feedUrl, seekSec)」断言；
+AirPlay 相关 5 文件 62 例通过、`tsc` 0。
+
 ## [4.6.65] - 2026-10-21
 
 ### Fix / 4.6.64 CI 红:DLNA 渲染器 manifest 契约仍断言「零配置」
