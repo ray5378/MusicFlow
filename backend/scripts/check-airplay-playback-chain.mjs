@@ -740,6 +740,34 @@ console.log("===== R23 起播/重启恢复:不得绕开统一起播路径;设备
   );
 }
 
+console.log("===== R24 启动期 HA 音量/静音回放守卫(重启保留设备音量,4.6.55 现场补漏) =====");
+{
+  const peers = stripComments(read("backend/src/routes/api/peers.ts"));
+  const guard = stripComments(read("backend/src/services/player/bootVolumeGuard.ts"));
+  // 现场:容器启动 ~31s 后 airplay_device_state 被写成 20,写方 UA = HomeAssistant/…
+  // 服务端必须在启动窗口内拦住这笔"实体重建回放",否则持久值每次都被覆盖。
+  check(
+    "音量/静音写入口都调用启动期回放守卫",
+    /shouldIgnoreBootVolumeEcho\(\{[^}]*op: "volume"/.test(peers)
+      && /shouldIgnoreBootVolumeEcho\(\{[^}]*op: "mute"/.test(peers),
+    "音量或静音路由漏了守卫:HA 未升级时会继续覆盖持久值",
+  );
+  check(
+    "守卫只按 HA UA + 启动窗口 + 每 peer 第一笔生效",
+    /BOOT_VOLUME_GUARD_MS = 120_000/.test(guard)
+      && guard.includes("HA_UA_PREFIX")
+      && guard.includes("HomeAssistant")
+      && /if \(opts\.seen\.has\(key\)\) return false;/.test(guard),
+    "守卫条件被放宽/改窄(误拦非 HA 客户端,或拦掉用户后续操作)",
+  );
+  check(
+    "音量写入有永久观测日志(来源 UA / peer / 值)",
+    /\[peer-volume\] \$\{peerId\} <- \$\{volume\} ua=/.test(peers)
+      && /\[peer-mute\] \$\{peerId\} <- \$\{muted\} ua=/.test(peers),
+    "缺写入口径日志,下次再出现静默覆盖无法定位来源",
+  );
+}
+
 console.log("");
 if (failures.length) {
   console.log(`✗ AirPlay 播放链路时序守卫失败 ${failures.length} 项:`);

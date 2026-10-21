@@ -1,5 +1,7 @@
 // 自动生成 —— 由 index.ts 物理拆分而来（peers 域，35 条路由）。零逻辑改动。
 import type { Hono } from "hono";
+import { createLogger } from "../../utils/logger.js";
+import { shouldIgnoreBootVolumeEcho } from "../../services/player/bootVolumeGuard.js";
 import {
   BusinessErrorCode,
   apiErrorStatus,
@@ -789,19 +791,36 @@ app.post("/v1/peers/:peerId/seek", async (c) => {
  *  载荷 = 当前快照 + 本次 patch:fork 模式下主进程镜像可能尚未随 RPC 刷新,
  *  以本次写入值为准可避免广播出旧值。非 sendspin / 解析失败静默跳过。 */
 
+const log = createLogger("peers");
+
+// 进程启动时刻:启动窗口守卫的基准(本模块在监听前完成路由注册,≈ 进程启动)。
+// 见 services/player/bootVolumeGuard.ts 顶部的现场记录。
+const SERVER_BOOT_AT = Date.now();
+const bootEchoSeen = new Set<string>();
+
 app.post("/v1/peers/:peerId/volume", async (c) => {
   const peerId = decodePeerId(c);
   const parsed = parsePeerId(peerId);
   if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
+  // 音量写入口径统一在这里:一次解析、一条观测日志、一道启动期 HA 回放守卫。
+  // 此前五个分支(dlna/group/airplay/sendspin/local)各解析一次 body,任何全局
+  // 策略都要复制五份 —— 2026-10-21 的「重启后强制 20」正是这样漏掉的。
+  const body = await c.req.json().catch(() => ({} as any));
+  const volume = body?.volume;
+  if (typeof volume !== "number") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsVolume"), 400);
+  const ua = c.req.header("user-agent") || "";
+  log.info(`[peer-volume] ${peerId} <- ${volume} ua=${ua || "-"}`);
+  if (shouldIgnoreBootVolumeEcho({ now: Date.now(), bootAt: SERVER_BOOT_AT, ua, peerId, op: "volume", seen: bootEchoSeen })) {
+    // HA 实体重建时回放旧 volume_level(实测启动 ~31s 一笔)。忽略这笔不伤任何
+    // 用户操作:实体回放只发生一次,之后的写入(用户主动调)照常生效。
+    log.warn(`[peer-volume] 忽略启动期 HA 音量回放 ${peerId} <- ${volume}(保留持久值)`);
+    return c.json({ success: true, ignored: "boot-volume-echo" });
+  }
   if (parsed.kind === "dlna") {
-    const { volume } = await c.req.json().catch(() => ({} as any));
-    if (typeof volume !== "number") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsVolume"), 400);
     try { await setDeviceVolume(parsed.id, volume); return c.json({ success: true }); }
     catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   if (parsed.kind === "group") {
-    const { volume } = await c.req.json().catch(() => ({} as any));
-    if (typeof volume !== "number") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsVolume"), 400);
     try {
       // 组音量**先落库**(无成员也持久,重启恢复);再扇出到在线成员。
       // 扇出失败不回滚库值 —— 成员全离线时仍要保住用户的调节结果。
@@ -812,14 +831,10 @@ app.post("/v1/peers/:peerId/volume", async (c) => {
     catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   if (parsed.kind === "airplay") {
-    const { volume } = await c.req.json().catch(() => ({} as any));
-    if (typeof volume !== "number") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsVolume"), 400);
     try { await getQueueController().transport(parsed.id, "volume", volume); return c.json({ success: true }); }
     catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   if (parsed.kind === "sendspin") {
-    const { volume } = await c.req.json().catch(() => ({} as any));
-    if (typeof volume !== "number") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsVolume"), 400);
     try {
       await getQueueController().transport(parsed.id, "volume", volume);
       // 落库在 setVolumeCore(播控唯一咽喉)内完成;这里只管写成功后的回显广播。
@@ -829,8 +844,6 @@ app.post("/v1/peers/:peerId/volume", async (c) => {
     catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   if (parsed.kind === "local") {
-    const { volume } = await c.req.json().catch(() => ({} as any));
-    if (typeof volume !== "number") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsVolume"), 400);
     return c.json(dispatchPeerCommand(peerId, "volume", { volume }));
   }
   return c.json({ success: true });
@@ -874,6 +887,12 @@ app.post("/v1/peers/:peerId/mute", async (c) => {
   if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   const { muted } = await c.req.json().catch(() => ({} as any));
   if (typeof muted !== "boolean") return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsMuted"), 400);
+  const ua = c.req.header("user-agent") || "";
+  log.info(`[peer-mute] ${peerId} <- ${muted} ua=${ua || "-"}`);
+  if (shouldIgnoreBootVolumeEcho({ now: Date.now(), bootAt: SERVER_BOOT_AT, ua, peerId, op: "mute", seen: bootEchoSeen })) {
+    log.warn(`[peer-mute] 忽略启动期 HA 静音回放 ${peerId} <- ${muted}(保留持久值)`);
+    return c.json({ success: true, ignored: "boot-mute-echo" });
+  }
   if (parsed.kind === "dlna") {
     try { await setDeviceMute(parsed.id, muted); return c.json({ success: true }); }
     catch (e: any) { return c.json(apiInternalError(e), 500); }

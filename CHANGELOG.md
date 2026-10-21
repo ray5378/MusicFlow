@@ -2,6 +2,18 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.56] - 2026-10-21
+
+### Fix / 重启后音量仍被回放成 20:服务端补「启动期 HA 回放」守卫
+
+用户升级 4.6.55 镜像后重启容器,音量仍回到 20。现场证据:容器 `StartedAt=07:10:21Z`,`airplay_device_state` 行在 `07:10:52Z` 被写成 20 —— 服务端自身不在启动时写音量,这笔写入来自外部;临时探针抓到 UA = `HomeAssistant/2026.10.2 aiohttp/3.14.5`。即:HA 集成未升级(仍会剪实体并回放旧 `volume_level`),回放发生在服务端落库之后,把持久值覆盖成 20。
+
+- **写入口径统一**:`POST /v1/peers/:peerId/volume` 的五个分支(dlna/group/airplay/sendspin/local)此前各解析一次 body,全局策略无法统一注入;现改为**一次解析 + 一条永久观测日志**(`[peer-volume] <peer> <- <值> ua=<UA>`)。
+- **启动期回放守卫**(`services/player/bootVolumeGuard.ts`):进程启动 120s 内、UA 以 `HomeAssistant/` 开头、且该 peer 的 volume/mute **第一笔**写入 → 忽略并回 200(仅记 warn),避免 HA 实体重建回放覆盖持久音量;之后的写入(用户主动调)照常生效,非 HA 客户端不受影响。静音路由同款守卫(`[peer-mute]`)。
+- **为什么不用「值 == 20/80」判定**:值本身没有语义(用户可能就是想设 20);「HA UA + 启动窗口 + 每 peer 第一笔」才是实体回放的稳定特征。
+- **回归守卫/测试**:播放链路守卫扩到 **R24**;新增 `bootVolumeGuard` 6 例(窗口边界 / 非 HA / 每 peer 独立 / volume 与 mute 互不消耗 / UA 前缀);`tsc` 0。
+- **配套**:HA 集成 `hass-musicflow` v2.1.2 的实体剪枝恢复窗口仍是根治项 —— 升级后 HA 不再回放,服务端守卫是未升级期间的兜底。
+
 ## [4.6.55] - 2026-10-21
 
 ### Fix / 4.6.54 的 CI 红:插件 manifest 用例仍按「AirPlay 默认关闭」断言

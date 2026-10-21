@@ -39,10 +39,11 @@ app.use("*", async (c: Any, next: Any) => {
 registerPeers(app as Any);
 
 const get = (p: string) => app.request("http://x" + p);
-const post = (p: string) =>
+const post = (p: string, body?: unknown) =>
   app.request("http://x" + p, {
     method: "POST",
     headers: { "content-type": "application/json" },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
 const json = async (r: Response) => (await r.json()) as Any;
 
@@ -81,11 +82,19 @@ describe("play/pause/stop/next/prev/volume 的兜底成功返回", () => {
     },
   );
 
-  it("POST /v1/peers/:peerId/volume:kind 不落任何分支 → 兜底 { success: true }(连 body 都不读)", async () => {
-    const r = await post("/v1/peers/dlna:dev1/volume");
+  // 2026-10-21 起音量写入口径统一:body 在**分支之前**解析并校验(启动期 HA 回放
+  // 守卫需要 UA + 值,不可能再让每个 kind 分支各读一次 body)。因此这里从「连 body
+  // 都不读」改为「body 已校验、未知 kind 仍走兜底」。
+  it("POST /v1/peers/:peerId/volume:kind 不落任何分支 → 兜底 { success: true }", async () => {
+    const r = await post("/v1/peers/dlna:dev1/volume", { volume: 30 });
     expect(r.status).toBe(200);
     expect(await json(r)).toEqual({ success: true });
     expect(fns.setDeviceVolume).not.toHaveBeenCalled();
     expect(fns.dispatchPeerCommand).not.toHaveBeenCalled();
+  });
+
+  it("POST /v1/peers/:peerId/volume:缺 volume → 400(统一入口先校验 body)", async () => {
+    const r = await post("/v1/peers/dlna:dev1/volume");
+    expect(r.status).toBe(400);
   });
 });
