@@ -358,7 +358,9 @@ async function yieldSiblingDlnaForAirPlay(deviceId: string): Promise<void> {
   try {
     const { getQueueController } = await import("../player/index.js");
     const qc = getQueueController();
-    wasActive = qc.snapshot(`dlna:${dlnaPeer}`)?.isActive === true;
+    // 读快照只用于「是否需要等停稳」,读不到不能阻断下面的冻结 ——
+    // snapshot 缺失/异常时按「未激活」处理,freeze 必须照发。
+    try { wasActive = qc.snapshot?.(`dlna:${dlnaPeer}`)?.isActive === true; } catch { wasActive = false; }
     qc.stopPlayback(`dlna:${dlnaPeer}`);
   } catch (e) {
     log.warn("双协议互斥:冻结同 host DLNA 队列失败(忽略)", { deviceId, dlnaPeer, err: (e as Error)?.message || e });

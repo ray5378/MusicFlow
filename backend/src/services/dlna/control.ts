@@ -1152,7 +1152,9 @@ export async function stopDevice(deviceId: string): Promise<void> {
   //   此时只做本地收尾(标记 STOPPED),设备传输交给 AirPlay 会话。
   let siblingAirPlay = false;
   try {
-    const host = device.location ? new URL(device.location).hostname : "";
+    // host 取 `avTransportUrl`(必存在,前面已校验):`location` 在部分缓存/持久化
+    // 记录里可能缺失,用它算 host 会得到空串 → 守卫静默失效。
+    const host = new URL(device.avTransportUrl).hostname;
     const { hasActiveAirPlaySessionForHost } = await import("../airplay/control.js");
     siblingAirPlay = hasActiveAirPlaySessionForHost(host);
   } catch { /* 判定失败按旧口径停 */ }

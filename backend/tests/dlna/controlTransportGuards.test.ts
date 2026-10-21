@@ -254,6 +254,14 @@ describe("DLNA Stop 不得误杀同 host AirPlay 输出(流转后 reset 源端)"
     await stopDevice(id);
     expect(calls).toContain("Stop");
   });
+
+  it("互斥让位 stopDevicePlayback 不受反向守卫影响:AirPlay 起播前仍硬停 DLNA", async () => {
+    const id = await seed();
+    AP_ACTIVE.value = true;
+    calls = [];
+    await stopDevicePlayback(id);
+    expect(calls).toContain("Stop");
+  });
 });
 
 // ===========================================================================

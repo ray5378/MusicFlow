@@ -59,11 +59,17 @@ const S = vi.hoisted(() => {
     setDeviceVolume: vi.fn(async () => undefined),
     setDeviceMute: vi.fn(async () => undefined),
     stopDevicePlayback: vi.fn(async () => undefined),
+    // 「DLNA 是否真的在播」与「停稳状态」的读取口:缺了会让停稳窗静默跳过。
+    getTransportState: vi.fn(async () => "STOPPED"),
     getPlayerController: { reportState: vi.fn(), unregisterAirPlayDevices: vi.fn() },
     // stopAirPlayService 注销队列走的是 getQueueController,少它这条断言会假绿。
     // stopPlayback 是 AirPlay 起播互斥「冻结同 host DLNA 队列」的落点
     // (见 yieldSiblingDlnaForAirPlay):少它的话冻结断言会静默假绿(替身漏洞)。
-    getQueueController: { unregisterAirPlayDevices: vi.fn(), stopPlayback: vi.fn() },
+    getQueueController: {
+      unregisterAirPlayDevices: vi.fn(),
+      stopPlayback: vi.fn(),
+      snapshot: vi.fn(() => ({ isActive: false })),
+    },
     getPeerManager: { reconcileAirPlayPeers: vi.fn(), removeAirPlayPeers: vi.fn() },
     reportPlaybackLoudness: vi.fn(),
     persist: null as any,
@@ -180,6 +186,8 @@ vi.mock("../../src/services/dlna/control.js", async (orig) => {
     setDeviceVolume: (...a: any[]) => S.setDeviceVolume(...a),
     setDeviceMute: (...a: any[]) => S.setDeviceMute(...a),
     stopDevicePlayback: (...a: any[]) => S.stopDevicePlayback(...a),
+    // 停稳窗读取口:必须桩掉,否则会真发 SOAP GetTransportInfo。
+    getTransportState: (...a: any[]) => S.getTransportState(...a),
   };
 });
 vi.mock("../../src/services/player/index.js", () => ({
@@ -259,6 +267,8 @@ beforeEach(() => {
   S.getPlayerController.unregisterAirPlayDevices.mockReset();
   S.getQueueController.unregisterAirPlayDevices.mockReset();
   S.getQueueController.stopPlayback.mockReset();
+  S.getQueueController.snapshot.mockReset().mockReturnValue({ isActive: false });
+  S.getTransportState.mockReset().mockResolvedValue("STOPPED");
   S.getPeerManager.reconcileAirPlayPeers.mockReset();
   S.getPeerManager.removeAirPlayPeers.mockReset();
   sup.rpc.mockReset().mockImplementation(async () => undefined);
@@ -459,6 +469,35 @@ describe("起播编排(startSession / castToAirPlayDevice)", () => {
     ]);
     await C.castToAirPlayDevice(castOpts(d.id));
     expect(S.getQueueController.stopPlayback).toHaveBeenCalledWith("dlna:dlna-fork");
+  });
+
+  it("DLNA 确实在播 → 停播后先等设备报 STOPPED 再建 RAOP 会话(停稳窗)", async () => {
+    const d = dev({ host: "192.168.1.36" });
+    S.setDevices([d]);
+    S.getCachedDevices.mockReturnValue([
+      { id: "dlna-settle", location: "http://192.168.1.36/ctl", renderingControlUrl: "http://192.168.1.36/rc" },
+    ]);
+    S.getQueueController.snapshot.mockReturnValue({ isActive: true });
+    S.getTransportState.mockResolvedValue("STOPPED");
+    await C.castToAirPlayDevice(castOpts(d.id));
+    expect(S.getTransportState).toHaveBeenCalledWith("dlna-settle");
+    // 顺序:冻结 → 停 DLNA → 读停稳状态 → 建会话(connect)
+    const freezeAt = S.getQueueController.stopPlayback.mock.invocationCallOrder[0];
+    const stopAt = S.stopDevicePlayback.mock.invocationCallOrder[0];
+    const stateAt = S.getTransportState.mock.invocationCallOrder[0];
+    expect(freezeAt).toBeLessThan(stopAt);
+    expect(stopAt).toBeLessThan(stateAt);
+  });
+
+  it("DLNA 没在播 → 不读停稳状态(普通客户端起播不被额外等待拖慢)", async () => {
+    const d = dev({ host: "192.168.1.37" });
+    S.setDevices([d]);
+    S.getCachedDevices.mockReturnValue([
+      { id: "dlna-idle", location: "http://192.168.1.37/ctl", renderingControlUrl: "http://192.168.1.37/rc" },
+    ]);
+    S.getQueueController.snapshot.mockReturnValue({ isActive: false });
+    await C.castToAirPlayDevice(castOpts(d.id));
+    expect(S.getTransportState).not.toHaveBeenCalled();
   });
 
   it("冻结队列失败不能拖垮起播(与 SOAP Stop 同级容错)", async () => {

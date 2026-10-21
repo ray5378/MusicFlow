@@ -976,6 +976,28 @@ console.log("===== R29 DLNA Stop 不得误杀同 host AirPlay 输出(流转后 r
     })(),
     "守卫与 Stop 的下发顺序倒置:先发 Stop 再判等于没守",
   );
+  check(
+    "守卫 host 取 avTransportUrl(不得用可能缺失的 location → 空串静默失效)",
+    /const host = new URL\(device\.avTransportUrl\)\.hostname;/.test(dlG),
+    "host 解析用 location:持久化/缓存记录缺 location 时守卫恒 false,真机复现无声",
+  );
+  check(
+    "**常量断言**:SOAP Stop 调用点恰为 4 处(castToDevice/playUriOnDevice/stopDevicePlayback/stopDevice)",
+    dlG.split('soapCall(device.avTransportUrl, AV_TRANSPORT, "Stop"').length - 1 === 4,
+    `实际 = ${dlG.split('soapCall(device.avTransportUrl, AV_TRANSPORT, "Stop"').length - 1}(应为 4;多出的直调会绕过 stopDevice 的同 host AirPlay 守卫)`,
+  );
+  check(
+    "互斥让位 stopDevicePlayback 保持无守卫(AirPlay 起播前必须仍能硬停 DLNA)",
+    (() => {
+      const iPb = dlG.indexOf("export async function stopDevicePlayback(");
+      const iSt = dlG.indexOf("export async function stopDevice(");
+      const body = iPb >= 0 && iSt > iPb ? dlG.slice(iPb, iSt) : "";
+      return body.length > 0
+        && !/hasActiveAirPlaySessionForHost/.test(body)
+        && body.includes('soapCall(device.avTransportUrl, AV_TRANSPORT, "Stop"');
+    })(),
+    "互斥让位被反向守卫挡住:DLNA 不停 ⇒ AirPlay 起播后设备仍占着 DLNA 输入",
+  );
 }
 console.log("");
 if (failures.length) {

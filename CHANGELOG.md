@@ -2,6 +2,27 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.68] - 2026-10-22
+
+### Fix / 4.6.67 CI 红:冻结 DLNA 队列被「读快照」提前打断
+
+`yieldSiblingDlnaForAirPlay` 在冻结队列前先读 `qc.snapshot(...).isActive`（用于判断是否需要
+等停稳）；`tests/airplay/controlOrchestration.test.ts` 的 QueueController 替身只提供
+`stopPlayback`，缺 `snapshot` ⇒ 读快照抛 TypeError 被外层 catch 吞掉，`stopPlayback`
+根本没执行，3 例断言失败（全量 7404 通过 / 3 失败）。
+
+**修复**：
+1. 快照读取单独 try/catch，`snapshot` 缺失/异常一律视为「未激活」，**不得阻断冻结**；
+   `stopPlayback` 仍在 SOAP Stop 之前无条件执行（R25/R28 顺序不变）。
+2. 测试替身补齐 `snapshot` 与 `getTransportState`，并新增两例：
+   - DLNA 确实在播 → 顺序必须是「冻结 → 停 DLNA → 读停稳 → 建会话」；
+   - DLNA 没在播 → 不读停稳状态（普通客户端起播不被额外等待拖慢）。
+3. R29 守卫强化：host 取 `avTransportUrl`（`location` 可能缺失导致空串静默失效）、
+   SOAP Stop 调用点常量断言（4 处，多一处直调即判红）、互斥让位 `stopDevicePlayback`
+   必须保持无守卫。
+
+**验证**：`tsc --noEmit` 0；AirPlay + DLNA 守卫 16 文件 / 349 例通过；回环守卫脚本全绿。
+
 ## [4.6.67] - 2026-10-22
 
 ### Fix / 主卧(DLNA)→HiVi(AirPlay) 流转后「进度在走但设备完全没声」
