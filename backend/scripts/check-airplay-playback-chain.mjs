@@ -621,6 +621,125 @@ console.log("===== R18 流转接续:起播即落位 + 建会话硬预算(HiVi �
   );
 }
 
+console.log("===== R19 插件默认开启 + 启停零残留(2026-10-21 用户拍板) =====");
+{
+  const plugin = stripComments(read("backend/src/services/plugin/renderers/airplay.ts"));
+  check(
+    "AirPlay renderer manifest 的 defaultEnabled 必须为 true",
+    /defaultEnabled:\s*true/.test(plugin) && !/defaultEnabled:\s*false/.test(plugin),
+    "插件仍默认关闭:新装实例开箱看不到 AirPlay 设备",
+  );
+  check(
+    "插件文案不得再声称「默认关闭 / Disabled by default」",
+    !/默认关闭/.test(plugin) && !/Disabled by default/.test(plugin),
+    "文案与 manifest 不一致,用户会按旧文案以为要手动开启",
+  );
+  check(
+    "插件停用必须回收 AirPlay 设备/会话/discovery(零残留)",
+    /unregisterAirPlayDevices\(\)/.test(ap) && /stopAirPlayDiscovery\(\)/.test(ap),
+    "停用插件后仍残留设备注册或 mDNS 监听",
+  );
+  // 「默认开启」只改初始值,绝不能变成「不可关闭」:插件页的手动开关必须继续存在,
+  // 且 PUT /v1/plugins/:id/toggle 仍要联动 start/stopAirPlayService。
+  const pluginsRoute = stripComments(read("backend/src/routes/api/plugins.ts"));
+  check(
+    "插件开关仍联动 AirPlay 服务(默认开启 ≠ 不可手动关闭)",
+    /airplay-renderer/.test(pluginsRoute)
+      && /startAirPlayService\(\)/.test(pluginsRoute)
+      && /stopAirPlayService\(\)/.test(pluginsRoute),
+    "toggle 路由丢失了 AirPlay 启停联动:默认开启后将无法真正关闭",
+  );
+  check(
+    "存在「关 → 停在播会话 / 开 → 起监听」的回归用例",
+    /airplay-renderer:关 → 停在播会话;开 → 起监听/.test(
+      read("backend/tests/routes/lt2_pluginsRouteBranches.test.ts"),
+    ),
+    "插件开关的回归用例被删,手动关闭能力失去测试保护",
+  );
+}
+
+console.log("===== R20 RTSP 请求行:必须带 `RTSP/1.0` 版本段(缺了标准接收端直接 400) =====");
+{
+  const raop = stripComments(read("backend/src/services/airplay/raop.ts"));
+  // 两处请求行:sendRtsp(常规请求) 与 sendRtspNoWait(音量等 fire-and-forget)。
+  // 任何一处漏版本段,都会在 shairport-sync 这类合规接收端上表现为 400 Bad Request,
+  // 而 LinkPlay 接收端较宽松 —— 只在部分设备上复现,极难定位。
+  check(
+    "两处 RTSP 请求行都带 RTSP/1.0",
+    (raop.match(/RTSP\/1\.0\\r\\n/g) || []).length >= 2,
+    "有请求行缺版本段(shairport-sync 会回 400)",
+  );
+}
+
+console.log("===== R21 音量链路:0-100 → dB 映射、同 host DLNA 转发、静音独立 =====");
+{
+  const dec = stripComments(read("backend/src/services/airplay/decoder.ts"));
+  check(
+    "音量映射端点正确:0 → -144(静音),100 → 0dB",
+    /if \(v <= 0\) return -144;/.test(dec)
+      && /return -30 \+ \(v \/ 100\) \* 30;/.test(dec),
+    "dB 映射端点被改动,会出现「0% 仍出声」或「100% 不是满音量」",
+  );
+  check(
+    "LinkPlay(HiVi/MUZO 等)音量必须转发同 host 的 DLNA RenderingControl",
+    /forwarded to DLNA device/.test(ap) && /setDeviceVolume\(dlnaPeer/.test(ap),
+    "只发 RAOP SET_PARAMETER:LinkPlay 接收端忽略该指令,音量条不动",
+  );
+  check(
+    "静音与音量相互独立(取消静音恢复原音量,不把 volume 归零)",
+    /setAirPlayMuted/.test(ap) && /st\.muted = muted/.test(ap) && /st\.volume/.test(ap),
+    "静音实现成了「音量置 0」,取消静音后会丢原音量",
+  );
+  // 重启后「强制音量」的根因是 volumeState 只在内存、读取点回落到写死缺省。
+  // 正确做法:设置即落库;读取时用持久值播种(无行才用 DEFAULT_AIRPLAY_VOLUME)。
+  check(
+    "AirPlay 音量/静音必须落库(设置即持久,重启可恢复)",
+    /saveAirPlayVolumeState\(deviceId, \{ volume: vol \}\)/.test(ap)
+      && /saveAirPlayVolumeState\(deviceId, \{ muted \}\)/.test(ap),
+    "音量仍只在内存:容器重启后丢设置,客户端重连会用缺省值覆盖设备音量",
+  );
+  check(
+    "状态读取必须用持久值播种(不得写死缺省值)",
+    /function volumeStateOf/.test(ap)
+      && /getAirPlayVolumeState\(deviceId\)/.test(ap)
+      && /const vol = volumeStateOf\(deviceId/.test(ap),
+    "getAirPlayStatus 仍直接回 80:重启后客户端会把这个缺省值当权威回推",
+  );
+}
+
+console.log("===== R22 取流会话:独立 token 命名空间 + 同 (song,device) 复用 =====");
+{
+  const sess = stripComments(read("backend/src/services/airplay/session.ts"));
+  check(
+    "AirPlay 走自己的 /rest/airplay/stream/ 路由",
+    /\/rest\/airplay\/stream\//.test(sess) && !/\/rest\/dlna\/stream\//.test(sess),
+    "又复用了 DLNA 取流路由:DLNA 兼容头会串到 AirPlay 解码器",
+  );
+  check(
+    "同 (songId, deviceId) 未过期时复用 token(否则 uri 变会误判换歌)",
+    /SELECT token FROM airplay_stream_tokens WHERE song_id = \? AND device_id = \?/.test(sess)
+      && /UPDATE airplay_stream_tokens SET exp = \?/.test(sess),
+    "每次 cast 都 mint 新 token → PlaybackTracker 把 seek 当成换歌并自动 advance",
+  );
+}
+
+console.log("===== R23 起播/重启恢复:不得绕开统一起播路径;设备闸排队可观测 =====");
+{
+  const qc = stripComments(read("backend/src/services/player/QueueController.ts"));
+  check(
+    "resumeActive 仍走 playCurrent(重启恢复不得绕过统一起播路径)",
+    /async resumeActive\(deviceId: string, baseUrl: string\)[\s\S]{0,400}playCurrent\(deviceId, baseUrl\)/.test(qc),
+    "重启恢复另开了一条起播路径,落点/串行闸都会绕过去",
+  );
+  // 闸被某个挂死的操作占住时,后续 cast 会**静默排队**到超时;排队日志是唯一
+  // 能在现场一眼看出「是谁占着闸」的线索,删掉它就回到盲调状态。
+  check(
+    "设备闸排队必须可观测(排队耗时日志)",
+    /\[AirPlay\]\[gate\] \$\{deviceId\} 排队 \$\{waited\}ms 后开始/.test(ap),
+    "缺排队日志:闸被谁占住无法定位",
+  );
+}
+
 console.log("");
 if (failures.length) {
   console.log(`✗ AirPlay 播放链路时序守卫失败 ${failures.length} 项:`);

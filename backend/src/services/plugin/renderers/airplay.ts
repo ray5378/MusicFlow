@@ -26,9 +26,10 @@ export const airplayRendererManifest: PluginManifest = {
   type: "renderer",
   description: "通过 AirPlay (RAOP) 协议将音乐投放到局域网内的 AirPlay 音箱、电视等设备",
   capabilities: ["renderer"],
-  // 默认关闭:不是所有用户都需要 AirPlay(mDNS 常驻监听有 CPU/内存开销)。
-  // 用户可在插件管理页开启;开启后才启动 discovery/服务,关闭时零常驻资源。
-  defaultEnabled: false,
+  // 默认开启(2026-10-21 用户拍板):AirPlay 是内建投屏主链路之一,开箱即用。
+  // 关闭仍可在插件管理页操作:停用后 discovery / 子进程 / 设备注册全部回收,
+  // 零常驻资源(与「默认关闭」时期的资源语义完全一致,只是初始值反过来)。
+  defaultEnabled: true,
   configSchema: [],
   // 插件侧 i18n 字典:默认文案即中文,故 zh 省略、只补 en。前端按当前界面语言取用。
   i18n: {
@@ -45,7 +46,7 @@ Casts music via the AirPlay (RAOP) protocol to AirPlay speakers, TVs and other d
 3. Playback state is synced back to the server.
 
 ### Notes
-- **Disabled by default**: not everyone needs AirPlay (the mDNS listener costs CPU/memory). Enable it in the plugin page; discovery runs only while enabled — zero resident resources when off.`,
+- **Enabled by default**: AirPlay is one of the built-in casting paths, ready out of the box. You can disable it in the plugin page; discovery / child process / device registration all stop when disabled — zero resident resources.`,
     },
   },
   documentation: `### 功能介绍

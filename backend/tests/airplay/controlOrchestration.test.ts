@@ -4,6 +4,7 @@ import "../plugins/_env.js";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { PlaybackState } from "../../src/services/player/types.js";
 import { sqlite } from "../../src/db/index.js";
+import { saveAirPlayVolumeState } from "../../src/services/airplay/deviceState.js";
 
 // 本文件替身掉的外部依赖:
 //   raop.ts / decoder.ts —— 真货要开 RTSP 与 ffmpeg,单测里只验证「编排」语义;
@@ -1135,6 +1136,23 @@ describe("音量 / 静音(含 DLNA 同 host 转发)", () => {
     expect(C.getAirPlayStatus(devId()).volume).toBe(100);
     await C.setAirPlayVolume(devId(), -20);
     expect(C.getAirPlayStatus(devId()).volume).toBe(0);
+  });
+
+  it("重启播种:内存无音量但库里有行 → /status 回持久值(不是缺省 80)", async () => {
+    // 复现容器重启后的时序:新进程 volumeState 为空,DB 里留着用户上次设置。
+    // 若读取点写死缺省 80,客户端会把 80 当权威回推,设备音量被重置
+    // (2026-10-21 现场)。正确行为:startAirPlayService 后读库播种。
+    const id = "seed-" + Date.now();
+    S.setDevices([dev({ id })]);
+    saveAirPlayVolumeState(id, { volume: 41, muted: true });
+    C.startAirPlayService();
+    try {
+      const st = C.getAirPlayStatus(id);
+      expect(st.volume).toBe(41);
+      expect(st.muted).toBe(true);
+    } finally {
+      await C.stopAirPlayService(); // 复位服务标记,避免影响后续用例
+    }
   });
 
   it("音量:有 DLNA peer 且转发成功 → 走 DLNA,不再回落 SET_PARAMETER", async () => {

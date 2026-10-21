@@ -468,6 +468,16 @@ export function initDatabase() {
       updated_at TEXT NOT NULL DEFAULT ''
     );
 
+    -- AirPlay 按设备音量/静音(device_id 主键)。volumeState 只在进程内存:容器重启
+    -- 后为空 → 读取点回落到写死缺省,客户端会把缺省值当权威回推,设备音量被重置。
+    -- 落库后重启仍回吐用户上次设置,设备侧音量得以原样保留(2026-10-21)。
+    CREATE TABLE IF NOT EXISTS airplay_device_state (
+      device_id TEXT PRIMARY KEY,
+      volume INTEGER NOT NULL DEFAULT 80,
+      muted INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT DEFAULT ''
+    );
+
     CREATE TABLE IF NOT EXISTS device_queues (
       device_id TEXT PRIMARY KEY,
       items_json TEXT NOT NULL DEFAULT '[]',

@@ -23,6 +23,7 @@ import { sqlite } from "../../db/index.js";
 import { createAirPlaySession } from "./session.js";
 import type { AirplaySessionEndInfo } from "./sessionRuntime.js";
 import { createLogger } from "../../utils/logger.js";
+import { getAirPlayVolumeState, saveAirPlayVolumeState, deleteAirPlayVolumeState, DEFAULT_AIRPLAY_VOLUME } from "./deviceState.js";
 
 // 解码/缓冲层(ffmpeg spawn + 有界 PCM 队列 + 音量 dB 换算)已抽到 ./decoder.ts ——
 // airplay 子进程要复用同一份实现,但不能经由本模块(会拖进 DB/DLNA/peer 等主进程态)。
@@ -97,6 +98,31 @@ interface ActiveSession {
 
 const sessions = new Map<string, ActiveSession>();
 const volumeState = new Map<string, { volume: number; muted: boolean; supportsRsa: boolean }>();
+
+/** 取设备音量状态:**内存优先,缺失时用持久值播种**。
+ *
+ *  绝不能在这里直接写死缺省 —— 容器重启后 volumeState 为空,直接回 80 会让
+ *  客户端把「缺省值」当成权威回推,把设备自身在重启前设好的音量覆盖掉
+ *  (2026-10-21 现场:重启后 HiVi 被推成缺省音量)。有持久行就先用持久行,
+ *  没有行(从未设置过)才用 DEFAULT_AIRPLAY_VOLUME,与改动前完全一致。 */
+/** AirPlay 服务是否在运行(插件启用 = startAirPlayService 已调用)。
+ *  停用后保持「内存清空 = 缺省值」的旧语义,不拿库值回填 —— 停用中的设备没有
+ *  任何状态出口,回读库只会在插件页制造「关了还显示旧音量」的错觉。
+ *  重新启用/容器重启时由 startAirPlayService 置回 true,库值才参与播种。 */
+let airPlayServiceActive = false;
+
+function volumeStateOf(deviceId: string, supportsRsa: boolean) {
+  const hit = volumeState.get(deviceId);
+  if (hit) return hit;
+  const saved = airPlayServiceActive ? getAirPlayVolumeState(deviceId) : null;
+  const st = {
+    volume: saved?.volume ?? DEFAULT_AIRPLAY_VOLUME,
+    muted: saved?.muted ?? false,
+    supportsRsa,
+  };
+  volumeState.set(deviceId, st);
+  return st;
+}
 const lastCast = new Map<string, { songId: string; title?: string; artist?: string; album?: string; coverArt?: string; durationSec?: number; streamUrl: string }>();
 
 /**
@@ -549,6 +575,9 @@ export function deleteAirPlayDeviceRecord(deviceId: string): boolean {
   sqlite.prepare("DELETE FROM airplay_devices WHERE id = ?").run(deviceId);
   // 清理该设备的内存态(音量/最近一次投屏),防止只增不删(内存红线)。
   volumeState.delete(deviceId);
+  // 永久删除 = 这台设备从没配置过:持久音量/静音一并清掉,避免设备重新被发现时
+  // 带着旧设置"复活"(与 sendspin 解绑清整行同语义)。
+  deleteAirPlayVolumeState(deviceId);
   lastCast.delete(deviceId);
   import("./discovery.js").then(({ removeAirPlayDevice }) => {
     removeAirPlayDevice(deviceId);
@@ -935,9 +964,12 @@ function dlnaPeerOfAirPlay(deviceId: string): string | undefined {
 
 export async function setAirPlayVolume(deviceId: string, volume: number): Promise<void> {
   const vol = Math.max(0, Math.min(100, Math.round(volume)));
-  const st = volumeState.get(deviceId) || { volume: 80, muted: false, supportsRsa: false };
+  const st = volumeStateOf(deviceId, false);
   st.volume = vol;
   volumeState.set(deviceId, st);
+  // 先落库再下发:即使设备侧转发失败(离线/超时),用户这次设置也不会丢,
+  // 重启后仍按这个值回吐,不会被缺省值顶掉。
+  saveAirPlayVolumeState(deviceId, { volume: vol });
 
   // Linkplay receivers ignore AirPlay SET_PARAMETER volume; forward through the
   // sibling DLNA RenderingControl channel (same physical device) which applies
@@ -959,9 +991,11 @@ export async function setAirPlayVolume(deviceId: string, volume: number): Promis
 }
 
 export async function setAirPlayMuted(deviceId: string, muted: boolean): Promise<void> {
-  const st = volumeState.get(deviceId) || { volume: 80, muted: false, supportsRsa: false };
+  const st = volumeStateOf(deviceId, false);
   st.muted = muted;
   volumeState.set(deviceId, st);
+  // 只写 muted:volume 字段保持原值 —— 取消静音必须恢复静音前的音量,而不是 0。
+  saveAirPlayVolumeState(deviceId, { muted });
   const dlnaPeer = dlnaPeerOfAirPlay(deviceId);
   if (dlnaPeer) {
     try {
@@ -1032,7 +1066,9 @@ function sessionView(deviceId: string): SessionView | null {
 export function getAirPlayStatus(deviceId: string): AirPlayDeviceStatus {
   const dev = getAirPlayDevice(deviceId);
   const s = sessionView(deviceId);
-  const vol = volumeState.get(deviceId) || { volume: 80, muted: false, supportsRsa: !!dev?.supportsRsa };
+  // 重启后 volumeState 为空:这里必须回持久值(而不是写死 80),否则 /status
+  // 会把缺省音量当成权威告诉所有客户端,重连回推就变成「强制音量」。
+  const vol = volumeStateOf(deviceId, !!dev?.supportsRsa);
   if (!s || s.ended) {
     return {
       available: !!dev?.available,
@@ -1101,6 +1137,7 @@ export function getAirPlayPeerStatus(deviceId: string): {
 /** Start discovery + device event wiring. Call once at boot (or when the
  *  AirPlay renderer plugin is toggled on). Idempotent. */
 export function startAirPlayService(): void {
+  airPlayServiceActive = true;
   startAirPlayDiscovery();
   onAirPlayEvent((e) => {
     if (e.type === "byebye") {
@@ -1137,7 +1174,9 @@ export async function stopAirPlayService(): Promise<void> {
   for (const id of activeIds) {
     try { await stopAirPlaySession(id); } catch { /* ignore */ }
   }
-  // 2. 清内存态(音量/最近投屏/设备列表)。
+  // 2. 清内存态(音量/最近投屏/设备列表)。库值**保留**:重新启用后仍恢复到
+  //    用户上次设置;停用期间 volumeStateOf 不读库,读取回落到缺省值。
+  airPlayServiceActive = false;
   volumeState.clear();
   lastCast.clear();
   // 3. 移除 peer(动态 import 避免循环依赖: peer → airplay/control)。
