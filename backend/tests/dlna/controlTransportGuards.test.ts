@@ -32,8 +32,10 @@ vi.mock("../../src/services/dlna/eventing.js", () => ({
   }),
 }));
 
+const AP_ACTIVE = vi.hoisted(() => ({ value: false }));
 vi.mock("../../src/services/airplay/control.js", () => ({
   stopAirPlaySessionsForHost: async () => {},
+  hasActiveAirPlaySessionForHost: () => AP_ACTIVE.value,
 }));
 
 let DISCOVERED: any[] = [];
@@ -133,6 +135,7 @@ beforeAll(() => {
 
 beforeEach(() => {
   EV.reset();
+  AP_ACTIVE.value = false;
   calls = [];
   soap = () => ({ xml: OK_XML });
   installFetch();
@@ -234,6 +237,22 @@ describe("transport action 失败必须上报给调用方(并转入待轮询)", 
     await expect(pauseDevice(id)).rejects.toThrow(/transition/);
     await expect(stopDevice(id)).rejects.toThrow(/transition/);
     expect(isDeviceAvailable(id)).toBe(false);
+  });
+});
+
+// ===========================================================================
+describe("DLNA Stop 不得误杀同 host AirPlay 输出(流转后 reset 源端)", () => {
+  it("同 host AirPlay 会话活跃 → 不下发设备 Stop,只做本地收尾", async () => {
+    const id = await seed();
+    AP_ACTIVE.value = true;
+    calls = [];
+    await stopDevice(id);
+    expect(calls).not.toContain("Stop");
+    // 设备侧真停过一次之后,reset 才允许真正下发 Stop
+    AP_ACTIVE.value = false;
+    calls = [];
+    await stopDevice(id);
+    expect(calls).toContain("Stop");
   });
 });
 

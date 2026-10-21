@@ -2,6 +2,47 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.67] - 2026-10-22
+
+### Fix / 主卧(DLNA)→HiVi(AirPlay) 流转后「进度在走但设备完全没声」
+
+**根因**：客户端在流转完成后会立刻 `POST /peers/<源端>/reset` 收尾源端。源端是
+「主卧」DLNA，而它与 HiVi AirPlay 是**同一台物理设备**（同 host 192.168.10.30）。
+`reset → stopPlayback + stopDevice()` 会对设备下发 DLNA `Stop` —— Linkplay/HiVi 固件
+的 DLNA Stop 会**连带停掉同一台设备的 AirPlay 输出**：设备 `getPlayerStatus` 立刻变
+`stop`，而服务端 AirPlay 会话不知情，位置继续按墙钟前进 ⇒ 用户看到「队列和进度都
+流转过来了，但一点声音都没有」；手动拖一下进度会重建会话，此时设备已处于停止态，
+反而能出声。
+
+240 现场（2026-10-22）逐秒取证：
+```
+16:31:09.947 RTSP RECORD 200 → AirPlay 会话建立
+16:31:10.167 [DLNA][Stop] 发起（客户端 reset 源端，1.2s 后到达）
+16:31:11.180 [ws][state] STOPPED
+16:31:11+   服务端 AP=PLAYING pos 持续前进，设备 getPlayerStatus=stop/curpos=0
+```
+
+**修复**：
+1. `airplay/control.ts` 新增 `hasActiveAirPlaySessionForHost(host)` —— 判定同 host 是否
+   仍有活跃 AirPlay 推流会话（in-proc 看 `sessions`，fork 看子进程镜像，复用
+   `hasActiveSession`）。
+2. `dlna/control.ts` 的 `stopDevice()` 在下发 SOAP `Stop` **之前**做守卫：同 host 有活跃
+   AirPlay 会话时**只做本地收尾**（事件态置 STOPPED），不再碰设备传输；判定失败按旧
+   口径执行。`stopDevicePlayback()`（AirPlay 起播时的互斥让位）保持原样，确保互斥方向
+   不受影响。
+3. 同设备 DLNA→AirPlay 起播前新增「等 DLNA 报 STOPPED + 300ms 宽限」再建 RAOP 会话
+   （`DLNA_SETTLE_MAX_MS=2500`，`dlna/control.ts` 新增轻量 `getTransportState()`），
+   覆盖「SOAP Stop 已返回但固件还在切输入」的时间窗。
+
+**真机验证（240 + HiVi H5MKII）**：直接起播 / seek / 暂停恢复 / 停止 / 主卧→HiVi 流转 +
+客户端 reset 源端，全链路设备 `getPlayerStatus` 保持 `play` 且 `curpos` 持续前进；
+日志出现 `DLNA][Stop] … 同 host AirPlay 会话在播 → 跳过设备 Stop(防误杀 AirPlay 输出)`。
+
+**回归守卫**：`check-airplay-playback-chain.mjs` R28 增补「DLNA 停稳等待」，新增 **R29**
+（反向互斥判定 / `stopDevice` 守卫 / 守卫必须先于 Stop 下发）；新增
+`dlna/controlTransportGuards` 守卫用例与 `airplay/mutex` 边界用例（2 文件 22 例通过），
+`tsc --noEmit` 0。
+
 ## [4.6.66] - 2026-10-22
 
 ### Fix / 主卧(DLNA)→HiVi(AirPlay) 流转:队列/进度都对，但设备不出声

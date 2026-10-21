@@ -1035,6 +1035,24 @@ export async function stopDevicePlayback(deviceId: string): Promise<void> {
   getEventManager().emit("player_refresh", deviceId, { reason: "stopped" });
 }
 
+/**
+ * 轻量读一次 transport state(只发 GetTransportInfo,不查位置/音量)。
+ * 供「AirPlay 起播前等同 host DLNA 真正停稳」的轮询使用 —— 不能用
+ * getDeviceStatus(它还会发 GetPositionInfo/GetVolume,在设备切输入期间反而添乱)。
+ * 失败返回 null(调用方按「读不到就别再等」处理,绝不无限轮询)。
+ */
+export async function getTransportState(deviceId: string): Promise<string | null> {
+  const device = getDevice(deviceId);
+  if (!device?.avTransportUrl) return null;
+  try {
+    const xml = await soapCall(device.avTransportUrl, AV_TRANSPORT, "GetTransportInfo", { InstanceID: "0" });
+    const m = xml.match(/<CurrentTransportState>([^<]*)<\/CurrentTransportState>/i);
+    return m ? m[1].trim() : null;
+  } catch {
+    return null;
+  }
+}
+
 // Preload the next track on the device via SetNextAVTransportURI so the
 // device can switch to it gaplessly when the current track ends.
 // Only call this if probeEnqueueSupport returned true and we haven't already
@@ -1125,6 +1143,25 @@ export async function stopDevice(deviceId: string): Promise<void> {
   if (!device?.avTransportUrl) throw new Error("设备未找到");
   const rt = runtimeOf(deviceId);
   rt.nextEnqueued = false;
+
+  // ★ 同 host 的 AirPlay 会话正在播时,**绝不能**再下发 DLNA Stop:
+  //   Linkplay/HiVi 的 DLNA Stop 会连带停掉同一台设备的 AirPlay 输出。
+  //   2026-10-22 真机现场:流转到 HiVi 后,客户端立刻 reset 源端「主卧」,
+  //   reset → stopDevice → 设备收到 DLNA Stop ⇒ AirPlay 刚出声就静音,
+  //   而服务端进度继续走(用户观感「有进度无声,拖一下进度又有声」)。
+  //   此时只做本地收尾(标记 STOPPED),设备传输交给 AirPlay 会话。
+  let siblingAirPlay = false;
+  try {
+    const host = device.location ? new URL(device.location).hostname : "";
+    const { hasActiveAirPlaySessionForHost } = await import("../airplay/control.js");
+    siblingAirPlay = hasActiveAirPlaySessionForHost(host);
+  } catch { /* 判定失败按旧口径停 */ }
+  if (siblingAirPlay) {
+    log.info(`[DLNA][Stop] ${deviceId} 同 host AirPlay 会话在播 → 跳过设备 Stop(防误杀 AirPlay 输出)`);
+    getEventManager().setTransportState(deviceId, "STOPPED");
+    return;
+  }
+
   log.debug(`[DLNA][Stop] ${deviceId} 发起`);
   try {
     await soapCall(device.avTransportUrl, AV_TRANSPORT, "Stop", { InstanceID: "0" });

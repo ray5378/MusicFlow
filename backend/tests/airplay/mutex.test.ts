@@ -4,7 +4,7 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { sqlite } from "../../src/db/index.js";
 import { registerBuiltinPlugins } from "../../src/plugins/builtins.js";
-import { stopAirPlaySessionsForHost } from "../../src/services/airplay/control.js";
+import { stopAirPlaySessionsForHost, hasActiveAirPlaySessionForHost } from "../../src/services/airplay/control.js";
 import { stopDevicePlayback } from "../../src/services/dlna/control.js";
 
 beforeAll(() => {
@@ -27,5 +27,10 @@ describe("双协议互斥(方案 A)", () => {
   it("stopDevicePlayback 对不存在设备安全返回(不抛错)", async () => {
     // getDevice 找不到 → 直接 return;不抛错即通过
     await expect(stopDevicePlayback("nonexistent-device-id")).resolves.toBeUndefined();
+  });
+
+  it("hasActiveAirPlaySessionForHost:空 host / 未知 host 都判 false(不得误拦 DLNA Stop)", () => {
+    expect(hasActiveAirPlaySessionForHost("")).toBe(false);
+    expect(hasActiveAirPlaySessionForHost("192.168.99.99")).toBe(false);
   });
 });

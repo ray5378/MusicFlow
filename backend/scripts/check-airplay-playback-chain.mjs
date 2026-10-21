@@ -934,6 +934,48 @@ console.log("===== R28 AirPlay 流转/seek 落位:偏移走服务端回环流,�
       && /buffering: timeOffset === 0 \|\| airplaySeekNeedsBuffer/.test(restG),
     "web 直链不支持 Range:服务端 -ss 直接失败(timeOffset=60 返回 Invalid data / 0 字节)",
   );
+  check(
+    "同设备 DLNA→AirPlay:等 DLNA 报 STOPPED + 宽限后再建 AirPlay 会话",
+    /DLNA_SETTLE_MAX_MS = 2_500/.test(apG)
+      && /getTransportState\(dlnaPeer\)/.test(apG)
+      && /DLNA_SETTLE_GRACE_MS/.test(apG)
+      && /wasActive/.test(apG),
+    "DLNA Stop 返回立刻就建 AirPlay 会话:设备还在切输入 ⇒ RTP 在发、设备不响",
+  );
+  check(
+    "DLNA 侧提供轻量 GetTransportInfo 状态读取(不得用 full status 轮询)",
+    /export async function getTransportState\(deviceId: string\)/.test(
+      stripComments(read("backend/src/services/dlna/control.ts")),
+    ),
+    "缺少轻量状态读取,互斥等待无法判断设备是否真的停稳",
+  );
+}
+console.log("===== R29 DLNA Stop 不得误杀同 host AirPlay 输出(流转后 reset 源端) =====");
+{
+  const apG = stripComments(read("backend/src/services/airplay/control.ts"));
+  const dlG = stripComments(read("backend/src/services/dlna/control.ts"));
+  check(
+    "AirPlay 侧提供 hasActiveAirPlaySessionForHost(同 host 活跃会话判定)",
+    /export function hasActiveAirPlaySessionForHost\(host: string\): boolean/.test(apG)
+      && /hasActiveSession\(d\.id\)/.test(apG),
+    "缺少反向互斥判定:DLNA 侧无法知道同 host 的 AirPlay 是否在播",
+  );
+  check(
+    "DLNA stopDevice 在 AirPlay 会话活跃时跳过硬停(只做本地收尾)",
+    /hasActiveAirPlaySessionForHost\(host\)/.test(dlG)
+      && /跳过设备 Stop\(防误杀 AirPlay 输出\)/.test(dlG),
+    "客户端流转后 reset 源端 DLNA 会连带停掉 HiVi 的 AirPlay 输出 ⇒ 有进度无声",
+  );
+  check(
+    "**常量断言**:stopDevice 的硬停分支必须在守卫之后(不得先发 Stop 再判)",
+    (() => {
+      const iFn = dlG.indexOf("export async function stopDevice(");
+      const iGuard = dlG.indexOf("hasActiveAirPlaySessionForHost(host)", iFn);
+      const iSoap = dlG.indexOf('soapCall(device.avTransportUrl, AV_TRANSPORT, "Stop"', iFn);
+      return iFn >= 0 && iGuard > iFn && iSoap > iGuard;
+    })(),
+    "守卫与 Stop 的下发顺序倒置:先发 Stop 再判等于没守",
+  );
 }
 console.log("");
 if (failures.length) {

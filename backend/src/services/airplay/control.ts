@@ -224,6 +224,12 @@ function withDeviceGate<T>(deviceId: string, fn: () => Promise<T>): Promise<T> {
  *  挂住就必须跳过继续,绝不能把整个 cast 拖到 QueueController 的 30s 硬顶
  *  (2026-10-21 HiVi 现场:每次流转都卡 30s,表现为「流转接续失败」)。 */
 const DLNA_YIELD_DEADLINE_MS = 6_000;
+/** DLNA 停播后等待设备报 STOPPED 的上限(2026-10-22 同设备切输入)。 */
+const DLNA_SETTLE_MAX_MS = 2_500;
+/** 报 STOPPED 后再给固件切输入的宽限。 */
+const DLNA_SETTLE_GRACE_MS = 300;
+/** GetTransportInfo 轮询间隔。 */
+const DLNA_SETTLE_POLL_MS = 200;
 const STOP_SESSION_DEADLINE_MS = 4_000;
 
 async function withDeadline<T>(
@@ -268,6 +274,21 @@ async function stopSession(deviceId: string): Promise<void> {
   s.ended = true;
   try { killDecoder(s.ffmpeg); } catch { /* ignore */ }
   await s.player.stop().catch(() => {});
+}
+
+/** 双协议互斥(反向守卫):指定 host 上是否仍有活跃的 AirPlay 推流会话。
+ *
+ *  用于 DLNA 侧「停止/重置」前的判定 —— 同一台 Linkplay/HiVi 设备的 DLNA Stop
+ *  会**连带停掉 AirPlay 输出**(2026-10-22 真机:流转到 HiVi 后客户端 reset 源端
+ *  DLNA,设备立刻静音,而服务端 AirPlay 进度继续走)。此时只能清本地队列,
+ *  绝不能再向设备下发 DLNA Stop。 */
+export function hasActiveAirPlaySessionForHost(host: string): boolean {
+  if (!host) return false;
+  const h = host.toLowerCase();
+  for (const d of getAirPlayDevices()) {
+    if (d.host && d.host.toLowerCase() === h && hasActiveSession(d.id)) return true;
+  }
+  return false;
 }
 
 /** 双协议互斥:停止与指定 host 同址的 AirPlay 会话(RAOP TEARDOWN)。
@@ -331,9 +352,14 @@ async function yieldSiblingDlnaForAirPlay(deviceId: string): Promise<void> {
   const dlnaPeer = dlnaPeerOfAirPlay(deviceId);
   log.debug(`[AirPlay][cast] 互斥:开始 device=${deviceId} dlnaPeer=${dlnaPeer ?? "-"}`);
   if (!dlnaPeer) return;
+  // 停之前先记住 DLNA 队列是否在播:只有真的在播才需要等设备切输入,
+  // 普通「客户端→HiVi」起播(DLNA 没在播)不能被这段等待拖慢。
+  let wasActive = false;
   try {
     const { getQueueController } = await import("../player/index.js");
-    getQueueController().stopPlayback(`dlna:${dlnaPeer}`);
+    const qc = getQueueController();
+    wasActive = qc.snapshot(`dlna:${dlnaPeer}`)?.isActive === true;
+    qc.stopPlayback(`dlna:${dlnaPeer}`);
   } catch (e) {
     log.warn("双协议互斥:冻结同 host DLNA 队列失败(忽略)", { deviceId, dlnaPeer, err: (e as Error)?.message || e });
   }
@@ -345,6 +371,32 @@ async function yieldSiblingDlnaForAirPlay(deviceId: string): Promise<void> {
     log.info("双协议互斥:AirPlay 起播前停止同 host DLNA 播放并冻结其队列", { deviceId, dlnaPeer, ms: Date.now() - t });
   } catch (e) {
     log.warn("双协议互斥:停止同 host DLNA 播放失败(忽略)", { deviceId, dlnaPeer, err: (e as Error)?.message || e });
+  }
+
+  // ★ 2026-10-22:DLNA 侧 SOAP Stop 返回 ≠ 设备已经切走输入。
+  //   Linkplay/HiVi 同一台设备同时暴露 DLNA + AirPlay:刚 Stop 的瞬间设备仍在
+  //   DLNA 通道/正在切输入,此时建立的 AirPlay RAOP 会话**RTP 在发、设备不响**;
+  //   用户几秒后手动拖一下进度(重建会话)反而有声 —— 现场日志与此完全吻合。
+  //   这里在 DLNA **确实在播**时,等它报 STOPPED(轮询 GetTransportInfo,2.5s 上限)
+  //   再给 300ms 让固件切完输入,然后才建 AirPlay 会话。
+  if (wasActive) {
+    const t0 = Date.now();
+    let state: string | null = null;
+    try {
+      const { getTransportState } = await import("../dlna/control.js");
+      while (Date.now() - t0 < DLNA_SETTLE_MAX_MS) {
+        state = await getTransportState(dlnaPeer);
+        if (state === null || state === "STOPPED") break;
+        await new Promise((r) => setTimeout(r, DLNA_SETTLE_POLL_MS));
+      }
+    } catch { /* 读不到状态就不等,下面仍有 grace */ }
+    await new Promise((r) => setTimeout(r, DLNA_SETTLE_GRACE_MS));
+    log.info("双协议互斥:DLNA 已停稳,开始建 AirPlay 会话", {
+      deviceId,
+      dlnaPeer,
+      state: state ?? "-",
+      ms: Date.now() - t0,
+    });
   }
 }
 
