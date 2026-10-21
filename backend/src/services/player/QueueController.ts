@@ -106,6 +106,11 @@ interface PlayerControllerLike {
   setExpectedDuration(playerId: string, seconds: number): void;
 }
 
+/** 跨曲连续「卡死→切歌」上限:超过即停队列。
+ *  取值 3:一首失败可能是源抖动;三首连续失败说明这一队里当前区域整体不可播
+ *  (240 真机:整段网络源歌曲),继续往下走只会拖垮事件循环,不会恢复播放。 */
+const STALL_SKIP_LIMIT = 3;
+
 export class QueueController extends EventEmitter {
   private queues = new Map<string, QueueData>();
   private players = new Map<string, UniversalPlayer>();
@@ -117,6 +122,13 @@ export class QueueController extends EventEmitter {
   /** 同一首连续卡死计数(key=裸 id):stalled 重投只兜一次 transient,
    *  同一首连续卡死第 2 次即放行切歌,而不是 2-3 秒无限重播(见 handleDecision)。 */
   private stallCounters = new Map<string, { songId: string | undefined; count: number }>();
+  /** 跨曲连续「卡死→放行切歌」计数(key=裸 id)。
+   *  stallCounters 按「同一首」计数、切歌即归 1 —— 整队都是慢源/死源时挡不住它
+   *  一首接一首往下走。2026-10-21 240 真机:主卧连续跳过 20+ 首,每首都要
+   *  judgePlayable(10s)+resolve(20s)+整曲缓冲,事件循环被拖到 /status 12s、
+   *  HA 卡片与客户端全部超时(用户观感 =「容器崩溃/连不上」)。
+   *  达到上限即**停队列**(而不是把整圈走完),等源恢复或用户手动继续。 */
+  private stallSkipStreak = new Map<string, number>();
   /** 连续 cast **抛错**计数(key=裸 id),只在 cast 成功返回时清零。
    *  与 stallCounters 互补:后者按「同一首」计数,而 songId 一变就归 1 ——
    *  整队每首都投不出去时,它会在 all/shuffle 下随切歌不断重置 → 无界绕圈。
@@ -620,8 +632,9 @@ export class QueueController extends EventEmitter {
           } else {
             this.ctrls.get(id)?.endOptimistic(playerId);
             this.ctrls.get(id)?.resetTracker(playerId);
-            // 确认在播:清掉卡死计数(之前若有抖动攒的数作废)。
+            // 确认在播:清掉卡死计数(之前若有抖动攒的数作废)与跨曲连跳计数。
             this.stallCounters.delete(id);
+            this.stallSkipStreak.delete(id);
             return;
           }
         }
@@ -641,6 +654,23 @@ export class QueueController extends EventEmitter {
         if (q) {
           const nextIdx = this.pickNext(q, false);
           if (nextIdx !== -1 && nextIdx !== q.currentIndex) {
+            // ── 跨曲熔断:连续 N 首「卡死→切歌」= 当前区域整体不可播 ──
+            // 继续走完整圈只会不断触发 judgePlayable/resolve/整曲缓冲,
+            // 把事件循环拖死(240:主卧连跳 20+ 首后 /status 12s、HA 与客户端全超时)。
+            const streak = (this.stallSkipStreak.get(id) ?? 0) + 1;
+            this.stallSkipStreak.set(id, streak);
+            if (streak >= STALL_SKIP_LIMIT) {
+              log.warn(`[QueueController] ${id}: 连续 ${streak} 首卡死,停止推进(等源恢复或用户手动继续)`);
+              this.stallSkipStreak.delete(id);
+              this.stallCounters.delete(id);
+              this.ctrls.get(id)?.resetTracker(playerId);
+              q.isActive = false;
+              q.ended = true;
+              this.persist(id);
+              this.emit("queue_changed", id, this.snapshot(id));
+              try { await this.players.get(id)?.stop?.(); } catch { /* 设备停止失败不影响熔断 */ }
+              return;
+            }
             log.warn(`[QueueController] ${id}: ${curSongId} 连续卡死 ${stallCount} 次,放行切歌`);
             this.stallCounters.delete(id);
             this.advancing.add(id);

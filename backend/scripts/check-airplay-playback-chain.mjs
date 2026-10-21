@@ -814,6 +814,26 @@ console.log("===== R25 同设备双协议流转(AirPlay <-> DLNA):落点/互斥/
     "缺每设备单会话约束:旧会话残留时新会话只能排队",
   );
 }
+console.log("===== R26 慢源熔断:DLNA 25s 窗口 + 跨曲连跳上限 =====");
+{
+  const pcG = stripComments(read("backend/src/services/player/PlayerController.ts"));
+  const qcG = stripComments(read("backend/src/services/player/QueueController.ts"));
+  check(
+    "DLNA 阶段2 窗口 25s(其余 5s)",
+    /const PLAY_TIMEOUT_MS = 5000;/.test(pcG)
+      && /const DLNA_PLAY_TIMEOUT_MS = 25_000;/.test(pcG)
+      && /playerId\.startsWith\("dlna:"\) \? DLNA_PLAY_TIMEOUT_MS : PLAY_TIMEOUT_MS/.test(pcG),
+    "DLNA 沿用 5s:慢速网络源每次起播都判 stalled,整队被推着走",
+  );
+  check(
+    "跨曲连续卡死熔断(3 首即停队列)",
+    /const STALL_SKIP_LIMIT = 3;/.test(qcG)
+      && /this\.stallSkipStreak\.set\(id, streak\)/.test(qcG)
+      && /streak >= STALL_SKIP_LIMIT/.test(qcG)
+      && /q\.isActive = false;[\s\S]{0,220}q\.ended = true;/.test(qcG),
+    "无跨曲熔断:整段不可播时会把整圈走完并拖死事件循环",
+  );
+}
 console.log("");
 if (failures.length) {
   console.log(`✗ AirPlay 播放链路时序守卫失败 ${failures.length} 项:`);

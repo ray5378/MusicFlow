@@ -241,7 +241,7 @@ describe("MA 式链路集成测试", () => {
   });
 
   // ============ 场景 3:5s play 超时 → stalled 兜底重试 ============
-  it("场景3:乐观窗口 5s 超时未确认 PLAYING → stalled → 重试当前首", async () => {
+  it("场景3:DLNA 乐观窗口 25s 超时未确认 PLAYING → stalled → 重试当前首", async () => {
     const { pc, qc, device } = setup();
     // 模拟卡死设备:Play 命令成功但设备实际不播,playMedia 期间不发 PLAYING(只发 IDLE/BUFFERING)
     const origPlayMedia = device.playMedia.bind(device);
@@ -259,11 +259,11 @@ describe("MA 式链路集成测试", () => {
     await qc.playFrom("d1", makeItems(2), 0, "http://base");
     expect(device.playMediaCalls.length).toBe(1);
 
-    // 乐观窗口已开启(cast 前),IDLE/BUFFERING 被屏蔽,5s 内未收到 PLAYING
+    // 乐观窗口已开启(cast 前),IDLE/BUFFERING 被屏蔽,窗口内未收到 PLAYING
     await vi.advanceTimersByTimeAsync(800); // 乐观窗口内,忽略
 
-    // 超过 5s play 超时 → 触发 stalled → QueueController 重试当前首
-    await vi.advanceTimersByTimeAsync(5000);
+    // DLNA 窗口 15s:满 15s 仍未确认 → 触发 stalled → QueueController 重试当前首
+    await vi.advanceTimersByTimeAsync(25_000);
     expect(device.playMediaCalls.length).toBe(2); // 重试 s1
     expect(device.playMediaCalls[1].songId).toBe("s1");
     // 恢复原始 playMedia(后续断言不受影响)
@@ -310,8 +310,8 @@ describe("MA 式链路集成测试", () => {
     await qc.playFrom("d1", makeItems(2), 0, "http://base");
     expect(device.playMediaCalls.length).toBe(1);
 
-    // 超过 5s play 超时 → stalled → 复查命中假在播签名 → 不清计数 → 重投自愈
-    await vi.advanceTimersByTimeAsync(6000);
+    // 超过 DLNA 25s 窗口 → stalled → 复查命中假在播签名 → 不清计数 → 重投自愈
+    await vi.advanceTimersByTimeAsync(26_000);
     expect(device.playMediaCalls.length).toBe(2); // 第 1 次重投(自愈),不再被骗住
     device.playMedia = origPlayMedia;
   });

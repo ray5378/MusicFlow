@@ -2,8 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { PlayerController } from "../../src/services/player/PlayerController.js";
 import { PlaybackState, type PlayerState } from "../../src/services/player/types.js";
 
-function st(state: PlaybackState, uri = "u1", pos = 0): PlayerState {
-  return { playerId: "dlna:d1", playbackState: state, position: pos, duration: 100, mediaUri: uri, updatedAt: Date.now() };
+function st(state: PlaybackState, uri = "u1", pos = 0, playerId = "dlna:d1"): PlayerState {
+  return { playerId, playbackState: state, position: pos, duration: 100, mediaUri: uri, updatedAt: Date.now() };
 }
 
 describe("PlayerController", () => {
@@ -44,17 +44,34 @@ describe("PlayerController", () => {
     expect(onDecision).toHaveBeenCalledWith("track_changed", "dlna:d1");
   });
 
-  it("5s play 超时:cast 送达后 5s 仍未确认 PLAYING,触发 stalled", () => {
+  it("5s play 超时(AirPlay/Sendspin):cast 送达后 5s 仍未确认 PLAYING,触发 stalled", () => {
+    ctrl.reportState(st(PlaybackState.PLAYING, "u1", 0, "airplay:ap1"));
+    vi.advanceTimersByTime(800);
+    ctrl.beginOptimistic("airplay:ap1", "u2");
+    ctrl.reportState(st(PlaybackState.IDLE, "u2", 0, "airplay:ap1"));
+    vi.advanceTimersByTime(800); // 乐观窗口内,忽略
+    expect(onDecision).not.toHaveBeenCalled();
+    ctrl.armOptimisticTimeout("airplay:ap1"); // cast 命令送达 → 阶段 2 开始计时
+    vi.advanceTimersByTime(4000);
+    expect(onDecision).not.toHaveBeenCalled(); // 未满 5s
+    vi.advanceTimersByTime(1000);
+    expect(onDecision).toHaveBeenCalledWith("stalled", "airplay:ap1");
+  });
+
+  // DLNA 单独 15s(2026-10-21 240):投给音箱的是「整曲缓冲后回环」的实时流,
+  // 网络源首字节实测 10~20s。5s 会在每次起播判 stalled → 整队被慢源推着走,
+  // 并把事件循环拖死(用户观感 = 容器崩溃、HA/客户端连不上)。
+  it("DLNA 25s play 超时:24s 不判卡死,满 25s 才触发 stalled", () => {
     ctrl.reportState(st(PlaybackState.PLAYING, "u1"));
     vi.advanceTimersByTime(800);
     ctrl.beginOptimistic("dlna:d1", "u2");
     ctrl.reportState(st(PlaybackState.IDLE, "u2"));
-    vi.advanceTimersByTime(800); // 乐观窗口内,忽略
+    vi.advanceTimersByTime(800);
     expect(onDecision).not.toHaveBeenCalled();
-    ctrl.armOptimisticTimeout("dlna:d1"); // cast 命令送达 → 阶段 2 开始计时
-    vi.advanceTimersByTime(4000);
-    expect(onDecision).not.toHaveBeenCalled(); // 未满 5s
-    vi.advanceTimersByTime(1000);
+    ctrl.armOptimisticTimeout("dlna:d1");
+    vi.advanceTimersByTime(24_000);
+    expect(onDecision).not.toHaveBeenCalled(); // 慢速网络源仍在缓冲,不得判卡死
+    vi.advanceTimersByTime(1_000);
     expect(onDecision).toHaveBeenCalledWith("stalled", "dlna:d1");
   });
 

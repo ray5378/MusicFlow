@@ -20,6 +20,11 @@ const log = createLogger("PlayerController");
 const DEBOUNCE_LAYER1_MS = 250;  // player 层去抖
 const DEBOUNCE_LAYER2_MS = 500;  // → queue 层去抖
 const PLAY_TIMEOUT_MS = 5000;    // 乐观窗口上限
+// DLNA 单独放宽:投给音箱的是「整曲缓冲后回环」的实时流,网络源歌曲首字节
+// 实测 10~20s(240:kuwo/soda 源 + 整曲下载)。沿用 5s 会在每次起播都判 stalled
+// → 重投/切歌 → 整队被慢源推着走,并把事件循环拖到 /status 12s、HA/客户端全超时
+// (2026-10-21 真机:主卧连续跳 20+ 首)。AirPlay/Sendspin 仍维持 5s。
+const DLNA_PLAY_TIMEOUT_MS = 25_000;
 // PLAYING 期本地节拍。对照 MA `players/controller.py:_poll_players`(3210-3216):
 // MA 每 0.5s 把本地推算的 corrected_elapsed_time 推给队列侧,不等设备上报。
 // 本仓设备状态采样是 5s(QueueController.startPollLoop),若结束判定只看采样点,
@@ -126,14 +131,15 @@ export class PlayerController {
   armOptimisticTimeout(playerId: string): void {
     const opt = this.optimistic.get(playerId);
     if (!opt || opt.timeoutTimer) return;
+    const timeoutMs = playerId.startsWith("dlna:") ? DLNA_PLAY_TIMEOUT_MS : PLAY_TIMEOUT_MS;
     opt.timeoutTimer = setTimeout(() => {
       this.optimistic.delete(playerId);
-      // debug:窗口超时 = 5s 内没等到设备报 PLAYING。这是"投出去但没播起来"的关键信号,
+      // debug:窗口超时 = 窗口内没等到设备报 PLAYING。这是"投出去但没播起来"的关键信号,
       // 上面还会有一条 [stalled] 决策日志;两者成对出现说明重投链路在跑。
-      log.debug(`[PlayerController][optimistic] ${playerId}: 阶段2 超时(${PLAY_TIMEOUT_MS}ms 未收到 PLAYING)→ stalled`);
+      log.debug(`[PlayerController][optimistic] ${playerId}: 阶段2 超时(${timeoutMs}ms 未收到 PLAYING)→ stalled`);
       this.onDecision("stalled", playerId);
-    }, PLAY_TIMEOUT_MS);
-    log.debug(`[PlayerController][optimistic] ${playerId}: 阶段2 起 5s 等 PLAYING 计时`);
+    }, timeoutMs);
+    log.debug(`[PlayerController][optimistic] ${playerId}: 阶段2 起 ${Math.round(timeoutMs / 1000)}s 等 PLAYING 计时`);
   }
 
   private clearOptimistic(playerId: string): void {

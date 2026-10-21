@@ -26,10 +26,11 @@ async function sleep(ms: number): Promise<void> {
   await new Promise((r) => setTimeout(r, ms));
 }
 
-function setup(opts: { castFails?: boolean } = {}) {
+function setup(opts: { castFails?: boolean; songCount?: number } = {}) {
   const qc = new QueueController();
   const played: string[] = [];
   let castFails = opts.castFails ?? false;
+  const songCount = opts.songCount ?? 2;
   const mockPlayer = {
     playerId: "dlna:stalltest",
     async pollState() {
@@ -47,10 +48,9 @@ function setup(opts: { castFails?: boolean } = {}) {
     reportState: () => {}, resetTracker: () => {}, setExpectedDuration: () => {},
   };
   qc.registerPlayer("stalltest", mockPlayer, mockCtrl);
-  qc.setQueue("stalltest", [
-    { songId: "s1", title: "t1", mime: "audio/mpeg", duration: 180 },
-    { songId: "s2", title: "t2", mime: "audio/mpeg", duration: 180 },
-  ] as any, 0, "http://base");
+  qc.setQueue("stalltest", Array.from({ length: songCount }, (_, i) => ({
+    songId: `s${i + 1}`, title: `t${i + 1}`, mime: "audio/mpeg", duration: 180,
+  })) as any, 0, "http://base");
   return { qc, played, setCastFails: (v: boolean) => { castFails = v; } };
 }
 
@@ -77,6 +77,21 @@ describe("stalled 连续卡死放行", () => {
     // s2 再卡:计数按新歌重来,先重投 s2
     await qc.handleDecision("stalled", "dlna:stalltest");
     expect(played).toEqual(["s1", "s2", "s2"]);
+  });
+
+  it("跨曲熔断:连续 3 首卡死即停队列,不再把整圈走完", async () => {
+    // 240 真机(2026-10-21):主卧整段网络源不可播,每首 stall 2 次就切下一首,
+    // 一路跳过 20+ 首;每首的 judgePlayable+resolve+整曲缓冲把事件循环拖到
+    // /status 12s、HA 卡片与客户端全部超时(用户观感 = 容器崩溃)。
+    const { qc, played } = setup({ songCount: 5 });
+    qc.setPlayMode("stalltest", "order");
+    // 每首:第 1 次 stalled 重投当前首,第 2 次切下一首;第 3 首的第 2 次触发熔断。
+    for (let i = 0; i < 6; i++) await qc.handleDecision("stalled", "dlna:stalltest");
+    expect(played).toEqual(["s1", "s2", "s2", "s3", "s3"]);
+    const snap = qc.snapshot("stalltest");
+    expect(snap.isActive).toBe(false);
+    expect(snap.ended).toBe(true);
+    expect(snap.currentIndex, "停在 s3,不得再起播 s4").toBe(2);
   });
 
   it("cast 抛错不再静默:自动补派 stalled 继续推进(不再停死)", async () => {
