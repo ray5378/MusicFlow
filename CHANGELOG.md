@@ -2,6 +2,15 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.53] - 2026-10-21
+
+### Fix / 4.6.52 的 CI 红:互斥硬上限不改变两个起播入口的调用形态
+
+4.6.52 把「互斥 DLNA 让位」包了一层 `withDeadline(...)`,导致 `check-airplay-dlna-mutex.mjs` 的 R2「两个起播入口各调用一次 `await yieldSiblingDlnaForAirPlay(opts.deviceId)`」计数从 2 变成 1,`ci` 作业因此报红(其余 11 个 workflow 全绿)。
+
+- 修法:把硬上限**移进助手内部**(只包住 `stopDevicePlayback`),in-proc / fork 两个起播入口仍保持原来的直调形态;`R18` 守卫同步改为断言 `withDeadline(stopDevicePlayback`。
+- 复跑:互斥守卫、播放链路守卫(R1~R18)、`tsc`、相关 4 文件 150 例全绿;真机单次流转 556ms、落点 3.465s、`PLAYING` 正常前进(行为与 4.6.52 一致,仅调用形态回归守卫约定)。
+
 ## [4.6.52] - 2026-10-21
 
 ### Fix / HiVi 流转接续失败:起播即落位 + 建会话硬预算(真机实测)

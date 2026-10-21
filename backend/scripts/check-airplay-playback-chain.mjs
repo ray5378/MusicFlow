@@ -615,7 +615,7 @@ console.log("===== R18 流转接续:起播即落位 + 建会话硬预算(HiVi �
     "互斥 DLNA 与旧会话收尾有硬上限(不得拖死 cast)",
     /DLNA_YIELD_DEADLINE_MS = 6_000/.test(ap)
       && /STOP_SESSION_DEADLINE_MS = 4_000/.test(ap)
-      && /withDeadline\(yieldSiblingDlnaForAirPlay/.test(ap)
+      && /withDeadline\(stopDevicePlayback/.test(ap)
       && /withDeadline\(stopSession/.test(ap),
     "清理步骤没有硬上限,慢设备会把 cast 拖到 30s",
   );

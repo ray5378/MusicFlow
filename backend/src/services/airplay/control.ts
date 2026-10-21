@@ -274,7 +274,9 @@ async function yieldSiblingDlnaForAirPlay(deviceId: string): Promise<void> {
   }
   try {
     const t = Date.now();
-    await stopDevicePlayback(dlnaPeer);
+    // 互斥是**尽力而为**,必须有硬上限:它在 cast 的关键路径上,SOAP/事件侧一旦挂住
+    // 就会把整个 cast 拖死(2026-10-21 现场:HiVi 每次流转都卡到 30s 硬顶)。
+    await withDeadline(stopDevicePlayback(dlnaPeer), DLNA_YIELD_DEADLINE_MS, "互斥 DLNA 让位", deviceId);
     log.info("双协议互斥:AirPlay 起播前停止同 host DLNA 播放并冻结其队列", { deviceId, dlnaPeer, ms: Date.now() - t });
   } catch (e) {
     log.warn("双协议互斥:停止同 host DLNA 播放失败(忽略)", { deviceId, dlnaPeer, err: (e as Error)?.message || e });
@@ -293,7 +295,7 @@ async function startSession(opts: AirPlayCastOptions, seekSec?: number): Promise
   // ⚠️ 互斥是**尽力而为**,必须有硬上限:它在 cast 的关键路径上,一旦 SOAP/事件
   // 侧挂住就会把整个 cast 拖死(2026-10-21 现场:HiVi 每次流转都卡到 30s 硬顶)。
   const tDlna = Date.now();
-  await withDeadline(yieldSiblingDlnaForAirPlay(opts.deviceId), DLNA_YIELD_DEADLINE_MS, "互斥 DLNA 让位", opts.deviceId);
+  await yieldSiblingDlnaForAirPlay(opts.deviceId);
   const dlnaMs = Date.now() - tDlna;
 
   // 旧会话收尾同样封顶:TEARDOWN 已在 raop 侧限 2.5s,这里再兜一层总预算。
