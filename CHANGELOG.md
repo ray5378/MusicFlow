@@ -2,6 +2,15 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.55] - 2026-10-21
+
+### Fix / 4.6.54 的 CI 红:插件 manifest 用例仍按「AirPlay 默认关闭」断言
+
+`tests/plugins/renderersPlugin.test.ts` 的用例把 `defaultEnabled === false` 当成契约,而 4.6.54 已按用户要求改为默认开启,`ci` 与 `build-and-push` 的全量测试门禁因此报红(526 文件中仅此 1 例失败)。
+
+- 用例改为断言 `defaultEnabled === true`,并补充「不存在 toggleable 之类的不可关闭标记」——默认开启 ≠ 不可手动关闭:插件页开关、`PUT /v1/plugins/:id/toggle` 的启停联动均保持不变。
+- 复跑:`renderersPlugin`、播放链路守卫(R1~R23)、`tsc`、相关文件全绿。
+
 ## [4.6.54] - 2026-10-21
 
 ### Feat / AirPlay 插件默认开启 + 音量/静音持久化(重启保留设备自身音量)

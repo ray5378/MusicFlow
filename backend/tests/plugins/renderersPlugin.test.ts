@@ -249,14 +249,17 @@ describe("DLNA 渲染器 control:action 路由(动态 import 同一个 control �
   });
 });
 
-describe("AirPlay 渲染器插件 manifest(默认关闭:零常驻资源)", () => {
-  it("id/type/capabilities 与「默认关闭、零配置」约定", () => {
+describe("AirPlay 渲染器插件 manifest(默认开启:零配置;仍可手动关闭)", () => {
+  it("id/type/capabilities 与「默认开启、零配置、可手动关闭」约定", () => {
     expect(AIRPLAY_RENDERER_ID).toBe("airplay-renderer");
     expect(airplayRendererManifest.id).toBe("airplay-renderer");
     expect(airplayRendererManifest.type).toBe("renderer");
     expect(airplayRendererManifest.capabilities).toEqual(["renderer"]);
-    // 这条是本插件与 DLNA 渲染器唯一的语义差别:mDNS 常驻监听有开销,故默认关
-    expect(airplayRendererManifest.defaultEnabled).toBe(false);
+    // 2026-10-21 用户拍板:AirPlay 是内建投屏主链路,新装默认开启(与 DLNA 渲染器对齐)。
+    // 「默认开启」只改初始值:插件管理页的开关仍在,toggle 关 → 停会话/停 mDNS/注销
+    // player,开 → 起发现,故这里同时断言**没有**任何「不可关闭」的标记位。
+    expect(airplayRendererManifest.defaultEnabled).toBe(true);
+    expect((airplayRendererManifest as any).toggleable).toBeUndefined();
     expect(airplayRendererManifest.configSchema).toEqual([]);
     expect(airplayRendererPlugin.manifest).toBe(airplayRendererManifest);
   });
