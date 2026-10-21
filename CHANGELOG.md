@@ -2,6 +2,25 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.69] - 2026-10-22
+
+### Fix / 4.6.68 CI 红:双协议互斥守卫「助手内冻结队列」失明
+
+4.6.68 把 `yieldSiblingDlnaForAirPlay` 的冻结调用改成局部变量
+`const qc = getQueueController(); … qc.stopPlayback(...)`，而
+`scripts/check-airplay-dlna-mutex.mjs` 的 R1 用**字面字符串**
+`getQueueController().stopPlayback(` 钉死「助手内确实冻结队列」⇒ 静态守卫判红
+（`ci` 失败；`类型检查 + 全量测试` 本身通过）。
+
+**修复**：快照仍从局部 `qc` 读（可容错），冻结调用恢复为
+`getQueueController().stopPlayback(...)` 字面形态，并在代码里注明原因，避免
+后续重构再次让守卫失明。
+
+**验证**：`check-airplay-dlna-mutex.mjs` 与 `check-airplay-playback-chain.mjs`
+双双全绿；`tests/airplay/controlOrchestration.test.ts` +
+`tests/dlna/controlTransportGuards.test.ts` + `tests/airplay/mutex.test.ts`
+共 154 例通过。
+
 ## [4.6.68] - 2026-10-22
 
 ### Fix / 4.6.67 CI 红:冻结 DLNA 队列被「读快照」提前打断

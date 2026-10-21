@@ -361,7 +361,10 @@ async function yieldSiblingDlnaForAirPlay(deviceId: string): Promise<void> {
     // 读快照只用于「是否需要等停稳」,读不到不能阻断下面的冻结 ——
     // snapshot 缺失/异常时按「未激活」处理,freeze 必须照发。
     try { wasActive = qc.snapshot?.(`dlna:${dlnaPeer}`)?.isActive === true; } catch { wasActive = false; }
-    qc.stopPlayback(`dlna:${dlnaPeer}`);
+    // ⚠️ 必须以 `getQueueController().stopPlayback(...)` 的**字面形态**出现:
+    //   双协议互斥守卫 check-airplay-dlna-mutex.mjs 用该字符串钉死「助手内确实冻结
+    //   队列」。改用局部变量 qc.stopPlayback(...) 会让静态守卫失明(4.6.68 CI 红)。
+    getQueueController().stopPlayback(`dlna:${dlnaPeer}`);
   } catch (e) {
     log.warn("双协议互斥:冻结同 host DLNA 队列失败(忽略)", { deviceId, dlnaPeer, err: (e as Error)?.message || e });
   }
