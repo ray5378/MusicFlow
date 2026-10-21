@@ -300,8 +300,18 @@ app.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
     //   武装必须在起播**之前**:起播那一步的 playCore 会消费它。
     const borrow = await tryArmSendspinBorrow(fromPeerId, toPeerId, askPosition);
     let startedIdx: number | null = null;
+    // ★ AirPlay 目标:起点必须在**这一次** cast 里落位(playMedia 的 startMs),
+    //   不能再走「先起播、再 seek」—— 那是同一设备上的第二次完整建会话,HiVi/Linkplay
+    //   这类单会话设备会在第二次 RECORD 上永久等待(2026-10-21 真机:流转接续失败)。
+    //   sendspin 借流自带落点,不需要本值。
+    const inCastPos = parsedTo.kind === "airplay" && !borrow.armed
+      ? (askPosition ?? await readPeerPositionSeconds(fromPeerId))
+      : null;
     try {
-      startedIdx = await getQueueManager().playFrom(parsedTo.id, items, start, getDlnaBaseUrl(c));
+      startedIdx = await getQueueManager().playFrom(
+        parsedTo.id, items, start, getDlnaBaseUrl(c), undefined,
+        inCastPos !== null && inCastPos > 0 ? Math.round(inCastPos * 1000) : undefined,
+      );
     } catch (e: any) { return c.json(apiInternalError(e), 500); }
     // 移交只在「目标端真的起播了源端那一首」且**确实落位**时才成立。任一不成立都走
     // 常规对齐 —— 且必须走:移交没发生就意味着目标端还在 0 秒。
@@ -313,6 +323,9 @@ app.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
       await borrowLandingConfirmed(toPeerId, borrow.positionSeconds);
     if (handedOver) {
       landedPosition = borrow.positionSeconds ?? null;
+    } else if (inCastPos !== null && inCastPos > 0) {
+      // 起播即落位(AirPlay):**不再补 seek**,避免第二次建会话。
+      landedPosition = inCastPos;
     } else {
       const pos = askPosition ?? await readPeerPositionSeconds(fromPeerId);
       if (pos !== null && pos > 0 && await seekPeerToSeconds(toPeerId, pos)) landedPosition = pos;

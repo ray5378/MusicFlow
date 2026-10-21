@@ -12,6 +12,11 @@ import {
   PCM_BYTES_PER_CHUNK,
   RAOP_LATENCY_MIN,
   NTP_EPOCH_DELTA,
+  RTSP_TIMEOUT_MS,
+  RTSP_CLEANUP_TIMEOUT_MS,
+  HANDSHAKE_BUDGET_MS,
+  RTSP_STEP_MIN_MS,
+  rtspTimeoutFor,
   ntpNow,
   ntpFromDate,
   ts2ntp,
@@ -23,6 +28,29 @@ import {
   seekPositionSec,
   pcmToAlacRaw,
 } from "../../src/services/airplay/raop.js";
+
+describe("RTSP 超时预算:握手必须早于 cast 的 30s 硬顶结束", () => {
+  it("清理类请求(TEARDOWN/FLUSH)永远用短超时", () => {
+    expect(rtspTimeoutFor("TEARDOWN", null)).toBe(RTSP_CLEANUP_TIMEOUT_MS);
+    expect(rtspTimeoutFor("FLUSH", 50_000)).toBe(RTSP_CLEANUP_TIMEOUT_MS);
+    expect(RTSP_CLEANUP_TIMEOUT_MS).toBeLessThan(RTSP_TIMEOUT_MS);
+  });
+
+  it("握手请求按剩余预算收缩,且不低于单步下限", () => {
+    expect(rtspTimeoutFor("ANNOUNCE", null)).toBe(RTSP_TIMEOUT_MS);
+    expect(rtspTimeoutFor("ANNOUNCE", HANDSHAKE_BUDGET_MS - 1000)).toBe(HANDSHAKE_BUDGET_MS - 1000);
+    // 预算快耗尽 → 下限兜底(仍给对方一次应答机会),不会变成 0/负数
+    expect(rtspTimeoutFor("SETUP", 200)).toBe(RTSP_STEP_MIN_MS);
+    expect(rtspTimeoutFor("RECORD", -5_000)).toBe(RTSP_STEP_MIN_MS);
+    // 预算比默认超时更大时不放大等待
+    expect(rtspTimeoutFor("RECORD", 60_000)).toBe(RTSP_TIMEOUT_MS);
+  });
+
+  it("三步握手的**最坏**总耗时小于 cast 硬顶(30s)", () => {
+    // 真机健康握手约 1s;预算存在的意义是封顶,不是常态等待。
+    expect(HANDSHAKE_BUDGET_MS).toBeLessThan(30_000);
+  });
+});
 
 describe("RAOP 常量(与 libraop 对齐,改动即协议不兼容)", () => {
   it("采样参数固定 44.1k/16bit/立体声,每包 352 帧", () => {

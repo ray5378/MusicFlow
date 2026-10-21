@@ -28,8 +28,13 @@ export function createAirPlayProtocolPlayer(deviceId: string): ProtocolPlayer {
   const playerId = `airplay:${deviceId}`;
   return {
     playerId,
-    async playMedia(item: QueueItem, baseUrl: string, _startMs = 0) {
+    async playMedia(item: QueueItem, baseUrl: string, startMs = 0) {
       const streamUrl = createAirPlaySession(item.songId, deviceId, baseUrl).streamUrl;
+      // ★ 起播即落位(流转/带进度起播):起点交给**这一次** ANNOUNCE/SETUP/RECORD,
+      //   绝不再「先起播、再 seek」—— AirPlay 的 seek 是完整重建会话,连续两次建会话
+      //   会让 HiVi 这类单会话设备在第二次 RECORD 上永久等待(2026-10-21 真机:
+      //   流转时第 3 次握手 RECORD 挂死 12s → 流转失败/无声)。
+      const seekSec = startMs > 0 ? startMs / 1000 : undefined;
       await castToAirPlayDevice({
         deviceId,
         songId: item.songId,
@@ -40,6 +45,7 @@ export function createAirPlayProtocolPlayer(deviceId: string): ProtocolPlayer {
         durationSec: item.duration,
         baseUrl,
         streamUrl,
+        ...(seekSec !== undefined ? { seekSec } : {}),
       });
       // mediaUri identifies the current track for PlayerController's
       // track_changed detection — the token stream URL is per-cast.

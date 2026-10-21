@@ -155,7 +155,10 @@ const gateHeld = new AsyncLocalStorage<ReadonlySet<string>>();
 function withDeviceGate<T>(deviceId: string, fn: () => Promise<T>): Promise<T> {
   if (gateHeld.getStore()?.has(deviceId)) return fn(); // 可重入:同一调用链不再排队
   const prev = deviceGates.get(deviceId) ?? Promise.resolve();
+  const queuedAt = Date.now();
   const exec = () => {
+    const waited = Date.now() - queuedAt;
+    if (waited > 50) log.debug(`[AirPlay][gate] ${deviceId} 排队 ${waited}ms 后开始`);
     const next = new Set(gateHeld.getStore() ?? []);
     next.add(deviceId);
     return gateHeld.run(next, fn);
@@ -163,6 +166,33 @@ function withDeviceGate<T>(deviceId: string, fn: () => Promise<T>): Promise<T> {
   const run = prev.then(exec, exec);
   deviceGates.set(deviceId, run.then(() => undefined, () => undefined));
   return run;
+}
+
+/** 建会话关键路径上的**清理步骤**硬上限:互斥 DLNA 让位 / 旧会话收尾都是尽力而为,
+ *  挂住就必须跳过继续,绝不能把整个 cast 拖到 QueueController 的 30s 硬顶
+ *  (2026-10-21 HiVi 现场:每次流转都卡 30s,表现为「流转接续失败」)。 */
+const DLNA_YIELD_DEADLINE_MS = 6_000;
+const STOP_SESSION_DEADLINE_MS = 4_000;
+
+async function withDeadline<T>(
+  p: Promise<T>,
+  ms: number,
+  label: string,
+  deviceId: string,
+): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<null>((resolve) => {
+    timer = setTimeout(() => {
+      log.warn(`[AirPlay][cast] ${deviceId} ${label} 超过 ${ms}ms 未完成,跳过继续(避免拖死 cast)`);
+      resolve(null);
+    }, ms);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([p, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /** 该设备是否有活跃推流会话(fork 看子进程镜像的会话表;in-proc 看本地 sessions)。 */
@@ -181,6 +211,7 @@ async function stopSession(deviceId: string): Promise<void> {
   }
   const s = sessions.get(deviceId);
   if (!s) return;
+  log.debug(`[AirPlay][cast] stopSession: 收尾旧会话 ${deviceId}`);
   sessions.delete(deviceId);
   s.ended = true;
   try { killDecoder(s.ffmpeg); } catch { /* ignore */ }
@@ -233,6 +264,7 @@ export async function stopAirPlaySession(deviceId: string): Promise<void> {
  */
 async function yieldSiblingDlnaForAirPlay(deviceId: string): Promise<void> {
   const dlnaPeer = dlnaPeerOfAirPlay(deviceId);
+  log.debug(`[AirPlay][cast] 互斥:开始 device=${deviceId} dlnaPeer=${dlnaPeer ?? "-"}`);
   if (!dlnaPeer) return;
   try {
     const { getQueueController } = await import("../player/index.js");
@@ -241,8 +273,9 @@ async function yieldSiblingDlnaForAirPlay(deviceId: string): Promise<void> {
     log.warn("双协议互斥:冻结同 host DLNA 队列失败(忽略)", { deviceId, dlnaPeer, err: (e as Error)?.message || e });
   }
   try {
+    const t = Date.now();
     await stopDevicePlayback(dlnaPeer);
-    log.info("双协议互斥:AirPlay 起播前停止同 host DLNA 播放并冻结其队列", { deviceId, dlnaPeer });
+    log.info("双协议互斥:AirPlay 起播前停止同 host DLNA 播放并冻结其队列", { deviceId, dlnaPeer, ms: Date.now() - t });
   } catch (e) {
     log.warn("双协议互斥:停止同 host DLNA 播放失败(忽略)", { deviceId, dlnaPeer, err: (e as Error)?.message || e });
   }
@@ -251,14 +284,22 @@ async function yieldSiblingDlnaForAirPlay(deviceId: string): Promise<void> {
 async function startSession(opts: AirPlayCastOptions, seekSec?: number): Promise<void> {
   const dev = getAirPlayDevice(opts.deviceId);
   if (!dev) throw new Error("AirPlay 设备不在线或未发现");
+  log.info(`[AirPlay][cast] 开始建会话 device=${opts.deviceId} host=${dev.host}:${dev.port} seek=${seekSec ?? 0}s`);
 
   // ===== 双协议互斥(同 host 的 DLNA 播放先行停止并冻结其队列) =====
   // Linkplay/HiVi 类设备同时暴露 DLNA + AirPlay,音频输入互斥:若 DLNA 正在播放,
   // AirPlay RAOP 起播会被设备输入抢占逻辑干扰(或设备停在 DLNA 通道 → 无声);
   // 且仅 SOAP Stop 不够——DLNA 队列会自动续播反杀,详见 yieldSiblingDlnaForAirPlay。
-  await yieldSiblingDlnaForAirPlay(opts.deviceId);
+  // ⚠️ 互斥是**尽力而为**,必须有硬上限:它在 cast 的关键路径上,一旦 SOAP/事件
+  // 侧挂住就会把整个 cast 拖死(2026-10-21 现场:HiVi 每次流转都卡到 30s 硬顶)。
+  const tDlna = Date.now();
+  await withDeadline(yieldSiblingDlnaForAirPlay(opts.deviceId), DLNA_YIELD_DEADLINE_MS, "互斥 DLNA 让位", opts.deviceId);
+  const dlnaMs = Date.now() - tDlna;
 
-  await stopSession(opts.deviceId);
+  // 旧会话收尾同样封顶:TEARDOWN 已在 raop 侧限 2.5s,这里再兜一层总预算。
+  const tStop = Date.now();
+  await withDeadline(stopSession(opts.deviceId), STOP_SESSION_DEADLINE_MS, "旧 AirPlay 会话收尾", opts.deviceId);
+  const stopMs = Date.now() - tStop;
 
   const baseUrl = opts.baseUrl || getEffectiveBaseUrl();
   if (!baseUrl) throw new Error("未确定播放流地址(DLNA_BASE_URL 或先进行一次投屏)");
@@ -268,12 +309,20 @@ async function startSession(opts: AirPlayCastOptions, seekSec?: number): Promise
 
   const player = new RaopPlayer({ host: dev.host, port: dev.port, pk: dev.pk, et: dev.et });
   let session: RaopSession;
+  const tConn = Date.now();
   try {
     session = await player.connect();
   } catch (e) {
     player.stop().catch(() => {});
     throw e;
   }
+  const connMs = Date.now() - tConn;
+  // 分段耗时是「流转接续失败」的第一手证据:互斥(DLNA Stop)/旧会话 TEARDOWN/握手
+  // 三步各自都可能挂住,合起来超过 QueueController 的 30s cast 硬顶。
+  log.info(
+    `AirPlay 起播分段耗时: 互斥DLNA=${dlnaMs}ms 旧会话TEARDOWN=${stopMs}ms RAOP握手=${connMs}ms (host=${dev.host})`,
+    { deviceId: opts.deviceId },
+  );
 
   // 重播输入同样走回环管道(同上:raw 直通会假 EOF/从头重连);回环地址幂等直通。
   // seek 走**完整重建**时,新会话的 RTP 时间线要按目标秒重锚(否则上报位置从 0 起算)。

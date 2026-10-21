@@ -74,6 +74,21 @@ describe("playMedia", () => {
     expect(got.mediaUri).toBe(STREAM);
   });
 
+  it("startMs > 0 → cast 带 seekSec(流转起播即落位,不再二次 seek)", async () => {
+    f.createAirPlaySession.mockReturnValue({ streamUrl: STREAM });
+    await createAirPlayProtocolPlayer(DEV).playMedia(item(), "http://host", 12_500);
+    // 为什么钉死:AirPlay 的 seek 是完整重建会话 —— 流转时「先起播、再 seek」
+    // 会对 HiVi 单会话设备连开两次 RTSP,第二次 RECORD 永久等待(真机 2026-10-21)。
+    expect(f.castToAirPlayDevice).toHaveBeenCalledWith(expect.objectContaining({ seekSec: 12.5 }));
+  });
+
+  it("startMs = 0 → 不带 seekSec(普通起播行为零变化)", async () => {
+    f.createAirPlaySession.mockReturnValue({ streamUrl: STREAM });
+    await createAirPlayProtocolPlayer(DEV).playMedia(item(), "http://host", 0);
+    const arg = f.castToAirPlayDevice.mock.calls.at(-1)?.[0] as Record<string, any>;
+    expect("seekSec" in arg).toBe(false);
+  });
+
   it("mediaUri 就是 streamUrl:track_changed 靠它识别当前曲(非 token 之外的身份)", async () => {
     f.createAirPlaySession.mockReturnValue({ streamUrl: STREAM });
     const p = createAirPlayProtocolPlayer(DEV);

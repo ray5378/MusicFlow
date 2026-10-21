@@ -30,6 +30,26 @@ export const PCM_BYTES_PER_CHUNK = CHUNK_LEN * CHANNELS * (SAMPLE_SIZE / 8); // 
 export const RAOP_LATENCY_MIN = 11025;     // frames (libraop's LATENCY_MIN)
 export const NTP_EPOCH_DELTA = 2208988800; // seconds 1970→1900
 
+/** 单条 RTSP 请求的默认超时(常规操作)。 */
+export const RTSP_TIMEOUT_MS = 10_000;
+/** 清理类请求(TEARDOWN/FLUSH)的超时:设备不答也必须尽快放行,否则新 cast 被拖着。 */
+export const RTSP_CLEANUP_TIMEOUT_MS = 2_500;
+/** 握手(ANNOUNCE→SETUP→RECORD)的**总预算**。
+ *
+ *  三步各自 10s 串起来 = 30s,正好撞上 QueueController 的 cast 30s 硬顶 —— 真机实测
+ *  HiVi 一次流转就在这 30s 上崩(2026-10-21)。健康握手实测约 1s,给 8s 足够宽松,
+ *  超时则快速失败、交给上层重投,而不是把整个 cast 拖死。 */
+export const HANDSHAKE_BUDGET_MS = 8_000;
+/** 握手期间单步的最小等待(预算快耗尽时也要给设备一个响应的机会)。 */
+export const RTSP_STEP_MIN_MS = 1_500;
+
+/** 按方法 + 握手剩余预算选超时:清理请求永远短;握手请求受总预算约束。 */
+export function rtspTimeoutFor(method: string, remainingHandshakeMs: number | null): number {
+  if (method === "TEARDOWN" || method === "FLUSH") return RTSP_CLEANUP_TIMEOUT_MS;
+  if (remainingHandshakeMs === null) return RTSP_TIMEOUT_MS;
+  return Math.max(RTSP_STEP_MIN_MS, Math.min(RTSP_TIMEOUT_MS, remainingHandshakeMs));
+}
+
 /** 推流节拍健康度(可观测指标,由 `RaopPlayer.realtimeStats` 暴露)。 */
 export interface RaopRealtimeStats {
   /** 已发出的 RTP 音频包数。 */
@@ -247,6 +267,8 @@ export class RaopPlayer {
   private aesIv = randomBytes(16);
   private ssrc = randomBytes(4).readUInt32BE(0);
   private seq = (Math.random() * 0xffff) | 0;
+  /** 握手总预算的截止时刻(epoch ms;0 = 不在握手阶段)。见 rtspTimeoutFor。 */
+  private handshakeDeadline = 0;
   private headTs = 0;
   private startTs = 0;
   /** `startTs` 对应的真实 NTP 时刻(内容时间线 → 墙钟的锚点)。
@@ -413,10 +435,14 @@ export class RaopPlayer {
       if (!sock) { reject(new Error("RTSP socket closed")); return; }
       sock.on("data", onData);
       sock.write(req);
+      const waitMs = rtspTimeoutFor(
+        method,
+        this.handshakeDeadline > 0 ? this.handshakeDeadline - Date.now() : null,
+      );
       const t = setTimeout(() => {
         sock.off("data", onData);
-        reject(new Error(`RTSP ${method} timeout`));
-      }, 10000);
+        reject(new Error(`RTSP ${method} timeout(${waitMs}ms)`));
+      }, waitMs);
       sock.once("close", () => clearTimeout(t));
     });
   }
@@ -471,59 +497,103 @@ export class RaopPlayer {
     return lines.join("\r\n") + "\r\n";
   }
 
+  /** 建会话的**总**上限:bindUdp/建 TCP/三步 RTSP 任何一步卡住都必须失败返回。
+   *  只给单步设超时不够 —— 卡在 bindUdp 这类「没有超时」的步骤上时,cast 会一直
+   *  悬着并占住设备闸,后续所有流转全部排队(2026-10-21 HiVi 现场)。 */
   async connect(): Promise<RaopSession> {
+    const budget = Number(process.env.AIRPLAY_CONNECT_BUDGET_MS) > 0
+      ? Number(process.env.AIRPLAY_CONNECT_BUDGET_MS)
+      : 12_000;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`RAOP connect 总超时(${budget}ms)`)), budget);
+      timer.unref?.();
+    });
+    try {
+      return await Promise.race([this.doConnect(), timeout]);
+    } catch (e) {
+      // 半开资源就地收掉:否则下一次 cast 与残留 socket/会话并存。
+      try { this.socket?.destroy(); } catch { /* ignore */ }
+      try { this.audioSocket?.close(); this.ctrlSocket?.close(); this.timeSocket?.close(); } catch { /* ignore */ }
+      throw e;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private async doConnect(): Promise<RaopSession> {
     this.destroying = false;
+    const tBind = Date.now();
     await this.bindUdp();
+    log.debug(`connect: UDP bind 完成 ${Date.now() - tBind}ms (local=${this.localIp})`);
+    const tTcp = Date.now();
     await new Promise<void>((resolve, reject) => {
       const s = net.createConnection({ host: this.opts.host, port: this.opts.port }, () => {
         this.socket = s;
         resolve();
       });
       s.on("error", (e) => reject(e));
-      setTimeout(() => reject(new Error("RTSP connect timeout")), 8000).unref();
+      setTimeout(() => reject(new Error("RTSP connect timeout")), 5000).unref();
     });
+    log.debug(`connect: RTSP TCP 已连上 ${Date.now() - tTcp}ms`);
     this.url = `rtsp://${this.opts.host}:${this.opts.port}/${this.sid}`;
 
-    const announce = await this.sendRtsp("ANNOUNCE", this.sdp(), "application/sdp");
-    this.session = announce.headers["session"] || null;
-
-    // SETUP
-    const ctrlPort = this.ctrlSocket!.address().port;
-    const timePort = this.timeSocket!.address().port;
-    const setup = await this.sendRtsp("SETUP", null, null, [
-      ["Transport", `RTP/AVP/UDP;unicast;interleaved=0-1;mode=record;control_port=${ctrlPort};timing_port=${timePort}`],
-    ]);
+    // 握手总预算(见 HANDSHAKE_BUDGET_MS):三步串行,单步 10s 会让 cast 撞上 30s 硬顶。
+    const hsBudget = Number(process.env.AIRPLAY_HANDSHAKE_BUDGET_MS) > 0
+      ? Number(process.env.AIRPLAY_HANDSHAKE_BUDGET_MS)
+      : HANDSHAKE_BUDGET_MS;
+    this.handshakeDeadline = Date.now() + hsBudget;
+    const hsT0 = Date.now();
     let audioPort = 0;
     let controlPort = 0;
     let timingPort = 0;
-    const t = setup.headers["transport"] || "";
-    for (const tok of t.split(";")) {
-      const [k, v] = tok.split("=");
-      if (k === "server_port") audioPort = parseInt(v, 10);
-      if (k === "control_port") controlPort = parseInt(v, 10);
-      if (k === "timing_port") timingPort = parseInt(v, 10);
-    }
-    if (!audioPort) throw new Error("RAOP SETUP: no server_port in Transport response");
-    if (setup.headers["session"]) this.session = setup.headers["session"];
+    try {
+      const tAnnounce = Date.now();
+      const announce = await this.sendRtsp("ANNOUNCE", this.sdp(), "application/sdp");
+      this.session = announce.headers["session"] || null;
+      log.debug(`RTSP ANNOUNCE ${announce.status} ${Date.now() - tAnnounce}ms`);
 
-    // RECORD
-    const ntp0 = ntpNow();
-    this.headTs = ntp2ts(ntp0, this.opts.sampleRate);
-    this.headTs -= this.headTs % CHUNK_LEN;
-    this.startTs = this.headTs;
-    this.baseTs = this.headTs;
-    this.startNtp = ntp0;
-    const rtpInfo = `seq=${this.seq};rtptime=${this.headTs}`;
-    const record = await this.sendRtsp("RECORD", null, null, [["Range", "npt=0-"], ["RTP-Info", rtpInfo]]);
-    // libraop: Audio-Latency (frames) from the RECORD reply adjusts the latency
-    // the device expects us to honor in sync packets. Ours must be >= 1s of
-    // frames, matching what cliraop uses by default (MS2TS(1000, sr)); the
-    // device-side rtp hold depth is derived from the sync packet's
-    // rtp_timestamp_latency field, so a too-small value underruns and stutters.
-    const audioLatency = parseInt(record.headers["audio-latency"] || "", 10);
-    if (Number.isFinite(audioLatency) && audioLatency > 0) {
-      this.latencyFrames = Math.max(audioLatency, this.opts.sampleRate);
-      log.info(`audio latency: ${audioLatency} frames -> sync latency ${this.latencyFrames} frames (${Math.round(this.latencyFrames / this.opts.sampleRate * 1000)}ms)`);
+      // SETUP
+      const ctrlPort = this.ctrlSocket!.address().port;
+      const timePort = this.timeSocket!.address().port;
+      const tSetup = Date.now();
+      const setup = await this.sendRtsp("SETUP", null, null, [
+        ["Transport", `RTP/AVP/UDP;unicast;interleaved=0-1;mode=record;control_port=${ctrlPort};timing_port=${timePort}`],
+      ]);
+      log.debug(`RTSP SETUP ${setup.status} ${Date.now() - tSetup}ms`);
+      const t = setup.headers["transport"] || "";
+      for (const tok of t.split(";")) {
+        const [k, v] = tok.split("=");
+        if (k === "server_port") audioPort = parseInt(v, 10);
+        if (k === "control_port") controlPort = parseInt(v, 10);
+        if (k === "timing_port") timingPort = parseInt(v, 10);
+      }
+      if (!audioPort) throw new Error("RAOP SETUP: no server_port in Transport response");
+      if (setup.headers["session"]) this.session = setup.headers["session"];
+
+      // RECORD
+      const ntp0 = ntpNow();
+      this.headTs = ntp2ts(ntp0, this.opts.sampleRate);
+      this.headTs -= this.headTs % CHUNK_LEN;
+      this.startTs = this.headTs;
+      this.baseTs = this.headTs;
+      this.startNtp = ntp0;
+      const rtpInfo = `seq=${this.seq};rtptime=${this.headTs}`;
+      const tRecord = Date.now();
+      const record = await this.sendRtsp("RECORD", null, null, [["Range", "npt=0-"], ["RTP-Info", rtpInfo]]);
+      log.debug(`RTSP RECORD ${record.status} ${Date.now() - tRecord}ms (握手总耗时 ${Date.now() - hsT0}ms)`);
+      // libraop: Audio-Latency (frames) from the RECORD reply adjusts the latency
+      // the device expects us to honor in sync packets. Ours must be >= 1s of
+      // frames, matching what cliraop uses by default (MS2TS(1000, sr)); the
+      // device-side rtp hold depth is derived from the sync packet's
+      // rtp_timestamp_latency field, so a too-small value underruns and stutters.
+      const audioLatency = parseInt(record.headers["audio-latency"] || "", 10);
+      if (Number.isFinite(audioLatency) && audioLatency > 0) {
+        this.latencyFrames = Math.max(audioLatency, this.opts.sampleRate);
+        log.info(`audio latency: ${audioLatency} frames -> sync latency ${this.latencyFrames} frames (${Math.round(this.latencyFrames / this.opts.sampleRate * 1000)}ms)`);
+      }
+    } finally {
+      this.handshakeDeadline = 0;
     }
 
     // ---- RTP plumbing ----

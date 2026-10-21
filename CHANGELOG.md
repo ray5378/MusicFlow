@@ -2,6 +2,19 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.52] - 2026-10-21
+
+### Fix / HiVi 流转接续失败:起播即落位 + 建会话硬预算(真机实测)
+
+用户实测反馈:拖拽跳转正常,但**流转播放接续经常失败**(HiVi H5MKII,Linkplay 双协议设备)。240 现场日志 + 230 真机复现,定位到三层独立缺陷:
+
+- **① 一次流转会在同一台设备上连开 2~3 条 RTSP 会话**:`transfer` 原本「先 cast、再 seek」,而 AirPlay 的 seek 是**完整重建会话**。HiVi 只认一条会话:第 3 次握手的 `ANNOUNCE/SETUP` 都回 200,`RECORD` 永久不答 → cast 卡满 30s。修复:transfer 到 AirPlay 时把源端进度作为 `playMedia(item, baseUrl, startMs)` 交给**这一次** cast(`seekSec`),不再补 seek;`playFrom` → `playCurrent` → `UniversalPlayer` 全链路透传落点,DLNA/Sendspin/组忽略该参数(行为零变化)。实测单会话 `seek=1.924s` 起播,transfer 1.3~4.0s。
+- **② cast 30s 超时的兜底回调在 `setTimeout` 里 `throw`** → **未捕获异常直接杀掉后端进程**(240 容器 RestartCount 持续增长,期间 API `connection refused`,所有设备播放同时中断)。修复:兜底返回 `null`、再在 async 函数内抛错进入既有失败分支;同时 best-effort `player.stop()` 回收半开会话(避免幽灵会话继续占住设备闸)。
+- **③ 建会话各步没有总预算**:`bindUdp` 无超时、三步 RTSP 各 10s、`TEARDOWN` 也 10s、互斥 DLNA 让位无上限 —— 任一步挂住都会长期占住 per-device 闸,后续所有流转排队等待。修复:握手总预算 8s(单步按剩余预算收缩,下限 1.5s)、`TEARDOWN/FLUSH` 2.5s、`connect()` 总预算 12s(覆盖 bindUdp/TCP/握手三步)、互斥 DLNA 6s / 旧会话收尾 4s 硬上限;超时快速失败交给既有重投通道。
+- **可观测性**:新增 `[AirPlay][cast] 开始建会话`、`互斥:开始`、`RTSP ANNOUNCE|SETUP|RECORD ×ms`、`AirPlay 起播分段耗时(互斥DLNA / 旧会话TEARDOWN / RAOP握手)` 与设备闸排队日志 —— 下次现场一眼看出是哪一步慢。
+- **真机验证(230 → 240,HiVi H5MKII)**:DLNA 通道在播 → 流转到 AirPlay 连续 **10/10 成功**(单次 1.6~4.0s),`PLAYING` 且 position 按 1:1 前进;`RTSP RECORD` 全部 200、握手 ~400ms;容器 RestartCount 保持 0(修复前同一场景每次 30s 超时并伴随进程崩溃)。
+- **测试/守卫**:`check-airplay-playback-chain.mjs` 扩到 **R1~R18**(R18:cast 超时不得抛到定时器 / 超时回收会话 / 落点全链路透传 / 握手与 connect 预算 / 清理步骤硬上限);新增 `castTimeoutGuard`(超时不杀进程 + 落点透传)、`airplayProtocolPlayer`(`seekSec` 仅 `startMs>0` 时下发)、`raopPure`(`rtspTimeoutFor` 预算收缩)用例;相关 6 文件 251 例全绿。
+
 ## [4.6.51] - 2026-10-21
 
 ### Chore / 依赖安全升级(修复 security 工作流的 npm audit 硬门禁)

@@ -23,9 +23,10 @@ export class UniversalPlayer {
     return this.protocol;
   }
 
-  async playMedia(item: QueueItem, baseUrl: string): Promise<{ mediaUri: string }> {
+  async playMedia(item: QueueItem, baseUrl: string, startMs?: number): Promise<{ mediaUri: string }> {
     if (!this.protocol) throw new Error(`UniversalPlayer ${this.playerId} 无协议 player`);
-    return this.protocol.playMedia(item, baseUrl);
+    // 起播落位(AirPlay 用):其余协议忽略该参数 = 与改动前完全一致。
+    return this.protocol.playMedia(item, baseUrl, startMs);
   }
 
   async stop(): Promise<void> { await this.protocol?.stop(); }

@@ -546,6 +546,81 @@ console.log("===== R17 DLNA 状态一致性:陈旧 GENA 不得覆盖 SOAP ====="
   );
 }
 
+console.log("===== R18 流转接续:起播即落位 + 建会话硬预算(HiVi 真机 2026-10-21) =====");
+{
+  const qc = stripComments(read("backend/src/services/player/QueueController.ts"));
+  const raop = stripComments(read("backend/src/services/airplay/raop.ts"));
+  const peers = stripComments(read("backend/src/routes/api/peers.ts"));
+  const uni = stripComments(read("backend/src/services/player/UniversalPlayer.ts"));
+  check(
+    "cast 超时的兜底回调不得 throw(定时器里抛错 = 未捕获异常 = 进程退出)",
+    /\(\)\s*=>\s*null as \{ mediaUri: string \} \| null/.test(qc)
+      && !/\(\)\s*=>\s*\{\s*throw new Error\("playMedia 超过/.test(qc),
+    "withTimeout 兜底仍在 setTimeout 里抛错(HiVi 流转现场:整个后端崩,容器重启)",
+  );
+  check(
+    "cast 超时后 best-effort 回收设备侧半开会话(player.stop)",
+    /abortTimedOutCast/.test(qc) && /player\.stop\(\)\.catch/.test(qc),
+    "超时后不回收,下一次 cast 会与幽灵会话并存",
+  );
+  check(
+    "playFrom/playCurrent 透传起播落点 startPositionMs",
+    /startPositionMs\?: number/.test(qc)
+      && /playCurrent\(playerId, baseUrl, startPositionMs\)/.test(qc)
+      && /player\.playMedia\(fullItem, baseUrl, castStartMs\)/.test(qc),
+    "起播落点没有传进 cast",
+  );
+  check(
+    "UniversalPlayer 透传 startMs(其余协议忽略即为零变化)",
+    /playMedia\(item: QueueItem, baseUrl: string, startMs\?: number\)/.test(uni)
+      && /this\.protocol\.playMedia\(item, baseUrl, startMs\)/.test(uni),
+    "UniversalPlayer 把落点参数吞掉了",
+  );
+  check(
+    "AirPlay 起播即落位:seekSec 由 startMs 派生",
+    /const seekSec = startMs > 0 \? startMs \/ 1000 : undefined;/.test(proto)
+      && /\.\.\.\(seekSec !== undefined \? \{ seekSec \} : \{\}\)/.test(proto),
+    "protocolPlayer 未把落点交给 cast",
+  );
+  check(
+    "transfer 到 AirPlay:把源进度交给本次 cast",
+    /const inCastPos = parsedTo\.kind === "airplay" && !borrow\.armed/.test(peers)
+      && /Math\.round\(inCastPos \* 1000\)/.test(peers),
+    "transfer 仍走「先起播、再 seek」",
+  );
+  check(
+    "transfer 到 AirPlay 不再补 seek(避免第二次建会话)",
+    /else if \(inCastPos !== null && inCastPos > 0\)/.test(peers),
+    "起播落位后仍会再 seek 一次",
+  );
+  check(
+    "RAOP 握手有总预算,单步等待按剩余预算收缩",
+    /HANDSHAKE_BUDGET_MS = 8_000/.test(raop)
+      && /export function rtspTimeoutFor/.test(raop)
+      && /rtspTimeoutFor\(\s*method/.test(raop),
+    "握手仍是三步各 10s(合计会撞 30s cast 硬顶)",
+  );
+  check(
+    "清理类 RTSP(TEARDOWN/FLUSH)用短超时",
+    /RTSP_CLEANUP_TIMEOUT_MS = 2_500/.test(raop)
+      && /method === "TEARDOWN" \|\| method === "FLUSH"/.test(raop),
+    "TEARDOWN 仍可能阻塞 10s",
+  );
+  check(
+    "connect 有总预算(bindUdp/TCP/握手任一步卡死都必须失败返回)",
+    /RAOP connect 总超时/.test(raop) && /Promise\.race\(\[this\.doConnect\(\), timeout\]\)/.test(raop),
+    "connect 没有总预算,卡在 bindUdp 会永久占住设备闸",
+  );
+  check(
+    "互斥 DLNA 与旧会话收尾有硬上限(不得拖死 cast)",
+    /DLNA_YIELD_DEADLINE_MS = 6_000/.test(ap)
+      && /STOP_SESSION_DEADLINE_MS = 4_000/.test(ap)
+      && /withDeadline\(yieldSiblingDlnaForAirPlay/.test(ap)
+      && /withDeadline\(stopSession/.test(ap),
+    "清理步骤没有硬上限,慢设备会把 cast 拖到 30s",
+  );
+}
+
 console.log("");
 if (failures.length) {
   console.log(`✗ AirPlay 播放链路时序守卫失败 ${failures.length} 项:`);

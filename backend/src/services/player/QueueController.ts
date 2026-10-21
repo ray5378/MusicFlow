@@ -887,7 +887,24 @@ export class QueueController extends EventEmitter {
     }
   }
 
-  private async playCurrent(deviceId: string, baseUrl: string): Promise<void> {
+  /** cast 超时收尾:尽力收回设备侧半开会话,再抛错交给 playCurrent 的 catch。
+   *
+   *  为什么必须 stop:playMedia 不可取消,超时只是「不再等」;底层 RTSP 握手/socket
+   *  可能仍在飞。若放任不管,下一次 cast 会与这条幽灵会话并存 —— 单会话设备
+   *  (HiVi/Linkplay)会一直停在旧通道,表现就是「流转后无声 / 接续失败」。
+   *  stop 走设备闸,排在仍在飞的 cast 之后执行,正好在幽灵会话建立完成时把它拆掉。 */
+  private abortTimedOutCast(
+    player: { stop(): Promise<void> },
+    playerId: string,
+    songId: string,
+    timeoutMs: number,
+  ): never {
+    log.error(`[QueueController][cast] ${playerId} cast 超 ${timeoutMs}ms 未返回 song=${songId},判失败并回收设备会话`);
+    void player.stop().catch(() => { /* 回收失败不阻塞失败分支 */ });
+    throw new Error(`playMedia 超过 ${timeoutMs}ms 未返回(cast 挂死)`);
+  }
+
+  private async playCurrent(deviceId: string, baseUrl: string, startPositionMs?: number): Promise<void> {
     const q = this.queues.get(deviceId);
     const player = this.players.get(deviceId);
     const ctrl = this.ctrls.get(deviceId);
@@ -997,12 +1014,24 @@ export class QueueController extends EventEmitter {
       log.debug(`[QueueController][cast] ${playerId} 起点 idx=${q.currentIndex} song=${fullItem.songId} baseUrl=${baseUrl} dur=${this.knownDuration(fullItem)}`);
       // cast 内部含 RTSP 握手 / 设备 SOAP / 令牌落库;任何一步挂死都会让 advancing 永不释放。
       // 30s 硬顶(设备侧单步超时 8s,这里覆盖多步串联的最坏情况),超时走下面的失败分支。
-      const { mediaUri } = await withTimeout(
-        player.playMedia(fullItem, baseUrl),
-        30_000,
+      //
+      // ⚠️ 兜底回调**绝不能 throw**:withTimeout 是在 setTimeout 里调 fallback 的,那里
+      // 抛错等于未捕获异常 → **整个后端进程退出**(2026-10-21 现场:HiVi 流转时 cast
+      // 挂 30s → Node 直接崩,容器重启,API 报 connection refused,所有设备播放全断)。
+      // 正确姿势:超时先返回 null,再在**本 async 函数内**抛错 —— 这样才落进下面的
+      // catch(cast 失败分支:计失败链 + 派 stalled 走重投/切歌)。
+      // MF_CAST_TIMEOUT_MS 是测试接缝(缩短等待),生产不设即 30s。
+      const castTimeoutMs = Number(process.env.MF_CAST_TIMEOUT_MS) > 0
+        ? Number(process.env.MF_CAST_TIMEOUT_MS)
+        : 30_000;
+      // 起点只对**本次要起播的那一首**有意义:中途跳过了死源后就不能再套用。
+      const castStartMs = skips > 0 ? undefined : startPositionMs;
+      const { mediaUri } = (await withTimeout(
+        player.playMedia(fullItem, baseUrl, castStartMs),
+        castTimeoutMs,
         `${playerId} playMedia(${fullItem.songId})`,
-        () => { throw new Error("playMedia 超过 30000ms 未返回(cast 挂死)"); },
-      );
+        () => null as { mediaUri: string } | null,
+      )) ?? this.abortTimedOutCast(player, playerId, fullItem.songId, castTimeoutMs);
       log.debug(`[QueueController][cast] ${playerId} 完成 ${Date.now() - castT0}ms mediaUri=${mediaUri}`);
       // cast 命令已送达 → 断开连续失败链(下面的 catch 才计失败)。
       this.castFailStreak.delete(deviceId);
@@ -1154,6 +1183,10 @@ export class QueueController extends EventEmitter {
     startIndex: number | null | undefined,
     baseUrl: string,
     contentContext?: string,
+    /** 起播即落位(毫秒):流转/带进度起播时把起点交给**这一次** cast,
+     *  不再「先起播、再 seek」。AirPlay 的 seek 是完整重建会话,对 HiVi 这类
+     *  单会话设备连续两次建会话会让第二次 RECORD 永久等待(2026-10-21 真机)。 */
+    startPositionMs?: number,
   ): Promise<number> {
     playerId = stripPlayerPrefix(playerId);
     const mode = this.queues.get(playerId)?.playMode ?? "shuffle";
@@ -1168,7 +1201,7 @@ export class QueueController extends EventEmitter {
     this.setQueue(playerId, items, idx, baseUrl, contentContext);
     if (!this.advancing.has(playerId)) {
       this.advancing.add(playerId);
-      try { await this.playCurrent(playerId, baseUrl); }
+      try { await this.playCurrent(playerId, baseUrl, startPositionMs); }
       finally { this.advancing.delete(playerId); }
       this.schedulePreProbe(playerId); this.schedulePrefetch(playerId);
     }
