@@ -1,6 +1,7 @@
 // 自动生成 —— 由 index.ts 物理拆分而来（peers 域，35 条路由）。零逻辑改动。
 import type { Hono } from "hono";
 import { createLogger } from "../../utils/logger.js";
+import { freezesPositionBeforeCast } from "../../services/playTarget.js";
 import {
   BusinessErrorCode,
   apiErrorStatus,
@@ -337,12 +338,16 @@ app.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
     //   武装必须在起播**之前**:起播那一步的 playCore 会消费它。
     const borrow = await tryArmSendspinBorrow(fromPeerId, toPeerId, askPosition);
     let startedIdx: number | null = null;
-    // ★ AirPlay / 同设备 DLNA 目标:起点必须在**这一次** cast 里落位(playMedia 的 startMs),
+    // ★ AirPlay / group / 同设备 DLNA 目标:起点必须在**这一次** cast 里落位(playMedia 的 startMs),
     //   不能再走「先起播、再 seek」—— 对 AirPlay 是同一设备上的第二次完整建会话,
     //   HiVi/Linkplay 这类单会话设备会在第二次 RECORD 上永久等待(2026-10-21 真机);
-    //   对同设备 DLNA 则是源端已被互斥停掉、晚读数恒为 0。sendspin 借流自带落点。
+    //   对同设备 DLNA 则是源端已被互斥停掉、晚读数恒为 0。
+    //   **group 也必须定格**(2026-10-24 全量矩阵实测):组起播要建 pump + 并行成员桥接,
+    //   4~20s,晚读数会把这几十秒算进落点(源 47.52s → 目标落到 52.43s,超前 4.9s),
+    //   并且晚读数分支还要补一次 seek —— 对组等于重建一次时间线,直接把流转拖到超时。
+    //   sendspin 借流自带落点。
     const inCastPos = !borrow.armed
-      ? (parsedTo.kind === "airplay"
+      ? (freezesPositionBeforeCast(parsedTo.kind)
           ? (askPosition ?? await readPeerPositionSeconds(fromPeerId))
           : srcPosEarly)
       : null;

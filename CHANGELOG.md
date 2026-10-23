@@ -29,6 +29,24 @@
 `bridgeCast` 最大并发数」钉住并行契约(不依赖墙钟、不 flaky),并覆盖失败重试、
 离线成员跳过、`send_ahead` 下限、组内无 airplay 成员五种情形。
 
+### Fix / 流转到群组:落点改为「起播前定格」(实测超前源端 4.9s、且额外 seek 拖到超时)
+
+**症状(全量流转矩阵实测)**:`transfer-from` 目标为群组时——
+- `AP1 → group`:源端 47.52s,回执落点 **52.43s**,目标确实从 52s 起播(超前 4.9s);
+- `AP2 → group`:回执落点 47.64s 正确,但目标全程 `STOPPED`,观察窗口内没起播。
+
+**根因**:`routes/api/peers.ts` 的落点分支只对 `airplay` 目标「起播前定格位置」,群组落到了
+「起播后晚读数 + 补一次 seek」的老口径上。群组起播要建 pump 再逐个成员握手桥接,
+即使并行后仍需 4~20s —— 这段耗时被算进落点(late 读数从 47.52s 涨到 52.43s),
+而且补 seek 对群组等于**重建一次时间线**,把整格拖到超出观察窗口。
+
+**修复**:新增 `playTarget.freezesPositionBeforeCast(kind)`,把「必须在 cast 前定格」
+收口成单一判据(`airplay` / `group` 为真),`peers.ts` 改用它。群组因此也走
+`playFrom(..., startMs)`,既不把起播耗时算进落点,也不再补第二次 seek。
+`dlna` / `sendspin` / `local` 保持旧口径(起播 1~3s,晚读数更贴近真正出声的时刻)。
+
+**回归防线**:`tests/services/playTarget.test.ts` 增 3 例钉住该判据(含未知 kind 保守不定格)。
+
 ## [4.6.70] - 2026-10-22
 
 ### Feature / AirPlay 改为默认独立子进程（与 Sendspin 对齐）
