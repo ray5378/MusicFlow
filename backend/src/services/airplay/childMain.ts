@@ -8,6 +8,7 @@
 //   cast / stopSession / stopAll / pause / resume / seek / setVolumeDb。
 import { ChildRpcHost } from "../rendererHost/childHost.js";
 import { AirplaySessionRuntime } from "./sessionRuntime.js";
+import type { AirplayBridgeServer } from "./bridgeServer.js";
 import type {
   AirplayChildToParent,
   AirplaySnapshot,
@@ -20,8 +21,10 @@ export type ChildSend = (msg: AirplayChildToParent) => void;
 
 export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, AirplaySnapshot> {
   readonly runtime: AirplaySessionRuntime;
+  /** 桥接 PCM 接收端(未启用桥接时为空:in-proc/单测路径)。 */
+  private readonly bridge: AirplayBridgeServer | null;
 
-  constructor(send: ChildSend) {
+  constructor(send: ChildSend, bridge?: AirplayBridgeServer) {
     // hooks 里的 onChanged 要回调到本控制器(触发快照),而 super() 之前还不能用 this
     // → 用一个后置填充的持有者,真正调用发生在会话起停时(那时已构造完毕)。
     const holder: { ctl: AirplayChildController | null } = { ctl: null };
@@ -45,15 +48,24 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
       send,
       buildState: () => this.buildState(),
       dispatch: (op, payload) => this.dispatch(op, payload),
-      onStop: () => runtime.stopAll(),
+      onStop: async () => {
+        await runtime.stopAll();
+        await bridge?.stop();
+      },
     });
     this.runtime = runtime;
+    this.bridge = bridge ?? null;
     holder.ctl = this;
   }
 
   buildState(): AirplayStateEnvelope {
     // 会话态就是镜像的全部内容(设备发现/DB/peer/lastCast 都留主进程)。
     return { t: "state", ...this.runtime.snapshot() };
+  }
+
+  /** 桥接端口(供 child.ts 启动时上报;未启用为 0)。 */
+  get bridgePort(): number {
+    return this.bridge?.listenPort ?? 0;
   }
 
   private async dispatch(op: string, p: any): Promise<unknown> {
@@ -99,6 +111,45 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
         // dB 由主进程算好(DLNA 转发失败时的回落通道)。
         this.runtime.setVolumeDb(String(p.deviceId), Number(p.db) || -144);
         return null;
+      }
+      // ==================== AirPlay×Sendspin 同步群组(桥接会话)====================
+      case "bridgeCast": {
+        // 桥接会话:设备连接参数由主进程给(discovery 在主进程),PCM 来自 sendspin
+        // pump —— 本进程内的 BridgeRing 按墙钟 + 该设备 latencyFrames 取内容。
+        if (!this.bridge) throw new Error("airplay 桥接收听端未启动(桥接需要 fork 模式)");
+        const deviceId = String(p.deviceId);
+        const ring = this.bridge.ringFor(deviceId);
+        const port = this.bridge.listenPort;
+        const cast = await this.runtime.castBridge({
+          deviceId,
+          host: String(p.host),
+          port: Number(p.port) || 7000,
+          pk: p.pk ? String(p.pk) : undefined,
+          et: p.et ? String(p.et) : undefined,
+          title: p.title ? String(p.title) : undefined,
+          artist: p.artist ? String(p.artist) : undefined,
+          album: p.album ? String(p.album) : undefined,
+          durationSec: Number(p.durationSec) || 0,
+          // lead = 该设备实测播放延迟(RECORD 应答的 audio-latency,缺省 1s)。
+          makeProducer: (player) =>
+            ring.producer(() => Math.round((player.latencyFramesUsed / 44100) * 1_000_000)),
+          resetSource: () => ring.reset(),
+        });
+        this.requestSnapshot(true);
+        // latencyFrames 必须回给主进程:pump 的 send_ahead 要抬到它之上,
+        // 否则桥接侧每包欠载(BridgeRing producer 取的内容永远超前于已生产内容)。
+        return { bridgePort: port, latencyFrames: cast.latencyFrames, sampleRate: cast.sampleRate };
+      }
+      case "bridgeSeek": {
+        // 复用普通 seek 的桥接分支(RAOP FLUSH + 上游缓冲清空)。
+        const ok = await this.runtime.seek(String(p.deviceId), Number(p.seconds) || 0);
+        this.requestSnapshot(true);
+        return ok;
+      }
+      case "bridgeStats": {
+        return this.bridge?.hasRing(String(p.deviceId))
+          ? this.bridge.ringFor(String(p.deviceId)).ringStats
+          : null;
       }
       default:
         throw new Error(`未知 airplay rpc op: ${op}`);

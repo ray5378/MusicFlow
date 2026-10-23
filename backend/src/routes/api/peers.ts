@@ -925,13 +925,16 @@ app.post("/v1/peers/:peerId/mute", async (c) => {
   if (parsed.kind === "group") {
     // 组没有自己的渲染器,静音要逐台成员下发。个别成员不支持静音时不应连累
     // 其余设备,所以全部并发执行后再汇总——只有全员失败才算失败。
-    // 成员按 kind 分流:dlna 走 RenderingControl,sendspin 走组/连接双置位。
+    // 成员按 kind 分流:sendspin 走组/连接双置位,airplay 走 RAOP 的 SET_PARAMETER volume。
+    // (DLNA 已禁止入组,这里不再有"设备级 RenderingControl"这一路;解析不出 kind 的
+    //  脏数据按失败计入,不会静默当成 DLNA 去下发。)
     const members = gm.get(parsed.id)?.memberIds || [];
     if (members.length === 0) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.group.empty"), 400);
     const results = await Promise.allSettled(members.map(m => {
       const s = splitMemberId(m);
-      if (s?.kind === "sendspin") return setSendspinMemberMuted(s.id, muted);
-      return setDeviceMute(s?.id ?? m, muted);
+      if (!s) return Promise.reject(new Error(`成员 ${m} 格式非法`));
+      if (s.kind === "sendspin") return setSendspinMemberMuted(s.id, muted);
+      return setAirPlayMuted(s.id, muted);
     }));
     const ok = results.filter(r => r.status === "fulfilled").length;
     if (ok === 0) {

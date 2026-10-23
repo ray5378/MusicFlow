@@ -292,8 +292,10 @@ export function rateScope(peerId: string): string[] {
       const out = g.memberIds.map(memberToPeerId).filter((p): p is string => !!p);
       return out.length > 0 ? out : [peerId];
     }
-    // 只有 DLNA / Sendspin 能进组（见 group/index.ts 的 GroupMemberKind）。
-    if (!peerId.startsWith("dlna:") && !peerId.startsWith("sendspin:")) return [peerId];
+    // 只有 sendspin / airplay 能进组（见 group/index.ts 的 GroupMemberKind）。
+    // 注意:airplay 成员**必须**参与"取最低"—— 组的输出能力是全体成员的下包络,
+    // 漏掉它就等于让一台只支持 48K 的 AirPlay 设备被组里的 96K 配置喂爆。
+    if (!peerId.startsWith("sendspin:") && !peerId.startsWith("airplay:")) return [peerId];
     const bare = peerId.slice(peerId.indexOf(":") + 1);
     const gids = gm.groupsOfDevice(bare);
     if (gids.length === 0) return [peerId];
@@ -310,12 +312,14 @@ export function rateScope(peerId: string): string[] {
   }
 }
 
-/** 组成员 id（裸 id ≡ DLNA / `dlna:` / `sendspin:`）→ peerId；其它 → null。 */
+/** 组成员 id → peerId(`sendspin:<clientId>` / `airplay:<deviceId>`);其它 → null。
+ *
+ *  ★ 2026-10-23:DLNA 禁止入组,组成员只有 sendspin / airplay 两类 —— 因此裸 id 不再
+ *  "视为 DLNA"(那个口径已随 DLNA 禁入组一起废弃),直接返回 null 不参与取最低。 */
 function memberToPeerId(m: unknown): string | null {
   if (typeof m !== "string" || !m) return null;
-  if (m.startsWith("sendspin:") || m.startsWith("dlna:")) return m;
-  if (m.startsWith("group:") || m.startsWith("local:") || m.startsWith("airplay:")) return null;
-  return `dlna:${m}`; // 裸 id = 历史数据，视为 DLNA（与 group/index.ts 同口径）
+  if (m.startsWith("sendspin:") || m.startsWith("airplay:")) return m;
+  return null; // dlna: / 裸 id / group: / local: 都不是合法组成员
 }
 
 /** 裸读一行（不做归一化），供写路径判「是否需要写」。 */

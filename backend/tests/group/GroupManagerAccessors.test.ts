@@ -9,8 +9,11 @@
 //   ③ `removeDeviceFromAllGroups`(删除设备时清理)必须真的把成员从每个组摘掉并落库,
 //      否则删掉的设备会永远挂在组里。
 //
-// 手法:进程单例 + 真实 SQLite(继承 GroupManager.test.ts 的建表方式),DLNA 设备源
+// 手法:进程单例 + 真实 SQLite(继承 GroupManager.test.ts 的建表方式),airplay 设备源
 // 与 sendspin 运行/镜像源全部换成可控假体。
+//
+// ★ 2026-10-23:群组成员只有 sendspin / airplay 两类,DLNA 禁止入组 —— "另一类成员"
+// 的解析源从 DLNA 缓存换成了 airplay 设备表(getAirPlayDevice)。
 //
 // MUST be the first import: redirects DATA_DIR to an isolated temp dir.
 import "../plugins/_env.js";
@@ -18,11 +21,14 @@ import "../plugins/_env.js";
 import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
 import { sqlite } from "../../src/db/index.js";
 
-vi.mock("../../src/services/dlna/control.js", () => ({
-  getCachedDevices: () => [
-    { id: "d1", name: "客厅音响", available: true },
-    { id: "d2", name: "卧室音响", available: false },
-  ],
+vi.mock("../../src/services/airplay/discovery.js", () => ({
+  getAirPlayDevice: (id: string) => {
+    const table: Record<string, any> = {
+      d1: { id: "d1", name: "客厅音响", alias: "", available: true },
+      d2: { id: "d2", name: "卧室音响", alias: "", available: false },
+    };
+    return table[id];
+  },
 }));
 
 // 本文件刻意模拟「in-proc server 不存在(fork 模式)」—— 只剩 supervisor 镜像。
@@ -94,7 +100,7 @@ describe("GroupManager:按 owner 过滤(普通用户越权隔离)", () => {
   });
 
   it("listWithMembersForOwner('') → 空数组(注释与实现不符,见报告)", () => {
-    gm.createGroup("全量组", ["d1"], "u1");
+    gm.createGroup("全量组", ["airplay:d1"], "u1");
     // 说明:该方法的 docblock 写「管理员传入空串返回全量」,但实现直接委托
     // listForOwner("") → 短路返回 []。当前唯一调用点(routes/api/groups.ts)对管理员
     // 走的是 listWithMembers(),所以线上未暴露;一旦有人按注释调用,管理员会看到空列表。
@@ -103,11 +109,11 @@ describe("GroupManager:按 owner 过滤(普通用户越权隔离)", () => {
   });
 
   it("listWithMembersForOwner(uid) 只回该 owner 的组并附成员详情", () => {
-    const g = gm.createGroup("我的组", ["d1"], "u1");
-    gm.createGroup("别人的组", ["d2"], "u2");
+    const g = gm.createGroup("我的组", ["airplay:d1"], "u1");
+    gm.createGroup("别人的组", ["airplay:d2"], "u2");
     const mine = gm.listWithMembersForOwner("u1");
     expect(mine.map((x) => x.id)).toEqual([g.id]);
-    expect(mine[0].members[0]).toMatchObject({ deviceId: "d1", name: "客厅音响", available: true });
+    expect(mine[0].members[0]).toMatchObject({ deviceId: "airplay:d1", name: "客厅音响", available: true });
   });
 
   it("isOwnedBy:管理员恒 true;普通用户须为 owner;组不存在 false", () => {
@@ -146,35 +152,35 @@ describe("GroupManager:removeDeviceFromAllGroups(删除设备时清理)", () => 
   it("把该设备从所有组摘掉并持久化;不含它的组不动", () => {
     const gm = new GroupManager();
     gm.loadFromDb();
-    const g1 = gm.createGroup("含 d1", ["d1", "d2"], "u1");
-    const g2 = gm.createGroup("不含", ["d2"], "u1");
+    const g1 = gm.createGroup("含 d1", ["airplay:d1", "airplay:d2"], "u1");
+    const g2 = gm.createGroup("不含", ["airplay:d2"], "u1");
 
-    gm.removeDeviceFromAllGroups("dlna:d1"); // 命名空间写法也要命中裸 id 存储
-    expect(gm.get(g1.id)!.memberIds).toEqual(["d2"]);
-    expect(gm.get(g2.id)!.memberIds).toEqual(["d2"]);
+    gm.removeDeviceFromAllGroups("airplay:d1"); // 命名空间写法也要命中裸 id 存储
+    expect(gm.get(g1.id)!.memberIds).toEqual(["airplay:d2"]);
+    expect(gm.get(g2.id)!.memberIds).toEqual(["airplay:d2"]);
 
     // 持久化:重新 loadFromDb 后仍是摘除后的成员
     const gm2 = new GroupManager();
     gm2.loadFromDb();
-    expect(gm2.get(g1.id)!.memberIds).toEqual(["d2"]);
+    expect(gm2.get(g1.id)!.memberIds).toEqual(["airplay:d2"]);
   });
 
   it("设备不在任何组 → 无副作用(不写库不广播)", () => {
     const gm = new GroupManager();
     gm.loadFromDb();
-    const g = gm.createGroup("G", ["d1"], "u1");
+    const g = gm.createGroup("G", ["airplay:d1"], "u1");
     const events: string[] = [];
     gm.on("group_updated", () => events.push("updated"));
-    gm.removeDeviceFromAllGroups("d2");
-    expect(gm.get(g.id)!.memberIds).toEqual(["d1"]);
+    gm.removeDeviceFromAllGroups("d2"); // 裸 id 也要命中(调用方可能传裸 id)
+    expect(gm.get(g.id)!.memberIds).toEqual(["airplay:d1"]);
     expect(events).toEqual([]);
   });
 
   it("进程单例也走同一实现(getGroupManager 与 peer 层共用一份状态)", () => {
     const gm = getGroupManager();
     gm.loadFromDb();
-    const g = gm.createGroup("单例组", ["d1", "d2"], "");
+    const g = gm.createGroup("单例组", ["airplay:d1", "airplay:d2"], "");
     gm.removeDeviceFromAllGroups("d2");
-    expect(getGroupManager().get(g.id)!.memberIds).toEqual(["d1"]);
+    expect(getGroupManager().get(g.id)!.memberIds).toEqual(["airplay:d1"]);
   });
 });

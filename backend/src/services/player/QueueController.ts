@@ -10,7 +10,8 @@ import { albums, deviceQueues, groupQueues, songs } from "../../db/schema.js";
 import { PlayMode, PlayerState, PlaybackState, QueueItem, QueueSnapshot } from "./types.js";
 import { UniversalPlayer } from "./UniversalPlayer.js";
 import { getPlayerController } from "./index.js";
-import { createDlnaProtocolPlayer, getEffectiveBaseUrl, clearCurrentMedia, getDevice, alignDeviceToPosition } from "../dlna/control.js";
+import { createDlnaProtocolPlayer, getEffectiveBaseUrl, clearCurrentMedia } from "../dlna/control.js";
+import { getAirPlayDevice } from "../airplay/discovery.js";
 import { createAirPlayProtocolPlayer } from "../airplay/protocolPlayer.js";
 import { createSendspinProtocolPlayer } from "../sendspin/protocolPlayer.js";
 import { getCachedPlayability } from "../source/online/streamFallback.js";
@@ -414,7 +415,13 @@ export class QueueController extends EventEmitter {
   }
 
   /** 重启后恢复:对照原 QueueManager.resumeActive。设备有活跃队列时续播当前首。 */
-  async resumeActive(deviceId: string, baseUrl: string): Promise<void> {
+  /** 恢复一个"队列仍激活但播放已停"的目标(离线看门狗的成员回归恢复走这里)。
+   *
+   *  `startPositionMs`:从哪一毫秒起播。**必须由调用方给出最后已知位置** ——
+   *  群组离线看门狗记着 lastPosition(全员离线瞬间的 leader 进度),成员回归时
+   *  从那个位置续播才是"续播";缺省(不传)仍是"从头播",供启动自愈这类
+   *  没有历史位置的场景使用。 */
+  async resumeActive(deviceId: string, baseUrl: string, startPositionMs?: number): Promise<void> {
     deviceId = stripPlayerPrefix(deviceId);
     const q = this.queues.get(deviceId);
     if (!q || !q.isActive || q.currentIndex < 0) return;
@@ -422,7 +429,7 @@ export class QueueController extends EventEmitter {
     if (this.advancing.has(deviceId)) return;
     this.advancing.add(deviceId);
     try {
-      await this.playCurrent(deviceId, baseUrl);
+      await this.playCurrent(deviceId, baseUrl, startPositionMs);
     } finally {
       this.advancing.delete(deviceId);
     }
@@ -1326,13 +1333,12 @@ export class QueueController extends EventEmitter {
     }
     q.items = []; q.currentIndex = -1; q.isActive = false; q.ended = false;
     q.shuffleOrder = []; q.shufflePos = -1; q.shuffleLen = 0;
-    // 清队列同时清掉设备端的媒体缓存,避免 status 返回上一首残留(组场景清各成员)。
+    // 清队列同时清掉设备端的媒体缓存,避免 status 返回上一首残留。
+    // ★ 组场景**不再**逐成员清:clearCurrentMedia 只服务 DLNA 的 AVTransport 缓存,
+    //   而 DLNA 已禁止入组(成员只有 sendspin / airplay);组停止时 pump 与桥接会话
+    //   已拆,airplay 设备的 RAOP 会话由 stopGroupAirPlayBridge 收口。
     const group = getGroupManager().get(playerId);
-    if (group) {
-      for (const d of group.memberIds) clearCurrentMedia(d);
-    } else {
-      clearCurrentMedia(playerId);
-    }
+    if (!group) clearCurrentMedia(playerId);
     // 队列清空 → 预探测状态一并清掉。必须赶在发快照**之前**,
     // 否则下发的快照还带着已失效的 exhausted 提示。
     getPreProbeScheduler().clear(playerId);
@@ -1544,11 +1550,25 @@ export class QueueController extends EventEmitter {
     }
   }
 
-  /** 组播放中新增成员:把当前曲目 cast 给新成员并 seek 到 leader 当前进度。
-   *  对照 MA Universal Group 的加入语义:仅在加入时对齐一次,不做周期漂移校正。
+  /** 组播放中新增成员:重建组时间线,把新成员并入同一条 pump。
+   *
+   *  ★ 2026-10-23(换成统一 pump 模型后):组成员只有 sendspin / airplay 两类,两者
+   *  都挂在**同一条 pump**(ug:<groupId>)上,不再有"逐设备 cast + 逐设备 seek 校准"
+   *  的 DLNA 路径 —— 那条路径成立的前提是"设备各自拉流、时间线各自独立",DLNA 已被
+   *  禁止入组,该前提不复存在。
+   *
+   *  为什么 airplay 新成员必须重建整组:桥接 sink 的目标设备列表写在**连接建立时的
+   *  HELLO 帧**里(bridgeServer 按 HELLO 注册 ring),运行中新增设备不会被推 PCM ——
+   *  结果就是"设备连上了、RAOP 会话在跑、但永远静音"。重建整组时间线(重起 pump +
+   *  桥接,整组设备一起握手)是唯一简单且一致的做法:
+   *    - 代价:整组短暂中断(<1s,握手 + 重新缓冲);
+   *    - 收益:新成员与其余成员继续共享同一条时间线,不是"各自 seek 到同一秒"。
+   *
+   *  sendspin 新成员**不走这里**(由 alignGroupMembers 走 sendspinGroupJoin 直播沿加入,
+   *  不需要重建)。本函数收到 newMemberIds 时只处理其中的 airplay 成员。
+   *
    *  - 组队列未激活 / 无当前曲 → 不动作(静默)
-   *  - 只处理在线新成员(离线成员回归由离线 watchdog 负责)
-   *  - 组处于暂停 → 新成员对齐后同步暂停(镜像组播放态)
+   *  - 只处理在线 airplay 新成员(离线成员回归由离线 watchdog 负责)
    *  - 新成员若有个人激活队列 → 标记不激活(组激活期间成员不可单独播放,保留 items) */
   async rejoinMembers(groupId: string, newMemberIds: string[]): Promise<void> {
     groupId = stripPlayerPrefix(groupId);
@@ -1556,45 +1576,31 @@ export class QueueController extends EventEmitter {
     if (!q || !q.isActive || q.currentIndex < 0) return;
     const item = q.items[q.currentIndex];
     if (!item) return;
-    const fullItem = await this.resolveItem(item);
-    const baseUrl = getEffectiveBaseUrl();
-    const online = newMemberIds.filter(d => !!getDevice(d)?.available);
-    if (online.length === 0) return;
-    // leader 当前进度与播放态(组状态派生自 leader)。
+    const apOnline = newMemberIds.filter(d => !!getAirPlayDevice(d)?.available);
+    if (apOnline.length === 0) return;
+    // leader 当前进度(组状态派生自 pump)。
     let position = 0;
-    let playState: string | undefined;
     try {
       const st = await getGroupStatus(groupId);
       if (typeof st.position === "number" && st.position > 0) position = st.position;
-      playState = st.state;
     } catch (e: any) {
       log.warn("组状态查询失败,回退 position=0", { groupId, err: e?.message || e });
     }
-    for (const deviceId of online) {
-      try {
-        const p = createDlnaProtocolPlayer(deviceId);
-        await p.playMedia(fullItem, baseUrl);
-        // cast 后立刻 seek 在部分渲染器(实测 HiVi)会静默失效,用校准 seek:
-        // 先等设备稳定 PLAYING,再以 leader 的"实时"位置为目标收敛。
-        let landed = position;
-        if (position > 0) {
-          landed = await alignDeviceToPosition(deviceId, position, {
-            getTargetSec: async () => {
-              const st = await getGroupStatus(groupId);
-              return typeof st.position === "number" && st.position > 0 ? st.position : position;
-            },
-          });
-        }
-        if (playState === "PAUSED_PLAYBACK") await p.pause();
-        const pq = this.queues.get(deviceId);
-        if (pq?.isActive) {
-          pq.isActive = false;
-          this.persist(deviceId);
-          this.emit("queue_changed", deviceId, this.snapshot(deviceId));
-        }
-        log.info(`[group] ${groupId}: 新成员 ${deviceId} 已对齐(位置 ${Math.round(landed)}s, 状态 ${playState ?? "?"})`);
-      } catch (e: any) {
-        log.warn(`[group] ${groupId}: 新成员 ${deviceId} 加入对齐失败: ${e?.message || e}`);
+    try {
+      // 重建:playCurrent 会走 group player 的 playMedia(重新握手整组桥接 + 新 pump),
+      // 并按 startPositionMs 从 leader 位置起播。
+      await this.playCurrent(groupId, getEffectiveBaseUrl(), position > 0 ? Math.round(position * 1000) : 0);
+      log.info(`[group] ${groupId}: 新 airplay 成员 ${apOnline.join(",")} 已并入(重建时间线@${Math.round(position)}s)`);
+    } catch (e: any) {
+      log.warn(`[group] ${groupId}: 新成员加入对齐失败: ${e?.message || e}`);
+      return;
+    }
+    for (const deviceId of apOnline) {
+      const pq = this.queues.get(deviceId);
+      if (pq?.isActive) {
+        pq.isActive = false;
+        this.persist(deviceId);
+        this.emit("queue_changed", deviceId, this.snapshot(deviceId));
       }
     }
   }

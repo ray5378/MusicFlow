@@ -9,7 +9,7 @@
 // 于是本模块可以整体跑在 rendererHost 的常驻子进程里:RAOP 的 7.98ms 墙钟节拍
 // 不再与 Web 请求、封面渲染、后台批量任务争抢主进程事件循环。
 import type { ChildProcessWithoutNullStreams } from "child_process";
-import { RaopPlayer, type RaopSession, type RaopRealtimeStats } from "./raop.js";
+import { RaopPlayer, type RaopSession, type RaopRealtimeStats, type PcmProducer } from "./raop.js";
 import { spawnDecoder, makeProducer, killDecoder } from "./decoder.js";
 import { createLogger } from "../../utils/logger.js";
 
@@ -79,11 +79,33 @@ export interface AirplayCastArgs {
   durationSec?: number;
 }
 
-interface ActiveSession {
+/** 桥接会话起播参数:PCM 来自 sendspin pump(经 BridgeRing),不走解码器。 */
+export interface AirplayBridgeCastArgs {
   deviceId: string;
+  host: string;
+  port: number;
+  pk?: string;
+  et?: string;
+  title?: string;
+  artist?: string;
+  album?: string;
+  durationSec?: number;
+  /** PCM 生产者工厂:入参为**已完成 RTSP 握手**的 player(可读 latencyFrames 决定 lead)。 */
+  makeProducer: (player: RaopPlayer) => PcmProducer;
+  /** seek / 停止时清空上游缓冲(与 RAOP FLUSH 配套)。 */
+  resetSource?: () => void;
+}
+
+interface ActiveSession {  deviceId: string;
   player: RaopPlayer;
-  ffmpeg: ChildProcessWithoutNullStreams;
+  /** 解码器会话(桥接会话没有解码器:音频来自 sendspin pump)。 */
+  ffmpeg?: ChildProcessWithoutNullStreams;
   session: RaopSession;
+  /** PCM 来源工厂:普通会话 = ffmpeg producer;桥接会话 = 环形缓冲 producer。
+   *  每次 runStream(含 seek 重建)都重新取一份,避免旧 producer 的状态泄漏。 */
+  makeProducer: () => PcmProducer;
+  /** 桥接会话专属:seek 时清空上游环形缓冲(与 RAOP FLUSH 配套)。 */
+  bridge?: { reset: () => void };
   streamPromise?: Promise<unknown>;
   /** Set while an in-place seek swaps the decoder: the old stream's finalizer
    *  must keep the RTSP session + sockets alive instead of tearing down. */
@@ -168,6 +190,7 @@ export class AirplaySessionRuntime {
       player,
       ffmpeg: ff,
       session,
+      makeProducer: () => makeProducer(ff),
       title: a.title,
       artist: a.artist,
       album: a.album,
@@ -185,6 +208,46 @@ export class AirplaySessionRuntime {
     this.hooks.onChanged?.();
   }
 
+  /** 起一个**桥接**会话:RTSP 握手 → 由 sendspin pump 的 PCM 驱动 RAOP 推流。
+   *
+   *  与 `cast()` 的唯一区别是 PCM 来源:不 spawn ffmpeg、不取 streamUrl,而是由
+   *  调用方注入 producer(airplay 侧的 `BridgeRing`,按墙钟 + 设备延迟取内容)。
+   *  同步精度由 pump 的时间线与本设备的 `latencyFrames` 共同决定 —— 也就是
+   *  MA 桥接层 `set_timing()` 做的同一件事,只是我们把「时间线」放在 pump 里。 */
+  async castBridge(a: AirplayBridgeCastArgs): Promise<{ latencyFrames: number; sampleRate: number }> {
+    await this.stop(a.deviceId); // 幂等:同设备旧会话先拆干净
+    const player = new RaopPlayer({ host: a.host, port: a.port, pk: a.pk, et: a.et });
+    let session: RaopSession;
+    try {
+      session = await player.connect();
+    } catch (e) {
+      player.stop().catch(() => {});
+      throw e;
+    }
+    const active: ActiveSession = {
+      deviceId: a.deviceId,
+      player,
+      session,
+      // 每次 runStream 重新取 producer:内部会读 player 的 latencyFrames 决定 lead,
+      // 而 latencyFrames 在 RECORD 应答后才最终确定(见 raop.ts connect)。
+      makeProducer: () => a.makeProducer(player),
+      bridge: { reset: a.resetSource ?? (() => {}) },
+      title: a.title,
+      artist: a.artist,
+      album: a.album,
+      duration: a.durationSec || 0,
+      streamUrl: "",
+      startedAt: Date.now(),
+      ended: false,
+    };
+    this.sessions.set(a.deviceId, active);
+    this.runStream(active, session);
+    this.hooks.onChanged?.();
+    // 回传给主进程:桥接设备的播放延迟(帧)。pump 的 send_ahead 必须 >= 它,
+    // 否则桥接侧「该送出的内容」永远超前于已生产内容 ⇒ 永久欠载静音。
+    return { latencyFrames: player.latencyFramesUsed, sampleRate: player.sampleRateUsed };
+  }
+
   /** Drive the session's current decoder into the RAOP sender and attach its
    *  lifecycle finalizer. Reused by the in-place seek path to attach a brand-new
    *  ffmpeg/producer to the SAME RTSP session.
@@ -200,7 +263,7 @@ export class AirplaySessionRuntime {
    *     kill only the (old) decoder. */
   private runStream(active: ActiveSession, session: RaopSession): void {
     const ff = active.ffmpeg;
-    const producer = makeProducer(ff);
+    const producer = active.makeProducer();
     // 节拍健康度周期打点:让 `reanchors` / `maxGap` 的**趋势**在播放过程中就可见
     // (原先只有 stream() 收尾那一行,出问题只能事后归因、也拿不到「何时开始变差」)。
     this.startHealthLog(active);
@@ -212,7 +275,7 @@ export class AirplaySessionRuntime {
         this.stopHealthLog(active);
         if (active.seekReplace) {
           active.seekReplace = false;
-          killDecoder(ff);
+          if (ff) killDecoder(ff);
           this.hooks.onChanged?.();
           return;
         }
@@ -225,14 +288,18 @@ export class AirplaySessionRuntime {
           this.sessions.delete(active.deviceId);
         }
         active.ended = true;
-        killDecoder(ff);
+        if (ff) killDecoder(ff);
+        // 桥接会话:上游环形缓冲同步清空(否则残留内容会在下次 cast 前被继续消费)。
+        try { active.bridge?.reset(); } catch { /* ignore */ }
         // 会话自然结束(整首播完 / 失败)也必须拆掉 RTP socket 并发 TEARDOWN,
         // 否则 socket 泄漏,设备同时维护多个并发会话(多个 timing 循环),互相干扰导致卡顿。
         // 收尾同样走上限:finalizer 本身不等它,但绝不能让半死连接长期占着 RTP 端口。
         void this.stopPlayerBounded(active);
         // P0-4:把解码器 stderr 带给主进程解析 loudnorm(子进程不碰 DB)。
         // 被 stop/失败时无 JSON,主进程侧解析失败即 false,不影响续播。
-        const loudnessStderr = (ff as any)?.stderrText?.() ?? "";
+        // 桥接会话没有解码器 —— 也就没有 loudnorm 采集,按「无数据」处理(主进程侧
+        // 解析失败即 false,不会误改歌曲增益)。
+        const loudnessStderr = ((ff as any)?.stderrText?.() as string | undefined) ?? "";
         this.hooks.onSessionEnded?.(active.deviceId, {
           current: stillCurrent,
           positionSec: Math.max(0, Number(active.player.positionSec) || 0),
@@ -275,7 +342,8 @@ export class AirplaySessionRuntime {
     this.sessions.delete(deviceId);
     s.ended = true;
     this.stopHealthLog(s);
-    try { killDecoder(s.ffmpeg); } catch { /* ignore */ }
+    try { if (s.ffmpeg) killDecoder(s.ffmpeg); } catch { /* ignore */ }
+    try { s.bridge?.reset(); } catch { /* ignore */ }
     await this.stopPlayerBounded(s);
     this.hooks.onChanged?.();
   }
@@ -341,6 +409,15 @@ export class AirplaySessionRuntime {
     const s = this.sessions.get(deviceId);
     if (!s || s.ended || !s.player.isStreaming) return false;
 
+    // 桥接会话:内容推进由 pump 负责(它会 re-anchor 并给 sink 发 reset),
+    // 这里只做 RAOP 侧 FLUSH + 上游缓冲清空,不重建解码器(根本没有解码器)。
+    if (s.bridge) {
+      await s.player.prepareSeek(t).catch(() => {});
+      try { s.bridge.reset(); } catch { /* ignore */ }
+      this.hooks.onChanged?.();
+      return true;
+    }
+
     const wasPaused = s.player.isPaused;
     const oldStream = s.streamPromise;
 
@@ -349,9 +426,11 @@ export class AirplaySessionRuntime {
     // Stop the old decoder NOW: makes the old producer's waitData unblock so the
     // old stream loop exits promptly instead of waiting out its 30s timeout.
     try {
-      killDecoder(s.ffmpeg);
-      s.ffmpeg.stdout?.destroy();
-      s.ffmpeg.stderr?.destroy();
+      if (s.ffmpeg) {
+        killDecoder(s.ffmpeg);
+        s.ffmpeg.stdout?.destroy();
+        s.ffmpeg.stderr?.destroy();
+      }
     } catch { /* ignore */ }
 
     await s.player.prepareSeek(t).catch(() => {});

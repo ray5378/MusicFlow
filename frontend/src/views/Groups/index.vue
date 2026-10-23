@@ -540,17 +540,15 @@
               @change="(v: any) => setChecked(dev.id, !!v)"
               @click.stop
             />
-            <MfIcon name="Monitor" class="device-icon" :class="{ offline: !dev.available }"  />
+            <MfIcon :name="dev.kind === 'airplay' ? 'Airplay' : 'Monitor'" class="device-icon" :class="{ offline: !dev.available }"  />
             <div class="device-info">
               <div class="device-name">
-                {{ dev.kind === "sendspin" ? deviceDisplayName(dev, dev.id) : dev.name }}
+                {{ deviceDisplayName(dev, dev.id) }}
                 <span v-if="!dev.available" class="device-offline-tag">{{ t('groups.offline') }}</span>
               </div>
               <div class="device-meta">
                 <template v-if="dev.kind === 'sendspin'">Sendspin</template>
-                <template v-else>
-                  {{ dev.manufacturer || dev.model || t('groups.dlnaDeviceMeta') }}
-                </template>
+                <template v-else>AirPlay · {{ dev.manufacturer || dev.model || 'RAOP' }}</template>
                 <span v-if="otherGroupsOf(dev.id).length > 0" class="device-group-tip">
                   {{ t('groups.alreadyIn', { names: otherGroupsOf(dev.id).join("、") }) }}
                 </span>
@@ -769,17 +767,19 @@ function onlineCount(g: any): number {
 }
 
 // ---- 群组成员 peerId ----
-// 成员 deviceId 是**命名空间化** id:`sendspin:<clientId>` / `dlna:<deviceId>` / 历史裸 id(=DLNA)。
+// 成员 deviceId 是**命名空间化** id:`sendspin:<clientId>` / `airplay:<deviceId>`。
+// (2026-10-23 起 DLNA 禁止入组;历史裸 id / dlna 成员在后端加载时已迁移剔除。)
 //
 // ⚠️ 这里曾有一组「成员迷你音量条」控件(静音键 + 滑条 + 数值),**已移除,不要再加回来**:
 //   群组的音量是**统一**的 —— 推流按 `ug:<gid>` 组对象的 volume 走(全组同一份 PCM、
 //   同一个编码增益),而成员滑条打的是 `/v1/peers/sendspin:<id>/volume`,写的是该设备
 //   **自己那个单设备组**的 volume,群组播放时压根不参与 ⇒ 滑条看着能动、实际没作用。
 //   成员静音同理交回给群组级入口,避免出现「组里两台设备各有一把旋钮」的错误心智模型。
-/** 成员的 peerId(sendspin 成员本身已带前缀,其余补 dlna:)。 */
+/** 成员的 peerId(成员 id 本就是命名空间化 peerId,原样返回)。
+ *  裸 id 只会来自未迁移的脏数据 —— 不再猜成 dlna(那会拼出一个 DLNA 成员,而 DLNA 已禁入组)。 */
 function memberPeerId(m: any): string {
   const id = typeof m?.deviceId === "string" ? m.deviceId : "";
-  return id.includes(":") ? id : `dlna:${id}`;
+  return id.includes(":") ? id : "";
 }
 
 // 每用户显示名:优先用「我」的改名覆盖,其次全局 alias,最后原始名。
@@ -868,27 +868,45 @@ function openRenameLocalPeer(p: any) {
   showRenameDeviceDialog.value = true;
 }
 
-// 群组编辑对话框可选成员:排除禁用 DLNA 设备(禁用设备不可加入/保留在群组中)。
-// sendspin 客户端(含离线)以 `sendspin:<id>` 形式并入(与后端命名空间一致,裸 id 仍视为
-// DLNA);离线的一并显示并带「离线」徽标 —— 后端对 sendspin 成员只校验格式,离线也能建组。
-const selectableDevices = computed(() => {
-  const dlna = (dlnaDevices.value || []).filter((d: any) => !d.disabled);
+// 群组编辑对话框可选成员。
+// ★ 2026-10-23:DLNA 不再可入组 —— DLNA 是各设备自拉流,没有共享时间线,组内无法同步。
+// 成员只剩两类:`airplay:<deviceId>`(桥接进同一 pump)/ `sendspin:<clientId>`(pump 原生)。
+// 离线成员一并显示并带「离线」徽标(后端只校验格式/设备档案,离线也能建组)。
+/** 组候选设备(成员只有两种 kind:airplay / sendspin;DLNA 已禁止入组)。 */
+interface GroupCandidate {
+  id: string;
+  name: string;
+  available: boolean;
+  kind: "airplay" | "sendspin";
+  /** airplay 专属:RAOP TXT 的 `am`(型号);sendspin 无此信息。 */
+  manufacturer?: string;
+  model?: string;
+}
+
+const selectableDevices = computed<GroupCandidate[]>(() => {
+  const airplay: GroupCandidate[] = (airplayDevices.value || [])
+    .filter((d: any) => !d.disabled)
+    .map((d: any) => ({
+      id: `airplay:${d.id}`,
+      name: d.alias || d.name || d.id,
+      available: !!d.available,
+      kind: "airplay" as const,
+      manufacturer: d.am,
+      model: d.am,
+    }));
   // available 取**真实态**而不是硬编码 true:后端对离线补回的项(已禁用且当前离线)
   // 带 offline:true,照它渲染才会出现「离线」徽标;两个字段都没有时回退 true。
-  const spin = (sendspinClients.value || []).map((c: any) => ({
+  const spin: GroupCandidate[] = (sendspinClients.value || []).map((c: any) => ({
     id: `sendspin:${c.clientId}`,
     name: c.name || c.clientId,
     available: typeof c.available === "boolean" ? c.available : !c.offline,
-    kind: "sendspin",
+    kind: "sendspin" as const,
   }));
-  // 已记住但当前离线的拨号目标(与 sendspinRows 的 offlineTargets 同源同判据):
-  // 服务端 /dial 才 remember,与拨入设备不相交;它们当前未连上、没有 clientId,
-  // 故以 host:port 作为成员 id(后端按 sendspin:<id> 解析)。
   // 拨号目标(dialTargets)不并入候选:它只有 host/port、没有 clientId,据此造出的
   // `sendspin:host:port` 与设备重连后的真实 `sendspin:<clientId>` 是两条不同成员,
   // 不会自动合并 -> 重复成员且永远离线。离线设备改由 /v1/sendspin/clients 以持久
   // 设备档案为底表补回(带真实 clientId),此处不再需要 dialTargets 兜底。
-  return [...dlna, ...spin];
+  return [...airplay, ...spin];
 });
 
 // deviceId → 除当前编辑组外,还属于哪些组(仅展示提示,不阻止多组加入)。
@@ -927,7 +945,7 @@ function openOutputConfig(peerIds: string[], name: string): void {
   showOutput.value = true;
 }
 
-/** 群组成员 → peerId 列表（`sendspin:<id>` / `dlna:<id>` / 历史裸 id 视为 DLNA）。 */
+/** 群组成员 → peerId 列表（`sendspin:<id>` / `airplay:<id>`）。 */
 function groupMemberPeerIds(g: any): string[] {
   return (g?.members || []).map((m: any) => memberPeerId(m)).filter((x: string) => !!x);
 }
@@ -1632,8 +1650,8 @@ async function openCreate() {
   editingGroup.value = null;
   formName.value = "";
   formMembers.value = [];
-  if (dlnaDevices.value.length === 0) await loadDlnaDevices();
   if (sendspinClients.value.length === 0) await loadSendspinClients();
+  if (airplayDevices.value.length === 0) await loadAirPlayDevices();
   showDialog.value = true;
 }
 
@@ -1641,8 +1659,8 @@ async function openEditMembers(g: any) {
   editingGroup.value = g;
   formName.value = g.name;
   formMembers.value = [...(g.memberIds || [])];
-  if (dlnaDevices.value.length === 0) await loadDlnaDevices();
   if (sendspinClients.value.length === 0) await loadSendspinClients();
+  if (airplayDevices.value.length === 0) await loadAirPlayDevices();
   showDialog.value = true;
 }
 

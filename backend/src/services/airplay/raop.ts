@@ -332,6 +332,13 @@ export class RaopPlayer {
   get isStreaming(): boolean { return this.streaming; }
   get isPaused(): boolean { return this.paused; }
 
+  /** 本会话实际使用的播放延迟(帧,44.1k):RECORD 应答的 `audio-latency` 若更大则取之,
+   *  否则回落到 1s。桥接 sink 用它算「此刻送出的音频要等多久才被听到」的 lead ——
+   *  与 MA 桥接层 `set_timing()` 上报下游延迟同义。 */
+  get latencyFramesUsed(): number { return this.latencyFrames; }
+  /** 协商采样率(桥接侧换算 lead 需要,恒 44100)。 */
+  get sampleRateUsed(): number { return this.opts.sampleRate; }
+
   /**
    * 推流节拍健康度快照(可观测指标)。
    *

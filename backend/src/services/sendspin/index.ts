@@ -748,10 +748,18 @@ export async function sendspinGroupPlay(
   memberIds: string[],
   item: { songId: string; title?: string; artist?: string; album?: string; coverArt?: string; duration?: number },
   startMs?: number,
+  /** AirPlay 桥接目标:组内 airplay 成员挂在同一条 pump 上(见 group/airplayBridge.ts)。 */
+  bridge?: { devices: string[]; host: string; port: number; minSendAheadUs?: number },
 ): Promise<void> {
   if (isForkMode()) {
     if (!sendspinSupervisor.isRunning()) throw new Error("sendspin 服务未运行");
-    await sendspinSupervisor.rpc("groupPlay", { group: groupName, members: memberIds, item, seekPositionMs: startMs });
+    await sendspinSupervisor.rpc("groupPlay", {
+      group: groupName,
+      members: memberIds,
+      item,
+      seekPositionMs: startMs,
+      ...(bridge && bridge.devices.length > 0 ? { bridge } : {}),
+    });
     return;
   }
   const { playGroupCore } = await import("./playerCore.js");
@@ -759,7 +767,7 @@ export async function sendspinGroupPlay(
   if (!srv) throw new Error("sendspin 服务未运行");
   playGroupCore(srv, groupName, memberIds, item as any, (cid, songId, message) => {
     log.warn(`sendspin group play ${songId} failed(group=${cid}): ${message}`);
-  }, startMs);
+  }, startMs, bridge);
 }
 
 /** 用户组停止(成员保留,下次起播复用)。 */

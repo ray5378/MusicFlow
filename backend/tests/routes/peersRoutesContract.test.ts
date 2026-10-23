@@ -874,8 +874,8 @@ describe("静音 mute", () => {
   });
 
   it("组静音:全员失败 → 502(带上游原因)", async () => {
-    gm.get.mockReturnValueOnce({ memberIds: ["dlna:d1", "sendspin:s1"] });
-    fns.setDeviceMute.mockRejectedValueOnce(new Error("设备不支持静音"));
+    gm.get.mockReturnValueOnce({ memberIds: ["airplay:ap9", "sendspin:s1"] });
+    fns.setAirPlayMuted.mockRejectedValueOnce(new Error("设备不支持静音"));
     fns.setSendspinMemberMuted.mockRejectedValueOnce(new Error("sendspin 静音失败"));
     const r = await post("/v1/peers/group:g1/mute", { muted: true });
     expect(r.status).toBe(502);
@@ -883,17 +883,28 @@ describe("静音 mute", () => {
   });
 
   it("组静音:部分成功 → 个别成员失败不连累其余(applied/total)", async () => {
-    gm.get.mockReturnValueOnce({ memberIds: ["dlna:d1", "sendspin:s1"] });
+    gm.get.mockReturnValueOnce({ memberIds: ["airplay:ap9", "sendspin:s1"] });
     fns.setSendspinMemberMuted.mockRejectedValueOnce(new Error("该成员离线"));
     const b = await json(await post("/v1/peers/group:g1/mute", { muted: false }));
     expect(b).toEqual({ success: true, applied: 1, total: 2 });
   });
 
-  it("组静音:成员按 kind 分流(dlna 走 RenderingControl,sendspin 走双置位)", async () => {
-    gm.get.mockReturnValueOnce({ memberIds: ["dlna:d1", "sendspin:s1"] });
+  it("组静音:成员按 kind 分流(airplay 走 RAOP volume,sendspin 走双置位)", async () => {
+    // ★ 2026-10-23:DLNA 禁止入组,组成员只有 sendspin / airplay,所以组静音不再有
+    // "设备级 RenderingControl(setDeviceMute)"那一路。
+    gm.get.mockReturnValueOnce({ memberIds: ["airplay:ap9", "sendspin:s1"] });
     await post("/v1/peers/group:g1/mute", { muted: true });
-    expect(fns.setDeviceMute).toHaveBeenCalledWith("d1", true);
+    expect(fns.setAirPlayMuted).toHaveBeenCalledWith("ap9", true);
     expect(fns.setSendspinMemberMuted).toHaveBeenCalledWith("s1", true);
+    expect(fns.setDeviceMute).not.toHaveBeenCalled();
+  });
+
+  it("组静音:解析不出 kind 的脏成员按失败计入,不当成 DLNA 下发", async () => {
+    gm.get.mockReturnValueOnce({ memberIds: ["bare-d1", "airplay:ap9"] });
+    const r = await post("/v1/peers/group:g1/mute", { muted: true });
+    expect((await json(r)).applied).toBe(1);
+    expect(fns.setDeviceMute).not.toHaveBeenCalled();
+    expect(fns.setAirPlayMuted).toHaveBeenCalledWith("ap9", true);
   });
 
   it("上游抛错 → 500", async () => {

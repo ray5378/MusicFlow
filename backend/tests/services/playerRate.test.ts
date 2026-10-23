@@ -9,7 +9,7 @@
 //      （ESPHome `sample_rate` 允许 16000~96000 的任意整数，不限于我们的五档）；
 //   ② **裁决优先级**：手动 > 探测 > 缺省 48000；清手动**不清探测**；两者皆空删行；
 //   ③ **群组取最低**（木桶原理）：成员一 96K 一 48K → 组内一律 48K；组外设备互不影响；
-//      裸 id 成员按 DLNA 认；
+//      ★ 2026-10-23:组成员只有 sendspin / airplay(DLNA 禁止入组),裸 id 不再按 DLNA 认;
 //   ④ **热路径永不抛**：空 peerId / 无行 / 坏数据一律回落到缺省，绝不把出流卡死。
 //
 // 每个 `it` 自带前置状态（清表 + 清组）——本仓开了 `sequence.shuffle`，不依赖执行顺序。
@@ -31,9 +31,9 @@ import {
   setPlayerRate,
 } from "../../src/services/playerRate.js";
 
-const A = "dlna:rate-device-a";
+const A = "airplay:rate-device-a";
 const B = "sendspin:rate-device-b";
-const C = "dlna:rate-device-c";
+const C = "airplay:rate-device-c";
 
 /** 直接落一行组 + 重载（绕开 `assertMembersAvailable` 的设备在线校验，
  *  单测只关心「组成员的采样率怎么算」，不关心成员此刻是否在线）。 */
@@ -138,7 +138,7 @@ describe("裁决优先级：手动 > 探测 > 缺省 48000", () => {
 
 describe("群组取最低（木桶原理）：组内必须同率", () => {
   it("成员一 96K 一 48K → 组内一律取 48K；集体抬到 96K 才升", () => {
-    seedGroup("g1", ["dlna:rate-device-a", "sendspin:rate-device-b"]);
+    seedGroup("g1", ["airplay:rate-device-a", "sendspin:rate-device-b"]);
     setPlayerRate(A, 96000);
     setPlayerRate(B, 96000);
     expect(resolveTargetSampleRate(A)).toBe(96000);
@@ -155,14 +155,14 @@ describe("群组取最低（木桶原理）：组内必须同率", () => {
   });
 
   it("组员**没配置**＝按缺省 48K 参与取最低（不是被忽略）", () => {
-    seedGroup("g1", ["dlna:rate-device-a", "sendspin:rate-device-b"]);
+    seedGroup("g1", ["airplay:rate-device-a", "sendspin:rate-device-b"]);
     setPlayerRate(A, 192000); // B 没配置 → 缺省 48000 拉低全组
     expect(resolveTargetSampleRate(A)).toBe(48000);
     expect(resolveTargetSampleRate("group:g1")).toBe(48000);
   });
 
   it("组外设备互不影响；不存在的 group: 回自己", () => {
-    seedGroup("g1", ["dlna:rate-device-a", "sendspin:rate-device-b"]);
+    seedGroup("g1", ["airplay:rate-device-a", "sendspin:rate-device-b"]);
     setPlayerRate(A, 48000);
     setPlayerRate(C, 96000);
     expect(resolveTargetSampleRate(C)).toBe(96000);
@@ -172,20 +172,20 @@ describe("群组取最低（木桶原理）：组内必须同率", () => {
   it("裸 id 成员按 DLNA 认（历史数据口径，与 group/index.ts 一致）", () => {
     seedGroup("g1", ["rate-device-a"]);
     setPlayerRate(A, 96000);
-    expect(rateScope("dlna:rate-device-a")).toEqual([A]);
+    expect(rateScope("airplay:rate-device-a")).toEqual([A]);
     expect(resolveTargetSampleRate(A)).toBe(96000);
   });
 
   it("airplay / local 不参与组（RAOP 协议锁 44100，本机播放器不进组）", () => {
-    seedGroup("g1", ["dlna:rate-device-a"]);
+    seedGroup("g1", ["airplay:rate-device-a"]);
     expect(rateScope("airplay:ap-1")).toEqual(["airplay:ap-1"]);
     expect(rateScope("local:u-1")).toEqual(["local:u-1"]);
     expect(resolveTargetSampleRate("airplay:ap-1")).toBe(DEFAULT_TARGET_RATE);
   });
 
   it("设备同时在多个组 → 取并集成员的最低值（任一组拖低就得让）", () => {
-    seedGroup("g1", ["dlna:rate-device-a", "sendspin:rate-device-b"]); // A:96K B:96K
-    seedGroup("g2", ["dlna:rate-device-a", "dlna:rate-device-c"]); // A:96K C:48K
+    seedGroup("g1", ["airplay:rate-device-a", "sendspin:rate-device-b"]); // A:96K B:96K
+    seedGroup("g2", ["airplay:rate-device-a", "airplay:rate-device-c"]); // A:96K C:48K
     setPlayerRate(A, 96000);
     setPlayerRate(B, 96000);
     setPlayerRate(C, 48000);

@@ -80,6 +80,16 @@ vi.mock("../../src/services/dlna/control.js", () => ({
   },
 }));
 
+// airplay 设备表:QueueController.rejoinMembers 用 getAirPlayDevice 判定"新成员是否在线
+// airplay 设备"(组成员只有 sendspin / airplay;DLNA 已禁止入组)。
+vi.mock("../../src/services/airplay/discovery.js", () => ({
+  getAirPlayDevice: (id: string) => {
+    const d = H.devices.get(id);
+    if (!d) return undefined;
+    return { id, name: `ap-${id}`, alias: "", host: "10.0.0.9", port: 7000, pk: "pk", et: "0,1", available: !!d.available };
+  },
+}));
+
 // 组:组管理器的读接口 + 组协议 player(扇出)+ 在线成员判据 + 组状态。
 vi.mock("../../src/services/group/index.js", () => ({
   getGroupManager: () => ({
@@ -174,7 +184,12 @@ function mkProto(pid: string): Any {
 function mkPlayer(pid: string, over: Any = {}): Any {
   return {
     playerId: pid,
-    playMedia: vi.fn(async (item: Any) => { H.log.push(`playMedia:${pid}:${item.songId}`); return { mediaUri: `uri:${pid}` }; }),
+    playMedia: vi.fn(async (item: Any, _baseUrl?: string, startMs?: number) => {
+      H.log.push(`playMedia:${pid}:${item.songId}`);
+      // 起播位置单独一行:组重建时间线时"从哪一秒接上"是核心断言(见 rejoinMembers)。
+      H.log.push(`playMediaStart:${pid}:${startMs ?? 0}`);
+      return { mediaUri: `uri:${pid}` };
+    }),
     stop: vi.fn(async () => {}),
     pause: vi.fn(async () => {}),
     resume: vi.fn(async () => {}),
@@ -791,47 +806,59 @@ describe("组:追踪重置 / 结束抑制 / 组归属 / 成员重入", () => {
     expect(H.alignTargets).toEqual([]);
   });
 
-  it("rejoinMembers:新成员对齐到 leader 进度,并在组暂停时同步暂停", async () => {
+  // ★ 2026-10-23 契约变更:airplay 新成员加入播放中的组时,**不再逐设备 cast + 逐设备
+  // seek 校准**(那是 DLNA 自拉流模型的姿势),而是**重建整组时间线** —— 桥接的目标设备
+  // 列表写在连接建立时的 HELLO 帧里,运行中新增的设备收不到 PCM,只能整体重建。
+  it("rejoinMembers:airplay 新成员 → 重建组时间线并从 leader 位置接上", async () => {
     const { qc, any } = mkQC("g1");
     H.devices.set("devA", { id: "devA", available: true });
     H.groupStatus = { position: 42, state: "PAUSED_PLAYBACK" };
-    H.alignResult = 41;
     any.queues.set("devA", { items: [{ songId: "x", title: "x", mime: "audio/mpeg" }], currentIndex: 0, playMode: "order", isActive: true, ended: false });
     const changed: Any[] = [];
     qc.on("queue_changed", (id: string) => changed.push(id));
 
     await qc.rejoinMembers("group:g1", ["devA"]);
 
-    // 对齐时用的是 leader 的实时位置(经 getTargetSec 回调取到)
-    expect(H.alignTargets).toEqual([{ deviceId: "devA", position: 42 }]);
-    expect(H.log).toContain("playMedia:dlna:devA:s1");
-    expect(H.log).toContain("pause:dlna:devA");
+    // 组时间线重建:组 player 用**当前曲**起播,起点 = leader 位置(42s → 42000ms)
+    expect(H.log).toContain("playMedia:dlna:g1:s1");
+    expect(H.log).toContain("playMediaStart:dlna:g1:42000");
+    // 新成员不再被单独 cast(统一 pump 产出音频)
+    expect(H.log.some((l) => l.includes("playMedia:dlna:devA"))).toBe(false);
     // 组激活期间成员的个人队列被标记为不激活(保留 items)
     expect(any.queues.get("devA").isActive).toBe(false);
     expect(changed).toContain("devA");
   });
 
-  it("rejoinMembers:组状态查询失败 → 回退 position=0 继续对齐", async () => {
+  it("rejoinMembers:组状态查询失败 → 回退 position=0(从头重建)", async () => {
     const { qc } = mkQC("g1");
     H.devices.set("devA", { id: "devA", available: true });
     H.groupStatusThrows = true;
     await qc.rejoinMembers("group:g1", ["devA"]);
-    expect(H.log).toContain("playMedia:dlna:devA:s1");
-    expect(H.alignTargets).toEqual([]);   // position=0 → 不需要校准 seek
+    expect(H.log).toContain("playMedia:dlna:g1:s1");
+    expect(H.log).toContain("playMediaStart:dlna:g1:0");
   });
 
-  it("rejoinMembers:单个成员对齐失败被吞掉,不影响其它成员", async () => {
+  it("rejoinMembers:离线新成员被跳过(不触发重建)", async () => {
     const { qc } = mkQC("g1");
-    H.devices.set("bad", { id: "bad", available: true });
+    H.devices.set("bad", { id: "bad", available: false });
     H.devices.set("good", { id: "good", available: true });
     H.groupStatus = { position: 30, state: "PLAYING" };
-    H.badDevices.add("bad");
 
     await expect(qc.rejoinMembers("group:g1", ["bad", "good"])).resolves.toBeUndefined();
 
-    expect(H.log).toContain("playMedia:dlna:good:s1");
-    expect(H.log).toContain("align:good:30");
+    // 只有在线的 good 参与 → 重建一次;离线成员不产生任何成员级调用
+    expect(H.log.filter((l) => l.startsWith("playMedia:")).length).toBe(1);
     expect(H.log.some((l) => l.includes("dlna:bad"))).toBe(false);
+  });
+
+  it("rejoinMembers:重建失败被吞掉(接口仍成功,组悬挂等看门狗恢复)", async () => {
+    const player = mkPlayer("dlna:g1");
+    player.playMedia = vi.fn(async () => { throw new Error("泵起不来"); });
+    const { qc } = mkQC("g1", { player });
+    H.devices.set("devA", { id: "devA", available: true });
+    H.groupStatus = { position: 10, state: "PLAYING" };
+
+    await expect(qc.rejoinMembers("group:g1", ["devA"])).resolves.toBeUndefined();
   });
 });
 
