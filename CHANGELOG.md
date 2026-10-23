@@ -85,6 +85,37 @@ group 目标各一例)。回退修复后两例均变红。
 **回归防线**:新增两例 —— airplay 成员 play 必须按 `detach → resume` 顺序执行;
 group 目标 play **不得**摘组(组本身不从属于任何组)。回退修复后前一例变红。
 
+### Fix / 起点被跳过丢弃时,回执仍谎报落点(`/queue/play` 与 `/queue/transfer-from`)
+
+**症状**:带进度起播 / 流转后,客户端把进度条画在 45s,声音却从 0 开始 —— 而且**时好时坏**,
+同一条指令一会儿落位一会儿归零,看起来像随机 bug。
+
+**实测证据(240 真机,`--seek 45` 全量矩阵 + 定向探针)**:
+
+```
+queue/play  {items, startIndex:0, position:45} → 回执 {"position": 45}
+源端实际状态  → state=PLAYING position=2.29 currentIndex=3  (第 0/1/2 首被判「无可用音源」跳过)
+容器日志      → [QueueController][playCurrent] bb5c…: song 59ce8891… 无可用音源,跳过(留在队列)
+```
+
+**根因**:`playCurrent` 里 `castStartMs = skips > 0 ? undefined : startPositionMs` ——
+跳过不可播曲目后起点**必须**丢弃(起点只属于原本那一首,套到别的歌上是错的)。
+但 HTTP 层不知道这件事发生了,把 `askPosition` 原样回执 ⇒ 落点在服务端**完全不可见**。
+而「无可用音源」的判定要过在线源复核,会抖动,于是同一条指令表现成随机落位/归零。
+
+**修复**:
+
+1. `QueueController` 新增 `castLanding` 记录本次 cast 的「起点是否真的编进去了」,
+   并暴露 `castLandingOf(deviceId)`(设备被清理时同步删除)。
+2. `/queue/play` 与 `/queue/transfer-from` 的回执改为按它判:被跳过丢弃时回
+   `position: null`,不再谎报。
+3. 流转侧还额外**禁止回落进「晚读数 + seek」分支**:目标端此刻播的是另一首,
+   把旧起点塞进去等于让它跳到不该去的位置 —— 如实回 null,什么也不做。
+
+**回归防线**:`tests/routes/peersRoutesContract.test.ts` 新增两例(起播回执 / 流转回执),
+`_peersFakes` 的 `queueController` 补 `castLandingOf` 出厂值(已落位,保持既有用例语义)。
+两例在回退修复后均变红。
+
 ## [4.6.70] - 2026-10-22
 
 ### Feature / AirPlay 改为默认独立子进程（与 Sendspin 对齐）

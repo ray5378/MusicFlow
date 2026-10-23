@@ -66,6 +66,10 @@ export const queueController = {
   stopPlayback: vi.fn(),
   clear: vi.fn(),
   getPlayerState: vi.fn(async () => null as Any),
+  // 起点是否真的编进本次 cast(路由据此决定回执 position 给值还是给 null)。
+  // 出厂 = 已落位,这样既有「带 position 起播 → 回执回显」的用例语义不变;
+  // 要验「跳过导致落点丢失」的用例单独 mockReturnValueOnce({applied:false})。
+  castLandingOf: vi.fn(() => ({ requestedMs: 0, applied: true }) as Any),
 };
 
 export const eventManager = {
@@ -172,6 +176,7 @@ const MANAGER_DEFAULTS: Array<[Any, string, Any]> = [
   [queueController, "stopPlayback", () => undefined],
   [queueController, "clear", () => undefined],
   [queueController, "getPlayerState", async () => null as Any],
+  [queueController, "castLandingOf", () => ({ requestedMs: 0, applied: true }) as Any],
   [eventManager, "getEventState", () => null as Any],
 ];
 

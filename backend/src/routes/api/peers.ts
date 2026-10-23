@@ -234,7 +234,14 @@ app.post("/v1/peers/:peerId/queue/play", async (c) => {
     try {
       await getQueueManager().playFrom(parsed.id, items, start, getDlnaBaseUrl(c), undefined, startMs);
     } catch (e: any) { return c.json(apiInternalError(e), 500); }
-    return c.json({ success: true, position: startMs !== undefined ? askPosition : null });
+    // ★ 回执必须诚实:本次起播若跳过了不可播曲目,startMs 已被 playCurrent 丢弃
+    //   (起点只属于原本那一首),这里再回 askPosition 就是谎话 —— 客户端会照它把
+    //   进度条画在 45s,声音却从 0 开始。2026-10-24 真机:同一首歌的在线可播性复核
+    //   会抖动,跳过与否交替出现,同一条指令表现成「有时落位、有时归零」的随机 bug。
+    const landed = startMs !== undefined && getQueueController().castLandingOf(parsed.id)?.applied
+      ? askPosition
+      : null;
+    return c.json({ success: true, position: landed });
   }
   // local:起点随起播交出去(见 seekPeerToSeconds 上方注释)。
   pm.localPlayFrom(peerId, c.get("user")!.id, items, start, askPosition ?? undefined);
@@ -373,8 +380,13 @@ app.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
     if (handedOver) {
       landedPosition = borrow.positionSeconds ?? null;
     } else if (inCastPos !== null && inCastPos > 0) {
-      // 起播即落位(AirPlay / 同设备 DLNA):**不再补 seek**,避免第二次建会话。
-      landedPosition = inCastPos;
+      // ★ 起播即落位(AirPlay / 同设备 DLNA):**不再补 seek**,避免第二次建会话。
+      //   但只有「起点真的编进去了」才算落位 —— 起播时若跳过不可播曲目,playCurrent
+      //   会丢弃 startMs(起点只属于原本那一首)。此时如实回 null,**也不要补 seek**:
+      //   目标端现在播的是另一首,把旧起点塞进去等于让它跳到不该去的位置。
+      landedPosition = getQueueController().castLandingOf(parsedTo.id)?.applied
+        ? inCastPos
+        : null;
     } else {
       // 晚读数优先(跨设备时更贴近目标端真正出声的时刻);同设备场景源端已被互斥
       // 停掉、晚读数恒为 0 → 用起播前的定格值兜底。

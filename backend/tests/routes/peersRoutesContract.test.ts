@@ -301,6 +301,18 @@ describe("POST /v1/peers/:peerId/queue/play", () => {
     expect((await post("/v1/peers/bare-id/queue/play", { items: [] })).status).toBe(400);
   });
 
+  it("cast 端:起播时跳过了不可播曲目 ⇒ 回执 position 必须为 null(不谎报落位)", async () => {
+    // 2026-10-24 真机:position=45 的起播指令,队列首曲当天被在线可播性复核判死、
+    // 跳过到下一首,startMs 随之丢弃(起点只属于原本那一首),目标端从 0 播;
+    // 而路由把 askPosition 原样回执 ⇒ 客户端把进度条画在 45s。可播性复核会抖动,
+    // 于是同一条指令表现成「有时落位、有时归零」。回执必须诚实。
+    queueController.castLandingOf.mockReturnValueOnce({ requestedMs: 45000, applied: false });
+    const b = await json(await post("/v1/peers/airplay:ap1/queue/play",
+      { items: [{ songId: "s1" }], startIndex: 0, position: 45 }));
+    expect(b.position).toBeNull();
+    expect(b.success).toBe(true);
+  });
+
   it("cast 端:先脱离活跃组,再以 startMs 起播(起播即落位,不做二次 seek)", async () => {
     queueManager.playFrom.mockResolvedValueOnce(3);
     const b = await json(await post("/v1/peers/dlna:dev1/queue/play", { items: [{ songId: "s1" }], startIndex: 3, position: 12.5 }));
@@ -383,6 +395,19 @@ describe("POST /v1/peers/:peerId/queue/transfer-from", () => {
     pm.getQueueSnapshot.mockReturnValueOnce({ items: [], currentIndex: 0 });
     const b = await json(await post("/v1/peers/dlna:dev1/queue/transfer-from", { from: "dlna:src" }));
     expect(b).toEqual({ success: true, transferred: 0 });
+  });
+
+  it("airplay 目标:起播跳过了不可播曲目 ⇒ 回执 position=null 且**不补 seek**", async () => {
+    // 跳过时 playCurrent 会丢弃 startMs(起点只属于原本那一首)。此时目标端播的是另一首,
+    // 若回落进「晚读数 + seek」分支,会把旧起点塞进新歌 —— 等于跳到不该去的位置。
+    // 正确口径:如实回 null,什么也不做。
+    pm.getQueueSnapshot.mockReturnValueOnce({ items: [{ songId: "a" }], currentIndex: 0 });
+    fns.readPeerPositionSeconds.mockResolvedValueOnce(45);
+    queueController.castLandingOf.mockReturnValueOnce({ requestedMs: 45000, applied: false });
+    const b = await json(await post("/v1/peers/airplay:ap1/queue/transfer-from", { from: "airplay:ap2" }));
+    expect(b.position).toBeNull();
+    expect(b.transferred).toBe(1);
+    expect(fns.seekPeerToSeconds).not.toHaveBeenCalled();
   });
 
   it("airplay 目标:源端落点必须在**摘组之前**定格(摘组会停掉替组出声的那台成员)", async () => {

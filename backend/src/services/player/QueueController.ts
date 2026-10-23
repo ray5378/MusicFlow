@@ -149,6 +149,15 @@ export class QueueController extends EventEmitter {
    *  目标端从 0 起涨,而**服务端回执仍是 47.5** ⇒ 界面/继续播/再次流转全部错位。
    *  起点是「这次起播的意图」,与设备报的位置无关,所以不能靠 lastPos 兜。 */
   private lastCastStartMs = new Map<string, number>();
+  /** 最近一次 cast 的「起点是否**真的**编进去了」。跳过不可播曲目时 `castStartMs`
+   *  会被丢弃(起点只属于原本那一首),此刻路由的回执必须如实说「没落位」——
+   *  否则客户端把进度条画在 45s,声音却从 0 开始。
+   *
+   *  真机依据(2026-10-24,`--seek 45` 全量矩阵):同一首歌的在线可播性复核会抖动,
+   *  跳过与否交替出现,于是同一条指令表现成「有时落位、有时归零」的随机 bug;
+   *  而两条路由(`/queue/play`、`/queue/transfer-from`)把 `askPosition` 原样回执,
+   *  让「跳过」这件事在服务端**完全不可见**。 */
+  private castLanding = new Map<string, { requestedMs: number; applied: boolean }>();
   /** `lastPos` 里的读数是**哪一首**报的。换曲必须清 —— 否则上一首的读数会被当成
    *  本曲的"最后位置"套进 frozen/stalled 的续播目标(例:上一首停在 200s、新曲刚起播
    *  就卡死 → 重投到 200s)。同一首重投(stalled / recoverInPlace)必须保留:
@@ -249,6 +258,7 @@ export class QueueController extends EventEmitter {
       this.lastPos.delete(k);
       this.lastPosSong.delete(k);
       this.lastCastStartMs.delete(k);
+      this.castLanding.delete(k);
       this.clearSleepTimer(k);
     }
   }
@@ -735,6 +745,15 @@ export class QueueController extends EventEmitter {
     }
   }
 
+  /** 最近一次起播的起点有没有**真的**编进去(供 HTTP 层如实回执)。
+   *
+   *  `applied=false` 的两种成因:本次起播跳过了不可播的曲目(`castStartMs` 被丢弃),
+   *  或调用方根本没要求起点。路由据此决定回执 `position` 是给值还是给 `null` ——
+   *  **绝不把没发生的落点报成成功**:客户端会照它画进度条。 */
+  castLandingOf(deviceId: string): { requestedMs: number; applied: boolean } | undefined {
+    return this.castLanding.get(stripPlayerPrefix(deviceId));
+  }
+
   /** 设备是否属于某个"正在播放"的组。组播放期间其个人队列决策一律忽略。
    *  设备可同时属于多个组,只要任一所属组的队列激活即视为受组控制。 */
   /** 设备所属的、**正在播放**的组（无则 undefined）。设备可同时属于多个组，取第一个
@@ -1083,6 +1102,11 @@ export class QueueController extends EventEmitter {
       // 起点只对**本次要起播的那一首**有意义:中途跳过了死源后就不能再套用。
       const castStartMs = skips > 0 ? undefined : startPositionMs;
       const castStartSec = castStartMs && castStartMs > 0 ? castStartMs / 1000 : 0;
+      // 供 HTTP 层如实回执:请求了起点但被跳过丢掉 ⇒ applied=false,路由不能说"已落位"。
+      this.castLanding.set(deviceId, {
+        requestedMs: startPositionMs && startPositionMs > 0 ? startPositionMs : 0,
+        applied: castStartSec > 0,
+      });
       // 记下本次起播意图(ms),供 cast 失败 / stalled 重投按原起点重投(见字段注释)。
       // 放在 playMedia **之前**:抛错时也要留痕,否则重投必然退回 0。
       this.lastCastStartMs.set(deviceId, castStartSec * 1000);

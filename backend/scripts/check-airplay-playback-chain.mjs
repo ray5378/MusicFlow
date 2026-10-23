@@ -588,7 +588,7 @@ console.log("===== R18 流转接续:起播即落位 + 建会话硬预算(HiVi �
   );
   check(
     "transfer 到 AirPlay:把源进度交给本次 cast",
-    /const inCastPos = !borrow\.armed[\s\S]{0,260}?parsedTo\.kind === "airplay"/.test(peers)
+    /const frozenPos = freezesPositionBeforeCast\(parsedTo\.kind\)/.test(peers)
       && /Math\.round\(inCastPos \* 1000\)/.test(peers),
     "transfer 仍走「先起播、再 seek」",
   );
@@ -787,10 +787,14 @@ console.log("===== R25 同设备双协议流转(AirPlay <-> DLNA):落点/互斥/
     "同设备流转会被当成两台设备:起播互斥停掉源端后读不到进度",
   );
   check(
-    "流转起点在任何起播/互斥动作之前定格(srcPosEarly)",
+    "流转起点在任何起播/互斥/摘组动作之前定格(srcPosEarly → frozenPos)",
     /const srcPosEarly = askPosition \?\? \(sameDevice \? await readPeerPositionSeconds/.test(peersG)
-      && /const inCastPos = !borrow\.armed[\s\S]{0,260}srcPosEarly/.test(peersG),
-    "落点在源端被互斥停掉之后才读:会恒为 0(真机=流转后从头播)",
+      && /const frozenPos = freezesPositionBeforeCast[\s\S]{0,200}srcPosEarly/.test(peersG)
+      // ★ 定格必须排在「摘组」之前:摘组本身会停掉源端(目标若正替该组出声),
+      //   晚读只能读到 0 —— 2026-10-24 真机实测「组 → 组内最后一台成员」回执 position=null。
+      && peersG.indexOf("const frozenPos =")
+        < peersG.indexOf("await detachFromActiveGroups(parsedTo)"),
+    "落点在源端被互斥/摘组停掉之后才读:会恒为 0(真机=流转后从头播)",
   );
   check(
     "DLNA playMedia 把 startMs 编进 timeOffset(起播即落位)",
