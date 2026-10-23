@@ -301,28 +301,32 @@ describe("POST /v1/peers/:peerId/queue/play", () => {
     expect((await post("/v1/peers/bare-id/queue/play", { items: [] })).status).toBe(400);
   });
 
-  it("cast 端:先脱离活跃组,再 playFrom;带 position 时起播后 seek 落位", async () => {
+  it("cast 端:先脱离活跃组,再以 startMs 起播(起播即落位,不做二次 seek)", async () => {
     queueManager.playFrom.mockResolvedValueOnce(3);
-    fns.seekPeerToSeconds.mockResolvedValueOnce(true);
     const b = await json(await post("/v1/peers/dlna:dev1/queue/play", { items: [{ songId: "s1" }], startIndex: 3, position: 12.5 }));
     expect(fns.detachFromActiveGroups).toHaveBeenCalled();
-    expect(queueManager.playFrom).toHaveBeenCalledWith("dev1", [{ songId: "s1" }], 3, "http://127.0.0.1:46400");
-    expect(fns.seekPeerToSeconds).toHaveBeenCalledWith("dlna:dev1", 12.5);
+    // 起点作为第 6 参进入**这一次** cast(12.5s → 12500ms)。
+    // 不再「先起播、再 seek」:AirPlay 的 seek 是完整重建会话,单会话设备
+    // (HiVi/Linkplay)第二次 RECORD 会永久等待;AP2 上还白多 3s、AP1 上直接 25s 超时。
+    expect(queueManager.playFrom).toHaveBeenCalledWith(
+      "dev1", [{ songId: "s1" }], 3, "http://127.0.0.1:46400", undefined, 12500,
+    );
+    expect(fns.seekPeerToSeconds).not.toHaveBeenCalled();
     expect(b).toEqual({ success: true, position: 12.5 });
   });
 
-  it("cast 端:seek 落位失败 → position=null(不谎报成功落位)", async () => {
-    fns.seekPeerToSeconds.mockResolvedValueOnce(false);
-    const b = await json(await post("/v1/peers/group:g1/queue/play", { items: [], position: 9 }));
+  it("cast 端:不带 position → startMs 为 undefined(从头播),position=null", async () => {
+    const b = await json(await post("/v1/peers/group:g1/queue/play", { items: [] }));
+    expect(queueManager.playFrom.mock.calls[0][5]).toBeUndefined();
     expect(b.position).toBeNull();
   });
 
-  it("cast 端:负 position 夹到 0;非有限数视为未传", async () => {
+  it("cast 端:负 position 夹到 0(等于没传起点);非有限数视为未传", async () => {
     await post("/v1/peers/dlna:dev1/queue/play", { items: [], position: -3 });
-    expect(fns.seekPeerToSeconds.mock.calls[0][1]).toBe(0);
-    fns.seekPeerToSeconds.mockClear();
+    expect(queueManager.playFrom.mock.calls[0][5]).toBeUndefined();
+    queueManager.playFrom.mockClear();
     await post("/v1/peers/dlna:dev1/queue/play", { items: [], position: "abc" });
-    expect(fns.seekPeerToSeconds).not.toHaveBeenCalled();
+    expect(queueManager.playFrom.mock.calls[0][5]).toBeUndefined();
   });
 
   it("cast 端:起播抛错 → 500(走统一内部错误契约)", async () => {
