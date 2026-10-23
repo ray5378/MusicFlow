@@ -141,6 +141,14 @@ export class QueueController extends EventEmitter {
    *     而不是从头播(= 用户眼里的"归零");
    *  ② frozen 判定后重投的落点。 */
   private lastPos = new Map<string, number>();
+  /** 各 player **本次 cast 的起点**(毫秒;0 = 从头)。cast 失败 / stalled 重投时按它重投。
+   *
+   *  为什么必须记:重投若一律「从 0 起播」,落点就永久丢了。真机依据(2026-10-24
+   *  流转矩阵首格):transfer-from 回执落点 47.5s,目标端第一次 cast 撞上
+   *  `AP2 命令管道无读端(ENXIO)` 抛错 → stall 通道重投一次(13.4s 总耗时)→
+   *  目标端从 0 起涨,而**服务端回执仍是 47.5** ⇒ 界面/继续播/再次流转全部错位。
+   *  起点是「这次起播的意图」,与设备报的位置无关,所以不能靠 lastPos 兜。 */
+  private lastCastStartMs = new Map<string, number>();
   /** 探测到「链路/子进程不可用」的 player(key=裸 id):记下当时的播放位置。
    *  期间**不接受任何决策**(不切歌、不计数、不重投),等恢复后一次性续播。
    *
@@ -593,7 +601,13 @@ export class QueueController extends EventEmitter {
         }
       }
       log.warn(`[QueueController][frozen] ${playerId}: PLAYING 但位置冻结@${Math.round(this.lastPos.get(id) ?? 0)}s,就地重投并拉回位置`);
-      await this.recoverInPlace(id, this.lastPos.get(id) ?? 0);
+      // 落点优先取设备最后上报的位置;**设备还没上报过**(刚起播就判冻结)时退回本次
+      // cast 的起点 —— 否则 recoverInPlace(0) 会把刚落好的位置重投成 0(同 lastCastStartMs 注释)。
+      const landSec = Math.max(
+        this.lastPos.get(id) ?? 0,
+        (this.lastCastStartMs.get(id) ?? 0) / 1000,
+      );
+      await this.recoverInPlace(id, landSec);
       return;
     }
     if (decision === "stalled") {
@@ -697,7 +711,11 @@ export class QueueController extends EventEmitter {
       }
       this.advancing.add(id);
       try {
-        await this.playCurrent(id, baseUrl);
+        // ★ 重投必须带上**原起点**:同一首、同一起播意图,只是上一次 cast 没成。
+        //   从 0 重投会让落点/续播位置永久归零(证据见 lastCastStartMs 字段注释);
+        //   0 是「本来就从 0 播」的正常值,与 undefined 等价。
+        const retryStartMs = this.lastCastStartMs.get(id) ?? 0;
+        await this.playCurrent(id, baseUrl, retryStartMs > 0 ? retryStartMs : undefined);
       } finally {
         this.advancing.delete(id);
       }
@@ -1063,6 +1081,9 @@ export class QueueController extends EventEmitter {
         : 30_000;
       // 起点只对**本次要起播的那一首**有意义:中途跳过了死源后就不能再套用。
       const castStartMs = skips > 0 ? undefined : startPositionMs;
+      // 记下本次起播意图(ms),供 cast 失败 / stalled 重投按原起点重投(见字段注释)。
+      // 放在 playMedia **之前**:抛错时也要留痕,否则重投必然退回 0。
+      this.lastCastStartMs.set(deviceId, castStartMs && castStartMs > 0 ? castStartMs : 0);
       const { mediaUri } = (await withTimeout(
         player.playMedia(fullItem, baseUrl, castStartMs),
         castTimeoutMs,
@@ -1168,6 +1189,8 @@ export class QueueController extends EventEmitter {
     this.flowOwned.delete(playerId);
     // 整队替换 → 上一轮队列攒的连续 cast 失败计数一起作废(新队列是一次全新的尝试)。
     this.castFailStreak.delete(playerId);
+    // 整队替换 → 上一条队列的起播意图(落点)作废,避免新队列的重投套用旧起点。
+    this.lastCastStartMs.delete(playerId);
     let q = this.queues.get(playerId);
     if (!q) { q = { items: [], currentIndex: -1, playMode: "shuffle", isActive: false, ended: false }; this.queues.set(playerId, q); }
     q.contentContext = contentContext ?? undefined;

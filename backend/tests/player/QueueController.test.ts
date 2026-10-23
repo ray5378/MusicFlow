@@ -149,6 +149,56 @@ describe("QueueController", () => {
     });
   });
 
+  describe("起播即落位:stalled 重投不丢落点(2026-10-24 流转矩阵首格真机)", () => {
+    /** 复现:transfer-from 回执落点 47.5s → 目标端 cast 之后一路正常,
+     *  随后 stalled 通道重投(链路抖动/乐观窗口超时都走这里)。
+     *  旧实现重投不带位置 ⇒ 目标端从 0 起涨,而回执仍写 47.5(落点永久丢失)。
+     *  这里直接驱动 stalled 通道 —— 正是真机上那条「cast 抛错 → setTimeout(handleDecision
+     *  ('stalled'))」的落点。 */
+    it("stalled 重投必须按本次 cast 的原起点重投", async () => {
+      const starts: (number | undefined)[] = [];
+      const p = makeMockPlayer();
+      p.playMedia = (async (_item: unknown, _base: unknown, startMs?: number) => {
+        starts.push(startMs);
+        return { mediaUri: "u-ok" };
+      }) as typeof p.playMedia;
+      qc.registerPlayer("d3", p, mockCtrl as any);
+      const items = [
+        { songId: "s1", title: "t1", mime: "audio/mpeg" } as any,
+        { songId: "s2", title: "t2", mime: "audio/mpeg" } as any,
+      ];
+      qc.setQueue("d3", items, 0, "http://base");
+
+      // 起播即落位:47.5s 交给这次 cast
+      await qc.playFrom("d3", items, 0, "http://base", undefined, 47500);
+      expect(starts).toEqual([47500]);
+
+      // 链路抖动 → stalled 通道重投当前首
+      await qc.handleDecision("stalled", "dlna:d3");
+      expect(starts.length).toBe(2);
+      expect(starts[1]).toBe(47500);   // 重投仍是同一落点(不是 undefined/0)
+    });
+
+    it("从头起播(起点 0)时重投依旧是 undefined,不凭空造出偏移", async () => {
+      const starts: (number | undefined)[] = [];
+      const p = makeMockPlayer();
+      p.playMedia = (async (_item: unknown, _base: unknown, startMs?: number) => {
+        starts.push(startMs);
+        return { mediaUri: "u-ok" };
+      }) as typeof p.playMedia;
+      qc.registerPlayer("d4", p, mockCtrl as any);
+      const items = [{ songId: "s1", title: "t1", mime: "audio/mpeg" } as any];
+      qc.setQueue("d4", items, 0, "http://base");
+
+      await qc.playFrom("d4", items, 0, "http://base");
+      expect(starts).toEqual([undefined]);
+
+      await qc.handleDecision("stalled", "dlna:d4");
+      expect(starts.length).toBe(2);
+      expect(starts[1]).toBeUndefined();
+    });
+  });
+
   describe("shuffle 上一首稳定性(v1.7.52 修复:当前曲固定在序列头,pos 可回退)", () => {
     beforeEach(() => {
       qc.setQueue("d1", [

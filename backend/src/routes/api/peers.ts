@@ -225,12 +225,15 @@ app.post("/v1/peers/:peerId/queue/play", async (c) => {
   if (isCastPeer(parsed)) {
     // 成员被显式指派播放 → 先脱离活跃组再独立播(MA ensure_player_ungrouped)。
     await detachFromActiveGroups(parsed);
+    // ★ 起播即落位(与 transfer-from 同口径):起点交给**这一次** cast 的 startMs,
+    //   绝不再「先起播、再从 0 seek」—— AirPlay 的 seek 是**完整重建会话**,
+    //   两次建会话会让单会话设备在第二次 RECORD 上挂死(2026-10-21 真机),
+    //   而且白白多等一次重建(实测 AP2 上 3s、AP1 上直接 25s 超时)。
+    const startMs = askPosition !== null && askPosition > 0 ? Math.round(askPosition * 1000) : undefined;
     try {
-      await getQueueManager().playFrom(parsed.id, items, start, getDlnaBaseUrl(c));
+      await getQueueManager().playFrom(parsed.id, items, start, getDlnaBaseUrl(c), undefined, startMs);
     } catch (e: any) { return c.json(apiInternalError(e), 500); }
-    let landed: number | null = null;
-    if (askPosition !== null && await seekPeerToSeconds(peerId, askPosition)) landed = askPosition;
-    return c.json({ success: true, position: landed });
+    return c.json({ success: true, position: startMs !== undefined ? askPosition : null });
   }
   // local:起点随起播交出去(见 seekPeerToSeconds 上方注释)。
   pm.localPlayFrom(peerId, c.get("user")!.id, items, start, askPosition ?? undefined);

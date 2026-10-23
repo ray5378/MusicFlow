@@ -245,6 +245,9 @@ export class AirplaySessionRuntime {
         durationSec: a.durationSec,
         streamUrl: a.streamUrl,
         songId: a.songId,
+        // 起播即落位:回环流已带 timeOffset,时间线基准必须同步,否则转播/续播的
+        // 上报位置从 0 起(流转矩阵里表现为「落点丢失」)。
+        startSec: a.seekSec,
       });
       return;
     }
@@ -304,6 +307,9 @@ export class AirplaySessionRuntime {
       artist?: string;
       album?: string;
       durationSec?: number;
+      /** 本次时间线的内容起点(秒):带进度起播(流转落点/续播)必传,
+       *  否则 PCM 流虽然已从目标处开始,上报位置还是从 0 涨。 */
+      startSec?: number;
       streamUrl: string;
       songId?: string;
       bridge?: { reset: () => void };
@@ -332,6 +338,7 @@ export class AirplaySessionRuntime {
       artist: o.artist,
       album: o.album,
       durationSec: o.durationSec,
+      startSec: o.startSec,
       makeProducer: o.makeProducer,
       resetSource: o.resetSource,
       binPath: bin.path,

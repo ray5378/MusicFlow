@@ -96,6 +96,13 @@ export interface CliSinkArgs {
   artist?: string;
   album?: string;
   durationSec?: number;
+  /** 本次时间线的**内容起点**(秒)。
+   *
+   *  带进度起播(流转落点 / 客户端从中间续播)时,PCM 流本身已经从 `startSec` 处
+   *  开始(服务端回环流带 `timeOffset`),但 cli 的时间线是从「第一批的可听时刻」起算的
+   *  —— 不补这个基准,上报位置会从 0 开始涨,进度条、流转落点、续播位置全部错位。
+   *  显式 seek 走 `seek()` 内部置基准,不需要调用方再传。 */
+  startSec?: number;
   /** 生产者工厂:入参 `leadUs()` 返回当前生效的播放提前量(微秒)。
    *  **必须在启动写循环之前调用一次**,之后每次拉取都用同一个 producer 实例。 */
   makeProducer: (leadUs: () => number) => PcmProducer;
@@ -139,6 +146,9 @@ export class CliSink {
   private leadAdjustUs = 0;
   /** 第一批 PCM 的单调时刻(0 = 还没起播)。 */
   private t0Us = 0;
+  /** 当前时间线的**内容起点**(秒):起播带进度 = startSec,seek 后 = 目标秒。
+   *  positionSec = baseSec + 已播时长,否则带进度起播会从 0 开始上报。 */
+  private baseSec = 0;
   /** 下一批的调度截止时刻(单调)。 */
   private nextAtUs = 0;
 
@@ -165,11 +175,12 @@ export class CliSink {
   /** 二进制承诺的播放提前量(微秒)= queue depth + 锚点余量 + 回执补偿。 */
   private effectiveLeadUs = (): number => Math.max(0, this.baseLeadMs * 1000 + this.leadAdjustUs);
 
-  /** 内容落点(秒)。以「第一批的可听时刻」为 0 点,pump 时间线上单调推进。 */
+  /** 内容落点(秒)。以「第一批的可听时刻」为 0 点,pump 时间线上单调推进;
+   *  `baseSec` 把这条时间线映射回**整曲**坐标(带进度起播 / seek 后)。 */
   get positionSec(): number {
     if (!this.t0Us) return 0;
     const elapsed = nowUs() - this.t0Us - this.effectiveLeadUs();
-    return Math.max(0, elapsed / 1e6);
+    return Math.max(0, this.baseSec + elapsed / 1e6);
   }
 
   get isPaused(): boolean {
@@ -269,6 +280,7 @@ export class CliSink {
     this.pushMeta();
 
     this.producer = this.a.makeProducer(this.effectiveLeadUs);
+    this.baseSec = Math.max(0, this.a.startSec ?? 0);
     this.t0Us = nowUs();
     this.nextAtUs = this.t0Us;
     this.startedAt = Date.now();
@@ -303,6 +315,9 @@ export class CliSink {
    *  组播 seek 没有解码器,调用方在同一位置补一次 `restartTimeline()` 即可。 */
   seek(seconds: number): void {
     if (!this.pipeFd || this.stopped) return;
+    // 基准必须先记下来:`restartTimeline()` 只挪 t0Us(第一批的新可听时刻),
+    // 不负责把内容起点从旧值改成新目标 —— 少了这一行,seek 后位置会从 0 重新涨。
+    this.baseSec = Math.max(0, seconds);
     this.send("ACTION=FLUSH");
     try { this.a.resetSource?.(); } catch { /* ignore */ }
     log.info(`[ap2] ${this.a.deviceId} FLUSH@${seconds}s`);
