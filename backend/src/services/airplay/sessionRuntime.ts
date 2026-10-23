@@ -6,11 +6,21 @@
 //
 // 输入只剩「设备连接参数 + 已 token 化的 streamUrl + 元数据」——由主进程取好传进来;
 // 输出只剩「会话态快照 + sessionEnded 事件」——主进程据此上报 IDLE、维护 lastCast。
-// 于是本模块可以整体跑在 rendererHost 的常驻子进程里:RAOP 的 7.98ms 墙钟节拍
+// 于是本模块可以整体跑在 rendererHost 的常驻子进程里:推流节拍
 // 不再与 Web 请求、封面渲染、后台批量任务争抢主进程事件循环。
+//
+// ## 两种传输(2026-10-23 全切)
+//
+//   - `kind: "cli"`  —— **默认**。PCM 写进 `cliairplay` 的 stdin,命令走 cmdpipe。
+//     AP1(RAOP)与 AP2(native/compat)由同一个二进制的 `--protocol` 分流(MA 也是
+//     这条唯一路径):SRP/HAP 配对、加密 RTSP、ALAC/AAC 帧、PTP 全在二进制里。
+//   - `kind: "raop"` —— **兜底**。自研 `RaopPlayer`(RTSP + AES-CBC + ALAC 打包 +
+//     7.98ms 节拍)。只在 `MUSICFLOW_AP2_CLI=0` 或二进制不可用时启用 —— 保证
+//     「删掉二进制也不会变哑巴」。该路径已真机验证,按计划退役。
 import type { ChildProcessWithoutNullStreams } from "child_process";
 import { RaopPlayer, type RaopSession, type RaopRealtimeStats, type PcmProducer } from "./raop.js";
 import { spawnDecoder, makeProducer, killDecoder } from "./decoder.js";
+import { CliSink, checkCliBinary, type CliSinkArgs, type CliSinkEndInfo } from "./ap2/index.js";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("AIRPLAY");
@@ -63,6 +73,26 @@ export interface AirplaySessionMirrorRow {
   stream?: RaopRealtimeStats;
 }
 
+/** cli 通道参数(cliairplay 的协议/凭据/TXT)。仅 `route: "cli"` 时有意义。 */
+export interface AirplayCliArgs {
+  /** 强制协议。AP1 必须显式 `raop`(AP1 设备没有 `_airplay` TXT,auto 会被带偏)。 */
+  protocol?: "auto" | "raop" | "airplay2" | "airplay2-compat";
+  /** 已序列化的 `_airplay._tcp` TXT(AP2 路由自动选择用)。 */
+  txt?: string;
+  /** HAP 凭据(192 hex);缺省 transient 配对。 */
+  creds?: string;
+  /** legacy Apple TV 的 RAOP 配对 secret。 */
+  secret?: string;
+  /** AP1:接收端 `_raop._tcp` 的 TXT 字段,原样透传。 */
+  raopTxt?: { et?: string; md?: string; am?: string; pk?: string; cn?: string; udn?: string };
+  /** AP1 音频载荷加密(默认开)。 */
+  encrypt?: boolean;
+  name?: string;
+  hostname?: string;
+  /** 起播音量(0-100)。 */
+  volume?: number;
+}
+
 export interface AirplayCastArgs {
   deviceId: string;
   host: string;
@@ -77,6 +107,10 @@ export interface AirplayCastArgs {
   title?: string;  artist?: string;
   album?: string;
   durationSec?: number;
+  /** 传输选择(主进程决定):`cli` = cliairplay,`raop` = 自研兜底。
+   *  缺省按「二进制是否可用」判 —— 见 `pickTransport`。 */
+  route?: "cli" | "raop";
+  cli?: AirplayCliArgs;
 }
 
 /** 桥接会话起播参数:PCM 来自 sendspin pump(经 BridgeRing),不走解码器。 */
@@ -90,17 +124,38 @@ export interface AirplayBridgeCastArgs {
   artist?: string;
   album?: string;
   durationSec?: number;
-  /** PCM 生产者工厂:入参为**已完成 RTSP 握手**的 player(可读 latencyFrames 决定 lead)。 */
-  makeProducer: (player: RaopPlayer) => PcmProducer;
+  /** PCM 生产者工厂。
+   *
+   *  - raop 路径:`player` 非空,调用方按 `player.latencyFramesUsed` 决定 lead
+   *    (RECORD 应答后才最终确定);
+   *  - cli 路径:`player` 为 null,lead 由 `CliSink` 自己量(先读 `[STATUS] latency`
+   *    的 warm_lead_ms 再起写循环),调用方用第二个参数 `leadUs()` 即可。 */
+  makeProducer: (player: RaopPlayer | null, leadUs: () => number) => PcmProducer;
   /** seek / 停止时清空上游缓冲(与 RAOP FLUSH 配套)。 */
   resetSource?: () => void;
+  /** 传输选择,同 `AirplayCastArgs.route`。 */
+  route?: "cli" | "raop";
+  cli?: AirplayCliArgs;
 }
 
-interface ActiveSession {  deviceId: string;
-  player: RaopPlayer;
+/** 传输选择:二进制可用就走 cli,否则回落自研 RAOP。
+ *  `MUSICFLOW_AP2_CLI=0` 时 `checkCliBinary` 恒为 null → 全链路回落到已验证的老路径。 */
+export function pickTransport(explicit?: "cli" | "raop"): "cli" | "raop" {
+  if (explicit) return explicit;
+  return checkCliBinary() ? "cli" : "raop";
+}
+
+interface ActiveSession {
+  deviceId: string;
+  /** 传输类型:cli(cliairplay)或 raop(自研兜底)。 */
+  kind: "cli" | "raop";
+  /** raop 专属。 */
+  player?: RaopPlayer;
+  /** cli 专属。 */
+  cli?: CliSink;
   /** 解码器会话(桥接会话没有解码器:音频来自 sendspin pump)。 */
   ffmpeg?: ChildProcessWithoutNullStreams;
-  session: RaopSession;
+  session?: RaopSession;
   /** PCM 来源工厂:普通会话 = ffmpeg producer;桥接会话 = 环形缓冲 producer。
    *  每次 runStream(含 seek 重建)都重新取一份,避免旧 producer 的状态泄漏。 */
   makeProducer: () => PcmProducer;
@@ -167,9 +222,32 @@ export class AirplaySessionRuntime {
     return [...this.sessions.keys()];
   }
 
-  /** 起一个会话:RTSP 握手 → ffmpeg 解码 → 按墙钟节拍推流。 */
+  /** 起一个会话:解码 → 按墙钟节拍推流。
+   *
+   *  默认走 cli(cliairplay stdin + cmdpipe);二进制不可用/显式关闭时回落自研 RAOP。 */
   async cast(a: AirplayCastArgs): Promise<void> {
     await this.stop(a.deviceId); // 幂等:同设备旧会话先拆干净(与原 startSession 一致)
+    if (pickTransport(a.route) === "cli") {
+      // 偏移编进**服务端回环流**(与 withPlaybackOffset 同口径):解码器吃一条从头就
+      // 正确的流,绝不对 live FLAC 做 `-ss`(残帧 ⇒ invalid sync code / 无声)。
+      const ff = spawnDecoder(withOffset(a.streamUrl, a.seekSec), undefined, { rowId: a.songId });
+      await this.startCli(a.deviceId, {
+        host: a.host,
+        port: a.port,
+        cli: a.cli,
+        ffmpeg: ff,
+        // 单播没有跨设备同步要求:顺序消费解码器输出即可,lead 由 cli 自己的
+        // queue depth 决定(producer 的 leadUs 在这里不参与取内容)。
+        makeProducer: () => makeProducer(ff),
+        title: a.title,
+        artist: a.artist,
+        album: a.album,
+        durationSec: a.durationSec,
+        streamUrl: a.streamUrl,
+        songId: a.songId,
+      });
+      return;
+    }
     const player = new RaopPlayer({ host: a.host, port: a.port, pk: a.pk, et: a.et });
     let session: RaopSession;
     try {
@@ -187,6 +265,7 @@ export class AirplaySessionRuntime {
     const ff = spawnDecoder(withOffset(a.streamUrl, a.seekSec), undefined, { rowId: a.songId });
     const active: ActiveSession = {
       deviceId: a.deviceId,
+      kind: "raop",
       player,
       ffmpeg: ff,
       session,
@@ -208,6 +287,105 @@ export class AirplaySessionRuntime {
     this.hooks.onChanged?.();
   }
 
+  /** cli 会话的公共装配(单播与组桥接共用)。
+   *
+   *  与 RAOP 路径的差别只在「PCM 从哪来」:单播 = ffmpeg 顺序解码;组播 = BridgeRing
+   *  按 pump 时间线取。两条都用同一个 `CliSink`,同步语义由 producer 的 lead 决定。 */
+  private async startCli(
+    deviceId: string,
+    o: {
+      host: string;
+      port: number;
+      cli?: AirplayCliArgs;
+      makeProducer: (leadUs: () => number) => PcmProducer;
+      resetSource?: () => void;
+      ffmpeg?: ChildProcessWithoutNullStreams;
+      title?: string;
+      artist?: string;
+      album?: string;
+      durationSec?: number;
+      streamUrl: string;
+      songId?: string;
+      bridge?: { reset: () => void };
+    },
+  ): Promise<{ leadUs: number; sampleRate: number }> {
+    const bin = checkCliBinary();
+    if (!bin) throw new Error("cliairplay 不可用,无法建立 AP 会话");
+    // 组播与单播都要显式决定协议:AP1 设备没有 `_airplay` TXT,`auto` 会被按
+    // 「无 features ⇒ AP2 native」处理,握手立刻失败。
+    const explicit = o.cli?.protocol;
+    const protocol = explicit ?? (o.cli?.creds ? "airplay2" : "raop");
+    const sink = new CliSink({
+      deviceId,
+      host: o.host,
+      port: o.port,
+      protocol,
+      txt: o.cli?.txt,
+      creds: o.cli?.creds,
+      secret: o.cli?.secret,
+      raopTxt: o.cli?.raopTxt,
+      encrypt: o.cli?.encrypt,
+      name: o.cli?.name,
+      hostname: o.cli?.hostname,
+      volume: o.cli?.volume,
+      title: o.title,
+      artist: o.artist,
+      album: o.album,
+      durationSec: o.durationSec,
+      makeProducer: o.makeProducer,
+      resetSource: o.resetSource,
+      binPath: bin.path,
+    } satisfies CliSinkArgs);
+
+    const active: ActiveSession = {
+      deviceId,
+      kind: "cli",
+      cli: sink,
+      ffmpeg: o.ffmpeg,
+      // cli 会话的 PCM 由 sink 自己按节拍向 producer 拉取;本字段只为满足统一结构,
+      // 被误用就立刻暴露(cli 路径绝不会走 runStream)。
+      makeProducer: () => { throw new Error("cli 会话不通过 makeProducer 取 PCM"); },
+      bridge: o.bridge,
+      title: o.title,
+      artist: o.artist,
+      album: o.album,
+      duration: o.durationSec || 0,
+      streamUrl: o.streamUrl,
+      songId: o.songId,
+      startedAt: Date.now(),
+      ended: false,
+    };
+    sink.onEnd = (info: CliSinkEndInfo) => this.finishCli(active, info);
+    this.sessions.set(deviceId, active);
+
+    try {
+      const r = await sink.start();
+      this.hooks.onChanged?.();
+      return r;
+    } catch (e) {
+      // 起播失败必须把占位会话摘掉,否则上层 `has()` 会以为它还在跑。
+      if (this.sessions.get(deviceId) === active) this.sessions.delete(deviceId);
+      try { if (o.ffmpeg) killDecoder(o.ffmpeg); } catch { /* ignore */ }
+      throw e;
+    }
+  }
+
+  /** cli 会话收尾(进程退出/失败):与 RAOP 的 finalizer 同口径 —— 先判「是否仍是
+   *  当前会话」,再决定这条 IDLE 该不该上报(被新起播取代的旧会话必须被抑制)。 */
+  private finishCli(active: ActiveSession, info: CliSinkEndInfo): void {
+    const stillCurrent = this.sessions.get(active.deviceId) === active;
+    if (stillCurrent) this.sessions.delete(active.deviceId);
+    active.ended = true;
+    try { if (active.ffmpeg) killDecoder(active.ffmpeg); } catch { /* ignore */ }
+    try { active.bridge?.reset(); } catch { /* ignore */ }
+    this.hooks.onSessionEnded?.(active.deviceId, {
+      current: stillCurrent,
+      positionSec: Math.max(0, info.positionSec),
+      durationSec: active.duration || info.durationSec,
+    });
+    this.hooks.onChanged?.();
+  }
+
   /** 起一个**桥接**会话:RTSP 握手 → 由 sendspin pump 的 PCM 驱动 RAOP 推流。
    *
    *  与 `cast()` 的唯一区别是 PCM 来源:不 spawn ffmpeg、不取 streamUrl,而是由
@@ -216,6 +394,28 @@ export class AirplaySessionRuntime {
    *  MA 桥接层 `set_timing()` 做的同一件事,只是我们把「时间线」放在 pump 里。 */
   async castBridge(a: AirplayBridgeCastArgs): Promise<{ latencyFrames: number; sampleRate: number }> {
     await this.stop(a.deviceId); // 幂等:同设备旧会话先拆干净
+    const ring = { reset: a.resetSource ?? (() => {}) };
+    if (pickTransport(a.route) === "cli") {
+      // 组播的 PCM 来自 BridgeRing(按 pump 时间线取内容),lead 就是 cli 自己的
+      // queue depth + 锚点余量 —— sink 起播后回传 leadUs,主进程据此抬 send_ahead。
+      const res = await this.startCli(a.deviceId, {
+        host: a.host,
+        port: a.port,
+        cli: a.cli,
+        // leadUs 由 sink 提供:它先读 `[STATUS] latency` 的 warm_lead_ms 再起写循环,
+        // 所以这个回调在 producer 被调用时已经有正确值。
+        makeProducer: (leadUs) => a.makeProducer(null, leadUs),
+        resetSource: ring.reset,
+        bridge: ring,
+        title: a.title,
+        artist: a.artist,
+        album: a.album,
+        durationSec: a.durationSec,
+        streamUrl: "",
+      });
+      // 回传 44.1k 帧数(与 RAOP 路径同单位):send_ahead 下限 = leadUs/1e6*44100。
+      return { latencyFrames: Math.round((res.leadUs / 1_000_000) * 44100), sampleRate: res.sampleRate };
+    }
     const player = new RaopPlayer({ host: a.host, port: a.port, pk: a.pk, et: a.et });
     let session: RaopSession;
     try {
@@ -226,12 +426,13 @@ export class AirplaySessionRuntime {
     }
     const active: ActiveSession = {
       deviceId: a.deviceId,
+      kind: "raop",
       player,
       session,
       // 每次 runStream 重新取 producer:内部会读 player 的 latencyFrames 决定 lead,
       // 而 latencyFrames 在 RECORD 应答后才最终确定(见 raop.ts connect)。
-      makeProducer: () => a.makeProducer(player),
-      bridge: { reset: a.resetSource ?? (() => {}) },
+      makeProducer: () => a.makeProducer(player, () => 0),
+      bridge: ring,
       title: a.title,
       artist: a.artist,
       album: a.album,
@@ -267,7 +468,7 @@ export class AirplaySessionRuntime {
     // 节拍健康度周期打点:让 `reanchors` / `maxGap` 的**趋势**在播放过程中就可见
     // (原先只有 stream() 收尾那一行,出问题只能事后归因、也拿不到「何时开始变差」)。
     this.startHealthLog(active);
-    const p = active.player.stream(producer, session)
+    const p = active.player!.stream(producer, session)
       .catch((e) => {
         log.error("airplay stream failed", { deviceId: active.deviceId, err: (e as Error)?.message || e });
       })
@@ -302,8 +503,8 @@ export class AirplaySessionRuntime {
         const loudnessStderr = ((ff as any)?.stderrText?.() as string | undefined) ?? "";
         this.hooks.onSessionEnded?.(active.deviceId, {
           current: stillCurrent,
-          positionSec: Math.max(0, Number(active.player.positionSec) || 0),
-          durationSec: active.duration || Math.max(0, Number(active.player.durationSec) || 0),
+          positionSec: Math.max(0, Number(active.player?.positionSec) || 0),
+          durationSec: active.duration || Math.max(0, Number(active.player?.durationSec) || 0),
           ...(loudnessStderr ? { loudnessStderr } : {}),
         });
         this.hooks.onChanged?.();
@@ -315,7 +516,7 @@ export class AirplaySessionRuntime {
   private startHealthLog(active: ActiveSession): void {
     this.stopHealthLog(active);
     active.healthTimer = setInterval(() => {
-      const st = active.player.realtimeStats;
+      const st = active.player?.realtimeStats;
       if (!st) return;
       const line =
         `[${active.deviceId}] ${st.chunks} chunks / ${(st.elapsedMs / 1000).toFixed(0)}s` +
@@ -344,23 +545,32 @@ export class AirplaySessionRuntime {
     this.stopHealthLog(s);
     try { if (s.ffmpeg) killDecoder(s.ffmpeg); } catch { /* ignore */ }
     try { s.bridge?.reset(); } catch { /* ignore */ }
-    await this.stopPlayerBounded(s);
+    if (s.kind === "cli") {
+      // cli 会话自带上限(STOP → 2s 无退出则 SIGKILL),不会挂住 RPC。
+      await s.cli?.stop().catch(() => {});
+    } else {
+      await this.stopPlayerBounded(s);
+    }
     this.hooks.onChanged?.();
   }
 
   /** 有上限的会话收尾:TEARDOWN 卡住时强制关传输,保证 RPC 一定回包。
    *  返回 true 表示正常收尾,false 表示超时后强制关闭。 */
   private async stopPlayerBounded(s: ActiveSession): Promise<boolean> {
+    const p = s.player;
+    if (!p) return true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<null>((resolve) => {
       timer = setTimeout(() => resolve(null), stopDeadlineMs());
       timer.unref?.();
     });
     try {
-      const r = await Promise.race([s.player.stop().catch(() => null), timeout]);
+      const r = await Promise.race([p.stop().catch(() => null), timeout]);
       if (r === null) {
         log.warn(`airplay 会话收尾超时(${stopDeadlineMs()}ms),强制关闭传输`, { deviceId: s.deviceId });
-        s.player.forceClose();
+        // 用 s.player 而不是上面那个局部量 p:静态守卫按唯一表达式钉这一处
+        // (scripts/check-airplay-playback-chain.mjs 的 forceClose 断言)。
+        s.player!.forceClose();
         return false;
       }
       return true;
@@ -375,11 +585,12 @@ export class AirplaySessionRuntime {
     }
   }
 
-  /** 暂停:停掉墙钟节的推进(chunk 不再发出),RTSP 会话保持。 */
+  /** 暂停:cli 静音但连接保持 / RAOP 停掉墙钟推进。 */
   pause(deviceId: string): boolean {
     const s = this.sessions.get(deviceId);
     if (!s) return false;
-    s.player.pause();
+    if (s.kind === "cli") s.cli?.pause();
+    else s.player?.pause();
     this.hooks.onChanged?.();
     return true;
   }
@@ -388,37 +599,62 @@ export class AirplaySessionRuntime {
   resume(deviceId: string): boolean {
     const s = this.sessions.get(deviceId);
     if (!s) return false;
-    s.player.resume();
+    if (s.kind === "cli") s.cli?.resume();
+    else s.player?.resume();
     this.hooks.onChanged?.();
     return true;
   }
 
   /** Seek the current track to `seconds`.
    *
-   *  While a session is live this is an IN-PLACE seek: the RTSP session and RTP
-   *  sockets stay up, the receiver's buffer is flushed (RAOP FLUSH), the RTP
-   *  clock is re-anchored on the session base (so the reported position starts
-   *  at the seek target and keeps climbing — no snap-back-to-0), and only the
-   *  ffmpeg decoder is swapped for one that resumes at `-ss seconds`. The hard
-   *  gap is just ffmpeg's seek+decode startup instead of a full TEARDOWN →
-   *  ANNOUNCE/SETUP/RECORD round trip.
+   *  cli 会话:cmdpipe `ACTION=FLUSH` 原地清缓冲;单播还要换解码器(新 ffmpeg 带
+   *  `-ss`)再重锚时间线。组播没有解码器,清环后重锚即可(pump 侧会同时 re-anchor)。
+   *
+   *  raop 会话:RTSP 会话与 RTP socket 保持,接收端 FLUSH,RTP 时钟按会话基准重锚,
+   *  只换解码器 —— 硬间隔只有 ffmpeg 的 seek+decode 启动,而不是整套
+   *  TEARDOWN → ANNOUNCE/SETUP/RECORD。
    *
    *  返回 false 表示没有可原地 seek 的会话(调用方回落到重播路径)。 */
   async seek(deviceId: string, seconds: number): Promise<boolean> {
     const t = Math.max(0, seconds);
     const s = this.sessions.get(deviceId);
-    if (!s || s.ended || !s.player.isStreaming) return false;
+    if (!s || s.ended) return false;
+
+    if (s.kind === "cli") {
+      const sink = s.cli;
+      if (!sink) return false;
+      sink.seek(t);
+      if (s.bridge) {
+        // 组播:pump 会 re-anchor 并给 ring 发 reset,这里只需把 cli 锚点跟上。
+        try { s.bridge.reset(); } catch { /* ignore */ }
+        sink.restartTimeline(`group-seek@${t}`);
+        this.hooks.onChanged?.();
+        return true;
+      }
+      // 单播:换解码器(偏移编进回环流,避免对 live FLAC 做 -ss)。
+      try {
+        if (s.ffmpeg) { killDecoder(s.ffmpeg); s.ffmpeg.stdout?.destroy(); s.ffmpeg.stderr?.destroy(); }
+      } catch { /* ignore */ }
+      const ff = spawnDecoder(withOffset(s.streamUrl, t), undefined, { rowId: s.songId });
+      s.ffmpeg = ff;
+      sink.setProducer(() => makeProducer(ff));
+      sink.restartTimeline(`seek@${t}`);
+      this.hooks.onChanged?.();
+      return true;
+    }
+
+    if (!s.player?.isStreaming) return false;
 
     // 桥接会话:内容推进由 pump 负责(它会 re-anchor 并给 sink 发 reset),
     // 这里只做 RAOP 侧 FLUSH + 上游缓冲清空,不重建解码器(根本没有解码器)。
     if (s.bridge) {
-      await s.player.prepareSeek(t).catch(() => {});
+      await s.player!.prepareSeek(t).catch(() => {});
       try { s.bridge.reset(); } catch { /* ignore */ }
       this.hooks.onChanged?.();
       return true;
     }
 
-    const wasPaused = s.player.isPaused;
+    const wasPaused = !!s.player?.isPaused;
     const oldStream = s.streamPromise;
 
     // Suppress the old stream's finalizer so the RTSP session survives the swap.
@@ -433,7 +669,7 @@ export class AirplaySessionRuntime {
       }
     } catch { /* ignore */ }
 
-    await s.player.prepareSeek(t).catch(() => {});
+    await s.player!.prepareSeek(t).catch(() => {});
     // Wait for the old loop + finalizer (which now runs the seekReplace branch).
     await (oldStream || Promise.resolve()).catch(() => {});
 
@@ -441,17 +677,26 @@ export class AirplaySessionRuntime {
     if (this.sessions.get(deviceId) !== s) return false;
 
     s.ffmpeg = spawnDecoder(withOffset(s.streamUrl, t), undefined, { rowId: s.songId });
-    this.runStream(s, s.session);
-    if (wasPaused) s.player.pause();
+    this.runStream(s, s.session!);
+    if (wasPaused) s.player!.pause();
     this.hooks.onChanged?.();
     return true;
   }
 
-  /** 应用 RAOP SET_PARAMETER 音量(dB 由主进程算好:DLNA 转发失败时的回落路径)。 */
+  /** 应用音量。cli 走 cmdpipe(`VOLUME=0-100`),raop 走 SET_PARAMETER(dB)。
+   *
+   *  dB → 百分比的反向映射必须与 `decoder.degreesToDb` 严格互逆:
+   *  `degreesToDb(v) = -30 + (v/100)*30`(v<=0 时 -144),所以
+   *  `dbToPercent(-30)=0`、`dbToPercent(0)=100`、`dbToPercent(-144)=0`。 */
   setVolumeDb(deviceId: string, db: number): boolean {
     const s = this.sessions.get(deviceId);
     if (!s) return false;
-    s.player.setVolumeDb(db);
+    if (s.kind === "cli") {
+      const pct = db <= -143 ? 0 : Math.min(100, Math.max(0, Math.round(((db + 30) / 30) * 100)));
+      s.cli?.setVolume(pct);
+      return true;
+    }
+    s.player?.setVolumeDb(db);
     return true;
   }
 
@@ -459,18 +704,20 @@ export class AirplaySessionRuntime {
   snapshot(): { sessions: AirplaySessionMirrorRow[] } {
     const sessions: AirplaySessionMirrorRow[] = [];
     for (const s of this.sessions.values()) {
+      const paused = s.kind === "cli" ? !!s.cli?.isPaused : !!s.player?.isPaused;
+      const pos = s.kind === "cli" ? (s.cli?.positionSec ?? 0) : Math.max(0, s.player?.positionSec ?? 0);
       sessions.push({
         deviceId: s.deviceId,
-        playbackState: s.ended ? "idle" : s.player.isPaused ? "paused" : "playing",
-        positionSec: Math.max(0, s.player.positionSec),
-        durationSec: s.duration || s.player.durationSec,
+        playbackState: s.ended ? "idle" : paused ? "paused" : "playing",
+        positionSec: Math.max(0, pos),
+        durationSec: s.duration || s.player?.durationSec || 0,
         ended: s.ended,
         title: s.title,
         artist: s.artist,
         album: s.album,
         streamUrl: s.streamUrl,
         startedAt: s.startedAt,
-        stream: s.player.realtimeStats ?? undefined,
+        stream: s.player?.realtimeStats ?? undefined,
       });
     }
     return { sessions };

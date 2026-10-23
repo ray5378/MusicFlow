@@ -9,6 +9,7 @@
 import { ChildRpcHost } from "../rendererHost/childHost.js";
 import { AirplaySessionRuntime } from "./sessionRuntime.js";
 import type { AirplayBridgeServer } from "./bridgeServer.js";
+import { ap2RuntimeInfo, cancelAllPairing, ptpDaemon } from "./ap2/index.js";
 import type {
   AirplayChildToParent,
   AirplaySnapshot,
@@ -51,6 +52,10 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
       onStop: async () => {
         await runtime.stopAll();
         await bridge?.stop();
+        // 配对会话与 PTP 守护不属于任何"会话":进程整体退出时必须显式收,
+        // 否则 cliairplay --pair-setup / --ptp-daemon 会留成孤儿进程(占 319/320)。
+        try { cancelAllPairing(); } catch { /* ignore */ }
+        try { ptpDaemon.stop(); } catch { /* ignore */ }
       },
     });
     this.runtime = runtime;
@@ -130,10 +135,17 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
           artist: p.artist ? String(p.artist) : undefined,
           album: p.album ? String(p.album) : undefined,
           durationSec: Number(p.durationSec) || 0,
-          // lead = 该设备实测播放延迟(RECORD 应答的 audio-latency,缺省 1s)。
-          makeProducer: (player) =>
-            ring.producer(() => Math.round((player.latencyFramesUsed / 44100) * 1_000_000)),
+          // lead:cli 通道由 sink 自己量(queue depth);raop 通道用 RECORD 应答的
+          // audio-latency(缺省 1s)。两种路径单位统一为微秒。
+          makeProducer: (player, leadUs) =>
+            ring.producer(
+              player
+                ? () => Math.round((player.latencyFramesUsed / 44100) * 1_000_000)
+                : leadUs,
+            ),
           resetSource: () => ring.reset(),
+          route: p.route === "raop" ? "raop" : p.route === "cli" ? "cli" : undefined,
+          cli: p.cli,
         });
         this.requestSnapshot(true);
         // latencyFrames 必须回给主进程:pump 的 send_ahead 要抬到它之上,
@@ -151,6 +163,10 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
           ? this.bridge.ringFor(String(p.deviceId)).ringStats
           : null;
       }
+      // AP2 运行时诊断:二进制路径/版本/可用性。主进程据此在设置页显示「AP2 已就绪」,
+      // 也让"为什么某台设备回落到了 RAOP"可被直接观察到。
+      case "ap2Info":
+        return ap2RuntimeInfo();
       default:
         throw new Error(`未知 airplay rpc op: ${op}`);
     }

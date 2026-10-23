@@ -207,10 +207,13 @@ check(
     `stillCurrent@${iStill} delete@${iDel}`,
   );
   check(
-    "sessionRuntime finalizer:事件带上 current: stillCurrent 与真实落点",
-    count(runtime, "current: stillCurrent") === 1
-      && /positionSec:\s*Math\.max\(0,\s*Number\(active\.player\.positionSec\)/.test(runtime),
-    "sessionEnded 载荷缺 current/positionSec",
+    // 双传输改造(AP1/AP2 统一走 cliairplay)后,sessionRuntime 里有**两处**收尾:
+    // 自研 RAOP 一条、cliairplay 一条。两处都必须上报 current/positionSec,否则主进程
+    // 判不了"这条会话到底是不是被用户换下来的那一首"。所以这里钉 2 次,少一处即失败。
+    "sessionRuntime 两条收尾(raop/cli)都带 current: stillCurrent 与真实落点",
+    count(runtime, "current: stillCurrent") === 2
+      && /positionSec:\s*Math\.max\(0,\s*Number\(active\.player\?\.positionSec\)/.test(runtime),
+    `sessionEnded 载荷缺 current/positionSec(current: stillCurrent 出现 ${count(runtime, "current: stillCurrent")} 次,应为 2)`,
   );
 }
 check(
@@ -1027,7 +1030,8 @@ console.log("===== R30 AirPlay 独立子进程(与 sendspin 对齐):默认 fork 
     "子进程会话收尾有硬上限(STOP_DEADLINE_MS + stopPlayerBounded)",
     /const STOP_DEADLINE_MS = 4_000/.test(rtG)
       && /private async stopPlayerBounded\(/.test(rtG)
-      && /s\.player\.forceClose\(\)/.test(rtG),
+      // player 在双传输改造后变成可选(cli 会话没有 RaopPlayer),故允许 `!.`
+      && /s\.player!?\.forceClose\(\)/.test(rtG),
     "子进程 await player.stop() 无上限:设备不答 TEARDOWN 时 cast RPC 永不回包",
   );
   check(

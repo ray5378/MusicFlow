@@ -465,6 +465,8 @@ export function initDatabase() {
       last_seen TEXT NOT NULL DEFAULT '',
       available INTEGER NOT NULL DEFAULT 0,
       disabled INTEGER NOT NULL DEFAULT 0,
+      -- HAP 配对凭据(192 hex,cliairplay --pair-setup 产出)。空 = 走 transient 配对。
+      hap_credentials TEXT NOT NULL DEFAULT '',
       updated_at TEXT NOT NULL DEFAULT ''
     );
 
@@ -741,6 +743,21 @@ export function initDatabase() {
     }
   } catch (e) {
     log.warn(`tag_repair_done 补列失败: ${e instanceof Error ? e.message : e}`);
+  }
+
+  // 结构升级(2026-10-23):airplay_devices 新增 hap_credentials 列。
+  // AP2 native 需要 pair-verify 凭据(192 hex),存在设备行上 ⇒ 跨重启/重发现保留,
+  // 不必每次投屏重新配对(Apple TV / HomePod 的 PIN 配对对用户是强打扰)。
+  try {
+    const cols = (sqlite.prepare("PRAGMA table_info(airplay_devices)").all() as { name?: unknown }[]).map((c) =>
+      String(c?.name ?? ""),
+    );
+    if (!cols.includes("hap_credentials")) {
+      sqlite.exec("ALTER TABLE airplay_devices ADD COLUMN hap_credentials TEXT NOT NULL DEFAULT ''");
+      log.info("airplay_devices 新增 hap_credentials 列(AP2 配对凭据)");
+    }
+  } catch (e) {
+    log.warn(`airplay_devices 补列失败: ${e instanceof Error ? e.message : e}`);
   }
 
   // Plugins (built-in and external drop-ins) are seeded from the unified catalog

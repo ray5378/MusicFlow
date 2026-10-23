@@ -10,6 +10,7 @@
 // mainReady 时拿到一次(mirror.bridgePort),不能硬编码。
 import { getGroupManager, splitMemberId } from "./index.js";
 import { getAirPlayDevice } from "../airplay/discovery.js";
+import { planCliRoute } from "../airplay/cliParams.js";
 import { airplaySupervisor } from "../airplay/supervisor.js";
 import { createLogger } from "../../utils/logger.js";
 
@@ -75,6 +76,9 @@ export async function startGroupAirPlayBridge(groupId: string): Promise<GroupBri
   /** 各设备 RECORD 应答的实际播放延迟(帧)及其采样率 —— 取最大者定 send_ahead 下限。 */
   let maxLatencyFrames = 0;
   let maxLatencyRate = 44100;
+  // 凭据在 DB(airplay_devices.hap_credentials):动态 import 避免 group 层反向拖入
+  // control.ts 的 DB/DLNA/peer 依赖(本模块此前对 control 只有这一处运行时依赖)。
+  const { getAirPlayCredentials } = await import("../airplay/control.js");
   for (const deviceId of devices) {
     const dev = getAirPlayDevice(deviceId);
     if (!dev) {
@@ -87,10 +91,20 @@ export async function startGroupAirPlayBridge(groupId: string): Promise<GroupBri
     }
     const t0 = Date.now();
     try {
+      // 通道/端口/TXT 统一装配:cli(AP2 走 7000 / AP1 走 5000)或自研 RAOP 兜底。
+      const plan = planCliRoute(dev, { creds: getAirPlayCredentials(deviceId) });
       const cast = await airplaySupervisor.rpc(
         "bridgeCast",
-        { deviceId, host: dev.host, port: dev.port, pk: dev.pk, et: dev.et },
-        30_000,
+        {
+          deviceId,
+          host: plan.host,
+          port: plan.port,
+          pk: dev.pk,
+          et: dev.et,
+          route: plan.route,
+          cli: plan.cli,
+        },
+        45_000,
       ) as { latencyFrames?: number; sampleRate?: number } | null;
       const frames = Number(cast?.latencyFrames) || 0;
       if (frames > maxLatencyFrames) {
@@ -98,7 +112,7 @@ export async function startGroupAirPlayBridge(groupId: string): Promise<GroupBri
         maxLatencyRate = Number(cast?.sampleRate) || 44100;
       }
       usable.push(deviceId);
-      log.info(`[airplay-bridge] 桥接会话已建立 device=${deviceId}(${dev.alias || dev.name}) host=${dev.host}:${dev.port} 握手=${Date.now() - t0}ms`);
+      log.info(`[airplay-bridge] 桥接会话已建立 device=${deviceId}(${dev.alias || dev.name}) ${plan.route}://${plan.host}:${plan.port} 握手=${Date.now() - t0}ms`);
     } catch (e) {
       log.warn(`[airplay-bridge] 设备 ${deviceId} 桥接握手失败(${Date.now() - t0}ms): ${(e as Error)?.message || e}`);
     }

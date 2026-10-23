@@ -24,6 +24,7 @@ import { createAirPlaySession } from "./session.js";
 import type { AirplaySessionEndInfo } from "./sessionRuntime.js";
 import { createLogger } from "../../utils/logger.js";
 import { getAirPlayVolumeState, saveAirPlayVolumeState, deleteAirPlayVolumeState, DEFAULT_AIRPLAY_VOLUME } from "./deviceState.js";
+import { planCliRoute } from "./cliParams.js";
 
 // 解码/缓冲层(ffmpeg spawn + 有界 PCM 队列 + 音量 dB 换算)已抽到 ./decoder.ts ——
 // airplay 子进程要复用同一份实现,但不能经由本模块(会拖进 DB/DLNA/peer 等主进程态)。
@@ -564,6 +565,35 @@ function runStream(active: ActiveSession, session: RaopSession): void {
 
 function isoNow(): string { return new Date().toISOString(); }
 
+/** 读设备行上的 HAP 配对凭据(192 hex)。空/非法一律当"未配对"处理,
+ *  让调用方回落到 transient 配对(Sonos / 绝大多数三方接收端无需预配对)。 */
+export function getAirPlayCredentials(deviceId: string): string | undefined {
+  try {
+    const row = sqlite.prepare("SELECT hap_credentials FROM airplay_devices WHERE id = ?").get(deviceId) as any;
+    const v = row?.hap_credentials;
+    return typeof v === "string" && v.length === 192 ? v : undefined;
+  } catch {
+    // 老库没有该列(迁移失败/只读库):当未配对,不影响 AP1 与 transient AP2。
+    return undefined;
+  }
+}
+
+/** 写/清除 HAP 配对凭据。`null` = 解除配对。 */
+export function setAirPlayCredentials(deviceId: string, creds: string | null): void {
+  const now = isoNow();
+  // 设备行可能还没建立(persist 在发现时跑,但配对可能抢在它前面) → 先兜底插一行。
+  sqlite
+    .prepare(
+      `INSERT OR IGNORE INTO airplay_devices (id, name, alias, first_seen, last_seen, available, updated_at)
+       VALUES (?, ?, '', ?, ?, 0, ?)`,
+    )
+    .run(deviceId, deviceId, now, now, now);
+  sqlite
+    .prepare("UPDATE airplay_devices SET hap_credentials = ?, updated_at = ? WHERE id = ?")
+    .run(creds ?? "", now, deviceId);
+  log.info(`[airplay] 设备 ${deviceId} 的配对凭据已${creds ? "保存" : "清除"}`);
+}
+
 function upsertAirPlayDeviceRow(d: AirPlayDevice, online: boolean): AirPlayDevice {
   const now = isoNow();
   const existing = sqlite.prepare("SELECT alias, first_seen, disabled FROM airplay_devices WHERE id = ?").get(d.id) as any;
@@ -877,12 +907,20 @@ async function castViaChild(opts: AirPlayCastOptions): Promise<void> {
   // 子进程的解码器同样吃**回环管道**(见 toLoopbackAirPlayStreamUrl):子进程不碰 DB,
   // 所以 URL 必须在主进程先换成回环形态。
   const compliantUrl = toLoopbackAirPlayStreamUrl(streamUrl);
+  // 通道(cli/cliairplay vs 自研 RAOP)+ 端口 + TXT 由一处统一装配(见 cliParams.ts):
+  // AP2 拨 `_airplay` 的 7000、AP1 拨 `_raop` 的 5000,两个端口不同,拿错必超时。
+  const plan = planCliRoute(dev, {
+    creds: getAirPlayCredentials(opts.deviceId),
+    volume: getAirPlayVolumeState(opts.deviceId)?.volume,
+  });
   await airplaySupervisor.rpc("cast", {
     deviceId: opts.deviceId,
-    host: dev.host,
-    port: dev.port,
+    host: plan.host,
+    port: plan.port,
     pk: dev.pk,
     et: dev.et,
+    route: plan.route,
+    cli: plan.cli,
     streamUrl: compliantUrl,
     songId: opts.songId,
     seekSec: opts.seekSec,
