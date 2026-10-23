@@ -331,6 +331,15 @@ app.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
   const srcPosEarly = askPosition ?? (sameDevice ? await readPeerPositionSeconds(fromPeerId) : null);
   let landedPosition: number | null = null;
   if (isCastPeer(parsedTo)) {
+    // ★ 落点定格必须在**任何会改变源端状态的动作之前**,摘组也算一次这样的动作:
+    //   目标若是活跃组的成员(极端情形下它就是替该组出声的那台设备),摘组会立刻
+    //   停掉它对源组的渲染,之后再读源端进度只能读到 0 —— 落点就这样丢了,目标端
+    //   从 0 起播而调用方拿到 position=null。实测(2026-10-24,两台 AP2 接收端真机):
+    //   「组 → 组内最后一台成员」流转响应 position=null;把定格提到摘组之前即恢复。
+    //   非定格类目标(sendspin/dlna)用先算好的 srcPosEarly,不额外多读一次。
+    const frozenPos = freezesPositionBeforeCast(parsedTo.kind)
+      ? (askPosition ?? await readPeerPositionSeconds(fromPeerId))
+      : srcPosEarly;
     // 流转目标是被托管成员 → 先脱离活跃组(MA ensure_player_ungrouped)。
     await detachFromActiveGroups(parsedTo);
     // ★ sendspin → sendspin:源端那条流在服务端是**现成解码好**的(泵 + PCM 窗口),
@@ -346,11 +355,7 @@ app.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
     //   4~20s,晚读数会把这几十秒算进落点(源 47.52s → 目标落到 52.43s,超前 4.9s),
     //   并且晚读数分支还要补一次 seek —— 对组等于重建一次时间线,直接把流转拖到超时。
     //   sendspin 借流自带落点。
-    const inCastPos = !borrow.armed
-      ? (freezesPositionBeforeCast(parsedTo.kind)
-          ? (askPosition ?? await readPeerPositionSeconds(fromPeerId))
-          : srcPosEarly)
-      : null;
+    const inCastPos = borrow.armed ? null : frozenPos;
     try {
       startedIdx = await getQueueManager().playFrom(
         parsedTo.id, items, start, getDlnaBaseUrl(c), undefined,
@@ -650,6 +655,12 @@ app.post("/v1/peers/:peerId/play", async (c) => {
   }
   if (parsed.kind === "airplay") {
     try {
+      // 与 dlna / sendspin 分支同口径:成员被显式指派播放 → 先脱离活跃组再独立播
+      // (MA ensure_player_ungrouped)。此前 airplay 分支漏了这一步:组成员正在被
+      // 组桥接驱动时,单点 play 会落到该成员自己的 ctrl 上,和桥接抢同一台设备,
+      // 表现为「点了播放没反应」或与组内容互相打断。2026-10-23 起 DLNA 已禁止入组,
+      // airplay 反而是最常见的成员 kind,这条漏得更明显。
+      await detachFromActiveGroups(parsed);
       getQueueController().resumePlayback(parsed.id);
       await getQueueController().transport(parsed.id, "play");
       return c.json({ success: true });

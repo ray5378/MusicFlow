@@ -47,6 +47,44 @@
 
 **回归防线**:`tests/services/playTarget.test.ts` 增 3 例钉住该判据(含未知 kind 保守不定格)。
 
+### Fix / 流转到「组内最后一台成员」时落点丢失(摘组动作抢在落点定格之前)
+
+**症状**:组正在播放 → 把音乐流转到该组内的成员设备,响应里 `position` 为 `null`,
+目标端从那首歌的 0 秒开始播;若目标恰好是组内**最后**一台成员,现象必现。
+
+**实测证据(240 + 230/231 两台 AP2 接收端真机)**:同一组连续两次流转,
+「组 → 成员 A」响应 `position: 5`(组里还剩 B,源组仍在播,读得到进度);
+「组 → 成员 B」响应 `position: null`(B 是最后一台,B 一被摘出组,组即停播,
+之后才去读源端进度,只能读到 0)。组成员表也同步从 2 → 1 → 0。
+
+**根因**:`transfer-from` 里 `detachFromActiveGroups(parsedTo)` 排在「源端落点定格」
+之前。摘组本身就会**停掉源端**(目标若正替该组出声,摘组即断流),违反文件里既有的
+那条原则 —— 落点必须在**任何会改变源端状态的动作**之前定格(此前只覆盖了「起播」,
+漏了「摘组」)。
+
+**修复**:把 `freezesPositionBeforeCast(kind)` 那条定格分支提到 `detachFromActiveGroups`
+之前;sendspin/dlna 这类非定格目标仍复用先前算好的 `srcPosEarly`,不额外多读一次。
+
+**回归防线**:`tests/routes/peersRoutesContract.test.ts` 新增两例,用「调用顺序数组」
+钉住 `readPeerPositionSeconds` 必须全部早于 `detachFromActiveGroups`(airplay 目标 +
+group 目标各一例)。回退修复后两例均变红。
+
+### Fix / `POST /v1/peers/:peerId/play` 的 airplay 分支漏了「先脱离活跃组」
+
+**症状**:组成员正被组桥接驱动时,对其中一台 AirPlay 成员单独点播放 —— 指令落到该成员
+自己的 ctrl 上,和组桥接抢同一台设备:表现为「点了播放没反应」,或与组正在播的内容互相打断。
+
+**根因**:`/play` 的 `dlna`、`sendspin` 两个分支都调了 `detachFromActiveGroups`,唯独
+`airplay` 分支没有。而 2026-10-23 起 DLNA 已禁止入组,**airplay 反而是最常见的成员 kind**,
+这条遗漏的影响面比当初写代码时更大。`shared.ts` 里那句「仅设备型成员(dlna / sendspin)适用」
+的注释也是同一批过时信息(函数体实际只接 airplay / sendspin)。
+
+**修复**:airplay 分支补上 `detachFromActiveGroups(parsed)`(与 dlna/sendspin 同口径,
+顺序仍是「先摘组、再 resume + transport」),并订正 `shared.ts` 的过时注释。
+
+**回归防线**:新增两例 —— airplay 成员 play 必须按 `detach → resume` 顺序执行;
+group 目标 play **不得**摘组(组本身不从属于任何组)。回退修复后前一例变红。
+
 ## [4.6.70] - 2026-10-22
 
 ### Feature / AirPlay 改为默认独立子进程（与 Sendspin 对齐）

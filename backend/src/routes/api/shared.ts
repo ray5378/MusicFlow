@@ -603,7 +603,8 @@ export const gm = getGroupManager();
 // 显式操控成员 → 自动脱离活跃组(MA ensure_player_ungrouped 语义):
 // 成员在组播期间不独立受理播放指令;用户把播放/切歌/流转明确指向成员本身时,
 // 先把它从所属活跃组摘出(写库 + 断流对齐),再走各 kind 的独立播放分支。
-// 仅设备型成员(dlna / sendspin)适用;group/local 目标本就不从属于任何组。
+// **适用 kind 见 detachFromActiveGroups 函数体:airplay / sendspin**(组成员只有这两类,
+// DLNA 自 2026-10-23 起禁止入组);group/local 目标本就不从属于任何组。
 /** sendspin → sendspin 的「借流」武装(泵移交,见 services/sendspin/playerCore.ts)。
  *
  *  两端都是 sendspin 系 peer 时才尝试。armed=true 表示紧随其后的那次起播会把源端

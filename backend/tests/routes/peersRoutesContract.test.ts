@@ -385,6 +385,36 @@ describe("POST /v1/peers/:peerId/queue/transfer-from", () => {
     expect(b).toEqual({ success: true, transferred: 0 });
   });
 
+  it("airplay 目标:源端落点必须在**摘组之前**定格(摘组会停掉替组出声的那台成员)", async () => {
+    // 2026-10-24 真机实测(240 + 两台 AP2 接收端):组正在播放时把音乐流转到
+    // 「组内最后一台成员」,detachFromActiveGroups 先把该成员摘出组 → 组失去全部
+    // 成员、立刻停播 → 之后才读源端进度只能读到 0 → 响应 position=null,目标端从 0
+    // 起播。判据:所有 readPeerPositionSeconds 都必须在 detachFromActiveGroups 之前。
+    const order: string[] = [];
+    fns.readPeerPositionSeconds.mockImplementation(async () => { order.push("read"); return 47; });
+    fns.detachFromActiveGroups.mockImplementation(async () => { order.push("detach"); });
+    pm.getQueueSnapshot.mockReturnValueOnce({ items: [{ songId: "a" }], currentIndex: 0 });
+    const b = await json(await post("/v1/peers/airplay:ap1/queue/transfer-from", { from: "group:g1" }));
+    expect(order).toContain("read");
+    expect(order).toContain("detach");
+    expect(order.lastIndexOf("read")).toBeLessThan(order.indexOf("detach"));
+    // 定格值进**这一次** cast 的 startMs(47s → 47000ms),不是事后 seek。
+    expect(queueManager.playFrom).toHaveBeenCalledWith(
+      "ap1", [{ songId: "a" }], 0, "http://127.0.0.1:46400", undefined, 47000,
+    );
+    expect(b.position).toBe(47);
+  });
+
+  it("group 目标:落点同样在摘组之前定格(组目标 detach 是 no-op,语义仍须一致)", async () => {
+    const order: string[] = [];
+    fns.readPeerPositionSeconds.mockImplementation(async () => { order.push("read"); return 52; });
+    fns.detachFromActiveGroups.mockImplementation(async () => { order.push("detach"); });
+    pm.getQueueSnapshot.mockReturnValueOnce({ items: [{ songId: "a" }], currentIndex: 0 });
+    const b = await json(await post("/v1/peers/group:g1/queue/transfer-from", { from: "dlna:src" }));
+    expect(order.lastIndexOf("read")).toBeLessThan(order.indexOf("detach"));
+    expect(b.position).toBe(52);
+  });
+
   it("cast 目标:sendspin 移交成立时按泵位置落位(不 seek)", async () => {
     pm.getQueueSnapshot.mockReturnValueOnce({ items: [{ songId: "sg" }], currentIndex: 0, playMode: "order" });
     fns.tryArmSendspinBorrow.mockResolvedValueOnce({ armed: true, songId: "sg", positionSeconds: 42 });
@@ -639,6 +669,28 @@ describe("传输控制 play / pause / stop", () => {
     resetPeersFakes();
     await post("/v1/peers/local:u1/play");
     expect(fns.dispatchPeerCommand).toHaveBeenCalledWith("local:u1", "play");
+  });
+
+  it("airplay 成员被显式 play → 先脱离活跃组,再起播(与 dlna/sendspin 同口径)", async () => {
+    // 缺口实证(2026-10-24):dlna / sendspin 分支都有 detachFromActiveGroups,唯独
+    // airplay 分支漏了。组成员正被组桥接驱动时,单点 play 会落到该成员自己的 ctrl
+    // 上,与桥接抢同一台设备(点了播放没反应 / 与组内容互相打断)。
+    const order: string[] = [];
+    fns.detachFromActiveGroups.mockImplementation(async () => { order.push("detach"); });
+    queueController.resumePlayback.mockImplementation(() => { order.push("resume"); });
+    const r = await post("/v1/peers/airplay:ap1/play");
+    expect(r.status).toBe(200);
+    const arg = fns.detachFromActiveGroups.mock.calls[0][0] as Record<string, unknown>;
+    expect(arg.kind).toBe("airplay");
+    expect(arg.id).toBe("ap1");
+    expect(order).toEqual(["detach", "resume"]);
+    expect(queueController.transport).toHaveBeenCalledWith("ap1", "play");
+  });
+
+  it("group 目标 play 不摘组(组本身不从属于任何组)", async () => {
+    await post("/v1/peers/group:g1/play");
+    expect(fns.detachFromActiveGroups).not.toHaveBeenCalled();
+    expect(queueController.transport).toHaveBeenCalledWith("g1", "play");
   });
 
   it("peerId 形态非法 → 400", async () => {
