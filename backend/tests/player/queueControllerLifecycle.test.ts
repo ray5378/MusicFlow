@@ -33,7 +33,11 @@ const H = vi.hoisted(() => ({
 function mkProto(pid: string): Any {
   return {
     playerId: pid,
-    async playMedia(item: Any) { H.log.push(`playMedia:${pid}:${item.songId}`); return { mediaUri: `uri:${pid}` }; },
+    async playMedia(item: Any, _b?: Any, startMs?: number) {
+      H.log.push(`playMedia:${pid}:${item.songId}`);
+      if (startMs) H.log.push(`startMs:${pid}:${startMs}`);
+      return { mediaUri: `uri:${pid}` };
+    },
     async stop() { H.log.push(`stop:${pid}`); },
     async pause() { H.log.push(`pause:${pid}`); },
     async resume() { H.log.push(`resume:${pid}`); },
@@ -115,7 +119,11 @@ function mkPlayer(pid: string, over: Any = {}): Any {
   return {
     playerId: pid,
     name: "p",
-    playMedia: vi.fn(async (item: Any) => { H.log.push(`playMedia:${pid}:${item.songId}`); return { mediaUri: `uri:${pid}` }; }),
+    playMedia: vi.fn(async (item: Any, _b?: Any, startMs?: number) => {
+      H.log.push(`playMedia:${pid}:${item.songId}`);
+      if (startMs) H.log.push(`startMs:${pid}:${startMs}`);
+      return { mediaUri: `uri:${pid}` };
+    }),
     stop: vi.fn(async () => { H.log.push(`stop:${pid}`); }),
     pause: vi.fn(async () => { H.log.push(`pause:${pid}`); }),
     resume: vi.fn(async () => { H.log.push(`resume:${pid}`); }),
@@ -425,7 +433,9 @@ describe("pollAllDevices —— 链路从丢到通,就地续播当前首", () =>
 
     // 续播围绕**当前这首**做:重投 s1,并把位置拉回离开处(减 1s 抵消 cast 启动开销)。
     expect(H.log).toContain("playMedia:dlna:d1:s1");
-    expect(H.log).toContain("seek:dlna:d1:29");
+    // 起播即落位:位置进 cast(30000ms),不再 cast 后再 seek 到 29s。
+    expect(H.log).toContain("startMs:dlna:d1:30000");
+    expect(H.log).not.toContain("seek:dlna:d1:29");
     // 恢复后不再挂着「链路丢失」记录,否则下一拍会重复续播。
     expect(any.linkLost.has("d1")).toBe(false);
   });
