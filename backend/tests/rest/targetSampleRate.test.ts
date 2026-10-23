@@ -22,7 +22,10 @@ import { setPlayerRate } from "../../src/services/playerRate.js";
 import { getGroupManager } from "../../src/services/group/index.js";
 import { setSetting } from "../../src/services/settings.js";
 
-const PEER = "dlna:rate-target-main";
+// 组成员只有 sendspin / airplay 两类(DLNA 禁入组,见 group/index.ts 的 GroupMemberKind),
+// 所以「成组取最低」的用例必须用合法成员写法 —— 用 dlna: 成员会在 loadFromDb 时被剔除,
+// 组变空 ⇒ 取最低静默失效(测试会变成"看起来跑了但其实没验到")。
+const PEER = "sendspin:rate-target-main";
 const PEER2 = "sendspin:rate-target-peer2";
 /** 无测量行 ⇒ 走实时 loudnorm（链里必然有 loudnorm，才会触发降采样回落那段）。 */
 const UNMEASURED = { id: "rate-target-unmeasured-song" };

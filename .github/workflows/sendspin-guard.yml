@@ -116,8 +116,9 @@ jobs:
             echo "::error::P1 回归:protocolPlayer 的 playMedia RPC 必须带 seekPositionMs: startMs(漏传则 fork 模式续播回 0,主进程测试全绿看不出来)"
             miss=1
           fi
-          # 生产点2:用户组 fork 起播
-          if ! grep -qF 'rpc("groupPlay", { group: groupName, members: memberIds, item, seekPositionMs: startMs })' backend/src/services/sendspin/index.ts; then
+          # 生产点2:用户组 fork 起播。参数形态允许跨行(airplay 桥接参数按需追加),
+          # 所以先把换行折成空格再比对:钉的仍是"四个参数按序在位"这件事,不是排版。
+          if ! tr '\n' ' ' < backend/src/services/sendspin/index.ts | tr -s ' ' | grep -qF 'rpc("groupPlay", { group: groupName, members: memberIds, item, seekPositionMs: startMs,'; then
             echo "::error::P1 回归:groupPlay RPC 必须带 seekPositionMs: startMs(用户组 fork 续播回 0)"
             miss=1
           fi

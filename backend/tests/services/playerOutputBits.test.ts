@@ -32,7 +32,9 @@ import {
 } from "../../src/services/playerRate.js";
 import { _clearSourceBitsCache, probeSourceBits } from "../../src/services/source/audioInfo.js";
 
-const A = "dlna:bits-device-a";
+// 组成员只有 sendspin / airplay 两类(DLNA 禁入组):用 dlna: 成员会在 loadFromDb 时被
+// 剔除,组变空 ⇒ 「取最低」静默失效(用例看起来在跑,其实什么也没验到)。
+const A = "airplay:bits-device-a";
 const B = "sendspin:bits-device-b";
 /** 无测量行 ⇒ 走实时 loudnorm（链里必然有 loudnorm，才会触发那段回落）。 */
 const UNMEASURED = { id: "bits-unmeasured-song" };

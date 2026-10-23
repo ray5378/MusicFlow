@@ -729,7 +729,10 @@ console.log("===== R23 起播/重启恢复:不得绕开统一起播路径;设备
   const qc = stripComments(read("backend/src/services/player/QueueController.ts"));
   check(
     "resumeActive 仍走 playCurrent(重启恢复不得绕过统一起播路径)",
-    /async resumeActive\(deviceId: string, baseUrl: string\)[\s\S]{0,400}playCurrent\(deviceId, baseUrl\)/.test(qc),
+    // 2026-10-23:签名多了第 3 参 startPositionMs(看门狗续播必须带落点,否则"续播"变"重播"),
+    // 但**仍然必须**经由统一起播路径 playCurrent —— 这里同时钉住"落点被透传下去",
+    // 防止为了图快在 resumeActive 里另开一条 cast。
+    /async resumeActive\(deviceId: string, baseUrl: string, startPositionMs\?: number\)[\s\S]{0,400}playCurrent\(deviceId, baseUrl, startPositionMs\)/.test(qc),
     "重启恢复另开了一条起播路径,落点/串行闸都会绕过去",
   );
   // 闸被某个挂死的操作占住时,后续 cast 会**静默排队**到超时;排队日志是唯一
