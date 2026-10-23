@@ -462,8 +462,17 @@ export class CliSink {
           const fd = fs.openSync(this.pipePath, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK);
           resolve(fd);
         } catch (e: any) {
-          if (Date.now() > deadline) {
-            reject(new Error(`AP2 命令管道无读端(${this.pipePath}): ${e?.code || e?.message}`));
+          // ENOENT = FIFO **本身已经不在了**(被并发拆除的会话 unlink 掉),
+          // 不是「读端还没打开」。这种情况重试再久也不会出现,只会白白把
+          // 5s 预算烧完 —— 2026-10-24 真机实测:组成员因此被拖 13s 后整场静音,
+          // 并且把整组的起播一起拖慢。立即失败,让上层(桥接编排)按「该成员跳过 /
+          // 重试一次」处理。
+          const gone = e?.code === "ENOENT";
+          if (gone || this.stopped || Date.now() > deadline) {
+            reject(new Error(
+              `AP2 命令管道无读端(${this.pipePath}): ${e?.code || e?.message}` +
+                (gone ? "[FIFO 已被拆除]" : ""),
+            ));
             return;
           }
           setTimeout(tryOpen, 100).unref?.();

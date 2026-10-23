@@ -72,22 +72,30 @@ export async function startGroupAirPlayBridge(groupId: string): Promise<GroupBri
     return null;
   }
 
-  const usable: string[] = [];
-  /** 各设备 RECORD 应答的实际播放延迟(帧)及其采样率 —— 取最大者定 send_ahead 下限。 */
-  let maxLatencyFrames = 0;
-  let maxLatencyRate = 44100;
+  /** 单台设备握手成功后的实测参数。 */
+  interface CastOk {
+    deviceId: string;
+    frames: number;
+    rate: number;
+    route: string;
+    host: string;
+    port: number;
+    ms: number;
+  }
+
   // 凭据在 DB(airplay_devices.hap_credentials):动态 import 避免 group 层反向拖入
   // control.ts 的 DB/DLNA/peer 依赖(本模块此前对 control 只有这一处运行时依赖)。
   const { getAirPlayCredentials } = await import("../airplay/control.js");
-  for (const deviceId of devices) {
+
+  const castOne = async (deviceId: string): Promise<CastOk | null> => {
     const dev = getAirPlayDevice(deviceId);
     if (!dev) {
       log.warn(`[airplay-bridge] 设备 ${deviceId} 不在设备表,跳过`);
-      continue;
+      return null;
     }
     if (!dev.available) {
       log.warn(`[airplay-bridge] 设备 ${deviceId}(${dev.name}) 当前离线,跳过`);
-      continue;
+      return null;
     }
     const t0 = Date.now();
     try {
@@ -107,15 +115,41 @@ export async function startGroupAirPlayBridge(groupId: string): Promise<GroupBri
         45_000,
       ) as { latencyFrames?: number; sampleRate?: number } | null;
       const frames = Number(cast?.latencyFrames) || 0;
-      if (frames > maxLatencyFrames) {
-        maxLatencyFrames = frames;
-        maxLatencyRate = Number(cast?.sampleRate) || 44100;
-      }
-      usable.push(deviceId);
+      const rate = Number(cast?.sampleRate) || 44100;
       log.info(`[airplay-bridge] 桥接会话已建立 device=${deviceId}(${dev.alias || dev.name}) ${plan.route}://${plan.host}:${plan.port} 握手=${Date.now() - t0}ms`);
+      return { deviceId, frames, rate, route: plan.route, host: plan.host, port: plan.port, ms: Date.now() - t0 };
     } catch (e) {
       log.warn(`[airplay-bridge] 设备 ${deviceId} 桥接握手失败(${Date.now() - t0}ms): ${(e as Error)?.message || e}`);
+      return null;
     }
+  };
+
+  // ★ 并行握手(2026-10-24 真机实锤,不可回退成串行):
+  //   串行时第 2 台必须等第 1 台握手完 —— 实测 3832ms + 2772ms,两台会话的
+  //   RECORD 延迟测量与 `START_UNIX_MS` 锚点落在**不同时刻**,成员之间出现
+  //   约 0.8s 的真实音频错位(230/231 两台 AP2 接收端 PCM 包络互相关实测:
+  //   峰 corr=0.779 @ +0.80s,而 lag=0 时只有 0.464)。并行握手让两台在同一时刻
+  //   完成握手、同一时刻开播,错位随之收敛;顺带把组起播从 7~16s 压到一次握手的时间。
+  const settled = await Promise.all(devices.map((d) => castOne(d)));
+  const usable: string[] = [];
+  const okList = settled.filter((x): x is CastOk => !!x);
+  // 失败的再给一次机会:实测存在 FIFO 被并发拆除导致的偶发握手失败(ENOENT),
+  // 单次重试代价约 1 次握手,但能把「整场静音」救回来。
+  const failed = devices.filter((d) => !okList.some((x) => x.deviceId === d));
+  if (failed.length > 0) {
+    log.warn(`[airplay-bridge] ${failed.length} 台成员首轮握手失败,重试一次: ${failed.join(",")}`);
+    const retried = await Promise.all(failed.map((d) => castOne(d)));
+    for (const r of retried) if (r) okList.push(r);
+  }
+
+  let maxLatencyFrames = 0;
+  let maxLatencyRate = 44100;
+  for (const c of okList) {
+    if (c.frames > maxLatencyFrames) {
+      maxLatencyFrames = c.frames;
+      maxLatencyRate = c.rate || 44100;
+    }
+    usable.push(c.deviceId);
   }
 
   if (usable.length === 0) return null;
