@@ -4,6 +4,43 @@
 
 ## [4.6.71] - 2026-10-24
 
+### Fix / cast 挂死时回执仍谎报落点(`transfer-from` 回 200 而目标端静默)
+
+**症状**:「组 → 组内最后一台成员」流转,接口 200 且 `position` 给了正确落点(97),
+目标端却**一点声音都没有**;客户端按落点把进度条画在 97s,过 30 多秒才突然开始出声。
+
+**实测证据(240 + 230 三台 AP2 模拟接收端,密集采样探针)**:
+
+```
+23:21:33.818   [QueueController][cast] …0002 起点 idx=5 song=307bc124 dur=129
+23:22:04.089   [QueueController][playCurrent] …0002: cast FAILED: playMedia 超过 30000ms 未返回(cast 挂死)
+23:22:04.106   [HTTP] WARN 慢请求 POST …/queue/transfer-from ms=31447
+               回执 → {"success": true, "transferred": 6, "startIndex": 5, "position": 97}   ← 谎报
+               同期探针采样 → B=STOPPED/0.00 ×14 次(目标端持续没起播)
+23:22:24.752   [QueueController][cast] …0002 起点 idx=5(卡死兜底重投)
+23:22:42.086   [QueueController][cast] …0002 完成 17335ms       ← 到这里才真正出声,晚 38s
+```
+
+**根因**:`castLanding` 是在 `playMedia` **之前**写下的 —— 那时只知道「打算把哪个起点
+编进本次 cast」,所以它的 `applied` 语义原本只回答「起点有没有被跳过逻辑丢弃」。
+cast 本身失败(30s 超时挂死 / cast 期间目标掉线)时,`abortTimedOutCast` 抛错落进
+`playCurrent` 的 catch,但那里**没有**回头作废 landing:`playFrom` 照常返回,
+路由读到 `castLandingOf(...).applied === true`,于是把「起播意图」当成「已经落位」回执。
+落点本身没错(重投沿用 `lastCastStartMs`,仍是 97),错的是**回执先于事实**。
+
+**修复**:cast 失败分支(含 cast 期间目标掉线的竞态分支)立刻把 landing 改写成
+`applied=false`、保留 `requestedMs` 供排查 ⇒ 路由如实回 `position: null`,
+客户端不会画出一个并未出声的进度条。重投成功时 `playCurrent` 会重新 `set(applied=true)`,
+重投路径的落点不受影响。
+
+**回归防线**:`tests/player/castLandingHonesty.test.ts` 三例 —— cast 挂死 `applied=false`、
+cast 成功 `applied=true` 且 `requestedMs` 原样、无起点 `applied=false`。
+撤掉修复后第一例变红(实测)。
+
+**未在本条处理**:触发这次挂死的上游出流 TTFB(`GET /rest/airplay/stream/:token`
+整曲缓冲 17~30s,`Lavf` 侧等首字节直到 30s cast 硬顶)属于另一条性能议题,
+与回执诚实性无关,另行评估。
+
 ### Fix / 桥接成员的播放位置改取 pump 内容时间线(成员上报位置超前组 8.4s)
 
 **症状**:同步组播放时,AirPlay 成员的 `/peers/:id/status` position 比组位置明显超前(实测

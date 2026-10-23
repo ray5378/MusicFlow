@@ -1137,6 +1137,18 @@ export class QueueController extends EventEmitter {
     } catch (e: any) {
       console.warn(`[QueueController][playCurrent] ${playerId}: cast FAILED:`, e?.message || e);
       ctrl.endOptimistic(playerId);
+      // ★ cast 本身失败(超时挂死 / 目标掉线)⇒ **起点没有落位**,landing 意图必须作废。
+      //   路由按 `castLandingOf(...).applied` 回执落点,而 landing 是在 playMedia **之前**
+      //   写下的(那时只知道"打算编哪个起点")。若这里不清,cast 挂死 30s 之后
+      //   playFrom 照样返回、路由照样回 position=<定格值> —— 客户端画出进度条,
+      //   设备却没声音(2026-10-24 真机:组 → 组内最后一台成员,回 97 而目标端静默,
+      //   真正起播要等 stalled 重投,晚 38s)。
+      //   保留 requestedMs 供排查,只把 applied 打成 false(= 未落位)。
+      //   重投成功时 playCurrent 会重新 set(applied=true),不影响重投路径。
+      {
+        const landing = this.castLanding.get(deviceId);
+        if (landing) this.castLanding.set(deviceId, { requestedMs: landing.requestedMs, applied: false });
+      }
       // 竞态兜底(2026-09-25):起播前的硬限制判据过关、但 cast 期间成员掉光/设备掉线 ⇒
       // 这**不是**「投不出去」,而是「现在没人可投」。必须在这里再问一次同一个判据并挂起:
       // 若落到下面的失败分支,castFailStreak 会一路累加到 2×曲数、每拍还放行一次切歌,
