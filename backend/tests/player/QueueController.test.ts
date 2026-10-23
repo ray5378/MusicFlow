@@ -197,6 +197,76 @@ describe("QueueController", () => {
       expect(starts.length).toBe(2);
       expect(starts[1]).toBeUndefined();
     });
+
+    it("换曲后不套用上一首的落点(跨曲 lastPos 必须重置)", async () => {
+      const starts: (number | undefined)[] = [];
+      const p = makeMockPlayer();
+      p.playMedia = (async (_item: unknown, _base: unknown, startMs?: number) => {
+        starts.push(startMs);
+        return { mediaUri: "u-ok" };
+      }) as typeof p.playMedia;
+      qc.registerPlayer("d5", p, mockCtrl as any);
+      const a = [{ songId: "sA", title: "A", mime: "audio/mpeg" } as any];
+      const b = [{ songId: "sB", title: "B", mime: "audio/mpeg" } as any];
+
+      // 上一首带落点起播(200s)→ 记下起播意图与 lastPos 基线
+      await qc.playFrom("d5", a, 0, "http://base", undefined, 200000);
+      // 换曲从头播(真实场景:自动切歌 / 用户点别的歌)
+      await qc.playFrom("d5", b, 0, "http://base");
+      expect(starts).toEqual([200000, undefined]);
+
+      // 新曲刚起播就卡死 → 重投必须还是"从头",不能继承上一首的 200s
+      await qc.handleDecision("stalled", "dlna:d5");
+      expect(starts.length).toBe(3);
+      expect(starts[2]).toBeUndefined();
+    });
+
+    it("播到中段卡死 → 从设备上报的位置续,而不是回退到起播点", async () => {
+      const starts: (number | undefined)[] = [];
+      const p = makeMockPlayer();
+      p.playMedia = (async (_item: unknown, _base: unknown, startMs?: number) => {
+        starts.push(startMs);
+        return { mediaUri: "u-ok" };
+      }) as typeof p.playMedia;
+      // 设备已经播到 120s(IDLE 卡死前的最后读数)
+      p.pollState = (async () => ({
+        playerId: "dlna:d6", playbackState: PlaybackState.IDLE,
+        position: 120, duration: 300, updatedAt: Date.now(),
+      })) as typeof p.pollState;
+      qc.registerPlayer("d6", p, mockCtrl as any);
+      const items = [{ songId: "s1", title: "t1", mime: "audio/mpeg" } as any];
+
+      await qc.playFrom("d6", items, 0, "http://base", undefined, 45000);
+      // 5s 兜底轮询把设备真实位置记进 lastPos(私有方法:驱动的正是生产那条路径)
+      await (qc as any).pollAllDevices(() => "http://base");
+
+      await qc.handleDecision("stalled", "dlna:d6");
+      expect(starts.length).toBe(2);
+      expect(starts[1]).toBe(120000);
+    });
+
+    it("frozen 就地恢复走「起播即落位」:cast 带起点,不再补 seek", async () => {
+      const starts: (number | undefined)[] = [];
+      const p = makeMockPlayer();
+      p.playMedia = (async (_item: unknown, _base: unknown, startMs?: number) => {
+        starts.push(startMs);
+        return { mediaUri: "u-ok" };
+      }) as typeof p.playMedia;
+      // PLAYING 但位置停在起播点(冻结)
+      p.pollState = (async () => ({
+        playerId: "dlna:d7", playbackState: PlaybackState.PLAYING,
+        position: 45, duration: 300, mediaUri: "u-ok", updatedAt: Date.now(),
+      })) as typeof p.pollState;
+      qc.registerPlayer("d7", p, mockCtrl as any);
+      const items = [{ songId: "s1", title: "t1", mime: "audio/mpeg" } as any];
+
+      await qc.playFrom("d7", items, 0, "http://base", undefined, 45000);
+      await qc.handleDecision("frozen", "dlna:d7");
+
+      expect(starts.length).toBe(2);
+      expect(starts[1]).toBe(45000);          // 起点进 cast
+      expect(p.calls).not.toContain("seek");  // 绝不再补一次会话重建
+    });
   });
 
   describe("shuffle 上一首稳定性(v1.7.52 修复:当前曲固定在序列头,pos 可回退)", () => {
