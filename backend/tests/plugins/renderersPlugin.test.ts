@@ -269,11 +269,14 @@ describe("AirPlay 渲染器插件 manifest(默认开启:零配置;仍可手动�
     expect(airplayRendererPlugin.manifest).toBe(airplayRendererManifest);
   });
 
-  it("插件侧 i18n 只补 en,且 en.documentation 说明不支持 AirPlay 2", () => {
+  it("插件侧 i18n 只补 en,且中英 documentation 都声明同时支持 AirPlay 1 与 AirPlay 2", () => {
     expect(Object.keys(airplayRendererManifest.i18n || {})).toEqual(["en"]);
     const en = (airplayRendererManifest.i18n as any).en;
     expect(en.name).toBe("AirPlay Renderer");
-    expect(airplayRendererManifest.documentation).toContain("不支持 AirPlay 2");
+    // 2026-10-24:cli 通道(cliairplay)落地后 AP1/AP2 双支持,详情页文案同步改口径
+    // (旧文案「不支持 AirPlay 2」与现状相反,这里双向钉住防止回退)。
+    expect(airplayRendererManifest.documentation).toContain("AirPlay 1（RAOP）与 AirPlay 2");
+    expect(en.documentation).toContain("AirPlay 1 (RAOP) and AirPlay 2");
   });
 });
 
