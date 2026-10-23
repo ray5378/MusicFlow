@@ -1270,14 +1270,30 @@ export class QueueController extends EventEmitter {
         ? Math.floor(Math.random() * items.length)
         : 0;
     this.setQueue(playerId, items, idx, baseUrl, contentContext);
-    if (!this.advancing.has(playerId)) {
-      this.advancing.add(playerId);
-      try { await this.playCurrent(playerId, baseUrl, startPositionMs); }
-      finally { this.advancing.delete(playerId); }
-      this.schedulePreProbe(playerId); this.schedulePrefetch(playerId);
+    // 上一轮 cast 还在飞(单次硬顶 30s)→ **等它收尾**再起播。
+    // 旧实现是 `if (!advancing.has())` 直接跳过:调用方拿到 200 + 落点回执,而设备
+    // 根本没收到这一次起播(2026-10-24 群组同步实测:queue/play 0.0s 返回、成员恒 0 秒,
+    // 且成员残留在上一首的会话里各播各的)。队列已经 setQueue 就位,只差这一次 cast。
+    if (!(await this.waitAdvancing(playerId, 35_000))) {
+      log.warn(`[QueueController][playFrom] ${playerId}: 上一轮 cast 35s 仍未收尾,放弃本次起播(队列已就位)`);
+      return this.queues.get(playerId)?.currentIndex ?? idx;
     }
+    this.advancing.add(playerId);
+    try { await this.playCurrent(playerId, baseUrl, startPositionMs); }
+    finally { this.advancing.delete(playerId); }
+    this.schedulePreProbe(playerId); this.schedulePrefetch(playerId);
     // 返回**实际起播下标**（可能是服务端随机的），供路由如实回执。
     return this.queues.get(playerId)?.currentIndex ?? idx;
+  }
+
+  /** 等 advancing 释放(单次 cast 硬顶 30s,这里给 35s)。true = 已释放可起播。 */
+  private async waitAdvancing(playerId: string, timeoutMs: number): Promise<boolean> {
+    const end = Date.now() + timeoutMs;
+    while (this.advancing.has(playerId)) {
+      if (Date.now() >= end) return false;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return true;
   }
 
   /** 用户从媒体库点某首歌 → 加入队列后"跳播"到该曲。即使处于随机模式也严格尊重

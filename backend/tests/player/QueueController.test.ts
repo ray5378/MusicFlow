@@ -269,6 +269,35 @@ describe("QueueController", () => {
     });
   });
 
+  describe("playFrom 并发保护(2026-10-24 群组同步实测:在飞 cast 期间静默不起播)", () => {
+    it("上一轮 cast 还在飞 → 等它收尾再起播,绝不并发也不静默跳过", async () => {
+      const starts: (number | undefined)[] = [];
+      let release: (() => void) | null = null;
+      const gate = new Promise<void>((r) => { release = r; });
+      const p = makeMockPlayer();
+      p.playMedia = (async (_item: unknown, _base: unknown, startMs?: number) => {
+        starts.push(startMs);
+        if (starts.length === 1) await gate;   // 第一次 cast 挂住不返回
+        return { mediaUri: "u-ok" };
+      }) as typeof p.playMedia;
+      qc.registerPlayer("d8", p, mockCtrl as any);
+      const items = [{ songId: "s1", title: "t1", mime: "audio/mpeg" } as any];
+
+      const first = qc.playFrom("d8", items, 0, "http://base");           // 不 await:挂着
+      await new Promise((r) => setTimeout(r, 50));
+      const second = qc.playFrom("d8", items, 0, "http://base", undefined, 60000);
+
+      await new Promise((r) => setTimeout(r, 300));
+      expect(starts.length).toBe(1);          // 正在等,没有并发第二次 cast
+
+      release!();
+      await first;
+      await second;
+      expect(starts.length).toBe(2);
+      expect(starts[1]).toBe(60000);          // 等到了,并按本次落点起播
+    });
+  });
+
   describe("shuffle 上一首稳定性(v1.7.52 修复:当前曲固定在序列头,pos 可回退)", () => {
     beforeEach(() => {
       qc.setQueue("d1", [
