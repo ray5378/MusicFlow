@@ -105,9 +105,20 @@ export class BridgeRing {
     return { ...this.stats, writtenFrames: this.writtenFrames, outFrames: this.stats.outFrames };
   }
 
+  /** 本环**内容时间线**上的当前秒数(= 读端此刻应当输出的内容位置,相对首帧)。
+   *
+   *  为什么需要它(2026-10-24 真机实锤):桥接会话的上报位置若按「会话已过时长」算,
+   *  会把「会话建好 → pump 起播」这段空转也算进去。实测 230-r1 建会话 22:24:20.8、
+   *  pump 22:24:29.5,于是该成员上报位置比组超前 8.4s,而同一组的另一台只超前 0.6s
+   *  （各自握手完成时刻不同 ⇒ 各偏各的)。内容时间线以 `baseTsUs`(pump 首帧) 为 0 点,
+   *  与组位置、其他成员同源,天然可比。 */
+  get contentSec(): number | null {
+    if (this.baseTsUs === null) return null;
+    return Math.max(0, (nowUs() - this.baseTsUs) / 1e6);
+  }
+
   /** 时间线重置(切歌 / seek):丢弃全部残留,等下一帧重新建立锚点。 */
-  reset(): void {
-    this.writtenFrames = 0;
+  reset(): void {    this.writtenFrames = 0;
     this.floorFrame = 0;
     this.baseTsUs = null;
     this.outFrame = null;

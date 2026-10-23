@@ -131,6 +131,8 @@ export interface AirplayBridgeCastArgs {
    *  - cli 路径:`player` 为 null,lead 由 `CliSink` 自己量(先读 `[STATUS] latency`
    *    的 warm_lead_ms 再起写循环),调用方用第二个参数 `leadUs()` 即可。 */
   makeProducer: (player: RaopPlayer | null, leadUs: () => number) => PcmProducer;
+  /** 桥接会话的内容时钟(秒),`null` = pump 还没送来第一帧。见 `CliSinkArgs.contentClock`。 */
+  makeContentClock?: () => number | null;
   /** seek / 停止时清空上游缓冲(与 RAOP FLUSH 配套)。 */
   resetSource?: () => void;
   /** 传输选择,同 `AirplayCastArgs.route`。 */
@@ -310,6 +312,8 @@ export class AirplaySessionRuntime {
       /** 本次时间线的内容起点(秒):带进度起播(流转落点/续播)必传,
        *  否则 PCM 流虽然已从目标处开始,上报位置还是从 0 涨。 */
       startSec?: number;
+      /** 桥接会话的内容时钟(见 CliSinkArgs.contentClock):给了就按 pump 时间线上报位置。 */
+      contentClock?: () => number | null;
       streamUrl: string;
       songId?: string;
       bridge?: { reset: () => void };
@@ -341,6 +345,7 @@ export class AirplaySessionRuntime {
       startSec: o.startSec,
       makeProducer: o.makeProducer,
       resetSource: o.resetSource,
+      contentClock: o.contentClock,
       binPath: bin.path,
     } satisfies CliSinkArgs);
 
@@ -413,6 +418,10 @@ export class AirplaySessionRuntime {
         // 所以这个回调在 producer 被调用时已经有正确值。
         makeProducer: (leadUs) => a.makeProducer(null, leadUs),
         resetSource: ring.reset,
+        // ★ 桥接会话的位置基准必须取 pump 内容时间线,而不是「本会话已过时长」:
+        //   会话在 pump 起播前就建好了(实测空转 8.4s),那段空转会把成员上报位置
+        //   顶到组前面去,且每台成员各偏各的(握手完成时刻不同)。
+        contentClock: a.makeContentClock,
         bridge: ring,
         title: a.title,
         artist: a.artist,

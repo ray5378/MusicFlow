@@ -108,6 +108,14 @@ export interface CliSinkArgs {
   makeProducer: (leadUs: () => number) => PcmProducer;
   /** 切歌/seek 时清空上游环形缓冲(与 cmdpipe FLUSH 配套)。 */
   resetSource?: () => void;
+  /** 桥接会话专用:内容时钟(秒),`null` = pump 还没送来第一帧。
+   *
+   *  为什么桥接不能复用 `t0Us` 那条时间线:普通 cast 的第一批 PCM **就是**内容起点,
+   *  「第一批的可听时刻」与「内容 0 秒」重合;而桥接的 PCM 来自 sendspin pump,
+   *  会话可以在 pump 起播**之前**好几秒就建好(实测建会话 22:24:20.8、pump 22:24:29.5),
+   *  这段空转全被算进 elapsed ⇒ 成员上报位置比组超前 8.4s,且每台成员各偏各的
+   *  (各自握手完成时刻不同)。注入内容时钟后位置改由 pump 时间线决定,与组同源。 */
+  contentClock?: () => number | null;
   /** 二进制路径(已自检可用)。 */
   binPath: string;
 }
@@ -176,8 +184,15 @@ export class CliSink {
   private effectiveLeadUs = (): number => Math.max(0, this.baseLeadMs * 1000 + this.leadAdjustUs);
 
   /** 内容落点(秒)。以「第一批的可听时刻」为 0 点,pump 时间线上单调推进;
-   *  `baseSec` 把这条时间线映射回**整曲**坐标(带进度起播 / seek 后)。 */
+   *  `baseSec` 把这条时间线映射回**整曲**坐标(带进度起播 / seek 后)。
+   *
+   *  桥接会话(注入了 `contentClock`)**不走这条时间线**:它的 0 点是 pump 首帧,
+   *  而不是本会话的第一批可听时刻 —— 两者相差「建会话 → pump 起播」的空转时长。 */
   get positionSec(): number {
+    const bridged = this.a.contentClock?.();
+    if (typeof bridged === "number" && Number.isFinite(bridged)) {
+      return Math.max(0, this.baseSec + Math.max(0, bridged));
+    }
     if (!this.t0Us) return 0;
     const elapsed = nowUs() - this.t0Us - this.effectiveLeadUs();
     return Math.max(0, this.baseSec + elapsed / 1e6);

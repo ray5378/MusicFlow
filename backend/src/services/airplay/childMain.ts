@@ -143,6 +143,8 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
                 ? () => Math.round((player.latencyFramesUsed / 44100) * 1_000_000)
                 : leadUs,
             ),
+          // 桥接会话的上报位置走 pump 内容时间线(与组/其他成员同源),不走「会话已过时长」。
+          makeContentClock: () => ring.contentSec,
           resetSource: () => ring.reset(),
           route: p.route === "raop" ? "raop" : p.route === "cli" ? "cli" : undefined,
           cli: p.cli,
