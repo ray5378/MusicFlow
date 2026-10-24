@@ -34,20 +34,10 @@ let controller: AirplayChildController | null = null;
 
 async function main(): Promise<void> {
   const { AirplayChildController } = await import("./childMain.js");
-  const { AirplayBridgeServer } = await import("./bridgeServer.js");
-  // 桥接 PCM 接收端(127.0.0.1 随机端口):sendspin 子进程的 pump 音频从这里进来。
-  // 启动失败不致命 —— 关掉桥接能力,普通 AP1 投屏照旧(见 bridgeCast 的报错)。
-  const bridge = new AirplayBridgeServer();
-  let bridgePort: number | undefined;
-  try {
-    bridgePort = await bridge.start();
-  } catch (e: any) {
-    log.warn(`airplay 桥接收听端启动失败,桥接功能不可用: ${e?.message || e}`);
-  }
-  controller = new AirplayChildController(send, bridgePort ? bridge : undefined);
-  send({ t: "mainReady", pid: process.pid, ...(bridgePort ? { bridgePort } : {}) });
+  controller = new AirplayChildController(send);
+  send({ t: "mainReady", pid: process.pid });
   controller.markReady();
-  log.info(`airplay 推流运行时已就绪: pid=${process.pid}${bridgePort ? ` bridge=127.0.0.1:${bridgePort}` : ""}`);
+  log.info(`airplay 推流运行时已就绪: pid=${process.pid}`);
 }
 
 installChildFatalHandlers(LOG_NAME, LABEL);

@@ -1,11 +1,7 @@
 // 播放器群组(SyncGroup)管理服务。仿 MA sync_group provider:
 //   - 组 = 多台设备的集合,组持有自己的队列(在 QueueController 接 group:<id> 后生效)
-//   - 成员用带命名空间的 peer 成员 id:`sendspin:<clientId>` / `airplay:<deviceId>`;
-//     DLNA 成员**禁止入组**(见下),组不能套组(`group:` 前缀拒绝)
-//   - ★ 2026-10-23 起:**DLNA 不允许进组**。DLNA 是各设备自拉流的扇出模型,没有共享
-//     时间线,组内只能"roughly 同时起播",无法做采样级同步;把它留在组里会让整组
-//     的同步观感被拉低,也掩盖真正的漂移。群组只接受两条能进同一条 pump/桥接
-//     时间线的成员:sendspin(原生 pump)与 airplay(经桥接 sink 挂同一 pump)。
+//   - 成员用带命名空间的 peer 成员 id:`sendspin:<clientId>` / `dlna:<deviceId>` /
+//     裸 id(历史数据,一律视为 DLNA);组不能套组(`group:` 前缀拒绝)
 //   - 一台设备可同时加入多个组(如"客厅组"+ "所有设备组"),设备同一时刻只能渲染一路流,
 //     多个组同时向同一设备投递时以最后一次命令为准(物理限制,非漂移校正范畴)
 //   - 组名必填、非空、限长;成员用全量替换(前端勾选框提交完整列表)或增量
@@ -16,30 +12,28 @@ import { v4 as uuidv4 } from "uuid";
 import { eq } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { playerGroups } from "../../db/schema.js";
-import { getAirPlayDevice } from "../airplay/discovery.js";
+import { getCachedDevices } from "../dlna/control.js";
 import { getServer as getSendspinServer } from "../sendspin/runtime.js";
 import { sendspinSupervisor } from "../sendspin/supervisor.js";
 import { getSendspinDeviceVolume } from "../sendspin/peerVolume.js";
 import { createLogger } from "../../utils/logger.js";
 
-/** 成员 kind:sendspin(原生 pump)/ airplay(桥接进同一 pump)。
- *  DLNA 已禁止(无共享时间线,做不了同步);历史裸 id 同样视为 DLNA 并迁移掉。 */
-export type GroupMemberKind = "sendspin" | "airplay";
+/** 成员 kind:dlna(默认,裸 id 亦属此) / sendspin。airplay/local 暂不支持进组。 */
+export type GroupMemberKind = "dlna" | "sendspin";
 
-/** 拆成员 id 为 kind＋裸 id。
- *  只认 `sendspin:` / `airplay:` 两种命名空间;`group:`(组不能套组)、`local:`(本机)、
- *  `dlna:`(已禁止)、裸 id(历史 DLNA 数据)一律返回 null —— 调用方据此拒绝/迁移。 */
+/** 拆成员 id 为 kind＋裸 id。`group:`/`local:` 前缀返回 null(组不能套组/含本机)。 */
 export function splitMemberId(m: string): { kind: GroupMemberKind; id: string } | null {
   if (typeof m !== "string" || !m) return null;
+  if (m.startsWith("group:") || m.startsWith("local:")) return null;
   if (m.startsWith("sendspin:")) {
     const id = m.slice("sendspin:".length);
     return id ? { kind: "sendspin", id } : null;
   }
-  if (m.startsWith("airplay:")) {
-    const id = m.slice("airplay:".length);
-    return id ? { kind: "airplay", id } : null;
+  if (m.startsWith("dlna:")) {
+    const id = m.slice("dlna:".length);
+    return id ? { kind: "dlna", id } : null;
   }
-  return null;
+  return { kind: "dlna", id: m }; // 裸 id = 历史数据,视为 DLNA
 }
 
 const log = createLogger("group");
@@ -51,7 +45,7 @@ export interface PlayerGroup {
   id: string;
   ownerUserId: string; // 创建者;管理员可为空串(历史数据)或管理员 id
   name: string;
-  memberIds: string[]; // 命名空间成员 id(sendspin:<clientId> / airplay:<deviceId>)
+  memberIds: string[]; // dlna deviceIds
   /** 组级音量 0-100:与成员设备音量独立,空组/全离线也持久(重启恢复)。 */
   volume: number;
   createdAt: string;
@@ -85,46 +79,22 @@ export class GroupManager extends EventEmitter {
     this.setMaxListeners(50);
   }
 
-  /** 启动时从 DB 加载全部组。
-   *
-   *  ★ 2026-10-23:DLNA 成员迁移。此前成员允许 DLNA(裸 id / `dlna:` 前缀),但 DLNA
-   *  没有共享时间线、做不了同步(见文件头),现已禁止入组。历史行里残留的 DLNA 成员
-   *  在加载时**剔除并落库**(否则组里会永远挂着永远不参与同步的成员,UI 还显示它在线),
-   *  同时打一行 warn 说明剔了谁 —— 用户可在群组页重新勾选 sendspin/airplay 成员。 */
+  /** 启动时从 DB 加载全部组。 */
   loadFromDb(): void {
     this.groups.clear();
     const rows = db.select().from(playerGroups).all();
-    let droppedMembers = 0;
-    let migratedGroups = 0;
     for (const r of rows) {
       let memberIds: string[] = [];
       try { memberIds = JSON.parse(r.memberIds || "[]"); } catch {}
-      const kept = (Array.isArray(memberIds) ? memberIds : []).filter((m) => splitMemberId(m) !== null);
-      if (kept.length !== memberIds.length) {
-        droppedMembers += memberIds.length - kept.length;
-        migratedGroups++;
-      }
-      const g: PlayerGroup = {
+      this.groups.set(r.id, {
         id: r.id,
         ownerUserId: r.ownerUserId || "",
         name: r.name,
-        memberIds: kept,
+        memberIds,
         volume: clampVolume(r.volume),
         createdAt: r.createdAt || "",
         updatedAt: r.updatedAt || "",
-      };
-      this.groups.set(r.id, g);
-      if (kept.length !== memberIds.length) {
-        try { this.persist(g); } catch (e) {
-          log.warn(`[group] 组 ${g.id} 的 DLNA 成员迁移落库失败: ${(e as Error)?.message || e}`);
-        }
-      }
-    }
-    if (droppedMembers > 0) {
-      log.warn(
-        `[group] 已从 ${migratedGroups} 个组中移除 ${droppedMembers} 个 DLNA 成员` +
-        `(DLNA 无共享时间线,不能参与同步;请改用 sendspin / airplay 成员)`,
-      );
+      });
     }
     log.info(`[group] loaded ${this.groups.size} player group(s) from DB`);
   }
@@ -276,35 +246,25 @@ export class GroupManager extends EventEmitter {
   /** 解析全部成员的展示信息(名称/可用性/sendspin 音量)。
    *
    *  **对外公开:这是「成员在线判定」的单一真相源。**
-   *  成员 id 带命名空间(`sendspin:<clientId>` / `airplay:<deviceId>`),必须按 kind
-   *  分派到各自的设备源 —— sendspin 成员**不在** DLNA 设备缓存里、airplay 成员也
-   *  **不在** DLNA 缓存里,拿成员 id 去 `getCachedDevices()` 查永远 miss ⇒ 会被误判
-   *  成离线。peer 层的「群组是否可用」(`PeerManager.reconcileGroupPeers`)必须复用
-   *  本方法,不得另写一套(曾经就是那样:只查 DLNA 缓存 ⇒ 非 DLNA 群组恒被标离线,
+   *  成员 id 带命名空间(`sendspin:<clientId>` / `dlna:<deviceId>` / 裸 id≡DLNA),
+   *  必须按 kind 分派到各自的设备源 —— sendspin 成员**不在** DLNA 设备缓存里,
+   *  拿成员 id 去 `getCachedDevices()` 查永远 miss ⇒ 会被误判成离线。
+   *  peer 层的「群组是否可用」(`PeerManager.reconcileGroupPeers`)必须复用本方法,
+   *  不得另写一套(曾经就是那样:只查 DLNA 缓存 ⇒ 非 DLNA 群组恒被标离线,
    *  「流转播放」选择器直接把整行剪掉,群组用不了)。 */
   resolveMemberStates(memberIds: string[]): GroupMemberInfo[] {
     return this.resolveMembers(memberIds);
   }
 
   private resolveMembers(memberIds: string[]): GroupMemberInfo[] {
+    const cache = new Map(getCachedDevices().map(d => [d.id, d]));
     return memberIds.map(memberId => {
       const split = splitMemberId(memberId);
       if (!split) return { deviceId: memberId, name: memberId, available: false };
       if (split.kind === "sendspin") return { deviceId: memberId, ...this.resolveSendspinMember(split.id) };
-      return { deviceId: memberId, ...this.resolveAirPlayMember(split.id) };
+      const d = cache.get(split.id);
+      return { deviceId: memberId, name: d ? (d.alias || d.name) : memberId, available: !!d?.available };
     });
-  }
-
-  /** airplay 成员展示信息:设备档案持久化(离线也在列表里),可用性取 discovery 的
-   *  `available`(90s 无 mDNS 刷新即 false)。 */
-  private resolveAirPlayMember(deviceId: string): { name: string; available: boolean } {
-    try {
-      const d = getAirPlayDevice(deviceId);
-      if (!d) return { name: deviceId, available: false };
-      return { name: (d.alias || d.name || deviceId).trim() || deviceId, available: !!d.available };
-    } catch {
-      return { name: deviceId, available: false };
-    }
   }
 
   /** sendspin 成员展示信息:in-proc 读真实 server,fork 读 supervisor 镜像,
@@ -357,19 +317,14 @@ export class GroupManager extends EventEmitter {
       if (seen.has(m)) throw new Error("成员列表不能重复");
       seen.add(m);
       const split = splitMemberId(m);
-      if (!split) {
-        // DLNA / 裸 id 是历史写法,给出可执行的原因,而不是含糊的"不是 DLNA 设备"。
-        if (m.startsWith("dlna:") || !m.includes(":")) {
-          throw new Error(`成员 ${m} 是 DLNA 设备:DLNA 各设备自拉流、没有共享时间线,无法参与同步群组(请改用 sendspin / airplay 成员)`);
-        }
-        throw new Error(`成员 ${m} 格式非法:只接受 sendspin:<clientId> 或 airplay:<deviceId>`);
-      }
+      // 组不能套组/含本机/airplay 暂不支持进组(旧报错口径保留)。
+      if (!split) throw new Error(`成员 ${m} 不是 DLNA 设备`);
       if (split.kind === "sendspin") {
         // sendspin 成员只校验格式(在线状态动态解析):组可持久化,设备离线仍可建组。
         continue;
       }
-      // airplay:设备档案持久化(离线仍在列表),但**必须曾经被发现过**,否则是脏数据。
-      if (!getAirPlayDevice(split.id)) throw new Error(`AirPlay 设备 ${m} 不存在`);
+      const known = getCachedDevices().some(d => d.id === split.id);
+      if (!known) throw new Error(`设备 ${m} 不是已知的 DLNA 设备`);
     }
   }
 

@@ -24,9 +24,6 @@ export interface AirplaySnapshot {
 /** mainReady 载荷:子进程就绪标记 + 自身 pid(便于日志/排障)。 */
 export interface AirplayReadyInfo {
   pid: number;
-  /** 桥接 PCM 接收端口(127.0.0.1)。sendspin 子进程据此把 pump 音频送进来;
-   *  启动失败/未启用桥接时缺省。 */
-  bridgePort?: number;
 }
 
 /** 子进程 → 主进程的业务事件。

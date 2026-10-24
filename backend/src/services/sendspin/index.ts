@@ -774,7 +774,7 @@ export async function sendspinGroupPlay(
   if (!srv) throw new Error("sendspin 服务未运行");
   playGroupCore(srv, groupName, memberIds, item as any, (cid, songId, message) => {
     log.warn(`sendspin group play ${songId} failed(group=${cid}): ${message}`);
-  }, startMs, bridge);
+  }, startMs);
 }
 
 /** 用户组停止(成员保留,下次起播复用)。 */

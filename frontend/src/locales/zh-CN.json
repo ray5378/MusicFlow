@@ -102,7 +102,8 @@
     },
     "proxyPlaceholder": "http://ip:port 或 socks5://ip:port",
     "testProxy": "测试连接",
-    "saved": "代理设置已保存",
+    "saved": "设置已保存",
+    "proxySaved": "代理设置已保存",
     "saveFailed": "保存失败",
     "proxyOk": "代理可用",
     "proxyBad": "代理不可用",
@@ -286,7 +287,9 @@
       "dynamicCode": "动态码(6位)",
       "codePh": "输入配对码",
       "tokenPh": "粘贴 SP:0… token",
-      "codeSent": "已提交,等待设备端完成"
+      "codeSent": "已提交,等待设备端完成",
+      "approvedToast": "已批准该设备",
+      "unapprovedToast": "已撤销批准"
     }
   },
   "layout": {

@@ -843,11 +843,7 @@ export class GroupPump {
           //   - 新行为:lead = min(send_ahead, 800ms) ⇒ 起播延迟恒 ≈0.8s,
           //     缓冲深度由 pushLoop 顶到插件配置的 prefill_buffer_ms(默认 3s)。
           const anchorLead = prefillEnabled()
-            // 桥接(AirPlay)在场时不能把锚点压在 800ms 上限:RAOP 设备缓冲恒 >=1s,
-            // 锚点若只提前 800ms,桥接侧「此刻该送的内容」就会超前于已生产内容
-            // ⇒ BridgeRing 只能 clamp(本设备比别家早 ~100ms)或直接欠载静音。
-            // 抬到 send_ahead 下限即可,纯 sendspin 组 floor=0 行为不变。
-            ? Math.min(aheadUs, Math.max(ANCHOR_SAFE_LEAD_US, this.group.sendAheadFloorUs || 0))
+            ? Math.min(aheadUs, ANCHOR_SAFE_LEAD_US)
             : (reseed ? reseedLead : aheadUs);
           const lead = BigInt(Math.max(anchorLead, FIRST_FRAME_LEAD_US));
           // ⚠️ 锚点必须**严格大于已发出的最后一个时间戳**(= 此刻的 cursorUs)。

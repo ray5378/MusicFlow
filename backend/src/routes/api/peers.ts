@@ -1,7 +1,6 @@
 // 自动生成 —— 由 index.ts 物理拆分而来（peers 域，35 条路由）。零逻辑改动。
 import type { Hono } from "hono";
 import { createLogger } from "../../utils/logger.js";
-import { freezesPositionBeforeCast } from "../../services/playTarget.js";
 import {
   BusinessErrorCode,
   apiErrorStatus,
@@ -226,21 +225,11 @@ app.post("/v1/peers/:peerId/queue/play", async (c) => {
   if (isCastPeer(parsed)) {
     // 成员被显式指派播放 → 先脱离活跃组再独立播(MA ensure_player_ungrouped)。
     await detachFromActiveGroups(parsed);
-    // ★ 起播即落位(与 transfer-from 同口径):起点交给**这一次** cast 的 startMs,
-    //   绝不再「先起播、再从 0 seek」—— AirPlay 的 seek 是**完整重建会话**,
-    //   两次建会话会让单会话设备在第二次 RECORD 上挂死(2026-10-21 真机),
-    //   而且白白多等一次重建(实测 AP2 上 3s、AP1 上直接 25s 超时)。
-    const startMs = askPosition !== null && askPosition > 0 ? Math.round(askPosition * 1000) : undefined;
     try {
-      await getQueueManager().playFrom(parsed.id, items, start, getDlnaBaseUrl(c), undefined, startMs);
+      await getQueueManager().playFrom(parsed.id, items, start, getDlnaBaseUrl(c));
     } catch (e: any) { return c.json(apiInternalError(e), 500); }
-    // ★ 回执必须诚实:本次起播若跳过了不可播曲目,startMs 已被 playCurrent 丢弃
-    //   (起点只属于原本那一首),这里再回 askPosition 就是谎话 —— 客户端会照它把
-    //   进度条画在 45s,声音却从 0 开始。2026-10-24 真机:同一首歌的在线可播性复核
-    //   会抖动,跳过与否交替出现,同一条指令表现成「有时落位、有时归零」的随机 bug。
-    const landed = startMs !== undefined && getQueueController().castLandingOf(parsed.id)?.applied
-      ? askPosition
-      : null;
+    let landed: number | null = null;
+    if (askPosition !== null && await seekPeerToSeconds(peerId, askPosition)) landed = askPosition;
     return c.json({ success: true, position: landed });
   }
   // local:起点随起播交出去(见 seekPeerToSeconds 上方注释)。
@@ -338,15 +327,6 @@ app.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
   const srcPosEarly = askPosition ?? (sameDevice ? await readPeerPositionSeconds(fromPeerId) : null);
   let landedPosition: number | null = null;
   if (isCastPeer(parsedTo)) {
-    // ★ 落点定格必须在**任何会改变源端状态的动作之前**,摘组也算一次这样的动作:
-    //   目标若是活跃组的成员(极端情形下它就是替该组出声的那台设备),摘组会立刻
-    //   停掉它对源组的渲染,之后再读源端进度只能读到 0 —— 落点就这样丢了,目标端
-    //   从 0 起播而调用方拿到 position=null。实测(2026-10-24,两台 AP2 接收端真机):
-    //   「组 → 组内最后一台成员」流转响应 position=null;把定格提到摘组之前即恢复。
-    //   非定格类目标(sendspin/dlna)用先算好的 srcPosEarly,不额外多读一次。
-    const frozenPos = freezesPositionBeforeCast(parsedTo.kind)
-      ? (askPosition ?? await readPeerPositionSeconds(fromPeerId))
-      : srcPosEarly;
     // 流转目标是被托管成员 → 先脱离活跃组(MA ensure_player_ungrouped)。
     await detachFromActiveGroups(parsedTo);
     // ★ sendspin → sendspin:源端那条流在服务端是**现成解码好**的(泵 + PCM 窗口),
@@ -354,15 +334,15 @@ app.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
     //   武装必须在起播**之前**:起播那一步的 playCore 会消费它。
     const borrow = await tryArmSendspinBorrow(fromPeerId, toPeerId, askPosition);
     let startedIdx: number | null = null;
-    // ★ AirPlay / group / 同设备 DLNA 目标:起点必须在**这一次** cast 里落位(playMedia 的 startMs),
+    // ★ AirPlay / 同设备 DLNA 目标:起点必须在**这一次** cast 里落位(playMedia 的 startMs),
     //   不能再走「先起播、再 seek」—— 对 AirPlay 是同一设备上的第二次完整建会话,
     //   HiVi/Linkplay 这类单会话设备会在第二次 RECORD 上永久等待(2026-10-21 真机);
-    //   对同设备 DLNA 则是源端已被互斥停掉、晚读数恒为 0。
-    //   **group 也必须定格**(2026-10-24 全量矩阵实测):组起播要建 pump + 并行成员桥接,
-    //   4~20s,晚读数会把这几十秒算进落点(源 47.52s → 目标落到 52.43s,超前 4.9s),
-    //   并且晚读数分支还要补一次 seek —— 对组等于重建一次时间线,直接把流转拖到超时。
-    //   sendspin 借流自带落点。
-    const inCastPos = borrow.armed ? null : frozenPos;
+    //   对同设备 DLNA 则是源端已被互斥停掉、晚读数恒为 0。sendspin 借流自带落点。
+    const inCastPos = !borrow.armed
+      ? (parsedTo.kind === "airplay"
+          ? (askPosition ?? await readPeerPositionSeconds(fromPeerId))
+          : srcPosEarly)
+      : null;
     try {
       startedIdx = await getQueueManager().playFrom(
         parsedTo.id, items, start, getDlnaBaseUrl(c), undefined,
@@ -380,13 +360,8 @@ app.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
     if (handedOver) {
       landedPosition = borrow.positionSeconds ?? null;
     } else if (inCastPos !== null && inCastPos > 0) {
-      // ★ 起播即落位(AirPlay / 同设备 DLNA):**不再补 seek**,避免第二次建会话。
-      //   但只有「起点真的编进去了」才算落位 —— 起播时若跳过不可播曲目,playCurrent
-      //   会丢弃 startMs(起点只属于原本那一首)。此时如实回 null,**也不要补 seek**:
-      //   目标端现在播的是另一首,把旧起点塞进去等于让它跳到不该去的位置。
-      landedPosition = getQueueController().castLandingOf(parsedTo.id)?.applied
-        ? inCastPos
-        : null;
+      // 起播即落位(AirPlay / 同设备 DLNA):**不再补 seek**,避免第二次建会话。
+      landedPosition = inCastPos;
     } else {
       // 晚读数优先(跨设备时更贴近目标端真正出声的时刻);同设备场景源端已被互斥
       // 停掉、晚读数恒为 0 → 用起播前的定格值兜底。
@@ -667,12 +642,6 @@ app.post("/v1/peers/:peerId/play", async (c) => {
   }
   if (parsed.kind === "airplay") {
     try {
-      // 与 dlna / sendspin 分支同口径:成员被显式指派播放 → 先脱离活跃组再独立播
-      // (MA ensure_player_ungrouped)。此前 airplay 分支漏了这一步:组成员正在被
-      // 组桥接驱动时,单点 play 会落到该成员自己的 ctrl 上,和桥接抢同一台设备,
-      // 表现为「点了播放没反应」或与组内容互相打断。2026-10-23 起 DLNA 已禁止入组,
-      // airplay 反而是最常见的成员 kind,这条漏得更明显。
-      await detachFromActiveGroups(parsed);
       getQueueController().resumePlayback(parsed.id);
       await getQueueController().transport(parsed.id, "play");
       return c.json({ success: true });
@@ -956,16 +925,13 @@ app.post("/v1/peers/:peerId/mute", async (c) => {
   if (parsed.kind === "group") {
     // 组没有自己的渲染器,静音要逐台成员下发。个别成员不支持静音时不应连累
     // 其余设备,所以全部并发执行后再汇总——只有全员失败才算失败。
-    // 成员按 kind 分流:sendspin 走组/连接双置位,airplay 走 RAOP 的 SET_PARAMETER volume。
-    // (DLNA 已禁止入组,这里不再有"设备级 RenderingControl"这一路;解析不出 kind 的
-    //  脏数据按失败计入,不会静默当成 DLNA 去下发。)
+    // 成员按 kind 分流:dlna 走 RenderingControl,sendspin 走组/连接双置位。
     const members = gm.get(parsed.id)?.memberIds || [];
     if (members.length === 0) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.group.empty"), 400);
     const results = await Promise.allSettled(members.map(m => {
       const s = splitMemberId(m);
-      if (!s) return Promise.reject(new Error(`成员 ${m} 格式非法`));
-      if (s.kind === "sendspin") return setSendspinMemberMuted(s.id, muted);
-      return setAirPlayMuted(s.id, muted);
+      if (s?.kind === "sendspin") return setSendspinMemberMuted(s.id, muted);
+      return setDeviceMute(s?.id ?? m, muted);
     }));
     const ok = results.filter(r => r.status === "fulfilled").length;
     if (ok === 0) {

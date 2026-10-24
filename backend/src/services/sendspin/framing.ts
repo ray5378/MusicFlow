@@ -37,16 +37,40 @@ export const unpackJsonBody = (b: Uint8Array): JsonMessage =>
 // codec_header(见 protocol.cpp `process_player_stream_object`)。设备端调度完全依赖
 // `server/time` 时钟同步来把 `timestamp` 换算到本地时钟 —— 提前量是设备自己的事,
 // 服务端只需保证「timestamp 是真实的期望播放时刻」。
-export const packAudioChunk = (timestampUs: bigint, data: Uint8Array): Uint8Array => {
-  const head = Buffer.allocUnsafe(9);
+/** 音频二进制帧头是否携带 `send_ahead` 字段(4B,BE)。
+ *
+ *  = **线上协议口径开关**,不是本项目自选:
+ *    - `13B`(默认) = 1B type + 8B 微秒时间戳 + **4B send_ahead**。
+ *      当前 spec 口径:aiosendspin 10.x 的 `add_audio_chunk_listener` 回调第 4 参就是
+ *      `send_ahead`,其文档原文 "Microseconds from the server's transmission of the
+ *      chunk to server_timestamp_us";ESPHome 2026.10 起的 sendspin-cpp 同样按 13B 切。
+ *      **发 9B 会被这类客户端多吃掉 4 字节** → FLAC 帧头 `ff f8 ca 88` 的前 4 字节被吞
+ *      → 每包 `Error decoding FLAC frame: -2` → 状态 PLAYING、进度推进、**完全无声**。
+ *    - `9B` = 旧固件(sendspin-cpp 0.7.2 及更早)口径,只有 type + 时间戳。
+ *      用 `SENDSPIN_AUDIO_HEADER=9` 环境变量切回。
+ *
+ *  ⚠️ 历史注记:2026-09-17 真机上「多塞 4B 导致无声」成立,是因为**当时代码与固件
+ *     都是 9B 口径**,多出来的 4B 被当成 FLAC 数据;如今固件已升到 13B 口径,
+ *     方向反转。判据不是「谁多谁少」,而是**两端字节数必须一致**:
+ *     客户端剥掉多少,B 起才是编码音频数据。 */
+export const AUDIO_HEADER_SEND_AHEAD = (process.env.SENDSPIN_AUDIO_HEADER ?? "13").trim() !== "9";
+
+export const packAudioChunk = (timestampUs: bigint, data: Uint8Array, sendAheadUs = 0): Uint8Array => {
+  const extra = AUDIO_HEADER_SEND_AHEAD ? 4 : 0;
+  const head = Buffer.allocUnsafe(9 + extra);
   head[0] = 0x04;
   head.writeBigInt64BE(timestampUs, 1);
+  if (extra === 4) {
+    // 饱和值语义同 MA:0 与 0xFFFFFFFF 表示「无意义」,此处按实际提前量写,钳到 u32。
+    const v = Math.max(0, Math.min(0xffffffff, Math.round(sendAheadUs)));
+    head.writeUInt32BE(v >>> 0, 9);
+  }
   return new Uint8Array(Buffer.concat([head, Buffer.from(data)]));
 };
 
 export const parseAudioChunk = (b: Uint8Array): { timestampUs: bigint; data: Uint8Array } => {
   const ts = Buffer.from(b.subarray(1, 9)).readBigInt64BE(0);
-  return { timestampUs: ts, data: b.subarray(9) };
+  return { timestampUs: ts, data: b.subarray(AUDIO_HEADER_SEND_AHEAD ? 13 : 9) };
 };
 
 export function fragment(data: Uint8Array, origType: number): Uint8Array[] {

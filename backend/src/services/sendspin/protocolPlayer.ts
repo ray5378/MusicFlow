@@ -83,32 +83,16 @@ async function onlineSendspinMembers(userGroupId: string): Promise<string[]> {
   });
 }
 
-/** 用户组 ProtocolPlayer 的扩展签名:playMedia 额外接收「AirPlay 桥接目标」。
- *  组 player(group/protocolPlayer)需要在起播时把同一 pump 的另一路出口(airplay
- *  sink)一起带上,标准 ProtocolPlayer 接口没有这个参数,故在此显式拓宽。 */
-export interface SendspinGroupPlayer extends ProtocolPlayer {
-  playMedia(
-    item: QueueItem,
-    baseUrl: string,
-    startMs?: number,
-    bridge?: { devices: string[]; host: string; port: number; minSendAheadUs?: number },
-  ): Promise<{ mediaUri: string }>;
-}
-
-/** 用户组抽象成一个 ProtocolPlayer(组内全部成员共享一条 pump 时间线:
- *  sendspin 成员是原生客户端,airplay 成员经桥接 sink 挂同一 pump)。 */
-export function createSendspinGroupPlayer(userGroupId: string): SendspinGroupPlayer {
+/** 用户组抽象成一个 ProtocolPlayer(仅覆盖组内 sendspin 成员;dlna 成员由组 player 另行扇出)。 */
+export function createSendspinGroupPlayer(userGroupId: string): ProtocolPlayer {
   const playerId = `group:${userGroupId}`;
   const groupName = sendspinGroupName(userGroupId);
   return {
     playerId,
-    async playMedia(item: QueueItem, baseUrl: string, startMs = 0, bridge?: { devices: string[]; host: string; port: number; minSendAheadUs?: number }) {
+    async playMedia(item: QueueItem, baseUrl: string, startMs = 0) {
       const members = await onlineSendspinMembers(userGroupId);
-      const bridged = !!bridge && bridge.devices.length > 0;
-      // 零 sendspin 成员也允许起播:纯 airplay 组由桥接 sink 消费同一 pump 的帧,
-      // pushFrame 以 sink 实收样本数推进时间线(见 server.ts pushFrame)。
-      if (members.length === 0 && !bridged) {
-        throw new Error(`组 ${userGroupId} 无在线成员,无法播放`);
+      if (members.length === 0) {
+        throw new Error(`组 ${userGroupId} 无在线 sendspin 成员,无法播放`);
       }
       // castSession/token 是主进程状态(track_changed 检测用),必须本侧生成。
       const streamUrl = createCastSession(item.songId, playerId, baseUrl).streamUrl;
@@ -116,7 +100,7 @@ export function createSendspinGroupPlayer(userGroupId: string): SendspinGroupPla
       // ug 组懒创建缺省 volume=100:起播前先灌 GroupManager 持久值(空组/重启后一致)。
       try { await sendspinGroupTransport(groupName, "volume", getGroupManager().getVolume(userGroupId)); }
       catch { /* 回填失败不挡起播,status 仍回持久值 */ }
-      await sendspinGroupPlay(groupName, members, item, startMs, bridge);
+      await sendspinGroupPlay(groupName, members, item, startMs);
       schedulePlayingReport(playerId, item.duration ?? 0);
       return { mediaUri: streamUrl };
     },

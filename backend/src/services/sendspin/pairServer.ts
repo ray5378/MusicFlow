@@ -89,12 +89,12 @@ const be32 = (n: number): Uint8Array => {
   return b;
 };
 
-function buildSid(h: Uint8Array, pairingIndex: number): Uint8Array {
-  // 注意与 spec 文本的差异:spec 写 sid = label||h||pairing_index||round,
-  // 但线上实现(aiosendspin 9.x,含真实设备) sid = label||h||pairing_index(无 round)。
-  // 互操作优先,跟线上实现走;round 仅用于重试计数,不进 sid。
+function buildSid(h: Uint8Array, pairingIndex: number, round: number): Uint8Array {
+  // 2026-10-24 实机互操作修正:ESPHome 2026.10 固件(sendspin-cpp 0.9.3)按新 spec
+  // 实现 sid = label||h||pairing_index||round(均大端 uint32);旧口径(无 round)
+  // 与其 CPace 校验必失败(pairing_code_mismatch)。旧口径仅适配 aiosendspin 9.x 时代。
   const l = new TextEncoder().encode(PAKE_SID_LABEL);
-  return new Uint8Array([...l, ...h, ...be32(pairingIndex)]);
+  return new Uint8Array([...l, ...h, ...be32(pairingIndex), ...be32(round)]);
 }
 
 function suiteKey(suite: string): "chacha" | "aesgcm" {
@@ -348,7 +348,7 @@ export class PairingCoordinator {
   private pakeSid(conn: SendspinConnection, a: Attempt): Uint8Array {
     const h = conn.noise?.handshakeHash;
     if (!h || h.length !== 32) throw new Error("no handshake hash");
-    return buildSid(h, a.pairingIndex);
+    return buildSid(h, a.pairingIndex, a.round);
   }
 
   private async runStaticRound(a: Attempt): Promise<void> {

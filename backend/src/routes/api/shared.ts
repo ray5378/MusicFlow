@@ -590,21 +590,15 @@ export async function setSendspinMemberMuted(clientId: string, muted: boolean): 
 export const gm = getGroupManager();
 
 /** 成员变更后对齐(新增→加入当前播放,摘除→断开):PUT 与 POST 增量口共用,语义单源。
- *
- *  ★ 2026-10-23:组成员只有 sendspin / airplay 两类(DLNA 禁止入组),两者都挂在
- *  **同一条 pump** 上,所以"加入"不是逐设备 cast,而是按 kind 各自接入同一条时间线:
+ *  - dlna 新增:现有 rejoinMembers(cast 当前曲＋seek 到 leader 进度);
  *  - sendspin 新增:直播沿加入(无需历史,见 sendspinGroupJoin);
- *  - airplay 新增:rejoinMembers 重建整组时间线(桥接设备列表写在 HELLO 帧里,
- *    运行中新增设备收不到 PCM,必须重建;见 QueueController.rejoinMembers);
  *  - sendspin 摘除:stream/end 后移出(不断其余成员);
- *  - airplay 摘除:单独停该设备的 RAOP 会话(stopAirPlayMemberBridge —— 组级拆除
- *    只遍历当前成员,摘掉的设备已不在列表里,漏掉会让会话一直挂着)。
+ *  - dlna 摘除:沿用旧行为(不主动停成员设备)。
  *  全部 best-effort:单个成员失败记日志,不影响其余成员与接口成功。 */
 // 显式操控成员 → 自动脱离活跃组(MA ensure_player_ungrouped 语义):
 // 成员在组播期间不独立受理播放指令;用户把播放/切歌/流转明确指向成员本身时,
 // 先把它从所属活跃组摘出(写库 + 断流对齐),再走各 kind 的独立播放分支。
-// **适用 kind 见 detachFromActiveGroups 函数体:airplay / sendspin**(组成员只有这两类,
-// DLNA 自 2026-10-23 起禁止入组);group/local 目标本就不从属于任何组。
+// 仅设备型成员(dlna / sendspin)适用;group/local 目标本就不从属于任何组。
 /** sendspin → sendspin 的「借流」武装(泵移交,见 services/sendspin/playerCore.ts)。
  *
  *  两端都是 sendspin 系 peer 时才尝试。armed=true 表示紧随其后的那次起播会把源端
@@ -654,12 +648,11 @@ export async function borrowLandingConfirmed(toPeerId: string, expectSeconds: nu
 }
 
 export async function detachFromActiveGroups(parsed: { kind: string; id: string }): Promise<void> {
-  // 组成员只有 sendspin / airplay;group/local 目标本就不从属于任何组。
-  if (parsed.kind !== "airplay" && parsed.kind !== "sendspin") return;
-  const bare = splitMemberId(`${parsed.kind}:${parsed.id}`)?.id ?? parsed.id;
+  if (parsed.kind !== "dlna" && parsed.kind !== "sendspin") return;
+  const bare = splitMemberId(parsed.kind === "sendspin" ? `sendspin:${parsed.id}` : parsed.id)?.id ?? parsed.id;
   const gid = getQueueController().activeGroupOfDevice(bare);
   if (!gid) return;
-  // memberIds 存的是命名空间写法(sendspin:<id> / airplay:<id>),按裸 id 找回原样再删。
+  // memberIds 存的是组内原样写法(sendspin:<id> / 裸 id ≡ dlna),按裸 id 找回原样再删。
   const memberKey = (gm.get(gid)?.memberIds ?? []).find(m => (splitMemberId(m)?.id ?? m) === bare);
   if (!memberKey) return;
   try {
@@ -672,27 +665,17 @@ export async function detachFromActiveGroups(parsed: { kind: string; id: string 
 }
 
 export async function alignGroupMembers(groupId: string, added: string[], removed: string[]): Promise<void> {
-  // 非法成员(DLNA / 裸 id / group:)在 GroupManager 校验阶段就已被拒绝,这里再兜一次:
-  // 解析不出 kind 的直接跳过,不参与任何对齐动作。
-  const kindOf = (m: string) => splitMemberId(m)?.kind;
+  const kindOf = (m: string) => splitMemberId(m)?.kind ?? "dlna";
   const bareOf = (m: string) => splitMemberId(m)?.id ?? m;
-  const apAdded = added.filter(m => kindOf(m) === "airplay").map(bareOf);
-  const apRemoved = removed.filter(m => kindOf(m) === "airplay").map(bareOf);
+  const dlnaAdded = added.filter(m => kindOf(m) === "dlna").map(bareOf);
   const spinAdded = added.filter(m => kindOf(m) === "sendspin").map(bareOf);
   const spinRemoved = removed.filter(m => kindOf(m) === "sendspin").map(bareOf);
-  if (apAdded.length > 0) {
-    // airplay 成员加入播放中的组:重建整组时间线(见 QueueController.rejoinMembers)。
-    getQueueController().rejoinMembers(groupId, apAdded).catch((e: any) => {
+  if (dlnaAdded.length > 0) {
+    // 成员加入播放中的组:把当前曲 cast 给新成员并 seek 到 leader 进度
+    // (仅加入时一次,不做周期漂移校正——纯 MA 忠实策略)。
+    getQueueController().rejoinMembers(groupId, dlnaAdded).catch((e: any) => {
       log.warn(`[group] ${groupId}: 成员加入对齐失败: ${e?.message || e}`);
     });
-  }
-  if (apRemoved.length > 0) {
-    try {
-      const { stopAirPlayMemberBridge } = await import("../../services/group/airplayBridge.js");
-      for (const deviceId of apRemoved) await stopAirPlayMemberBridge(deviceId, "成员摘除");
-    } catch (e: any) {
-      log.warn(`[group] ${groupId}: airplay 成员摘除收口失败: ${e?.message || e}`);
-    }
   }
   const sg = sendspinGroupName(groupId);
   for (const cid of spinAdded) {

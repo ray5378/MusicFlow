@@ -1204,7 +1204,7 @@ function openRenameSendspinDevice(dev: any) {
 async function approveSendspin(dev: any, approved: boolean): Promise<void> {
   try {
     await api.post("/rest/api/v1/sendspin/approve", { clientId: dev.clientId, approved });
-    ElMessage.success(t("settings.saved"));
+    ElMessage.success(approved ? t("settings.sendspin.approvedToast") : t("settings.sendspin.unapprovedToast"));
     await loadSendspinClients();
   } catch (e: any) {
     ElMessage.error(apiErrorText(e, t("common.operationFailed")));

@@ -25,9 +25,6 @@ const CHILD_ENTRY = resolveChildEntry(import.meta.url);
 
 export interface AirplayMirror {
   sessions: Map<string, AirplaySessionMirrorRow>;
-  /** 桥接 PCM 接收端口(airplay 子进程启动时上报,127.0.0.1)。
-   *  sendspin 子进程的 pump sink 据此把音频送进来;子进程未就绪/启动失败时缺省。 */
-  bridgePort?: number;
 }
 
 export interface AirplayHostHooks {
@@ -51,11 +48,7 @@ class AirplaySupervisor extends RendererHostSupervisor<
       childEntry: CHILD_ENTRY,
       childEnv: { MUSICFLOW_AIRPLAY_CHILD: "1" },
       initialMirror: { sessions: new Map() },
-      describeMirror: (m) => `sessions=${m.sessions.size}${m.bridgePort ? ` bridge=${m.bridgePort}` : ""}`,
-      // mainReady 载荷:pid + 桥接端口。端口每次重启可能变(内核分配),必须每次覆盖。
-      applyReady: (m, ready) => {
-        m.bridgePort = ready.bridgePort;
-      },
+      describeMirror: (m) => `sessions=${m.sessions.size}`,
       // mainReady 载荷只有 pid,无需落镜。
       applyState: (m, s) => {
         m.sessions = new Map(s.sessions.map((r) => [r.deviceId, r]));

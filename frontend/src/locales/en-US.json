@@ -102,7 +102,8 @@
     },
     "proxyPlaceholder": "http://ip:port or socks5://ip:port",
     "testProxy": "Test",
-    "saved": "Proxy settings saved",
+    "saved": "Saved",
+    "proxySaved": "Proxy settings saved",
     "saveFailed": "Failed to save",
     "proxyOk": "Proxy is working",
     "proxyBad": "Proxy is not working",
@@ -286,7 +287,9 @@
       "dynamicCode": "Dynamic code (6-digit)",
       "codePh": "Enter pairing code",
       "tokenPh": "Paste SP:0… token",
-      "codeSent": "Submitted, waiting for the device"
+      "codeSent": "Submitted, waiting for the device",
+      "approvedToast": "Device approved",
+      "unapprovedToast": "Approval revoked"
     }
   },
   "layout": {

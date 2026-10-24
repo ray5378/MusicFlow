@@ -13,7 +13,6 @@
 import WebSocket, { WebSocketServer } from "ws";
 import { randomBytes } from "node:crypto";
 import { loadOrCreateIdentity, type Identity } from "./identity.js";
-import { pumpSinks } from "./sink.js";
 import { getDeviceVolumeState, DEFAULT_SENDSPIN_VOLUME } from "./deviceState.js";
 import { asInitiator, handshakePayload1, type NoiseSession, type NoiseSuite } from "./handshake.js";
 import { packJsonBody, unpackJsonBody, packAudioChunk, type JsonMessage } from "./framing.js";
@@ -403,7 +402,7 @@ export class SendspinServer {
   }
 
   broadcastGroupState(g: SendspinGroup): void {
-    const sendAhead = computeCommonSendAhead([...g.members].map((c) => sendAheadInputOf(c)), g.sendAheadFloorUs);
+    const sendAhead = computeCommonSendAhead([...g.members].map((c) => sendAheadInputOf(c)));
     const stamp = nowUs();
     for (const c of g.members) {
       c.sendJson("server/state", {
@@ -592,11 +591,6 @@ export class SendspinGroup {
   /** 静态输出延迟(ms)。对齐 MA `CONF_SENDSPIN_STATIC_DELAY`,range=(0,5000)。
    *  只写给宣告了 `set_static_delay` 的设备,未宣告一律不发。 */
   staticDelayMs = 0;
-  /** send_ahead 下限(微秒),由 AirPlay 桥接起播时按设备 RAOP 延迟注入。
-   *  桥接设备不是 WS 成员,却同样要吃 1s 的 RAOP 缓冲 —— pump 若不提前这么多,
-   *  桥接侧「该送的内容」就会超前于已生产内容,导致永久欠载静音。
-   *  0 = 无下限(纯 sendspin 组,行为与历史完全一致)。 */
-  sendAheadFloorUs = 0;
   positionMs = 0;
   timelineBaseUs = 0n;
   /** 当前播曲(由 ProtocolPlayer.playMedia 写入,供 pollState/自动切歌判定)。 */
@@ -819,7 +813,7 @@ export class SendspinGroup {
    *  必须用同一个量(MA `push_stream.py:1313`),否则 `delta=(ts-send_ahead)-now`
    *  不为 0,设备会立刻判「已过期」→ underrun。 */
   commonSendAheadUs(): number {
-    return computeCommonSendAhead([...this.members].map((m) => sendAheadInputOf(m)), this.sendAheadFloorUs);
+    return computeCommonSendAhead([...this.members].map((m) => sendAheadInputOf(m)));
   }
 
   // ---- 缓冲档位 × 设备容量匹配(见 PREFILL_BUFFER_MAX_MS 注释与
@@ -1132,12 +1126,6 @@ export class SendspinGroup {
    *  当前峰值为基线登记,所以成员增删(含播中加入)都不会让时间线倒退或停滞。
    */
   async pushFrame(tsUs: bigint, pcm: Float32Array): Promise<number> {
-    // ---- 旁路 sink:与 sendspin 客户端吃**同一帧、同一时间戳**(AirPlay 桥接)----
-    // 放在编码之前:旁路出口(airplay)不依赖编码器,且必须在编码 await 之前拿到
-    // 本帧的原始 PCM(pump 的帧缓冲会被下一轮复用)。
-    // sinkSamples 用于零 sendspin 成员(纯 AirPlay 组)的时间线推进:此时没有任何
-    // 编码组产出,若只认编码器交付量,pump 会误判「编码器失效」而降级/提前切歌。
-    const sinkSamples = pumpSinks.dispatch(this.name, tsUs, pcm);
     // ---- 分组:同 (codec, gain) 的成员共享一次编码 ----
     const groups = new Map<
       string,
@@ -1223,9 +1211,7 @@ export class SendspinGroup {
       this.pushedBytes += meterBytes;
     }
     this.pruneRecent();
-    // 纯 AirPlay 组(无 sendspin 成员)以 sink 实收样本数推进时间线,
-    // 否则 pushLoop 会走「持续零产出」降级分支(见 streamEngine pushLoop)。
-    return Math.max(peak - before, sinkSamples);
+    return peak - before;
   }
 
   /** 取(必要时创建)某编码组的 late-join 缓存。 */
@@ -1922,6 +1908,29 @@ export class SendspinConnection {
     // 设备输出链路固有延迟:真机报在 player 层 `static_delay_ms`(缺省 0)。
     const sd = num(p.static_delay_ms);
     if (sd !== null && od === null) this.outputDelayMs = sd;
+    // 2026.10 固件(sendspin-cpp 0.9.3, spec 1.0):supported_commands 从 hello 的
+    // player@v1_support 挪到 client/state 的 player 对象(hello 只剩
+    // supported_formats/buffer_capacity)。不合并 ⇒ supportedCommands 恒空 ⇒
+    // sendPlayerCommand 恒拒发,音量/静音永远下不去(API 仍成功,表象=前端拖了没反应)。
+    if (Array.isArray(p.supported_commands)) {
+      const before = this.supportedCommands.length;
+      for (const c of p.supported_commands) {
+        if (typeof c === "string" && c && !this.supportedCommands.includes(c))
+          this.supportedCommands.push(c);
+      }
+      if (this.supportedCommands.length > before && this.supportedCommands.includes("volume")) {
+        // 首次学到音量命令能力:立即补发权威音量(重连后恢复存档值,spec MUST NOT
+        // assume 重连后音量不变)。
+        try {
+          if (typeof this.clientId === "string") {
+            const g = this.server.group(this.clientId);
+            if (g) this.server.syncVolume(g);
+          }
+        } catch {
+          /* 组可能尚不存在,忽略 */
+        }
+      }
+    }
     // ---- spec 三字段:根层优先,player 层回落(设备可能只发其中一部分) ----
     const availVal = root.available ?? p.available;
     if (typeof availVal === "boolean") {

@@ -223,7 +223,7 @@ async function onProxyToggle(val: string | number | boolean) {
     // 以服务端返回为准回写（enabled 且 url 非法时后端 400，不会走到这里）。
     if (res.data && typeof res.data.enabled === "boolean") proxyEnabled.value = res.data.enabled;
     if (typeof res.data?.url === "string") proxyUrl.value = res.data.url;
-    ElMessage.success(t("settings.saved"));
+    ElMessage.success(t("settings.proxySaved"));
   } catch (e: any) {
     proxyEnabled.value = prev; // 失败回滚，避免界面与后端状态不一致
     ElMessage.error(apiErrorText(e, t("settings.saveFailed")));
@@ -236,7 +236,7 @@ async function saveProxy() {
   proxySaving.value = true;
   try {
     await api.put("/rest/api/v1/proxy", { enabled: proxyEnabled.value, url: proxyUrl.value });
-    ElMessage.success(t("settings.saved"));
+    ElMessage.success(t("settings.proxySaved"));
   } catch (e: any) {
     ElMessage.error(apiErrorText(e, t("settings.saveFailed")));
   } finally {

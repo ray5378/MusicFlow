@@ -74,19 +74,3 @@ function stripKindPrefix(v: string): string {
   if (v.startsWith("airplay:")) return v.slice(8);
   return v;
 }
-
-/** 流转/起播时,起点是否必须在**这一次 cast 之前定格**(而不是起播后再读源端 + 补 seek)。
- *
- *  两种目标必须定格:
- *   - `airplay`:起播即落位。AirPlay 的 seek 是**重建整个会话**,单会话设备(HiVi /
- *     Linkplay)会在第二次 RECORD 上永久等待 —— 绝不能「先起播、再 seek」。
- *   - `group`:组起播要建 pump 再逐个成员握手桥接,并行后仍要 4~20s。晚读数会把这几十秒
- *     一起算进落点,而且晚读数分支还得再补一次 seek(对组等于重建一次时间线)。
- *     2026-10-24 全量流转矩阵实测:AP1 → group 源端 47.52s,目标落到 **52.43s**(超前
- *     4.9s);同一批里另一格 AP2 → group 因额外 seek 直接拖到超出观察窗口未起播。
- *
- *  dlna(跨设备)/ sendspin / local 保持旧口径:它们起播在 1~3s 内完成,晚读数反而更
- *  贴近目标端真正出声的时刻。 */
-export function freezesPositionBeforeCast(kind: string): boolean {
-  return kind === "airplay" || kind === "group";
-}

@@ -73,12 +73,8 @@ function positiveOr(v: number | undefined, fallback: number): number {
  *
  *  ⚠️ 空成员必须返回**缺省值**而非 0:0 表示「本块应立即输出」,正是 underrun 的成因。
  *  组临时为空(成员正在重连)时若下发 0,重连后的首块会立刻被判「目标时刻已过」。 */
-// floorUs = 非 sendspin 成员的下游延迟下限(AirPlay 桥接)。桥接设备不在 members 里
-// (它们不是 WS 客户端),但 pump 交付的 PCM 同样要经 RAOP 的 1s 设备缓冲才被听到:
-// 若 pump 只按 sendspin 成员的 800ms 提前量推帧,桥接侧「此刻该送出的内容」为
-// now + RAOP延迟(1000ms),会超前于已生产内容 200ms => BridgeRing 每包欠载 => 全程静音。
-export function computeCommonSendAhead(members: SendAheadInput[], floorUs = 0): number {
-  if (members.length === 0) return Math.max(DEFAULT_MIN_BUFFER_MS * 1000, floorUs);
+export function computeCommonSendAhead(members: SendAheadInput[]): number {
+  if (members.length === 0) return DEFAULT_MIN_BUFFER_MS * 1000;
   let maxUs = 0;
   for (const m of members) {
     const minBuffer = positiveOr(m.minBufferMs, DEFAULT_MIN_BUFFER_MS);
@@ -89,7 +85,7 @@ export function computeCommonSendAhead(members: SendAheadInput[], floorUs = 0): 
     const us = (lead + outDelay) * 1000;
     if (us > maxUs) maxUs = us;
   }
-  return Math.max(maxUs, floorUs);
+  return maxUs;
 }
 
 export type GroupProps = {

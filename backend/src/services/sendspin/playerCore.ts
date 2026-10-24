@@ -18,8 +18,6 @@ import { saveDeviceVolumeState } from "./deviceState.js";
 import { DEFAULT_SENDSPIN_VOLUME } from "./deviceState.js";
 import { createLogger } from "../../utils/logger.js";
 import { markPauseStopIssued } from "../player/pauseStopSettle.js";
-import { pumpSinks } from "./sink.js";
-import { AirPlayBridgeSink } from "./bridgeClient.js";
 
 const log = createLogger("Sendspin");
 
@@ -363,39 +361,12 @@ export function playGroupCore(
   onPlayFailed: PlayFailedSink = () => {},
   /** MA `play_index(seek_position=N)` 等价通道(用户组重建流起点)。 */
   seekPositionMs?: number,
-  /** AirPlay 桥接目标(组内含 airplay 成员时由主进程编排):pump 的 PCM 会旁路
-   *  送进 airplay 子进程,与 sendspin 成员共享同一条时间线。 */
-  bridge?: { devices: string[]; host: string; port: number; minSendAheadUs?: number },
 ): void {
   clearPauseState(srv, groupName);
   if (!srv) return;
   const g = srv.group(groupName);
-  // ★ 旁路 sink 必须先于 pump.play 注册:pump 起播即开始每 25ms 出帧,晚注册会丢开头。
-  //   先清掉上一首残留(组重播/切歌时旧 sink 已失效),再按本次目标重建。
-  pumpSinks.stopAll(groupName);
-  // ★ 桥接设备的 RAOP 延迟必须抬进 send_ahead(2026-10-23 实测):桥接设备不是 WS
-  //   成员,pump 默认只按 sendspin 成员协商(800ms)提前推帧;而 RAOP 设备缓冲是 1s,
-  //   桥接侧「此刻该送的内容」= now + 1000ms 会超前于已生产内容 200ms ⇒ 每包欠载
-  //   ⇒ 全程静音(两台 AP 实测 maxAbs=0)。抬到设备延迟之上,两侧时间线才同时成立。
-  g.sendAheadFloorUs = bridge && bridge.devices.length > 0 ? (bridge.minSendAheadUs ?? 0) : 0;
-  if (bridge && bridge.devices.length > 0) {
-    pumpSinks.register(groupName, new AirPlayBridgeSink({
-      group: groupName,
-      devices: bridge.devices,
-      host: bridge.host,
-      port: bridge.port,
-      onLog: (level, msg) => {
-        if (level === "error") log.error(msg);
-        else if (level === "warn") log.warn(msg);
-        else log.info(msg);
-      },
-    }));
-    log.info(`[Sendspin][bridge] ${groupName} 已挂 AirPlay 桥接 sink devices=${bridge.devices.join(",")} <- 127.0.0.1:${bridge.port}`);
-  }
   // ★ 借流(见 playCore 同名段落):用户组作目标时同样适用 —— 泵照搬,成员原样。
-  //   但**有桥接时禁用**:借流复用另一组已在跑的时间线,无法把桥接设备的 RAOP
-  //   延迟抬进 send_ahead ⇒ 桥接侧必然欠载(见上方 sendAheadFloorUs)。
-  const arm = bridge && bridge.devices.length > 0 ? null : borrowFor(g, item);
+  const arm = borrowFor(g, item);
   if (arm) {
     const conns = memberIds
       .map((id) => srv.clients.get(id))
@@ -443,11 +414,6 @@ export function stopGroupCore(srv: SendspinServer | null, groupName: string): vo
   if (!srv) return;
   const g = srv.group(groupName);
   pumpFor(srv, g).stop();
-  // 旁路 sink 一并收掉(关闭到 airplay 子进程的连接;airplay 会话由主进程另行停止)。
-  pumpSinks.stopAll(groupName);
-  // 桥接下限随会话一起清掉:否则下次同一组播纯 sendspin 时 send_ahead 仍被抬高,
-  // 白白多 200ms 起播延迟。
-  g.sendAheadFloorUs = 0;
   g.positionMs = 0;
   g.current = null;
   g.frozenDurationMs = 0;
@@ -704,9 +670,6 @@ export function seekCore(srv: SendspinServer | null, clientId: string, seconds: 
     //   暂停态保持不变(与 DLNA/AirPlay 一致)。故在每个返回点前恢复暂停。
     const wasPaused = !!g.paused;
     pump.seek(seconds, { clamp: !busy && !!cur });
-    // 旁路 sink(airplay 桥接)同步重置:环形缓冲清空,等新锚点的帧到达后重新对齐。
-    // 放在 pump.seek 之后:seek 会重锚时间线,先重置会让残留帧按旧锚点被消费。
-    pumpSinks.reset(clientId, clampedMs);
     if (!cur) {
       // 无在播曲(空闲):位置已记忆,下一次起播消费 —— MA resume_with_position 语义。
       if (wasPaused) pauseCore(srv, clientId);

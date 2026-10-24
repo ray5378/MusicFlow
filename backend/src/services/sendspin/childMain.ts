@@ -167,11 +167,7 @@ export class SendspinChildController extends ChildRpcHost<SendspinChildToParent,
         const members = Array.isArray(p.members) ? p.members.map(String) : [];
         playGroupCore(srv, String(p.group), members, p.item as QueueItem, (cid, songId, message) => {
           this.emit({ t: "playFailed", clientId: cid, songId, message });
-        }, p.seekPositionMs as number | undefined,
-        // ⚠️ 第 7 参 bridge 必须透传(2026-10-23 实锤):漏掉它 = pump 从不注册 AirPlay
-        //  sink ⇒ airplay 子进程的 BridgeRing 永远收不到 PCM ⇒ RAOP 仍按 8ms 节拍发
-        //  静音包(对账文件一直涨、RMS -91dB,看起来"在播"其实全程无声)。
-        p.bridge as { devices: string[]; host: string; port: number; minSendAheadUs?: number } | undefined);
+        }, p.seekPositionMs as number | undefined);
         this.requestSnapshot(true);
         return null;
       }

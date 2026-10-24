@@ -10,8 +10,7 @@ import { albums, deviceQueues, groupQueues, songs } from "../../db/schema.js";
 import { PlayMode, PlayerState, PlaybackState, QueueItem, QueueSnapshot } from "./types.js";
 import { UniversalPlayer } from "./UniversalPlayer.js";
 import { getPlayerController } from "./index.js";
-import { createDlnaProtocolPlayer, getEffectiveBaseUrl, clearCurrentMedia } from "../dlna/control.js";
-import { getAirPlayDevice } from "../airplay/discovery.js";
+import { createDlnaProtocolPlayer, getEffectiveBaseUrl, clearCurrentMedia, getDevice, alignDeviceToPosition } from "../dlna/control.js";
 import { createAirPlayProtocolPlayer } from "../airplay/protocolPlayer.js";
 import { createSendspinProtocolPlayer } from "../sendspin/protocolPlayer.js";
 import { getCachedPlayability } from "../source/online/streamFallback.js";
@@ -141,28 +140,6 @@ export class QueueController extends EventEmitter {
    *     而不是从头播(= 用户眼里的"归零");
    *  ② frozen 判定后重投的落点。 */
   private lastPos = new Map<string, number>();
-  /** 各 player **本次 cast 的起点**(毫秒;0 = 从头)。cast 失败 / stalled 重投时按它重投。
-   *
-   *  为什么必须记:重投若一律「从 0 起播」,落点就永久丢了。真机依据(2026-10-24
-   *  流转矩阵首格):transfer-from 回执落点 47.5s,目标端第一次 cast 撞上
-   *  `AP2 命令管道无读端(ENXIO)` 抛错 → stall 通道重投一次(13.4s 总耗时)→
-   *  目标端从 0 起涨,而**服务端回执仍是 47.5** ⇒ 界面/继续播/再次流转全部错位。
-   *  起点是「这次起播的意图」,与设备报的位置无关,所以不能靠 lastPos 兜。 */
-  private lastCastStartMs = new Map<string, number>();
-  /** 最近一次 cast 的「起点是否**真的**编进去了」。跳过不可播曲目时 `castStartMs`
-   *  会被丢弃(起点只属于原本那一首),此刻路由的回执必须如实说「没落位」——
-   *  否则客户端把进度条画在 45s,声音却从 0 开始。
-   *
-   *  真机依据(2026-10-24,`--seek 45` 全量矩阵):同一首歌的在线可播性复核会抖动,
-   *  跳过与否交替出现,于是同一条指令表现成「有时落位、有时归零」的随机 bug;
-   *  而两条路由(`/queue/play`、`/queue/transfer-from`)把 `askPosition` 原样回执,
-   *  让「跳过」这件事在服务端**完全不可见**。 */
-  private castLanding = new Map<string, { requestedMs: number; applied: boolean }>();
-  /** `lastPos` 里的读数是**哪一首**报的。换曲必须清 —— 否则上一首的读数会被当成
-   *  本曲的"最后位置"套进 frozen/stalled 的续播目标(例:上一首停在 200s、新曲刚起播
-   *  就卡死 → 重投到 200s)。同一首重投(stalled / recoverInPlace)必须保留:
-   *  那是本曲设备的真实读数,frozen 的"位置恢复"复查正是拿它当基线。 */
-  private lastPosSong = new Map<string, string>();
   /** 探测到「链路/子进程不可用」的 player(key=裸 id):记下当时的播放位置。
    *  期间**不接受任何决策**(不切歌、不计数、不重投),等恢复后一次性续播。
    *
@@ -256,9 +233,6 @@ export class QueueController extends EventEmitter {
       this.castFailStreak.delete(k);
       this.linkLost.delete(k);
       this.lastPos.delete(k);
-      this.lastPosSong.delete(k);
-      this.lastCastStartMs.delete(k);
-      this.castLanding.delete(k);
       this.clearSleepTimer(k);
     }
   }
@@ -440,13 +414,7 @@ export class QueueController extends EventEmitter {
   }
 
   /** 重启后恢复:对照原 QueueManager.resumeActive。设备有活跃队列时续播当前首。 */
-  /** 恢复一个"队列仍激活但播放已停"的目标(离线看门狗的成员回归恢复走这里)。
-   *
-   *  `startPositionMs`:从哪一毫秒起播。**必须由调用方给出最后已知位置** ——
-   *  群组离线看门狗记着 lastPosition(全员离线瞬间的 leader 进度),成员回归时
-   *  从那个位置续播才是"续播";缺省(不传)仍是"从头播",供启动自愈这类
-   *  没有历史位置的场景使用。 */
-  async resumeActive(deviceId: string, baseUrl: string, startPositionMs?: number): Promise<void> {
+  async resumeActive(deviceId: string, baseUrl: string): Promise<void> {
     deviceId = stripPlayerPrefix(deviceId);
     const q = this.queues.get(deviceId);
     if (!q || !q.isActive || q.currentIndex < 0) return;
@@ -454,7 +422,7 @@ export class QueueController extends EventEmitter {
     if (this.advancing.has(deviceId)) return;
     this.advancing.add(deviceId);
     try {
-      await this.playCurrent(deviceId, baseUrl, startPositionMs);
+      await this.playCurrent(deviceId, baseUrl);
     } finally {
       this.advancing.delete(deviceId);
     }
@@ -618,13 +586,7 @@ export class QueueController extends EventEmitter {
         }
       }
       log.warn(`[QueueController][frozen] ${playerId}: PLAYING 但位置冻结@${Math.round(this.lastPos.get(id) ?? 0)}s,就地重投并拉回位置`);
-      // 落点优先取设备最后上报的位置;**设备还没上报过**(刚起播就判冻结)时退回本次
-      // cast 的起点 —— 否则 recoverInPlace(0) 会把刚落好的位置重投成 0(同 lastCastStartMs 注释)。
-      const landSec = Math.max(
-        this.lastPos.get(id) ?? 0,
-        (this.lastCastStartMs.get(id) ?? 0) / 1000,
-      );
-      await this.recoverInPlace(id, landSec);
+      await this.recoverInPlace(id, this.lastPos.get(id) ?? 0);
       return;
     }
     if (decision === "stalled") {
@@ -728,30 +690,12 @@ export class QueueController extends EventEmitter {
       }
       this.advancing.add(id);
       try {
-        // ★ 重投位置 = **设备本曲最后上报** 与 **本次起播意图** 的较大者:
-        //   · cast 根本没成(设备从未上报过本曲)→ lastPos 已在起播时锚成起点,落点不丢;
-        //   · 播到中段才卡死(IDLE 累积超时)→ lastPos 是本曲真实读数,从卡住处续,
-        //     而不是回退到起播点(旧实现固定用起点,45s 起播的歌卡在 120s 会退回 45s)。
-        //   0 是「本来就从 0 播」的正常值,与 undefined 等价。
-        const retrySec = Math.max(
-          this.lastPos.get(id) ?? 0,
-          (this.lastCastStartMs.get(id) ?? 0) / 1000,
-        );
-        await this.playCurrent(id, baseUrl, retrySec > 0 ? Math.round(retrySec * 1000) : undefined);
+        await this.playCurrent(id, baseUrl);
       } finally {
         this.advancing.delete(id);
       }
       return;
     }
-  }
-
-  /** 最近一次起播的起点有没有**真的**编进去(供 HTTP 层如实回执)。
-   *
-   *  `applied=false` 的两种成因:本次起播跳过了不可播的曲目(`castStartMs` 被丢弃),
-   *  或调用方根本没要求起点。路由据此决定回执 `position` 是给值还是给 `null` ——
-   *  **绝不把没发生的落点报成成功**:客户端会照它画进度条。 */
-  castLandingOf(deviceId: string): { requestedMs: number; applied: boolean } | undefined {
-    return this.castLanding.get(stripPlayerPrefix(deviceId));
   }
 
   /** 设备是否属于某个"正在播放"的组。组播放期间其个人队列决策一律忽略。
@@ -938,10 +882,10 @@ export class QueueController extends EventEmitter {
    *  共同点:**不该切歌,只该把当前这首重新推起来**。切歌正是用户抱怨的"进度条归零 /
    *  曲目乱跳",所以恢复一律围绕当前曲做。
    *
-   *  位置校准:走**起播即落位** —— 位置作为 `playCurrent` 的 startPositionMs 交给
-   *  **这一次** cast。旧的「cast 完再 seek」对 AirPlay 是同一设备上的第二次完整建
-   *  会话(seek 会重建会话),HiVi/Linkplay 这类单会话设备会在第二次 RECORD 上永久
-   *  等待(2026-10-21 真机);DLNA 则要白等一次从 0 起播再跳。 */
+   *  位置校准复用组离线看门狗(group/watchdog.ts)的同款姿势:cast 会让设备从头播,
+   *  所以 cast 之后再 seek 到目标位置。seek 失败不阻断 —— 至少已经重新出声了,
+   *  比永远卡住强。seek 前必须 markSeekIssued:否则随后的重定位真空会被
+   *  `idle_early` 判成"真结束"→ 又切歌(见 seekSettle.ts)。 */
   private async recoverInPlace(deviceId: string, pos: number): Promise<void> {
     const player = this.players.get(deviceId);
     const ctrl = this.ctrls.get(deviceId);
@@ -950,13 +894,24 @@ export class QueueController extends EventEmitter {
     const playerId = player.playerId;
     this.advancing.add(deviceId);
     try {
-      // 不再减 1s:起点编进流里(回环流 timeOffset / DIDL 起点),不是"播起来再跳",
-      // 没有 cast 起播开销需要抵消。
-      const startMs = pos > 0 ? Math.round(pos * 1000) : undefined;
-      await this.playCurrent(deviceId, getEffectiveBaseUrl(), startMs);
-      // ⚠️ 不要在这里写 lastPos:那是「**设备告诉我们**的最后位置」,不是我们的意图。
-      // frozen 复查拿它当基线,写成起播意图会把设备仍在报的旧读数误判成"位置恢复了"。
-      log.info(`[QueueController][recover] ${playerId}: 已按落点重新起播${startMs ? `@${Math.round(pos)}s` : "(位置 0)"}`);
+      await this.playCurrent(deviceId, getEffectiveBaseUrl());
+      // 减 1s 抵消 cast 的启动开销(设备真正出声常晚于 Play 命令),避免定位略超前。
+      const target = Math.max(0, pos - 1);
+      if (target > 1) {
+        markSeekIssued(deviceId);
+        try {
+          await player.seek(target);
+          // ⚠️ 不要在这里写 lastPos:那是「**设备告诉我们**的最后位置」,不是我们的意图。
+          // 写了会把补偿 seek 的目标当成新的基线,下一次 frozen 复查就会把设备仍在报的
+          // 旧读数(高于 seek 目标)误判成"位置恢复了"→ 撤销 → 冻结永远修不掉。
+          // 真机依据:重投到 172.6s、设备仍报 173.6s → 复查判"已推进"→ 取消恢复。
+          log.info(`[QueueController][recover] ${playerId}: 已重投并拉回位置@${Math.round(target)}s`);
+        } catch (e: any) {
+          log.warn(`[QueueController][recover] ${playerId}: 重投成功但位置拉回失败(从头播):${e?.message || e}`);
+        }
+      } else {
+        log.info(`[QueueController][recover] ${playerId}: 已重投(位置 0,无需校准)`);
+      }
     } finally {
       this.advancing.delete(deviceId);
     }
@@ -1101,21 +1056,6 @@ export class QueueController extends EventEmitter {
         : 30_000;
       // 起点只对**本次要起播的那一首**有意义:中途跳过了死源后就不能再套用。
       const castStartMs = skips > 0 ? undefined : startPositionMs;
-      const castStartSec = castStartMs && castStartMs > 0 ? castStartMs / 1000 : 0;
-      // 供 HTTP 层如实回执:请求了起点但被跳过丢掉 ⇒ applied=false,路由不能说"已落位"。
-      this.castLanding.set(deviceId, {
-        requestedMs: startPositionMs && startPositionMs > 0 ? startPositionMs : 0,
-        applied: castStartSec > 0,
-      });
-      // 记下本次起播意图(ms),供 cast 失败 / stalled 重投按原起点重投(见字段注释)。
-      // 放在 playMedia **之前**:抛错时也要留痕,否则重投必然退回 0。
-      this.lastCastStartMs.set(deviceId, castStartSec * 1000);
-      // 换曲起播 ⇒ 上一首的「设备最后上报位置」对这首毫无意义,立刻锚成新起点;
-      // 同一首重投则**保留**(它是本曲真实读数,frozen 复查拿它当基线,见队列字段注释)。
-      if (this.lastPosSong.get(deviceId) !== fullItem.songId) {
-        this.lastPosSong.set(deviceId, fullItem.songId);
-        this.lastPos.set(deviceId, castStartSec);
-      }
       const { mediaUri } = (await withTimeout(
         player.playMedia(fullItem, baseUrl, castStartMs),
         castTimeoutMs,
@@ -1137,18 +1077,6 @@ export class QueueController extends EventEmitter {
     } catch (e: any) {
       console.warn(`[QueueController][playCurrent] ${playerId}: cast FAILED:`, e?.message || e);
       ctrl.endOptimistic(playerId);
-      // ★ cast 本身失败(超时挂死 / 目标掉线)⇒ **起点没有落位**,landing 意图必须作废。
-      //   路由按 `castLandingOf(...).applied` 回执落点,而 landing 是在 playMedia **之前**
-      //   写下的(那时只知道"打算编哪个起点")。若这里不清,cast 挂死 30s 之后
-      //   playFrom 照样返回、路由照样回 position=<定格值> —— 客户端画出进度条,
-      //   设备却没声音(2026-10-24 真机:组 → 组内最后一台成员,回 97 而目标端静默,
-      //   真正起播要等 stalled 重投,晚 38s)。
-      //   保留 requestedMs 供排查,只把 applied 打成 false(= 未落位)。
-      //   重投成功时 playCurrent 会重新 set(applied=true),不影响重投路径。
-      {
-        const landing = this.castLanding.get(deviceId);
-        if (landing) this.castLanding.set(deviceId, { requestedMs: landing.requestedMs, applied: false });
-      }
       // 竞态兜底(2026-09-25):起播前的硬限制判据过关、但 cast 期间成员掉光/设备掉线 ⇒
       // 这**不是**「投不出去」,而是「现在没人可投」。必须在这里再问一次同一个判据并挂起:
       // 若落到下面的失败分支,castFailStreak 会一路累加到 2×曲数、每拍还放行一次切歌,
@@ -1233,11 +1161,6 @@ export class QueueController extends EventEmitter {
     this.flowOwned.delete(playerId);
     // 整队替换 → 上一轮队列攒的连续 cast 失败计数一起作废(新队列是一次全新的尝试)。
     this.castFailStreak.delete(playerId);
-    // 整队替换 → 上一条队列的起播意图(落点)作废,避免新队列的重投套用旧起点。
-    this.lastCastStartMs.delete(playerId);
-    // 整队替换 → 旧队列的「最后上报位置」也不再代表任何东西(新队列可能从别的歌开始)。
-    this.lastPos.delete(playerId);
-    this.lastPosSong.delete(playerId);
     let q = this.queues.get(playerId);
     if (!q) { q = { items: [], currentIndex: -1, playMode: "shuffle", isActive: false, ended: false }; this.queues.set(playerId, q); }
     q.contentContext = contentContext ?? undefined;
@@ -1306,30 +1229,14 @@ export class QueueController extends EventEmitter {
         ? Math.floor(Math.random() * items.length)
         : 0;
     this.setQueue(playerId, items, idx, baseUrl, contentContext);
-    // 上一轮 cast 还在飞(单次硬顶 30s)→ **等它收尾**再起播。
-    // 旧实现是 `if (!advancing.has())` 直接跳过:调用方拿到 200 + 落点回执,而设备
-    // 根本没收到这一次起播(2026-10-24 群组同步实测:queue/play 0.0s 返回、成员恒 0 秒,
-    // 且成员残留在上一首的会话里各播各的)。队列已经 setQueue 就位,只差这一次 cast。
-    if (!(await this.waitAdvancing(playerId, 35_000))) {
-      log.warn(`[QueueController][playFrom] ${playerId}: 上一轮 cast 35s 仍未收尾,放弃本次起播(队列已就位)`);
-      return this.queues.get(playerId)?.currentIndex ?? idx;
+    if (!this.advancing.has(playerId)) {
+      this.advancing.add(playerId);
+      try { await this.playCurrent(playerId, baseUrl, startPositionMs); }
+      finally { this.advancing.delete(playerId); }
+      this.schedulePreProbe(playerId); this.schedulePrefetch(playerId);
     }
-    this.advancing.add(playerId);
-    try { await this.playCurrent(playerId, baseUrl, startPositionMs); }
-    finally { this.advancing.delete(playerId); }
-    this.schedulePreProbe(playerId); this.schedulePrefetch(playerId);
     // 返回**实际起播下标**（可能是服务端随机的），供路由如实回执。
     return this.queues.get(playerId)?.currentIndex ?? idx;
-  }
-
-  /** 等 advancing 释放(单次 cast 硬顶 30s,这里给 35s)。true = 已释放可起播。 */
-  private async waitAdvancing(playerId: string, timeoutMs: number): Promise<boolean> {
-    const end = Date.now() + timeoutMs;
-    while (this.advancing.has(playerId)) {
-      if (Date.now() >= end) return false;
-      await new Promise((r) => setTimeout(r, 100));
-    }
-    return true;
   }
 
   /** 用户从媒体库点某首歌 → 加入队列后"跳播"到该曲。即使处于随机模式也严格尊重
@@ -1419,12 +1326,13 @@ export class QueueController extends EventEmitter {
     }
     q.items = []; q.currentIndex = -1; q.isActive = false; q.ended = false;
     q.shuffleOrder = []; q.shufflePos = -1; q.shuffleLen = 0;
-    // 清队列同时清掉设备端的媒体缓存,避免 status 返回上一首残留。
-    // ★ 组场景**不再**逐成员清:clearCurrentMedia 只服务 DLNA 的 AVTransport 缓存,
-    //   而 DLNA 已禁止入组(成员只有 sendspin / airplay);组停止时 pump 与桥接会话
-    //   已拆,airplay 设备的 RAOP 会话由 stopGroupAirPlayBridge 收口。
+    // 清队列同时清掉设备端的媒体缓存,避免 status 返回上一首残留(组场景清各成员)。
     const group = getGroupManager().get(playerId);
-    if (!group) clearCurrentMedia(playerId);
+    if (group) {
+      for (const d of group.memberIds) clearCurrentMedia(d);
+    } else {
+      clearCurrentMedia(playerId);
+    }
     // 队列清空 → 预探测状态一并清掉。必须赶在发快照**之前**,
     // 否则下发的快照还带着已失效的 exhausted 提示。
     getPreProbeScheduler().clear(playerId);
@@ -1636,25 +1544,11 @@ export class QueueController extends EventEmitter {
     }
   }
 
-  /** 组播放中新增成员:重建组时间线,把新成员并入同一条 pump。
-   *
-   *  ★ 2026-10-23(换成统一 pump 模型后):组成员只有 sendspin / airplay 两类,两者
-   *  都挂在**同一条 pump**(ug:<groupId>)上,不再有"逐设备 cast + 逐设备 seek 校准"
-   *  的 DLNA 路径 —— 那条路径成立的前提是"设备各自拉流、时间线各自独立",DLNA 已被
-   *  禁止入组,该前提不复存在。
-   *
-   *  为什么 airplay 新成员必须重建整组:桥接 sink 的目标设备列表写在**连接建立时的
-   *  HELLO 帧**里(bridgeServer 按 HELLO 注册 ring),运行中新增设备不会被推 PCM ——
-   *  结果就是"设备连上了、RAOP 会话在跑、但永远静音"。重建整组时间线(重起 pump +
-   *  桥接,整组设备一起握手)是唯一简单且一致的做法:
-   *    - 代价:整组短暂中断(<1s,握手 + 重新缓冲);
-   *    - 收益:新成员与其余成员继续共享同一条时间线,不是"各自 seek 到同一秒"。
-   *
-   *  sendspin 新成员**不走这里**(由 alignGroupMembers 走 sendspinGroupJoin 直播沿加入,
-   *  不需要重建)。本函数收到 newMemberIds 时只处理其中的 airplay 成员。
-   *
+  /** 组播放中新增成员:把当前曲目 cast 给新成员并 seek 到 leader 当前进度。
+   *  对照 MA Universal Group 的加入语义:仅在加入时对齐一次,不做周期漂移校正。
    *  - 组队列未激活 / 无当前曲 → 不动作(静默)
-   *  - 只处理在线 airplay 新成员(离线成员回归由离线 watchdog 负责)
+   *  - 只处理在线新成员(离线成员回归由离线 watchdog 负责)
+   *  - 组处于暂停 → 新成员对齐后同步暂停(镜像组播放态)
    *  - 新成员若有个人激活队列 → 标记不激活(组激活期间成员不可单独播放,保留 items) */
   async rejoinMembers(groupId: string, newMemberIds: string[]): Promise<void> {
     groupId = stripPlayerPrefix(groupId);
@@ -1662,31 +1556,45 @@ export class QueueController extends EventEmitter {
     if (!q || !q.isActive || q.currentIndex < 0) return;
     const item = q.items[q.currentIndex];
     if (!item) return;
-    const apOnline = newMemberIds.filter(d => !!getAirPlayDevice(d)?.available);
-    if (apOnline.length === 0) return;
-    // leader 当前进度(组状态派生自 pump)。
+    const fullItem = await this.resolveItem(item);
+    const baseUrl = getEffectiveBaseUrl();
+    const online = newMemberIds.filter(d => !!getDevice(d)?.available);
+    if (online.length === 0) return;
+    // leader 当前进度与播放态(组状态派生自 leader)。
     let position = 0;
+    let playState: string | undefined;
     try {
       const st = await getGroupStatus(groupId);
       if (typeof st.position === "number" && st.position > 0) position = st.position;
+      playState = st.state;
     } catch (e: any) {
       log.warn("组状态查询失败,回退 position=0", { groupId, err: e?.message || e });
     }
-    try {
-      // 重建:playCurrent 会走 group player 的 playMedia(重新握手整组桥接 + 新 pump),
-      // 并按 startPositionMs 从 leader 位置起播。
-      await this.playCurrent(groupId, getEffectiveBaseUrl(), position > 0 ? Math.round(position * 1000) : 0);
-      log.info(`[group] ${groupId}: 新 airplay 成员 ${apOnline.join(",")} 已并入(重建时间线@${Math.round(position)}s)`);
-    } catch (e: any) {
-      log.warn(`[group] ${groupId}: 新成员加入对齐失败: ${e?.message || e}`);
-      return;
-    }
-    for (const deviceId of apOnline) {
-      const pq = this.queues.get(deviceId);
-      if (pq?.isActive) {
-        pq.isActive = false;
-        this.persist(deviceId);
-        this.emit("queue_changed", deviceId, this.snapshot(deviceId));
+    for (const deviceId of online) {
+      try {
+        const p = createDlnaProtocolPlayer(deviceId);
+        await p.playMedia(fullItem, baseUrl);
+        // cast 后立刻 seek 在部分渲染器(实测 HiVi)会静默失效,用校准 seek:
+        // 先等设备稳定 PLAYING,再以 leader 的"实时"位置为目标收敛。
+        let landed = position;
+        if (position > 0) {
+          landed = await alignDeviceToPosition(deviceId, position, {
+            getTargetSec: async () => {
+              const st = await getGroupStatus(groupId);
+              return typeof st.position === "number" && st.position > 0 ? st.position : position;
+            },
+          });
+        }
+        if (playState === "PAUSED_PLAYBACK") await p.pause();
+        const pq = this.queues.get(deviceId);
+        if (pq?.isActive) {
+          pq.isActive = false;
+          this.persist(deviceId);
+          this.emit("queue_changed", deviceId, this.snapshot(deviceId));
+        }
+        log.info(`[group] ${groupId}: 新成员 ${deviceId} 已对齐(位置 ${Math.round(landed)}s, 状态 ${playState ?? "?"})`);
+      } catch (e: any) {
+        log.warn(`[group] ${groupId}: 新成员 ${deviceId} 加入对齐失败: ${e?.message || e}`);
       }
     }
   }

@@ -22,9 +22,9 @@ export const AIRPLAY_RENDERER_ID = "airplay-renderer";
 export const airplayRendererManifest: PluginManifest = {
   id: AIRPLAY_RENDERER_ID,
   name: "AirPlay 渲染器",
-  version: "1.0.1",
+  version: "1.0.0",
   type: "renderer",
-  description: "把音乐投放到局域网内的 AirPlay 音箱、电视等设备，支持 AirPlay 1（RAOP）与 AirPlay 2",
+  description: "通过 AirPlay (RAOP) 协议将音乐投放到局域网内的 AirPlay 音箱、电视等设备",
   capabilities: ["renderer"],
   // 默认开启(2026-10-21 用户拍板):AirPlay 是内建投屏主链路之一,开箱即用。
   // 关闭仍可在插件管理页操作:停用后 discovery / 子进程 / 设备注册全部回收,
@@ -36,41 +36,33 @@ export const airplayRendererManifest: PluginManifest = {
     en: {
       name: "AirPlay Renderer",
       description:
-        "Cast music to AirPlay speakers, TVs and other devices on the LAN (AirPlay 1 RAOP and AirPlay 2)",
+        "Cast music via the AirPlay (RAOP) protocol to AirPlay speakers, TVs and other devices on the LAN",
       documentation: `### Features
-Casts music to AirPlay devices on the LAN (speakers, TVs, soundbars, Apple TV etc. — renderer capability). **Both AirPlay 1 (RAOP) and AirPlay 2 devices are supported**: mDNS listens on both \`_raop._tcp\` and \`_airplay._tcp\` and routes automatically by the capabilities each device reports. Audio is decoded by server-side ffmpeg and streamed in real time (RAW-ALAC) — the device does not need to support the source format.
-
-### Transport
-- Default engine is the built-in cliairplay runner (cli channel): AP2 devices pick the protocol automatically, AP1 devices use raop mode. Unicast and multicast links share one parameter assembly; multicast is used for multi-device synced playback from a single source.
-- The self-implemented RAOP stack (RTSP + RSA-OAEP + AES-CBC) serves as the fallback channel and takes over automatically when the engine is unavailable.
+Casts music via the AirPlay (RAOP) protocol to AirPlay speakers, TVs and other devices on the LAN.
 
 ### How it works
-1. \`discoverRenderers()\` discovers AirPlay devices via mDNS, adding/removing them as they come and go, and merges \`_airplay._tcp\` records to flag AirPlay 2 capability;
-2. Casting starts the session and streams audio with **start-at-position**: when starting with progress or transferring between devices, the start offset is encoded into that same session, so the reported position and resume point stay correct;
-3. \`controlRenderer()\` forwards play / pause / stop / volume / mute / position / seek;
-4. Shares the unified QueueController with DLNA / Sendspin: persistent queue, auto-advance, restart recovery and cross-device transfer.
+1. When enabled, starts AirPlay discovery / service (mDNS) so Apple-compatible devices can find MusicFlow as an AirPlay sender;
+2. Cast requests (from the client / HA integration / queue) are forwarded to the selected AirPlay device for playback;
+3. Playback state is synced back to the server.
 
 ### Notes
-- Devices must be reachable via mDNS; a few implementations differ (command pipe without a read end, restricted reverse channel) — the link retries or falls back to the RAOP channel automatically. If something misbehaves, disable/remove the device on the Groups page to troubleshoot;
-- **Enabled by default** (one of the built-in casting paths, ready out of the box): you can disable it on this page; discovery / child process / device registration all stop when disabled — zero resident resources.`,
+- **Enabled by default**: AirPlay is one of the built-in casting paths, ready out of the box. You can disable it in the plugin page; discovery / child process / device registration all stop when disabled — zero resident resources.`,
     },
   },
   documentation: `### 功能介绍
-把音乐投放到局域网内的 AirPlay 设备（音箱、电视、回音壁、Apple TV 等，renderer 能力）。**同时支持 AirPlay 1（RAOP）与 AirPlay 2 设备**：mDNS 同时监听 \`_raop._tcp\` 与 \`_airplay._tcp\`，按设备上报的能力自动路由。音频由服务器端 ffmpeg 解码后实时转码推流（RAW-ALAC），无需设备支持音源格式。
-
-### 传输通道
-- 默认走内置 cliairplay 引擎（cli 通道）：AP2 设备自动选择协议，AP1 设备走 raop 模式。单播与组播两条链路共用同一套参数装配，组播用于多设备同源同步播放。
-- 自研 RAOP 实现（RTSP + RSA-OAEP + AES-CBC 分块推送）作为兜底通道，引擎不可用时自动接管。
+通过 AirPlay 1 (RAOP) 协议把音乐投放到局域网内的 AirPlay 音箱、电视、回音壁等设备（renderer 能力）。协议要求 RSA-OAEP 加密 + AES-CBC 分块推送,由系统 ffmpeg 解码任意音源 → 实时 RAW-ALAC 编码后推流。
 
 ### 处理逻辑
-1. \`discoverRenderers()\` 通过 mDNS 在局域网发现 AirPlay 设备,随设备上下线自动增删,并合并 \`_airplay._tcp\` 记录标记 AirPlay 2 能力;
-2. 投屏时建立会话并推流,支持**起播即落位**——带进度起播 / 跨设备流转时,起点编进同一次会话,进度条与续播位置不丢;
-3. \`controlRenderer()\` 转发播放 / 暂停 / 停止 / 音量 / 静音 / 进度 / seek 指令;
-4. 与 DLNA / Sendspin 共用统一队列控制器(\`QueueController\`),支持持久化队列、自动切歌、重启恢复与跨设备流转。
+1. \`discoverRenderers()\` 通过 mDNS(\`_raop._tcp\`)在局域网发现 AirPlay 设备,随设备上下线自动增删;
+2. 投屏时 \`castToRenderer()\` 建立 RTSP 会话(RSA 密钥交换),将专辑流加密推送到设备(设备自行解缓存并播放);
+3. \`controlRenderer()\` 转发播放 / 暂停 / 停止 / 音量 / 进度 等控制指令;
+4. 与 DLNA 共用统一队列控制器(\`QueueController\`),支持持久化队列、自动切歌、重启恢复。
 
 ### 说明
-- 设备需 mDNS 可达;个别实现存在差异(如命令管道无读端、反向通道受限),链路会自动重试或回退兜底通道,如遇异常可在群组页先禁用/删除设备排查;
-- **默认开启**(内建投屏主链路之一,开箱即用):可在本页停用;停用后 discovery / 子进程 / 设备注册全部回收,零常驻资源。`,
+- 当前仅在「阿音 WR320」上验证通过(投屏/控制/音量/进度均正常),**其他设备不保证兼容**;
+- 设备需支持 AirPlay 1 (RAOP,RTSP + RSA)——当前常见的有源音箱/回音壁基本都支持,但个别实现存在差异,如遇异常可在群组页先禁用/删除设备排查;
+- 音频由服务器端 ffmpeg 解码后转码(无需设备支持格式);
+- 不支持 AirPlay 2:开发与验证环境没有 AirPlay 2 真机(HomePod / Apple TV / 纯 AP2 音箱等),协议差异较大,暂不提供 AirPlay 2 支持。`,
 };
 
 export const airplayRendererPlugin: RendererPlugin = {

@@ -176,7 +176,7 @@ async function cancelPair(row: any) {
 async function toggleApprove(row: any) {
   try {
     await api.post("/rest/api/v1/sendspin/approve", { clientId: row.clientId, approved: !row.approved });
-    ElMessage.success(t("settings.saved"));
+    ElMessage.success(!row.approved ? t("settings.sendspin.approvedToast") : t("settings.sendspin.unapprovedToast"));
     await load();
   } catch (e: any) {
     ElMessage.error(e.response?.data?.error || t("settings.saveFailed"));
