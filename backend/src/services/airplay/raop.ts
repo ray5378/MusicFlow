@@ -18,6 +18,8 @@
 import * as net from "net";
 import * as dgram from "dgram";
 import { publicEncrypt, createPublicKey, randomBytes, constants, createCipheriv } from "crypto";
+import { ntpFromHostUs, nowUs } from "../../utils/hostClock.js";
+import { ntpToRtpMod } from "./bridgeMath.js";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("RAOP");
@@ -72,10 +74,11 @@ export function ntpNow(): bigint {
   // the device only ever consumes NTP *differences*, so the epoch is arbitrary
   // as long as it never jumps. Using the wall clock here would let an NTP daemon
   // step corrupt the (rtp_remote - remote) deltas the receiver relies on.
-  const ms = performance.now();
-  const sec = BigInt(Math.floor(ms / 1000));
-  const frac = (BigInt(Math.trunc(ms)) << 32n) / 1000n;
-  return (sec << 32n) | frac;
+  // Phase 1:统一时钟源 —— 与 sendspin/clock 的 nowUs() 同为 host 单调 µs
+  // (CLOCK_MONOTONIC,跨进程同源),sendspin 的 tsUs 与 RAOP NTP 可直接比较。
+  // ⚠️ 纪元 = 机器开机时长(44.1k 下 2^32/rate ≈ 27.05h 就回绕)⇒ 转 RTP 必须
+  // 显式截断(RECORD 处 MAJ-10,唯一出处 bridgeMath.ntpToRtpMod)。
+  return ntpFromHostUs(nowUs());
 }
 
 /** Wall-clock NTP (seconds since 1900) as 64-bit (32s/32f). */
@@ -596,8 +599,10 @@ export class RaopPlayer {
 
       // RECORD
       const ntp0 = ntpNow();
-      this.headTs = ntp2ts(ntp0, this.opts.sampleRate);
-      this.headTs -= this.headTs % CHUNK_LEN;
+      // 🔴 MAJ-10:ntpNow 已是 host 开机纪元(可达 >27h),必须先 ToUint32 截断、
+      // 再对齐(顺序反了会残 32 破坏 352 对齐;`>>> 0` 而非 `& 0xFFFFFFFF`——
+      // 后者在边界得 −1,负余数让对齐失效)。唯一出处 bridgeMath.ntpToRtpMod。
+      this.headTs = ntpToRtpMod(ntp0, this.opts.sampleRate, CHUNK_LEN);
       this.startTs = this.headTs;
       this.baseTs = this.headTs;
       this.startNtp = ntp0;

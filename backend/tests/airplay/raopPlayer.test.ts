@@ -32,6 +32,8 @@ import {
   ntpNow,
   ntpToMs,
 } from "../../src/services/airplay/raop.js";
+import { ntpFromHostUs, ntpToHostUs, nowUs } from "../../src/utils/hostClock.js";
+import { ntpToRtpMod } from "../../src/services/airplay/bridgeMath.js";
 
 // ---------------------------------------------------------------------------
 // 假 socket
@@ -989,5 +991,68 @@ describe("sendSync:NTP 锚点必须锚推流墙钟(拖动后无声根因)", () =
     (p as any).sendSync(false);
     const pkt = ctrl.last;
     expect(pkt.readUInt32BE(4)).toBe((anyP.headTs - anyP.latencyFrames) >>> 0);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// 32 位模域(MAJ-10,Phase 1):ntpNow 已切 host 纪元(机器开机时长,可达 27h+),
+// RTP 32 位域必须「先 >>>0 截断、再对齐」;时间线算术全程模 2^32 自洽。
+// ---------------------------------------------------------------------------
+describe("32 位模域(MAJ-10):host 纪元下时间线不越界", () => {
+  it("ntpNow 与 hostClock.nowUs 同源(±100µs)", () => {
+    const t0 = nowUs();
+    const n = ntpNow();
+    const t1 = nowUs();
+    const hostUs = ntpToHostUs(n);
+    expect(Number(hostUs - t0)).toBeGreaterThanOrEqual(-100);
+    expect(Number(t1 - hostUs)).toBeGreaterThanOrEqual(-100);
+    expect(Number(hostUs - t0)).toBeLessThanOrEqual(100);
+    expect(Number(t1 - hostUs)).toBeLessThanOrEqual(100);
+  });
+
+  it("RECORD 换算:uptime 100_000s → headTs ≤ 0xFFFFFFFF 且 %352==0(先截断后对齐残 0)", () => {
+    const ntp0 = ntpFromHostUs(100_000n * 1_000_000n + 123_456n);
+    const headTs = ntpToRtpMod(ntp0, SAMPLE_RATE, CHUNK_LEN);
+    expect(headTs).toBeLessThanOrEqual(0xFFFFFFFF);
+    expect(headTs % CHUNK_LEN).toBe(0);
+    // 正序不变量:对齐结果 = 截断值 − 截断值%CHUNK_LEN(恒残 0)
+    const raw = Number(((ntp0 >> 16n) * BigInt(SAMPLE_RATE)) >> 16n);
+    expect(headTs).toBe(((raw >>> 0) - ((raw >>> 0) % CHUNK_LEN)) >>> 0);
+  });
+
+  it("sendSync 跨回绕:headTs 回绕到小值后 elapsedTs/rtptime/ntp 仍正确", () => {
+    const { anyP, ctrl } = makePlayer();
+    anyP.startTs = 0xFFFFFF00; // 距回绕 256
+    anyP.headTs = 144;         // 已回绕((0xFFFFFF00+400) mod 2^32 = 144)
+    anyP.baseTs = 0xFFFFFF00;
+    const startNtpVal = ntpFromHostUs(1_000_000_000_000n);
+    anyP.startNtp = startNtpVal;
+    anyP.latencyFrames = SAMPLE_RATE;
+    anyP.sendSync(false);
+    const s = ctrl.sent[0].buf;
+    // offset4 = headTs − latencyFrames(模 2^32,回绕后得大值)
+    expect(s.readUInt32BE(4)).toBe((144 - SAMPLE_RATE) >>> 0);
+    const elapsed = (144 - 0xFFFFFF00) >>> 0;
+    expect(elapsed).toBe(400);
+    // NTP = startNtp + ts2ntp(elapsedTs=400)
+    const wantNtp = startNtpVal + ((BigInt(400) << 16n) / BigInt(SAMPLE_RATE) << 16n);
+    const gotNtp = (BigInt(s.readUInt32BE(8)) << 32n) | BigInt(s.readUInt32BE(12));
+    expect(gotNtp).toBe(wantNtp);
+    // offset16 = headTs(模域小值)
+    expect(s.readUInt32BE(16)).toBe(144);
+  });
+
+  it("sendChunk 跨回绕:positionSec = (headTs−baseTs)>>>0 仍从真实内容位置起算", () => {
+    const { anyP } = makePlayer();
+    anyP.baseTs = 0xFFFFFF00;
+    anyP.startTs = 0xFFFFFF00;
+    anyP.headTs = 0xFFFFFF00;
+    anyP.sendChunk(pcmChunk());
+    // (0xFFFFFF00+352) mod 2^32 = 96 —— 跨回绕后 headTs 回到小值
+    expect(anyP.headTs).toBe((0xFFFFFF00 + CHUNK_LEN) >>> 0);
+    // positionSec 经 ts2ms 取整到毫秒:352 帧 ≈ 7.98ms → 7ms;关键是不变成垃圾值
+    expect(anyP.positionSec).toBeGreaterThanOrEqual(0);
+    expect(anyP.positionSec).toBeLessThanOrEqual(0.01);
   });
 });
