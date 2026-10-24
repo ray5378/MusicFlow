@@ -2,6 +2,26 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.72] - 2026-10-24
+
+### Chore / undici 升到 ^8.12.3(`v4.6.71` 的 security 门禁被新披露漏洞打红)
+
+**症状**:`v4.6.71` tag 的 `security` workflow 红(同一份 main 代码 23:45Z 那次还是绿的),
+`npm audit --audit-level=high` 退出码 1。
+
+**根因**:`undici 8.0.0 ~ 8.12.1` 在两次构建之间的时间窗里被披露 3 个 high 漏洞
+(属时间窗内新披露,与本版代码改动无关),而 `^8.11.2` 的 caret 范围正好把它锁在受影响区间内。
+
+**修复**:`backend/package.json` → `undici: ^8.12.3`(实装 8.12.3);
+`package-lock.json` 用 `npm install --package-lock-only --registry=https://registry.npmjs.org`
+重写,避免 npmmirror 的 `resolved` 地址污染 lock —— diff 收敛为纯版本升级(4 行)。
+
+**验证**:全仓引用 `undici` 的测试仅 2 个文件 ——
+`tests/services/proxyDispatcher.test.ts` + `tests/source/online/streamFallbackTtl.test.ts`,
+**2 files / 26 tests 全绿**;`npm ls undici` = 8.12.3。
+(230 本地 `npm audit` 走 npmmirror 不可用:`[-/npm/v1/security/* not implemented yet]`,
+审计结论以 CI 官方源为准。)
+
 ## [4.6.71] - 2026-10-24
 
 ### Fix / cast 挂死时回执仍谎报落点(`transfer-from` 回 200 而目标端静默)
