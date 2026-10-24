@@ -39,7 +39,8 @@ let controller: SendspinChildController | null = null;
 async function main(): Promise<void> {
   const { startSendspinInProcess, stopSendspinInProcess } = await import("./index.js");
   const { esphomeBridge } = await import("./esphomeBridge.js");
-  const { getDeviceEsphome, saveDeviceHost } = await import("./deviceState.js");
+  const { getDeviceEsphome, getDeviceEsphomeByHostname, getDeviceHostname, getHostnameByIp, saveDeviceHost, saveDeviceHostname } =
+    await import("./deviceState.js");
   const { SendspinChildController } = await import("./childMain.js");
 
   controller = new SendspinChildController(
@@ -52,13 +53,18 @@ async function main(): Promise<void> {
 
   const childHooks = {
     onActivated: (conn: any) => {
-      // 6053:设备 IP 从 Sendspin 连接自动派生,密钥按 clientId 逐台读 ——
-      // 每台设备各自一把,没填就不连(与主进程 registerServerPlayer 同款)。
+      // 6053:设备 IP 从 Sendspin 连接自动派生。凭据**按 hostname**取(clientId 会因
+      // 固件重装断裂,hostname 不会):新 clientId 未填 psk 时按 hostname 继承旧凭据。
+      // 绝不按 psk 反查设备 —— 同 psk 多台会串台(见 deviceState 的「设备身份」段)。
       const creds = (() => {
         if (!conn.clientId) return { psk: "", port: 0 };
-        return getDeviceEsphome(conn.clientId);
+        const known = getDeviceHostname(conn.clientId);
+        const hostname = known || getHostnameByIp(conn.remoteHost);
+        if (hostname && !known) saveDeviceHostname(conn.clientId, hostname);
+        const own = getDeviceEsphome(conn.clientId);
+        return own.psk ? own : getDeviceEsphomeByHostname(hostname);
       })();
-      esphomeBridge.syncDevice(conn.remoteHost, creds.psk, creds.port);
+      esphomeBridge.syncDevice(conn.remoteHost, creds.psk, creds.port, conn.clientId);
       // 记下这台设备这次的 host。fork 模式下主进程只从 IPC 拿到 clientId(见
       // SendspinChildEvent),host 只有这里能拿到 —— 而拨号守卫(自动发现 / 音流名单补枪)
       // 恰恰只有 host:port,得靠这层映射才能拦住「被禁用的设备又被拨回来」。

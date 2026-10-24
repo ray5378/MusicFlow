@@ -632,6 +632,10 @@ export function initDatabase() {
       -- 又拨回来」——发现那条路只有 host:port、拿不到 clientId,只能靠这层映射;
       -- 换过 DHCP 的设备查不到即放行(连上后 disabled 判定仍会挡住 peer 注册)。
       last_host TEXT NOT NULL DEFAULT '',
+      -- 设备 hostname(6053 deviceInfo 上报的 ESPHome 节点名 = mDNS 主机名)。
+      -- clientId 会因固件重装断裂(2026.10.0 起改随机串),hostname 是跨固件
+      -- 稳定的身份锚点;设备身份以 hostname + psk 认(psk 每台设备各自一把)。
+      hostname TEXT NOT NULL DEFAULT '',
       updated_at TEXT DEFAULT ''
     );
     -- 内部 ffmpeg 回环取流凭证(见 services/dlna/control.ts)。
@@ -758,6 +762,21 @@ export function initDatabase() {
     }
   } catch (e) {
     log.warn(`airplay_devices 补列失败: ${e instanceof Error ? e.message : e}`);
+  }
+
+  // 结构升级(2026-10-24):sendspin_device_state 新增 hostname 列。
+  // ESPHome 固件 2026.10.0 起 client_id 不再取 MAC(改随机串),固件一升级同一台
+  // 设备就成了「新设备」。hostname 由 6053 deviceInfo 上报,跨固件稳定的身份锚点。
+  try {
+    const cols = (sqlite.prepare("PRAGMA table_info(sendspin_device_state)").all() as { name?: unknown }[]).map((c) =>
+      String(c?.name ?? ""),
+    );
+    if (!cols.includes("hostname")) {
+      sqlite.exec("ALTER TABLE sendspin_device_state ADD COLUMN hostname TEXT NOT NULL DEFAULT ''");
+      log.info("sendspin_device_state 新增 hostname 列(设备身份锚点)");
+    }
+  } catch (e) {
+    log.warn(`sendspin_device_state 补列失败: ${e instanceof Error ? e.message : e}`);
   }
 
   // Plugins (built-in and external drop-ins) are seeded from the unified catalog

@@ -111,9 +111,16 @@ async function registerServerPlayer(srv: SendspinServer, conn: SendspinConnectio
   // 密钥按 **clientId** 从库里读 —— 每台设备各自一把,host 会被 DHCP 换掉而
   // clientId 不会。没填密钥 ⇒ syncDevice 不建连接(等于这台不启用 6053)。
   try {
-    const { getDeviceEsphome } = await import("./deviceState.js");
-    const creds = getDeviceEsphome(conn.clientId);
-    esphomeBridge.syncDevice(conn.remoteHost, creds.psk, creds.port);
+    const { getDeviceEsphome, getDeviceEsphomeByHostname, getDeviceHostname, getHostnameByIp, saveDeviceHostname } =
+      await import("./deviceState.js");
+    // 凭据按 hostname 取(见 child.ts 同款注释):clientId 变了按 hostname 继承旧 psk,
+    // 绝不按 psk 反查设备。
+    const known = getDeviceHostname(conn.clientId);
+    const hostname = known || getHostnameByIp(conn.remoteHost);
+    if (hostname && !known) saveDeviceHostname(conn.clientId, hostname);
+    const own = getDeviceEsphome(conn.clientId);
+    const creds = own.psk ? own : getDeviceEsphomeByHostname(hostname);
+    esphomeBridge.syncDevice(conn.remoteHost, creds.psk, creds.port, conn.clientId);
   } catch { /* 读凭据失败按「不连」处理,不阻断设备上线 */ }
   // key = 裸 clientId,与 registerDlnaDevice(裸 deviceId)一致。
   qc.registerSendspinDevice(conn.clientId, displayName);

@@ -287,6 +287,122 @@ export function getDeviceLastHost(clientId: string): string {
   }
 }
 
+/** 规范化 hostname:去空白 + 小写(ESPHome 节点名约束 [a-z0-9-],这里只做宽松
+ *  规范,非法字符不判死 —— 锚点只在「同值相等」意义上使用)。空值返回空串。 */
+export function normalizeHostname(raw: unknown): string {
+  // mDNS 上报的是 `esp32-player2.local`,6053 上报的是 `esp32-player2` —— 同一个名字,
+  // 统一去掉 `.local` 再比较,否则两条来源会各存一份对不上。
+  return String(raw ?? "").trim().toLowerCase().replace(/\.local\.?$/, "").slice(0, 128);
+}
+
+/** 记下设备 hostname(6053 deviceInfo 上报的 ESPHome 节点名)。跨固件重装稳定 ——
+ *  clientId 会断裂(固件 2026.10.0 起随机串),设备身份以 hostname + psk 认。
+ *  同值重复写幂等;空值忽略。 */
+export function saveDeviceHostname(clientId: string, hostname: string): void {
+  try {
+    const norm = normalizeHostname(hostname);
+    if (!clientId || !norm) return;
+    const cur = getDeviceVolumeState(clientId);
+    sqlite
+      .prepare(
+        `INSERT INTO sendspin_device_state (client_id, volume, muted, disabled, hostname, updated_at)
+         VALUES (?, ?, ?, 0, ?, ?) ON CONFLICT(client_id) DO UPDATE SET
+         hostname = excluded.hostname, updated_at = excluded.updated_at`,
+      )
+      .run(
+        clientId,
+        cur?.volume ?? DEFAULT_SENDSPIN_VOLUME,
+        (cur?.muted ?? false) ? 1 : 0,
+        norm,
+        new Date().toISOString(),
+      );
+  } catch (e: any) {
+    log.warn(`[device-state] 写 hostname ${clientId} 失败: ${e?.message || e}`);
+  }
+}
+
+/** 读设备 hostname(无行/未记录 → 空串)。 */
+export function getDeviceHostname(clientId: string): string {
+  try {
+    if (!clientId) return "";
+    const row = sqlite
+      .prepare("SELECT hostname FROM sendspin_device_state WHERE client_id = ?")
+      .get(clientId) as any;
+    return typeof row?.hostname === "string" ? String(row.hostname) : "";
+  } catch (e: any) {
+    log.warn(`[device-state] 读 hostname ${clientId} 失败: ${e?.message || e}`);
+    return "";
+  }
+}
+
+// ==================== 设备身份 = hostname(PSK 绑 hostname,不绑 clientId) ====================
+//
+// 为什么:clientId 会因固件重装断裂(ESPHome 2026.10.0 起改随机串),而 6053 密钥
+// (psk)是**设备级**凭据 —— 理应跟着设备(hostname)走,不能跟着一次性的 clientId 走。
+// 2026-10-24 真机教训:主卧/客厅两台设备用的是**同一把 psk**,所以任何「按 psk 反查
+// 设备」的匹配都会串台 ⇒ 这里只做单向:hostname → psk,永不 psk → 设备。
+
+/** IP → hostname 短时映射(mDNS 发现时记,设备 WS 上线时用)。
+ *  只在内存:发现与上线前后脚发生,重启丢一次不影响 —— 下一轮 mDNS 广播会补。
+ *  6053 连上后 deviceInfo 会写权威 hostname,这层只是「提前知道」的桥。 */
+const HOSTNAME_BY_IP_TTL_MS = 30 * 60_000;
+const hostnameByIp = new Map<string, { hostname: string; at: number }>();
+
+/** 记一条 IP → hostname(来自 mDNS 的 svc.host)。空值/非法忽略。 */
+export function rememberHostnameByIp(ip: string, hostname: string): void {
+  const key = String(ip ?? "").trim();
+  const norm = normalizeHostname(hostname);
+  if (!key || !norm) return;
+  hostnameByIp.set(key, { hostname: norm, at: Date.now() });
+  if (hostnameByIp.size > 64) {
+    const now = Date.now();
+    for (const [k, v] of hostnameByIp) {
+      if (now - v.at > HOSTNAME_BY_IP_TTL_MS) hostnameByIp.delete(k);
+    }
+    while (hostnameByIp.size > 64) {
+      const first = hostnameByIp.keys().next().value;
+      if (first === undefined) break;
+      hostnameByIp.delete(first);
+    }
+  }
+}
+
+/** 按 IP 取 hostname(未记录/过期 → 空串)。 */
+export function getHostnameByIp(ip: string): string {
+  const key = String(ip ?? "").trim();
+  if (!key) return "";
+  const e = hostnameByIp.get(key);
+  if (!e) return "";
+  if (Date.now() - e.at > HOSTNAME_BY_IP_TTL_MS) {
+    hostnameByIp.delete(key);
+    return "";
+  }
+  return e.hostname;
+}
+
+/** 按 **hostname** 取 6053 凭据(设备身份以 hostname 为键)。
+ *  用途:固件重装后 clientId 变了、新行还没有 psk ⇒ 按 hostname 继承旧凭据,
+ *  用户不必重填,6053 桥也不会因「查不到 psk」断开。
+ *  ⚠️ hostname 为空一律返回空 —— 绝不按 psk 反查设备(同 psk 多台会串台)。 */
+export function getDeviceEsphomeByHostname(hostname: string): { psk: string; port: number } {
+  try {
+    const norm = normalizeHostname(hostname);
+    if (!norm) return { psk: "", port: 0 };
+    const row = sqlite
+      .prepare(
+        "SELECT esphome_psk, esphome_port FROM sendspin_device_state WHERE hostname = ? AND esphome_psk <> '' ORDER BY updated_at DESC LIMIT 1",
+      )
+      .get(norm) as any;
+    if (!row) return { psk: "", port: 0 };
+    const psk = typeof row.esphome_psk === "string" ? row.esphome_psk.trim() : "";
+    const n = Number(row.esphome_port);
+    return { psk, port: Number.isInteger(n) && n >= 1 && n <= 65535 ? n : 0 };
+  } catch (e: any) {
+    log.warn(`[device-state] 按 hostname 读凭据 ${hostname} 失败: ${e?.message || e}`);
+    return { psk: "", port: 0 };
+  }
+}
+
 /** 该 host 是否属于**被用户禁用**的设备 —— 自动发现/拨号的守卫。
  *
  *  为什么要:用户禁用一台设备后它仍在广播 mDNS,自动发现(或音流的名单补枪)

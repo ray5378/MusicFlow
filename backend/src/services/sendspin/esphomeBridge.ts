@@ -49,6 +49,7 @@
 
 import { EspHomeClient, entityId, MediaPlayerCommand } from "esphome-client";
 import { createLogger } from "../../utils/logger.js";
+import { saveDeviceHostname } from "./deviceState.js";
 
 const log = createLogger("Esphome");
 
@@ -120,6 +121,9 @@ interface Entry {
   host: string;
   psk: string;
   port: number;
+  /** 该 host 对应的 sendspin clientId(由 syncDevice 调用方传入,可能为空:
+   *  启动期/凭据热更新路径只有 host)。hostname 落库要用它当主键。 */
+  clientId: string;
   cli: EspHomeClient | null;
   deviceName: string;
   esphomeVersion: string;
@@ -166,11 +170,12 @@ class EsphomeBridge {
    *  - 无变化 ⇒ 直接返回,不重复 connect(设备侧 client slot 有限)。
    *
    *  ⚠️ 没有全局开关了:填了密钥就连,没填就不连。 */
-  syncDevice(hostRaw: string, pskRaw: unknown, portRaw?: unknown): void {
+  syncDevice(hostRaw: string, pskRaw: unknown, portRaw?: unknown, clientIdRaw?: unknown): void {
     const host = String(hostRaw || "").trim();
     if (!host) return;
     const psk = normalizePsk(pskRaw);
     const port = normalizePort(portRaw);
+    const clientId = String(clientIdRaw || "").trim();
 
     const cur = this.entries.get(host);
     if (!psk) {
@@ -179,7 +184,11 @@ class EsphomeBridge {
       return;
     }
     if (cur) {
-      if (cur.psk === psk && cur.port === port) return;
+      if (cur.psk === psk && cur.port === port) {
+        // 同凭据只补记 clientId(启动期/热更新只带 host,设备上线后补上)。
+        if (clientId && cur.clientId !== clientId) cur.clientId = clientId;
+        return;
+      }
       this.closeEntry(host);
     }
     this.order = this.order.filter((h) => h !== host);
@@ -188,7 +197,7 @@ class EsphomeBridge {
       const drop = this.order.shift();
       if (drop) this.closeEntry(drop);
     }
-    this.spawn(host, psk, port);
+    this.spawn(host, psk, port, clientId);
   }
 
   /** 批量同步(启动 / 配置热更新):列表里的按各自凭据连,不在列表里的一律断开。 */
@@ -206,11 +215,12 @@ class EsphomeBridge {
     this.order = this.order.filter((h) => want.has(h));
   }
 
-  private spawn(host: string, psk: string, port: number): void {
+  private spawn(host: string, psk: string, port: number, clientId = ""): void {
     const entry: Entry = {
       host,
       psk,
       port,
+      clientId,
       cli: null,
       deviceName: "",
       esphomeVersion: "",
@@ -246,6 +256,9 @@ class EsphomeBridge {
       entry.connected = true;
       entry.connectedAt = Date.now();
       entry.lastError = "";
+      // deviceName 就是 ESPHome 节点名(= mDNS 主机名),跨固件重装稳定 —— 设备身份
+      // 以 hostname + psk 认,落库后即使 clientId 断裂也能一眼认出是哪台。
+      if (entry.clientId && entry.deviceName) saveDeviceHostname(entry.clientId, entry.deviceName);
       log.info(`6053 已连接 ${host}(${entry.deviceName} ${entry.esphomeVersion})`);
     });
     cli.on("entities", (list: any[]) => {

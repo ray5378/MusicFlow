@@ -26,7 +26,7 @@
 //    ⚠️ 单纯调 `browser.update()` **无效**(响应照样落进 existingService 分支)。
 import type { SendspinServer } from "./server.js";
 import { getSharedBonjour } from "../discovery/mdns.js";
-import { isHostOfDisabledDevice } from "./deviceState.js";
+import { isHostOfDisabledDevice, rememberHostnameByIp } from "./deviceState.js";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("sendspin-discover");
@@ -128,6 +128,12 @@ async function onPlayerSeen(srv: SendspinServer, svc: any): Promise<void> {
   const port = Number((svc as any)?.port);
   const host = pickIPv4(svc);
   if (!host || !Number.isInteger(port) || port < 1 || port > 65535) return;
+  // 顺手记下「IPv4 → mDNS 主机名」:WS 握手只有 IP,设备上线时靠这层把 hostname 绑到
+  // clientId,进而按 hostname 取 6053 凭据(见 deviceState 的「设备身份」段)。
+  const svcHost = typeof (svc as any)?.host === "string" ? (svc as any).host : "";
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(host) && svcHost && !svcHost.includes(":")) {
+    rememberHostnameByIp(host, svcHost);
+  }
   // 已禁用设备不再拨回(禁用 = 别再自动连它)。放最前,省掉后面一整串动作;
   // 判定按「最近一次已知 host」做,详见 deviceState.isHostOfDisabledDevice。
   if (isHostOfDisabledDevice(host)) return;
