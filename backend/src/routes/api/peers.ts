@@ -301,7 +301,20 @@ app.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
   // —— 那会让一个不存在的实例静默变成「调用方自己那条」,造成自我覆盖。故这里显式再判一次:
   // local 看 PeerManager 是否持有该实例;cast 端看 QueueController 是否有它的快照
   // (getQueueSnapshot 对未注册的 cast 端返回 undefined,但对 local 会返回空快照,不能当判据)。
-  const srcSnap = pm.getQueueSnapshot(fromPeerId);
+  // sendspin 源的队列键映射:泵播放时队列挂在**泵组名**下 —— 单设备=裸 clientId,
+  // 用户组=`group:<gid>`(成员表含 `sendspin:<bareId>`)。直接查裸 id 会拿到空快照
+  // ⇒ transferred 0 ⇒ 目标端空队列 ⇒ 流转后无声(240 实证,2026-10-24)。
+  let fromQueueKey = fromPeerId;
+  if (parsePeerId(fromPeerId)?.kind === "sendspin") {
+    const bare = fromPeerId.slice("sendspin:".length);
+    try {
+      const { getGroupManager } = await import("../../services/group/index.js");
+      const memberKey = `sendspin:${bare}`;
+      const host = getGroupManager().list().find((g) => (g.memberIds || []).includes(memberKey));
+      if (host) fromQueueKey = `group:${host.id}`;
+    } catch { /* 组管理器不可用:按裸 id 走旧行为 */ }
+  }
+  const srcSnap = pm.getQueueSnapshot(fromQueueKey);
   const srcIsLocal = parsePeerId(fromPeerId)?.kind === "local";
   const srcExists = srcIsLocal ? !!pm.get(fromPeerId) : !!srcSnap;
   if (!srcExists) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);

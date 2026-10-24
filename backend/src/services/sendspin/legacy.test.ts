@@ -126,15 +126,15 @@ describe("sendspin legacy 明文直通", () => {
       // FLAC 必须带 codec_header(STREAMINFO 的 base64),否则严格客户端拒收整条 stream/start。
       expect(typeof start.payload.player.codec_header).toBe("string");
       expect(start.payload.player.codec_header.length).toBeGreaterThan(0);
-      // 音频:单帧 RAW BINARY,不分片不加密。**9B 头** = [0x04][i64 μs],data 从 9 起。
-      // ⚠️ 不得是 13B(多 4B send_ahead)—— 设备侧会把那 4B 当 FLAC 数据 → 每包解码失败。
+      // 音频:单帧 RAW BINARY,不分片不加密。**13B 头** = [0x04][i64 μs][i32 send_ahead],
+      // data 从 13 起(Sendspin 1.0.0-rc1,ESPHome 2026.10 固件口径;2026.9 时代才是 9B)。
       conn.sendAudio(123456789n, new Uint8Array([1, 2, 3]));
       await waitFor(() => binaries.length > 0);
       const f = binaries[0];
       expect(f[0]).toBe(0x04);
       expect(f.readBigInt64BE(1)).toBe(123456789n);
-      expect([...f.subarray(9)]).toEqual([1, 2, 3]);
-      expect(f.length).toBe(9 + 3);
+      expect([...f.subarray(13)]).toEqual([1, 2, 3]);
+      expect(f.length).toBe(13 + 3);
       // 真推流:合成 20ms PCM 经组协商编码器(默认 flac)下发,legacy 端收到帧为 0x04 头。
       binaries.length = 0;
       const srv2 = getSendspinServer()!;
@@ -147,7 +147,7 @@ describe("sendspin legacy 明文直通", () => {
       if (af) {
         expect(af[0]).toBe(0x04);
         expect(af.readBigInt64BE(1)).toBe(987654321n);
-        expect(af.length).toBeGreaterThan(9);
+        expect(af.length).toBeGreaterThan(13);
       }
     } finally {
       ws.terminate();
