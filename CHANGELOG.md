@@ -2,6 +2,20 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.74] - 2026-10-24
+
+### Fix / SENDSPIN 流转到 AirPlay 无声(拖一下进度才出声)
+
+- 根因:sendspin 泵自拉流、不经服务端整曲缓冲(membuf);流转到 AirPlay 时回环流冷启动,web 源整曲缓冲单次 deadline 短,冷取流失败后推流全程饥饿——设备 PLAYING 但无数据(推流 378 次 reanchor / 3s 停顿),拖进度重建会话时 membuf 已被后台重试灌热才出声。DLNA 源不受影响:其播放路径经 /rest/stream 已把整曲灌进 membuf,转 AirPlay 热命中秒出声(同曲对比实证)。
+- 修复:transfer 目标为 AirPlay 且带起播起点时,先把源曲有界预热(≤8s)进 membuf 再 cast——落地则回环流预取命中秒供流;未落地则回环流搭车在途预取或直通,最坏起播稍慢,不再出现「会话活着但永远没数据」。
+
+### Feature / 群组成员调整:DLNA 禁止入组,AirPlay 允许入组
+
+- 后端成员命名空间新增 `airplay:<deviceId>`;`setMembers`/增量口对 DLNA 成员(含历史裸 id 写法)一律拒收,airplay 校验设备档案存在且未禁用(可用性动态解析,离线仍可建组)。
+- 组播放:airplay 成员逐设备独立 cast(与 DLNA 同为自拉流语义,起播即落位由各自 cast 承担);stop/pause/resume/seek/setVolume 同步扇出;组 leader 跨 kind 派生(airplay 可当选),组状态/音量按组标度回显。
+- 播放中入组:airplay 成员走 rejoinMembersAirplay——起点编进**本次 cast**(起播即落位,绝不先起播再 seek);摘除断开成员会话。
+- 前端群组候选此前已只列 airplay/sendspin,本次后端对齐后全链路闭环;群组列表成员音量条支持 airplay 回显。
+
 ## [4.6.73] - 2026-10-24
 
 ### Fix / Sendspin 对齐 1.0.0-rc1(ESPHome 2026.10.x 固件)——13B 帧头/配对 sid round/音量命令能力合并
