@@ -887,8 +887,8 @@ describe("startSendspinInProcess / startSendspinService / stop", () => {
     await new Promise((r) => setTimeout(r, 50)); // fire-and-forget registerServerPlayer
     expect(H.qc.registerSendspinDevice).toHaveBeenCalledWith("DEV1", "客厅");
     expect(H.pm.registerSendspin).toHaveBeenCalledWith("DEV1", "客厅", true, false);
-    // 6053 桥按 clientId 读凭据(无行=不连)
-    expect(H.esphome.syncDevice).toHaveBeenCalledWith("192.0.2.9", "", 0);
+    // 6053 桥凭据按 hostname 解析(无行=不连);第 4 参是 clientId(桥据此回写 hostname)
+    expect(H.esphome.syncDevice).toHaveBeenCalledWith("192.0.2.9", "", 0, "DEV1");
     // 上线回组:组在播 → 灌组音量(经 group transport) + joinGroupCore
     expect(H.core.setVolumeCore).toHaveBeenCalledWith(srv, "ss:ug:1", 50);
     expect(H.core.joinGroupCore).toHaveBeenCalledWith(srv, "ss:ug:1", "DEV1");
