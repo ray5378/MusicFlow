@@ -5,7 +5,177 @@
 > **怎么读**：**第一～五部分是正确做法，照做即可**；**第六部分是踩过的坑（含被推翻的旧结论），务必别重蹈**；其后是验证方法、MA 对齐、环境与附录。
 > **本文是唯一权威**。与归档文档冲突时，以本文为准。
 
+## ⚠️ 2026-10-24 增补：ESPHome 2026.10.x 已切到 Sendspin 1.0.0-rc1（多处结论反转）
+
+固件 2026.9.1 → 2026.10.1（sendspin 组件升 **sendspin-cpp 0.9.3**，实现 **Sendspin 1.0.0-rc1**）后，本文基线（2026.9.0 / 9B 帧）的若干结论**方向反转**。冲突处以本节为准（MusicFlow 服务端已按 rc1 对齐并经真机验证）：
+
+| 项 | 2026.9.0（旧基线） | 2026.10.x（rc1，现行） |
+|---|---|---|
+| 音频帧头 | **9B**（1B type + 8B ts） | **13B**（1B type + 8B ts + 4B `send_ahead` 大端 μs；`send_ahead` = 加密发送时刻 − 期望播放时刻，打戳须在加密发送前一刻） |
+| §坑 A1 | 「13B 会整链无声」 | **方向反转**：新固件里 `send_ahead` 是规范字段；9B 服务端对 2026.10 固件才会每包 `Error decoding FLAC frame: -2` 整链无声。判据不是「谁多谁少」，而是**两端剥掉的字节数必须一致** |
+| 配对 PAKE sid | `label‖h‖pairing_index`（aiosendspin 9.x） | `label‖h‖pairing_index‖round`（均大端 uint32；label = `sendspin-pair-pake-v1`）。服务端少 round ⇒ CPace 必 `pairing_code_mismatch` |
+| `supported_commands` | hello 的 `player@v1_support` | **挪到 client/state 的 player 对象**（hello 只剩 `supported_formats`/`buffer_capacity`）。服务端须在收到 client/state 时合并，否则音量/静音命令恒不下发（API 仍成功，表象=前端拖了没反应） |
+| `client_id` | 取网卡 MAC | **静态 Curve25519 公钥**（43B base64url），跨重连持久；重烧/擦 NVS 才会换 ⇒ 服务端以 **hostname+PSK** 兜底识别同一台设备 |
+| 传输加密 | 可选 | **每连接强制 Noise KKpsk2**；未配对访问默认开（`unpaired_access: true` 可直接播放） |
+| 音量语义 | — | spec：server MUST NOT 假设重连后音量不变 ⇒ **重连后必须重新下发**（MusicFlow 在 client/state 学到 volume 能力后立即补发权威音量） |
+| 服务端版本 | aiosendspin 9.x 对标 | 需 Sendspin 1.0.0-rc1 服务端（MA 2.10.7+ / 2.11.0b4+） |
+
+**配对窗语义（static code）**：`on_open_pairing_window` 在「服务端发起尝试、等设备确认」时触发——在此自动执行 `sendspin.confirm_pairing_window` 即实现零按钮配对；**boot 预开的窗会因服务器断连立刻关闭**，不能只靠 on_boot。窗在配对成功、5 次错码、服务器断连、取消或 5 分钟超时时关闭。配对码每台设备必须唯一（CSPRNG 随机 8 位）。
+
+### ESPHome 2026.10.x 设备配置示例（最新版，已去隐私）
+
+> esp32-player2 / esp32-player-meet 实产配置的合并去隐私版；S3 + Octal PSRAM 8MB + ESP-IDF 5.5.4。引脚按硬件改。
+
+```yaml
+esphome:
+  name: esp32-player            # ← 按设备改名
+  friendly_name: esp32-player
+  on_boot:
+    priority: -100
+    then:
+      - media_player.volume_set:      # 可选：空窗期兜底音量（服务端连上后被 syncVolume 覆盖）
+          id: speaker_media_player_id
+          volume: 20%
+      - sendspin.confirm_pairing_window:   # 开机自动开 5 分钟配对窗（与下面自动确认双保险）
+
+esp32:
+  board: esp32-s3-devkitc-1
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+    version: 5.5.4
+
+logger:
+  level: INFO                # DEBUG 级高频日志是实时音频链路的抖动源
+
+web_server:
+  port: 80
+
+button:
+  - platform: restart
+    name: "esp32-player Restart"
+    id: player_restart
+    icon: mdi:restart
+  - platform: template                            # 手动确认配对按钮（设备网页上点，备用）
+    name: "esp32-player Confirm Pairing"
+    id: confirm_pairing_btn
+    icon: mdi:link-variant
+    on_press:
+      - sendspin.confirm_pairing_window:
+
+api:
+  encryption:
+    key: "＜你的 ESPHome API 加密 Key＞"
+  reboot_timeout: 600s
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+network:
+  enable_ipv6: true
+  enable_high_performance: true     # 持续 25ms 一帧的音频流更稳
+
+wifi:
+  networks:
+    - ssid: "＜你的SSID＞"
+      password: "＜你的WiFi密码＞"
+  manual_ip:
+    static_ip: 192.168.10.xxx
+    gateway: 192.168.10.1
+    subnet: 255.255.255.0
+  power_save_mode: none
+  output_power: 20.5                # 别用最低档 8.5：信号弱 ⇒ 设备长时间不读 socket ⇒ 停摆重投
+  ap:
+    ssid: "Entrance-Media-Player"
+    password: "＜AP密码＞"
+
+captive_portal:
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+sendspin:
+  id: sendspin_hub
+  task_stack_in_psram: true
+  manufacturer: "DIY"
+  model: "esp32-s3-player"
+  firmware_version: "1.0.0"
+  static_pairing_code: "＜每台设备唯一的 8 位数字码，必须带引号＞"
+  unpaired_access: true             # 配对稳定后改 false：只允许已配对服务器播放
+  on_pairing_succeeded:
+    - logger.log:
+        format: "Sendspin server paired OK (server_id=%s)"
+        args: ["server_id.c_str()"]
+  on_pairing_failed:
+    - logger.log:
+        format: "Sendspin pairing FAILED (server_id=%s, reason=%s)"
+        args: ["server_id.c_str()", "reason.c_str()"]
+  on_open_pairing_window:
+    - sendspin.confirm_pairing_window:   # 服务端一发起配对就自动开窗（零按钮的核心）
+
+i2s_audio:
+  - id: i2s_output
+    i2s_lrclk_pin: GPIO7
+    i2s_bclk_pin: GPIO6              # ← 按硬件改
+
+speaker:
+  - platform: i2s_audio
+    id: speaker_id
+    dac_type: external
+    i2s_dout_pin: GPIO5
+    i2s_audio_id: i2s_output
+    sample_rate: 48000
+    bits_per_sample: 16bit
+    channel: stereo
+  - platform: mixer
+    id: mixer_speaker_id
+    output_speaker: speaker_id
+    source_speakers:
+      - id: announcement_spk_mixer_input
+      - id: media_spk_mixer_input
+  - platform: resampler
+    id: media_spk_resampling_input
+    output_speaker: media_spk_mixer_input
+  - platform: resampler
+    id: announcement_spk_resampling_input
+    output_speaker: announcement_spk_mixer_input
+
+media_source:
+  - platform: audio_http             # 平台名是 audio_http，不是 http_request（§3.4）
+    id: http_source_media
+  - platform: audio_http
+    id: http_source_announcement
+  - platform: sendspin
+    id: sendspin_source
+    buffer_size: 6000000             # §3.2 选型（8MB PSRAM 推荐 6MB）
+    decode_memory: psram
+    task_stack_in_psram: true
+
+media_player:
+  - platform: sendspin
+    id: sendspin_group_media_player
+  - platform: speaker_source
+    name: "Speaker Media Player"
+    id: speaker_media_player_id
+    volume_initial: 20%              # 空窗期兜底；服务端连上后被 syncVolume 覆盖
+    media_pipeline:
+      speaker: media_spk_resampling_input
+      num_channels: 2
+      sources:
+        - sendspin_source
+        - http_source_media
+    announcement_pipeline:
+      speaker: announcement_spk_resampling_input
+      num_channels: 1
+      sources:
+        - http_source_announcement
+```
+
 ---
+
+
 
 ## 0. 一分钟总纲
 
@@ -647,6 +817,7 @@ sendspin 版「rejoin」：`stream/start`（codec_header + 格式）→ `members
 - **真相**：`send_ahead` **根本不是 wire 字段**。设备 `sendspin-cpp` 的处理是 `client.cpp` 只剥 1B type → `player_role.cpp` 常量 `BINARY_TIMESTAMP_SIZE = 8` → **8B 之后一律当作编码音频**。多出的 4B 落在 payload 头部，首字节 `0x00` 而非 FLAC 同步字 `0xFF` → 每包 `Serious error decoding FLAC file`。
 - **为什么没早发现**：这个错误同时掩盖了自己 —— 帧格式错导致**每包都失败**，看起来像「解码器有问题」，于是去查 STREAMINFO、block size、喂料粒度，越查越远。
 - **教训**：**wire 格式的对错只有接收方能定义。** 任何「对齐某个参考实现」的推断，都必须回到接收端源码逐字节验证（`grep -rn "send_ahead" sendspin-cpp/` → **零命中**，一句话就证伪了）。
+- **⚠️ 2026-10-24 方向反转**：本坑仅适用于 2026.9.x 固件（`BINARY_TIMESTAMP_SIZE=8`）。2026.10.x 固件（sendspin-cpp 0.9.3）已按 rc1 规范把音频帧头升为 **13B（含 4B `send_ahead`）**——同样的 4 字节错位换了方向：9B 服务端对 2026.10 固件整链无声。教训升级版：**帧头口径跟着接收端固件版本走，换固件版本必须重新逐字节核验帧格式**（见文首增补节）。
 
 ### 坑 A2 —— 把 STREAMINFO block size 当成「决定性根因」
 
