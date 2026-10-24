@@ -207,13 +207,10 @@ check(
     `stillCurrent@${iStill} delete@${iDel}`,
   );
   check(
-    // 双传输改造(AP1/AP2 统一走 cliairplay)后,sessionRuntime 里有**两处**收尾:
-    // 自研 RAOP 一条、cliairplay 一条。两处都必须上报 current/positionSec,否则主进程
-    // 判不了"这条会话到底是不是被用户换下来的那一首"。所以这里钉 2 次,少一处即失败。
-    "sessionRuntime 两条收尾(raop/cli)都带 current: stillCurrent 与真实落点",
-    count(runtime, "current: stillCurrent") === 2
-      && /positionSec:\s*Math\.max\(0,\s*Number\(active\.player\?\.positionSec\)/.test(runtime),
-    `sessionEnded 载荷缺 current/positionSec(current: stillCurrent 出现 ${count(runtime, "current: stillCurrent")} 次,应为 2)`,
+    "sessionRuntime finalizer:事件带上 current: stillCurrent 与真实落点",
+    count(runtime, "current: stillCurrent") === 1
+      && /positionSec:\s*Math\.max\(0,\s*Number\(active\.player\.positionSec\)/.test(runtime),
+    "sessionEnded 载荷缺 current/positionSec",
   );
 }
 check(
@@ -588,7 +585,7 @@ console.log("===== R18 流转接续:起播即落位 + 建会话硬预算(HiVi �
   );
   check(
     "transfer 到 AirPlay:把源进度交给本次 cast",
-    /const frozenPos = freezesPositionBeforeCast\(parsedTo\.kind\)/.test(peers)
+    /const inCastPos = !borrow\.armed[\s\S]{0,260}?parsedTo\.kind === "airplay"/.test(peers)
       && /Math\.round\(inCastPos \* 1000\)/.test(peers),
     "transfer 仍走「先起播、再 seek」",
   );
@@ -732,10 +729,7 @@ console.log("===== R23 起播/重启恢复:不得绕开统一起播路径;设备
   const qc = stripComments(read("backend/src/services/player/QueueController.ts"));
   check(
     "resumeActive 仍走 playCurrent(重启恢复不得绕过统一起播路径)",
-    // 2026-10-23:签名多了第 3 参 startPositionMs(看门狗续播必须带落点,否则"续播"变"重播"),
-    // 但**仍然必须**经由统一起播路径 playCurrent —— 这里同时钉住"落点被透传下去",
-    // 防止为了图快在 resumeActive 里另开一条 cast。
-    /async resumeActive\(deviceId: string, baseUrl: string, startPositionMs\?: number\)[\s\S]{0,400}playCurrent\(deviceId, baseUrl, startPositionMs\)/.test(qc),
+    /async resumeActive\(deviceId: string, baseUrl: string\)[\s\S]{0,400}playCurrent\(deviceId, baseUrl\)/.test(qc),
     "重启恢复另开了一条起播路径,落点/串行闸都会绕过去",
   );
   // 闸被某个挂死的操作占住时,后续 cast 会**静默排队**到超时;排队日志是唯一
@@ -787,14 +781,10 @@ console.log("===== R25 同设备双协议流转(AirPlay <-> DLNA):落点/互斥/
     "同设备流转会被当成两台设备:起播互斥停掉源端后读不到进度",
   );
   check(
-    "流转起点在任何起播/互斥/摘组动作之前定格(srcPosEarly → frozenPos)",
+    "流转起点在任何起播/互斥动作之前定格(srcPosEarly)",
     /const srcPosEarly = askPosition \?\? \(sameDevice \? await readPeerPositionSeconds/.test(peersG)
-      && /const frozenPos = freezesPositionBeforeCast[\s\S]{0,200}srcPosEarly/.test(peersG)
-      // ★ 定格必须排在「摘组」之前:摘组本身会停掉源端(目标若正替该组出声),
-      //   晚读只能读到 0 —— 2026-10-24 真机实测「组 → 组内最后一台成员」回执 position=null。
-      && peersG.indexOf("const frozenPos =")
-        < peersG.indexOf("await detachFromActiveGroups(parsedTo)"),
-    "落点在源端被互斥/摘组停掉之后才读:会恒为 0(真机=流转后从头播)",
+      && /const inCastPos = !borrow\.armed[\s\S]{0,260}srcPosEarly/.test(peersG),
+    "落点在源端被互斥停掉之后才读:会恒为 0(真机=流转后从头播)",
   );
   check(
     "DLNA playMedia 把 startMs 编进 timeOffset(起播即落位)",
@@ -1034,8 +1024,7 @@ console.log("===== R30 AirPlay 独立子进程(与 sendspin 对齐):默认 fork 
     "子进程会话收尾有硬上限(STOP_DEADLINE_MS + stopPlayerBounded)",
     /const STOP_DEADLINE_MS = 4_000/.test(rtG)
       && /private async stopPlayerBounded\(/.test(rtG)
-      // player 在双传输改造后变成可选(cli 会话没有 RaopPlayer),故允许 `!.`
-      && /s\.player!?\.forceClose\(\)/.test(rtG),
+      && /s\.player\.forceClose\(\)/.test(rtG),
     "子进程 await player.stop() 无上限:设备不答 TEARDOWN 时 cast RPC 永不回包",
   );
   check(
