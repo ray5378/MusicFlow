@@ -2208,6 +2208,7 @@ export class SendspinConnection {
     // server/init 紧跟 msg1(中间不等客户端,见参考 run_handshake_server)。
     this.sendCleartext(serverInitText);
     const msg1Pt = handshakePayload1(pskHex, category);
+    this.msg1Pt = msg1Pt;
     const msg1Ct = this.noise!.writeMessage(msg1Pt);
     this.sendCleartext("noise/handshake", { data: b64urlEncode(msg1Ct) });
   }
@@ -2216,11 +2217,15 @@ export class SendspinConnection {
    *  按 spec 保持空 activities(不注册 peer、不给播放),等重新配对。 */
   sentinelMismatch = false;
 
+  /** beginHandshake 实际发出的 msg1 明文载荷(原文重放用,见 trySentinelFallback)。 */
+  private msg1Pt?: Uint8Array;
+
   /** Sentinel Fallback 验证:成功返回 true(会话已切换为 sentinel,标记失配)。 */
   private trySentinelFallback(msg2Ct: Uint8Array): boolean {
     try {
       const eph = this.noise?.ephemeralPriv;
-      if (!eph || !this.hsRemotePub || !this.clientInitText || !this.serverInitText) return false;
+      if (!eph || !this.hsRemotePub || !this.clientInitText || !this.serverInitText || !this.msg1Pt)
+        return false;
       const prologue = new Uint8Array(
         Buffer.concat([Buffer.from(this.clientInitText, "utf8"), Buffer.from(this.serverInitText, "utf8")]),
       );
@@ -2232,8 +2237,11 @@ export class SendspinConnection {
         psk: Buffer.from(SENTINEL_PSK_HEX, "hex"),
         ephemeralPriv: eph,
       });
-      // 推进到 step1(字节丢弃,只为内部状态与原会话对齐)再验 msg2。
-      fb.writeMessage(handshakePayload1(SENTINEL_PSK_HEX, "sn"));
+      // 关键:重放**原始 msg1 载荷字节**(beginHandshake 实际发出的那份,含 lt 的
+      // psk_id/类别)。客户端 hash 进对称状态的就是这份字节;若换用 sentinel 派生
+      // 载荷重算,hash 必分叉,msg2 永远验不过(实测 invalid tag)。载荷是明文吸收,
+      // 密钥侧传 sentinel psk 即可与客户端 mix_psk(SENTINEL) 对齐。
+      fb.writeMessage(this.msg1Pt);
       fb.readMessage(msg2Ct);
       this.noise = fb;
       this.handshakePskCategory = "sn";

@@ -228,25 +228,26 @@ describe("completeHandshake:Noise msg2 落定 + sentinel fallback", () => {
     expect(h.conn.handshakeDone).toBe(false);
   });
 
-  // ⚠️ 已知产品缺陷(记入交付报告):trySentinelFallback 重放 msg1 时用了 **sentinel 派生
-  //    的负载字节**,而对端客户端 hash 进对称状态的是服务端实际发出的 **lt 负载字节**;
-  //    两者不同 ⇒ hash 分叉 ⇒ readMessage(msg2) 必 "invalid tag" ⇒ fallback 恒返回 false。
-  //    (已用独立脚本实证:换成原始 lt payload 重放 → msg2 立即可解。)
-  //    这里用 it.fails 记录「本应成立」的契约:缺陷修好那天它会翻红,提醒解除标记。
-  it.fails("★ Sentinel Fallback:服务端按长配对 PSK 起会话,客户端丢记录用 sentinel 回 msg2 → 切回 sentinel 且标记失配", async () => {
-    const { srv } = makeServer();
+  // P0-2 已修(2026-10-25):fallback 重放**原始 msg1 载荷字节**、只换 psk 值,
+  // 与客户端「resolve 失败 → mix_psk(SENTINEL) 继续」的 fork 语义对齐。
+  it("★ Sentinel Fallback:服务端按长配对 PSK 起会话,客户端丢记录用 sentinel 回 msg2 → 切回 sentinel 且标记失配", async () => {
+    const { srv, logs } = makeServer();
     const PSK = "aa".repeat(32);
     const h = await noise(srv, { pairingStore: { getRecord: () => ({ pskHex: PSK }) } });
     expect(h.conn.sentinelMismatch).toBe(true);
     expect(h.conn.handshakeDone).toBe(true);
     expect(h.conn.handshakePskCategory).toBe("sn");
+    expect(logsContain(logs, "sentinel fallback")).toBe(true);
   });
 
-  // 现状(缺陷未修时):fallback 无法自证,必须**如实 fail** 而不是假装成功。
-  it("★ 凭证失配且 fallback 失败 → 明确 fail 收口(绝不假装握手成功)", async () => {
+  // 双双失败的真错场景:客户端既不用 lt 也不用 sentinel(伪造/彻底损坏的记录)。
+  it("★ 凭证失配且 fallback 也失败 → 明确 fail 收口(绝不假装握手成功)", async () => {
     const { srv, logs } = makeServer();
     const PSK = "aa".repeat(32);
-    const h = await noise(srv, { pairingStore: { getRecord: () => ({ pskHex: PSK }) } });
+    const h = await noise(srv, {
+      pairingStore: { getRecord: () => ({ pskHex: PSK }) },
+      responderPskHex: "cc".repeat(32),
+    });
     expect(h.conn.sentinelMismatch).toBe(false);
     expect(h.conn.handshakeDone).toBe(false);
     expect(logsContain(logs, "noise message 2 failed authentication")).toBe(true);
