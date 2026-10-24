@@ -1599,6 +1599,56 @@ export class QueueController extends EventEmitter {
     }
   }
 
+  /** 组播放中新增 **airplay** 成员:把当前曲 cast 给新成员,起点编进本次 cast(起播即落位)。
+   *  与 DLNA rejoinMembers 的差异:
+   *  - 在线判定走 airplay 设备档案(getAirPlayStatus.available),非 DLNA SOAP 可达性;
+   *  - 起点由 playMedia 的 startMs 一次性编进 cast,**绝不做事后校准 seek** ——
+   *    AirPlay seek 是完整重建会话,先起播再 seek 会让单会话设备永久等待(2026-10-21 真机);
+   *  - 组处于暂停 → 对齐后同步暂停(镜像组播放态);
+   *  - 新成员若有个人激活队列 → 标记不激活(组激活期间成员不可单独播放,保留 items)。 */
+  async rejoinMembersAirplay(groupId: string, newMemberIds: string[]): Promise<void> {
+    groupId = stripPlayerPrefix(groupId);
+    const q = this.queues.get(groupId);
+    if (!q || !q.isActive || q.currentIndex < 0) return;
+    const item = q.items[q.currentIndex];
+    if (!item) return;
+    const fullItem = await this.resolveItem(item);
+    const baseUrl = getEffectiveBaseUrl();
+    // 动态导入:QC ← airplay/control ← dlna/control 的静态边在某些加载序下成环(TDZ),
+    // 沿用 alignGroupMembers 同构。
+    const { getAirPlayStatus, isAirPlayDeviceDisabled } = await import("../airplay/control.js");
+    const online = newMemberIds
+      .filter(d => !isAirPlayDeviceDisabled(d) && getAirPlayStatus(d).available);
+    if (online.length === 0) return;
+    // leader 当前进度与播放态(组状态派生自 leader)。
+    let position = 0;
+    let playState: string | undefined;
+    try {
+      const st = await getGroupStatus(groupId);
+      if (typeof st.position === "number" && st.position > 0) position = st.position;
+      playState = st.state;
+    } catch (e: any) {
+      log.warn("组状态查询失败,回退 position=0", { groupId, err: e?.message || e });
+    }
+    const startMs = position > 0 ? Math.round(position * 1000) : 0;
+    for (const deviceId of online) {
+      try {
+        const p = createAirPlayProtocolPlayer(deviceId);
+        await p.playMedia(fullItem, baseUrl, startMs);
+        if (playState === "PAUSED" || playState === "PAUSED_PLAYBACK") await p.pause();
+        const pq = this.queues.get(deviceId);
+        if (pq?.isActive) {
+          pq.isActive = false;
+          this.persist(deviceId);
+          this.emit("queue_changed", deviceId, this.snapshot(deviceId));
+        }
+        log.info(`[group] ${groupId}: airplay 新成员 ${deviceId} 已对齐(起点 ${Math.round(startMs / 1000)}s, 状态 ${playState ?? "?"})`);
+      } catch (e: any) {
+        log.warn(`[group] ${groupId}: airplay 新成员 ${deviceId} 加入对齐失败: ${e?.message || e}`);
+      }
+    }
+  }
+
   /** List all devices that have an active (non-empty) queue. 对照原
    *  QueueManager.activeDevices — 供 Web 客户端恢复 cast 状态。 */
   activeDevices(): Array<{ deviceId: string; snapshot: QueueSnapshot }> {

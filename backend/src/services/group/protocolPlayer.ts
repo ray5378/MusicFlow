@@ -1,31 +1,35 @@
 // 组协议 player:实现 ProtocolPlayer 接口,对组内在线成员扇出命令。
 // 仿 MA Universal Group(全部成员并发播同一 URL,无漂移校正):
-//   - 成员按 kind 分流:dlna 逐成员 cast(各设备自拉流);sendspin 子集走**一个**
+//   - 成员按 kind 分流:dlna/airplay 逐成员 cast(各设备自拉流);sendspin 子集走**一个**
 //     共享 pump(ug:<groupId> 组＋单时间线,多房间同步,见 sendspin/playerCore)。
-//     混编组(dlna＋sendspin 同组)两种路径各播各的, roughly 同时起播,不做跨协议
-//     采样级对齐(MA 桥接语义同)。
-//   - playMedia/stop/pause/resume/seek/setVolume → dlna 扇出 ＋ sendspin 组单发
-//   - pollState → leader 派生(leader 可能是 sendspin 成员,走组 pump 状态)
+//     混编组各播各的,roughly 同时起播,不做跨协议采样级对齐(MA 桥接语义同)。
+//   - playMedia/stop/pause/resume/seek/setVolume → dlna/airplay 扇出 ＋ sendspin 组单发
+//   - pollState → leader 派生(leader 可能是 sendspin/airplay 成员)
 //   - 成员离线自动跳过;成员增删实时读取 GroupManager,无需重新注册
 import { getGroupManager, splitMemberId } from "./index.js";
 import { createDlnaProtocolPlayer, getDevice, getDeviceStatus, isDeviceAvailable } from "../dlna/control.js";
+import { createAirPlayProtocolPlayer } from "../airplay/protocolPlayer.js";
+import { getAirPlayStatus, isAirPlayDeviceDisabled } from "../airplay/control.js";
 import { getSendspinFront } from "../sendspin/index.js";
 import { sendspinGroupName } from "../sendspin/playerCore.js";
 import { PlaybackState, type PlayerState, type ProtocolPlayer, type QueueItem } from "../player/types.js";
 import { createLogger } from "../../utils/logger.js";
 
-/** 组内成员按 kind 拆分(裸 id)。dlna 含历史裸写法。 */
-export function splitGroupMembers(groupId: string): { dlna: string[]; spin: string[] } {
+/** 组内成员按 kind 拆分(裸 id)。dlna 含历史裸写法(仅旧组,新提交已禁)。 */
+export function splitGroupMembers(groupId: string): { dlna: string[]; airplay: string[]; spin: string[] } {
   const g = getGroupManager().get(groupId);
   const dlna: string[] = [];
+  const airplay: string[] = [];
   const spin: string[] = [];
-  if (!g) return { dlna, spin };
+  if (!g) return { dlna, airplay, spin };
   for (const m of g.memberIds) {
     const s = splitMemberId(m);
     if (!s) continue;
-    (s.kind === "sendspin" ? spin : dlna).push(s.id);
+    if (s.kind === "sendspin") spin.push(s.id);
+    else if (s.kind === "airplay") airplay.push(s.id);
+    else dlna.push(s.id);
   }
-  return { dlna, spin };
+  return { dlna, airplay, spin };
 }
 
 /** 组内在线 sendspin 成员(裸 clientId):front clients ready 判定,不在线即跳过。 */
@@ -40,23 +44,34 @@ export function getOnlineSendspinIds(groupId: string): string[] {
   });
 }
 
-/** 组是否有任一在线成员(dlna 在线或 sendspin 在线)。QC 结束抑制/看门狗悬挂判定用。 */
+/** 组内在线 airplay 成员(裸 deviceId):设备未禁用且 status.available 判定。
+ *  available 来自设备档案 + 发现态(与 /v1/airplay 同源),会话不存在时回档案值。 */
+export function getOnlineAirplayIds(groupId: string): string[] {
+  return splitGroupMembers(groupId).airplay
+    .filter(id => !isAirPlayDeviceDisabled(id) && getAirPlayStatus(id).available);
+}
+
+/** 组是否有任一在线成员(dlna / airplay / sendspin 任一)。QC 结束抑制/看门狗悬挂判定用。 */
 export function hasOnlineMember(groupId: string): boolean {
   if (getOnlineMemberIds(groupId).length > 0) return true;
+  if (getOnlineAirplayIds(groupId).length > 0) return true;
   return getOnlineSendspinIds(groupId).length > 0;
 }
 
 /** 组 leader(固定顺序首个在线成员,跨 kind;对照 MA _select_sync_leader)。
  *  返回 kind＋裸 id;组无在线成员返回 undefined。 */
-export function getGroupLeader(groupId: string): { kind: "dlna" | "sendspin"; id: string } | undefined {
+export function getGroupLeader(groupId: string): { kind: "dlna" | "sendspin" | "airplay"; id: string } | undefined {
   const g = getGroupManager().get(groupId);
   if (!g) return undefined;
   const spinOnline = new Set(getOnlineSendspinIds(groupId));
+  const apOnline = new Set(getOnlineAirplayIds(groupId));
   for (const m of g.memberIds) {
     const s = splitMemberId(m);
     if (!s) continue;
     if (s.kind === "sendspin") {
       if (spinOnline.has(s.id)) return { kind: "sendspin", id: s.id };
+    } else if (s.kind === "airplay") {
+      if (apOnline.has(s.id)) return { kind: "airplay", id: s.id };
     } else if (isDeviceAvailable(s.id)) {
       return { kind: "dlna", id: s.id };
     }
@@ -93,20 +108,24 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
     opName: string,
     op: (p: ProtocolPlayer) => Promise<unknown>,
   ): Promise<{ fulfilled: number; rejected: number }> {
-    const members = getOnlineMemberIds(groupId);
-    if (members.length === 0) {
-      log.debug(`[group][${opName}] ${groupId}: 无在线 DLNA 成员,跳过扇出`);
+    // dlna 与 airplay 成员一起逐设备扇出(airplay 用独立 cast,不进 sendspin pump)。
+    const dlnaIds = getOnlineMemberIds(groupId);
+    const apIds = getOnlineAirplayIds(groupId);
+    if (dlnaIds.length === 0 && apIds.length === 0) {
+      log.debug(`[group][${opName}] ${groupId}: 无在线 DLNA/AirPlay 成员,跳过扇出`);
       return { fulfilled: 0, rejected: 0 };
     }
+    const names = [...dlnaIds, ...apIds];
+    const players = [...dlnaIds.map(d => createDlnaProtocolPlayer(d)), ...apIds.map(d => createAirPlayProtocolPlayer(d))];
     const t0 = Date.now();
-    const results = await Promise.allSettled(members.map(d => op(createDlnaProtocolPlayer(d))));
+    const results = await Promise.allSettled(players.map(p => op(p)));
     // debug:逐成员记录失败者 —— 原实现只打「N/M 失败」总数,查「到底是谁没跟上」
     // (组内 seek 后某台音箱停在旧位置)时无从下手。
     const failed = results
-      .map((r, i) => (r.status === "rejected" ? `${members[i]}(${r.reason?.message || r.reason})` : null))
+      .map((r, i) => (r.status === "rejected" ? `${names[i]}(${r.reason?.message || r.reason})` : null))
       .filter((x): x is string => x !== null);
     if (failed.length > 0) {
-      log.warn(`[group][${opName}] ${groupId}: ${failed.length}/${members.length} 成员失败 ${Date.now() - t0}ms → ${failed.join(", ")}`);
+      log.warn(`[group][${opName}] ${groupId}: ${failed.length}/${names.length} 成员失败 ${Date.now() - t0}ms → ${failed.join(", ")}`);
     }
     return { fulfilled: results.length - failed.length, rejected: failed.length };
   }
@@ -124,8 +143,9 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
     playerId,
     async playMedia(item: QueueItem, baseUrl: string) {
       const dlnaOnline = getOnlineMemberIds(groupId);
+      const apOnline = getOnlineAirplayIds(groupId);
       const spinOnline = getOnlineSendspinIds(groupId);
-      if (dlnaOnline.length === 0 && spinOnline.length === 0) {
+      if (dlnaOnline.length === 0 && apOnline.length === 0 && spinOnline.length === 0) {
         throw new Error(`组 ${groupId} 无在线成员,无法播放`);
       }
       const jobs: Array<Promise<{ mediaUri: string }>> = [];
@@ -137,6 +157,9 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
         })());
       }
       for (const d of dlnaOnline) jobs.push(createDlnaProtocolPlayer(d).playMedia(item, baseUrl));
+      // airplay 成员逐设备独立 cast(与 DLNA 同为自拉流语义;起播即落位由各自
+      // protocolPlayer.playMedia 的 startMs 语义承担,组路径不传偏移)。
+      for (const d of apOnline) jobs.push(createAirPlayProtocolPlayer(d).playMedia(item, baseUrl));
       const results = await Promise.allSettled(jobs);
       const ok = results.find(r => r.status === "fulfilled");
       if (!ok) throw new Error(`组 ${groupId} 全部成员 cast 失败`);
@@ -184,6 +207,11 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
         const s = await createSendspinGroupPlayer(groupId).pollState();
         return { ...s, playerId };
       }
+      if (leader.kind === "airplay") {
+        // airplay leader:状态从设备会话态派生(sessionView 同源)。
+        const s = await createAirPlayProtocolPlayer(leader.id).pollState();
+        return { ...s, playerId };
+      }
       // leader 当前不可达(SOAP 失败已被 isDeviceAvailable 标记)→ 同上,不把离线默认
       // STOPPED 当成结束(仅当 getOnlineMemberIds 用的是 isDeviceAvailable 后此处防御性保留)。
       if (!isDeviceAvailable(leader.id)) {
@@ -222,6 +250,20 @@ export async function getGroupStatus(groupId: string): Promise<{
       volume: typeof gv?.volume === "number" ? gv.volume : persistedVolume,
       muted: !!gv?.muted,
       media: gv?.current ?? undefined,
+      updatedAt: Date.now(),
+    };
+  }
+  if (leader.kind === "airplay") {
+    // airplay leader:会话态同步取值(无会话/已结束时回设备档案态,position=0)。
+    const st = getAirPlayStatus(leader.id);
+    const state = st.playbackState === PlaybackState.PLAYING ? "PLAYING"
+      : st.playbackState === PlaybackState.PAUSED ? "PAUSED" : "STOPPED";
+    return {
+      state,
+      position: Math.floor(st.position || 0),
+      duration: Math.floor(st.duration || 0),
+      volume: persistedVolume,
+      muted: !!st.muted,
       updatedAt: Date.now(),
     };
   }

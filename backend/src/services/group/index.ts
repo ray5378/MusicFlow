@@ -1,7 +1,8 @@
 // 播放器群组(SyncGroup)管理服务。仿 MA sync_group provider:
 //   - 组 = 多台设备的集合,组持有自己的队列(在 QueueController 接 group:<id> 后生效)
-//   - 成员用带命名空间的 peer 成员 id:`sendspin:<clientId>` / `dlna:<deviceId>` /
-//     裸 id(历史数据,一律视为 DLNA);组不能套组(`group:` 前缀拒绝)
+//   - 成员用带命名空间的 peer 成员 id:`airplay:<deviceId>` / `sendspin:<clientId>` /
+//     `dlna:<deviceId>`/裸 id(仅历史数据可解析,新提交一律拒收 —— DLNA 已禁止入组);
+//     组不能套组(`group:` 前缀拒绝)
 //   - 一台设备可同时加入多个组(如"客厅组"+ "所有设备组"),设备同一时刻只能渲染一路流,
 //     多个组同时向同一设备投递时以最后一次命令为准(物理限制,非漂移校正范畴)
 //   - 组名必填、非空、限长;成员用全量替换(前端勾选框提交完整列表)或增量
@@ -13,13 +14,15 @@ import { eq } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { playerGroups } from "../../db/schema.js";
 import { getCachedDevices } from "../dlna/control.js";
+import { getAirPlayStatus, hasAirPlayDevice, isAirPlayDeviceDisabled } from "../airplay/control.js";
 import { getServer as getSendspinServer } from "../sendspin/runtime.js";
 import { sendspinSupervisor } from "../sendspin/supervisor.js";
 import { getSendspinDeviceVolume } from "../sendspin/peerVolume.js";
 import { createLogger } from "../../utils/logger.js";
 
-/** 成员 kind:dlna(默认,裸 id 亦属此) / sendspin。airplay/local 暂不支持进组。 */
-export type GroupMemberKind = "dlna" | "sendspin";
+/** 成员 kind:airplay / sendspin / dlna(仅历史数据可解析,**新提交一律拒收**,
+ *  2026-10-24 起 DLNA 禁止入组 —— 设备自拉流无共享时间线)。 */
+export type GroupMemberKind = "airplay" | "dlna" | "sendspin";
 
 /** 拆成员 id 为 kind＋裸 id。`group:`/`local:` 前缀返回 null(组不能套组/含本机)。 */
 export function splitMemberId(m: string): { kind: GroupMemberKind; id: string } | null {
@@ -29,11 +32,15 @@ export function splitMemberId(m: string): { kind: GroupMemberKind; id: string } 
     const id = m.slice("sendspin:".length);
     return id ? { kind: "sendspin", id } : null;
   }
+  if (m.startsWith("airplay:")) {
+    const id = m.slice("airplay:".length);
+    return id ? { kind: "airplay", id } : null;
+  }
   if (m.startsWith("dlna:")) {
     const id = m.slice("dlna:".length);
     return id ? { kind: "dlna", id } : null;
   }
-  return { kind: "dlna", id: m }; // 裸 id = 历史数据,视为 DLNA
+  return { kind: "dlna", id: m }; // 裸 id = 历史数据,视为 DLNA(仅旧组可解析,新提交在 assertMembersAvailable 拒收)
 }
 
 const log = createLogger("group");
@@ -56,9 +63,9 @@ export interface GroupMemberInfo {
   deviceId: string;
   name: string;
   available: boolean;
-  /** sendspin 成员专属:音量/静音回显(Groups 页成员迷你音量条)。
-   *  离线时不缺席 —— 回退持久库值,灰态仍可调,调完即持久、重连生效。
-   *  其它 kind 不填,前端按存在性渲染。 */
+  /** sendspin/airplay 成员专属:音量/静音回显(Groups 页成员迷你音量条)。
+   *  离线时不缺席 —— 回退持久值,灰态仍可调,调完即持久、重连生效。
+   *  dlna 成员不填,前端按存在性渲染。 */
   volume?: number;
   muted?: boolean;
 }
@@ -262,6 +269,11 @@ export class GroupManager extends EventEmitter {
       const split = splitMemberId(memberId);
       if (!split) return { deviceId: memberId, name: memberId, available: false };
       if (split.kind === "sendspin") return { deviceId: memberId, ...this.resolveSendspinMember(split.id) };
+      if (split.kind === "airplay") {
+        // airplay 成员:设备档案 + 会话态同源(与 /v1/airplay status 同一取值面)。
+        const s = getAirPlayStatus(split.id);
+        return { deviceId: memberId, name: s.name || split.id, available: !!s.available, volume: s.volume, muted: !!s.muted };
+      }
       const d = cache.get(split.id);
       return { deviceId: memberId, name: d ? (d.alias || d.name) : memberId, available: !!d?.available };
     });
@@ -317,14 +329,20 @@ export class GroupManager extends EventEmitter {
       if (seen.has(m)) throw new Error("成员列表不能重复");
       seen.add(m);
       const split = splitMemberId(m);
-      // 组不能套组/含本机/airplay 暂不支持进组(旧报错口径保留)。
+      // 组不能套组/含本机(旧报错口径保留)。
       if (!split) throw new Error(`成员 ${m} 不是 DLNA 设备`);
       if (split.kind === "sendspin") {
         // sendspin 成员只校验格式(在线状态动态解析):组可持久化,设备离线仍可建组。
         continue;
       }
-      const known = getCachedDevices().some(d => d.id === split.id);
-      if (!known) throw new Error(`设备 ${m} 不是已知的 DLNA 设备`);
+      if (split.kind === "airplay") {
+        // airplay 成员校验设备档案存在且未禁用(可用性动态解析,离线仍可建组)。
+        if (!hasAirPlayDevice(split.id)) throw new Error(`设备 ${m} 不是已知的 AirPlay 设备`);
+        if (isAirPlayDeviceDisabled(split.id)) throw new Error(`AirPlay 设备 ${m} 已被禁用`);
+        continue;
+      }
+      // dlna(含历史裸 id 写法):DLNA 设备自拉流、组内无共享时间线,2026-10-24 起禁止入组。
+      throw new Error(`DLNA 设备不支持加入群组(请先从成员中移除 ${m})`);
     }
   }
 

@@ -17,10 +17,26 @@ import { sqlite } from "../../src/db/index.js";
 
 // DLNA 设备源:只认裸 deviceId(与真实实现一致 —— sendspin 成员不会出现在这里)。
 vi.mock("../../src/services/dlna/control.js", () => ({
-  getCachedDevices: () => [
-    { id: "d1", name: "客厅音响", available: true },
-    { id: "d2", name: "卧室音响", available: false },
-  ],
+  getCachedDevices: () => [],
+}));
+
+// airplay 设备源(2026-10-24 起 DLNA 禁止入组,a1 在线 / a2 离线)。
+const AP = {
+  a1: { name: "HiVi 客厅", available: true },
+  a2: { name: "HiVi 卧室", available: false },
+};
+vi.mock("../../src/services/airplay/control.js", () => ({
+  hasAirPlayDevice: (id: string) => id in AP,
+  isAirPlayDeviceDisabled: () => false,
+  getAirPlayStatus: (id: string) => ({
+    available: AP[id]?.available ?? false,
+    name: AP[id]?.name ?? id,
+    playbackState: "idle",
+    position: 0,
+    duration: 0,
+    volume: 50,
+    muted: false,
+  }),
 }));
 
 // sendspin 客户端源:模拟「服务在跑、clientId=sp1 在线、sp2 离线」。
@@ -74,12 +90,13 @@ describe("群组 peer 可用性(组是容器,恒在线)", () => {
     const states = gm.resolveMemberStates([
       "sendspin:sp1", // 在线
       "sendspin:sp2", // 离线
-      "dlna:d1", // 在线
-      "d2", // 裸 id ≡ DLNA,离线
+      "airplay:a1", // 在线
+      "airplay:a2", // 离线
       "unknown-bare-id", // 哪都没有 ⇒ 离线
     ]);
     expect(states.map((s) => s.available)).toEqual([true, false, true, false, false]);
     expect(states[0].name).toBe("esp32-player2");
+    expect(states[2].name).toBe("HiVi 客厅");
   });
 
   it("组行恒 available:纯 sendspin 成员的组(曾经的 bug 点)", () => {
@@ -94,7 +111,7 @@ describe("群组 peer 可用性(组是容器,恒在线)", () => {
   });
 
   it("组行恒 available:成员全离线也不得显示离线(本次定稿)", () => {
-    const g = gm.createGroup("全离线组", ["sendspin:sp2", "dlna:d2"]);
+    const g = gm.createGroup("全离线组", ["sendspin:sp2", "airplay:a2"]);
     getPeerManager().reconcileGroupPeers();
     const peer = getPeerManager().get(`group:${g.id}`)!;
     expect(peer.available).toBe(true);
@@ -110,13 +127,17 @@ describe("群组 peer 可用性(组是容器,恒在线)", () => {
     expect(peer.onlineCount).toBe(0);
   });
 
-  it("组行恒 available:DLNA 组不得回归", () => {
-    const on = gm.createGroup("在线DLNA组", ["dlna:d1"]);
-    const off = gm.createGroup("离线DLNA组", ["dlna:d2"]);
+  it("组行恒 available:airplay 组(在线/离线成员各一)", () => {
+    const on = gm.createGroup("在线airplay组", ["airplay:a1"]);
+    const off = gm.createGroup("离线airplay组", ["airplay:a2"]);
     getPeerManager().reconcileGroupPeers();
     expect(getPeerManager().get(`group:${on.id}`)!.available).toBe(true);
     expect(getPeerManager().get(`group:${off.id}`)!.available).toBe(true);
     expect(getPeerManager().get(`group:${off.id}`)!.onlineCount).toBe(0);
+  });
+
+  it("DLNA 成员已禁止入组(2026-10-24 起拒收)", () => {
+    expect(() => gm.createGroup("DLNA组", ["dlna:d1"])).toThrow("DLNA 设备不支持加入群组");
   });
 
   it("组行恒 available:混合成员组", () => {

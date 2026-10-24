@@ -590,10 +590,11 @@ export async function setSendspinMemberMuted(clientId: string, muted: boolean): 
 export const gm = getGroupManager();
 
 /** 成员变更后对齐(新增→加入当前播放,摘除→断开):PUT 与 POST 增量口共用,语义单源。
- *  - dlna 新增:现有 rejoinMembers(cast 当前曲＋seek 到 leader 进度);
+ *  - airplay 新增:rejoinMembersAirplay(cast 当前曲,起点编进本次 cast 即落位);
  *  - sendspin 新增:直播沿加入(无需历史,见 sendspinGroupJoin);
  *  - sendspin 摘除:stream/end 后移出(不断其余成员);
- *  - dlna 摘除:沿用旧行为(不主动停成员设备)。
+ *  - airplay 摘除:stopAirPlay 断开成员会话(停止播组内容);
+ *  - dlna 摘除:沿用旧行为(不主动停成员设备;新提交已禁止 DLNA 入组)。
  *  全部 best-effort:单个成员失败记日志,不影响其余成员与接口成功。 */
 // 显式操控成员 → 自动脱离活跃组(MA ensure_player_ungrouped 语义):
 // 成员在组播期间不独立受理播放指令;用户把播放/切歌/流转明确指向成员本身时,
@@ -668,6 +669,8 @@ export async function alignGroupMembers(groupId: string, added: string[], remove
   const kindOf = (m: string) => splitMemberId(m)?.kind ?? "dlna";
   const bareOf = (m: string) => splitMemberId(m)?.id ?? m;
   const dlnaAdded = added.filter(m => kindOf(m) === "dlna").map(bareOf);
+  const apAdded = added.filter(m => kindOf(m) === "airplay").map(bareOf);
+  const apRemoved = removed.filter(m => kindOf(m) === "airplay").map(bareOf);
   const spinAdded = added.filter(m => kindOf(m) === "sendspin").map(bareOf);
   const spinRemoved = removed.filter(m => kindOf(m) === "sendspin").map(bareOf);
   if (dlnaAdded.length > 0) {
@@ -676,6 +679,21 @@ export async function alignGroupMembers(groupId: string, added: string[], remove
     getQueueController().rejoinMembers(groupId, dlnaAdded).catch((e: any) => {
       log.warn(`[group] ${groupId}: 成员加入对齐失败: ${e?.message || e}`);
     });
+  }
+  if (apAdded.length > 0) {
+    // airplay 成员加入:同样 cast 当前曲,但起点编进**本次 cast**(起播即落位,
+    // AirPlay seek 是完整重建会话,绝不能先起播再 seek)。
+    getQueueController().rejoinMembersAirplay(groupId, apAdded).catch((e: any) => {
+      log.warn(`[group] ${groupId}: airplay 成员加入对齐失败: ${e?.message || e}`);
+    });
+  }
+  for (const deviceId of apRemoved) {
+    try {
+      const { stopAirPlay } = await import("../../services/airplay/control.js");
+      await stopAirPlay(deviceId);
+    } catch (e: any) {
+      log.warn(`[group] ${groupId}: airplay 成员 ${deviceId} 摘除断开失败: ${e?.message || e}`);
+    }
   }
   const sg = sendspinGroupName(groupId);
   for (const cid of spinAdded) {

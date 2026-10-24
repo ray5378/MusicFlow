@@ -20,6 +20,10 @@ const H = vi.hoisted(() => {
     dlnaBehavior: new Map<string, (fn: string, args: any[]) => any>(),
     deviceStatus: new Map<string, any>(),
     deviceStatusThrows: new Set<string>(),
+    apAvailable: new Set<string>(),
+    apDisabled: new Set<string>(),
+    apCalls: [] as Array<{ id: string; fn: string; args: any[] }>,
+    apBehavior: new Map<string, (fn: string, args: any[]) => any>(),
     spinFront: null as any,
     spinCalls: [] as Array<{ fn: string; args: any[] }>,
     spinBehavior: null as any,
@@ -49,6 +53,10 @@ vi.mock("../../src/services/group/index.js", () => ({
     if (m.startsWith("sendspin:")) {
       const id = m.slice("sendspin:".length);
       return id ? { kind: "sendspin", id } : null;
+    }
+    if (m.startsWith("airplay:")) {
+      const id = m.slice("airplay:".length);
+      return id ? { kind: "airplay", id } : null;
     }
     if (m.startsWith("dlna:")) {
       const id = m.slice("dlna:".length);
@@ -94,6 +102,46 @@ vi.mock("../../src/services/dlna/control.js", () => {
       if (q && q.length) return q.shift()!;
       return H.dlnaAvailable.has(id);
     },
+  };
+});
+
+vi.mock("../../src/services/airplay/control.js", () => ({
+  isAirPlayDeviceDisabled: (id: string) => H.apDisabled.has(id),
+  getAirPlayStatus: (id: string) => ({
+    available: H.apAvailable.has(id) && !H.apDisabled.has(id),
+    name: `ap-${id}`,
+    playbackState: "IDLE",
+    position: 0,
+    duration: 0,
+    volume: 40,
+    muted: false,
+  }),
+}));
+
+vi.mock("../../src/services/airplay/protocolPlayer.js", () => {
+  const rec = async (id: string, fn: string, args: any[]) => {
+    H.apCalls.push({ id, fn, args });
+    const custom = H.apBehavior.get(id);
+    if (custom) {
+      const r = custom(fn, args);
+      if (r instanceof Error) throw r;
+      return r;
+    }
+    return fn === "pollState"
+      ? { playerId: `airplay:${id}`, playbackState: "PLAYING", position: 9, duration: 80, updatedAt: 0 }
+      : { mediaUri: `http://apcast/${id}` };
+  };
+  return {
+    createAirPlayProtocolPlayer: (id: string) => ({
+      playerId: `airplay:${id}`,
+      playMedia: (item: any, baseUrl: string, startMs?: number) => rec(id, "playMedia", [item, baseUrl, startMs]),
+      stop: () => rec(id, "stop", []),
+      pause: () => rec(id, "pause", []),
+      resume: () => rec(id, "resume", []),
+      seek: (sec: number) => rec(id, "seek", [sec]),
+      setVolume: (v: number) => rec(id, "setVolume", [v]),
+      pollState: () => rec(id, "pollState", []),
+    }),
   };
 });
 
@@ -161,6 +209,10 @@ function reset() {
   H.dlnaBehavior.clear();
   H.deviceStatus.clear();
   H.deviceStatusThrows.clear();
+  H.apAvailable.clear();
+  H.apDisabled.clear();
+  H.apCalls.length = 0;
+  H.apBehavior.clear();
   H.spinFront = null;
   H.spinCalls.length = 0;
   H.spinBehavior = null;
@@ -183,18 +235,18 @@ const warns = () => H.logLines.filter((l) => l.level === "warn").map((l) => l.ms
 
 // ---------------- 成员分流 ----------------
 describe("splitGroupMembers:按 kind 拆成员", () => {
-  it("组不存在 → 两个空数组", () => {
-    expect(splitGroupMembers("g-x")).toEqual({ dlna: [], spin: [] });
+  it("组不存在 → 三个空数组", () => {
+    expect(splitGroupMembers("g-x")).toEqual({ dlna: [], airplay: [], spin: [] });
   });
 
-  it("裸 id / dlna: / sendspin: 三类各归其位,group: 与 local: 前缀被丢弃", () => {
-    mkGroup("g1", ["bare1", "dlna:d2", "sendspin:c3", "group:g9", "local:u1"]);
-    expect(splitGroupMembers("g1")).toEqual({ dlna: ["bare1", "d2"], spin: ["c3"] });
+  it("裸 id / dlna: / airplay: / sendspin: 各归其位,group: 与 local: 前缀被丢弃", () => {
+    mkGroup("g1", ["bare1", "dlna:d2", "airplay:a3", "sendspin:c3", "group:g9", "local:u1"]);
+    expect(splitGroupMembers("g1")).toEqual({ dlna: ["bare1", "d2"], airplay: ["a3"], spin: ["c3"] });
   });
 
   it("空前缀(只有 'sendspin:' 没有 id)→ splitMemberId 返回 null → 该成员被跳过", () => {
-    mkGroup("g1", ["sendspin:", "dlna:", "", "dlna:ok"]);
-    expect(splitGroupMembers("g1")).toEqual({ dlna: ["ok"], spin: [] });
+    mkGroup("g1", ["sendspin:", "dlna:", "airplay:", "", "dlna:ok"]);
+    expect(splitGroupMembers("g1")).toEqual({ dlna: ["ok"], airplay: [], spin: [] });
   });
 });
 
@@ -310,7 +362,7 @@ describe("fanOut:无在线成员早返回 / 逐成员失败只告警不中断", 
     const p = createGroupProtocolPlayer("g1");
     await p.stop();
     expect(H.dlnaCalls).toEqual([]);
-    expect(H.logLines.filter((l) => l.level === "debug").map((l) => l.msg).join()).toContain("无在线 DLNA 成员,跳过扇出");
+    expect(H.logLines.filter((l) => l.level === "debug").map((l) => l.msg).join()).toContain("无在线 DLNA/AirPlay 成员,跳过扇出");
   });
 
   it("部分成员 reject → warn 里带出失败成员 id 与原因,其余成员照常下发", async () => {
@@ -544,5 +596,80 @@ describe("getGroupStatus:音量权威 = GroupManager 持久值", () => {
     H.deviceStatus.set("d1", { state: "PLAYING", position: 8, duration: 90, volume: 99, muted: true });
     H.groupVolume = 21;
     expect(await getGroupStatus("g1")).toEqual({ state: "PLAYING", position: 8, duration: 90, volume: 21, muted: true });
+  });
+});
+
+// ---------------- airplay 成员(2026-10-24 入组) ----------------
+describe("airplay 成员:在线判定 / leader / 扇出 / 状态派生", () => {
+  it("getOnlineAirplayIds:剔除禁用与不可用设备", async () => {
+    const { getOnlineAirplayIds } = await import("../../src/services/group/protocolPlayer.js");
+    mkGroup("g1", ["airplay:a1", "airplay:a2", "airplay:a3"]);
+    H.apAvailable.add("a1");
+    H.apAvailable.add("a2");
+    H.apDisabled.add("a2");
+    expect(getOnlineAirplayIds("g1")).toEqual(["a1"]);
+  });
+
+  it("hasOnlineMember:仅 airplay 在线 → true;全离线 → false", () => {
+    mkGroup("g1", ["airplay:a1", "sendspin:c1"]);
+    H.apAvailable.add("a1");
+    front([["c1", { ready: false }]]);
+    expect(hasOnlineMember("g1")).toBe(true);
+    H.apAvailable.clear();
+    expect(hasOnlineMember("g1")).toBe(false);
+  });
+
+  it("getGroupLeader:首个在线 airplay 成员当选(kind=airplay)", () => {
+    mkGroup("g1", ["airplay:a1", "airplay:a2"]);
+    H.apAvailable.add("a2");
+    expect(getGroupLeader("g1")).toEqual({ kind: "airplay", id: "a2" });
+  });
+
+  it("fanOut:stop/pause/resume/seek/setVolume 同时扇出到在线 airplay 成员", async () => {
+    mkGroup("g1", ["dlna:d1", "airplay:a1"]);
+    H.dlnaAvailable.add("d1");
+    H.apAvailable.add("a1");
+    const p = createGroupProtocolPlayer("g1");
+    await p.stop();
+    await p.pause();
+    await p.seek(3);
+    await p.setVolume(11);
+    expect(H.apCalls.map((c) => c.fn)).toEqual(["stop", "pause", "seek", "setVolume"]);
+    expect(H.apCalls.find((c) => c.fn === "setVolume")!.args).toEqual([11]);
+    expect(H.apCalls.find((c) => c.fn === "seek")!.args).toEqual([3]);
+  });
+
+  it("playMedia:airplay 成员逐设备 cast,item/baseUrl 原样透传", async () => {
+    mkGroup("g1", ["airplay:a1", "airplay:a2"]);
+    H.apAvailable.add("a1");
+    H.apAvailable.add("a2");
+    const r = await createGroupProtocolPlayer("g1").playMedia({ id: "q1", title: "T" } as any, "http://b1");
+    expect(H.apCalls.filter((c) => c.fn === "playMedia").map((c) => c.id).sort()).toEqual(["a1", "a2"]);
+    expect(H.apCalls.find((c) => c.fn === "playMedia")!.args[0]).toEqual({ id: "q1", title: "T" });
+    expect(H.apCalls.find((c) => c.fn === "playMedia")!.args[1]).toBe("http://b1");
+    expect(r.mediaUri).toBe("http://apcast/a1");
+  });
+
+  it("playMedia:组内 airplay 全离线 → 不 cast 且不影响其它成员", async () => {
+    mkGroup("g1", ["airplay:a1", "sendspin:c1"]);
+    front([["c1", { ready: true }]]);
+    await createGroupProtocolPlayer("g1").playMedia({ id: "q1" } as any, "http://base");
+    expect(H.apCalls).toEqual([]);
+    expect(H.spinCalls.filter((c) => c.fn === "playMedia").length).toBe(1);
+  });
+
+  it("pollState:leader 是 airplay → 设备会话态派生并覆写 playerId", async () => {
+    mkGroup("g1", ["airplay:a1"]);
+    H.apAvailable.add("a1");
+    const st = await createGroupProtocolPlayer("g1").pollState();
+    expect(st).toEqual({ playerId: "group:g1", playbackState: "PLAYING", position: 9, duration: 80, updatedAt: 0 });
+  });
+
+  it("getGroupStatus:leader 是 airplay → 会话态映射 + 组持久音量(设备音量不外泄)", async () => {
+    mkGroup("g1", ["airplay:a1"]);
+    H.apAvailable.add("a1");
+    H.groupVolume = 21;
+    const st = await getGroupStatus("g1");
+    expect(st).toEqual({ state: "STOPPED", position: 0, duration: 0, volume: 21, muted: false, updatedAt: expect.any(Number) });
   });
 });
