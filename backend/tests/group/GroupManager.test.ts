@@ -126,6 +126,23 @@ describe("GroupManager", () => {
     expect(gm.get(a.id)?.memberIds).toEqual(["airplay:d1"]);
   });
 
+  it("applyMemberDelta:add DLNA 成员抛错且组不受影响(不得部分生效)", () => {
+    // 增量接口是移动端 / 卡片的常用路径,必须与全量替换同口径。
+    // 2026-10-24 实机复核:PUT /v1/groups/:id/members 带 dlna 成员回 400
+    // 「…是 DLNA 设备:DLNA 各设备自拉流、没有共享时间线…」,组内容不变。
+    const a = gm.createGroup("组A", ["airplay:d1"]);
+    expect(() => gm.applyMemberDelta(a.id, { add: ["dlna:d2"] })).toThrow(/DLNA/);
+    expect(() => gm.applyMemberDelta(a.id, { add: ["d2"] })).toThrow(/DLNA/);
+    expect(gm.get(a.id)?.memberIds).toEqual(["airplay:d1"]);
+    // 同一批里混进合法成员时也不许「前面那个先加进去」:校验在赋值之前。
+    expect(() => gm.applyMemberDelta(a.id, { add: ["airplay:d2", "dlna:d2"] })).toThrow(/DLNA/);
+    expect(gm.get(a.id)?.memberIds).toEqual(["airplay:d1"]);
+    // 正常增量仍然可用(别把守卫写成一刀切)
+    const res = gm.applyMemberDelta(a.id, { add: ["airplay:d2"] });
+    expect(res?.added).toEqual(["airplay:d2"]);
+    expect(gm.get(a.id)?.memberIds).toEqual(["airplay:d1", "airplay:d2"]);
+  });
+
   it("renameGroup:改名并持久化", () => {
     const a = gm.createGroup("组A", ["airplay:d1"]);
     const renamed = gm.renameGroup(a.id, "新组名");
