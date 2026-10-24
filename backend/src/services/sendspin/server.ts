@@ -354,6 +354,12 @@ export class SendspinServer {
   }
 
   /** 连接完成 server/activate 后注册为可播播放器(由 index.ts 注入)。 */
+  /** 配对中的连接只登记身份(不碰组音量、不注册 peer):REST 与 PairingCoordinator
+   *  都要按 clientId 取到这条连接,而它还没资格播放。 */
+  onConnectionPairing(conn: SendspinConnection): void {
+    if (conn.clientId) this.clients.set(conn.clientId, conn);
+  }
+
   onConnectionActivated(conn: SendspinConnection): void {
     this.clients.set(conn.clientId!, conn);
     // 上线即对齐:此刻 hello 已解析完(含 `supported_commands`),若这个 clientId 名下
@@ -1704,8 +1710,25 @@ export class SendspinConnection {
     this.pairingActivations = 0; // 新握手,配对计数清零
     if (rh.category === "lt" && this.clientId) void this.server.pairingStore?.touchRecord(this.clientId);
     rh.resolve();
-    // 新密钥就位:重走 hello/activate(对端按新会话激活,peer 注册幂等刷新)。
-    this.sendJson("server/hello", { name: this.server.serverName });
+    // 新密钥就位。re-handshake 的 responder 只等 server/activate,**不会**再发
+    // client/hello:aiosendspin 收到 server/hello 直接
+    // RuntimeError("Expected server/activate, got ServerHelloMessage") 断连
+    // (2026-10-25 配对实测 —— 码已验过、记录已落盘,却卡死在这一步)。
+    // lt(配对提升/长连接轮换)→ 直接恢复 playback 激活并重注册(幂等);
+    // pr/sn → 不在这里抢发:调用方(配对编排)要带 pairing 载荷,缺 method 会被
+    // 客户端 _pairing_acceptable 判 False ⇒ UNAUTHORIZED。
+    if (rh.category === "lt") {
+      // 配对期 hello 把 roles 清空了(见 onClientHello 的配对分支),新会话必须按
+      // 原始 supported_roles 重新协商 —— 否则 activate 带 active_roles:[],
+      // 设备配对成功却永远不能播(2026-10-25 e2e 实测:paired:true 但 roles 为空)。
+      const supported = Array.isArray(this.clientHello?.supported_roles)
+        ? (this.clientHello!.supported_roles as string[])
+        : [];
+      if (this.roles.length === 0 && supported.length > 0) this.roles = negotiateRoles(supported);
+      this.sendJson("server/activate", { activities: ["playback"], active_roles: this.roles });
+      this.sendGroupUpdate();
+      this.server.onConnectionActivated(this);
+    }
   }
 
   private failRehandshake(e: Error): void {
@@ -2312,13 +2335,42 @@ export class SendspinConnection {
   private onClientHello(payload: any): void {
     this.clientHello = payload ?? {};
     const hello: Record<string, any> = this.clientHello ?? {};
-    // 凭证失配(Sentinel Fallback 成功但有配对记录):按 spec 保持空 activities,
-    // 不注册 peer、不给播放,等重新配对。
-    if (this.sentinelMismatch) {
+    // 未配对会话(sn/pr)只能激活 pairing:给 playback 会被真客户端 _apply_activation
+    // 判 pairing_required(未配对访问不可行)→ 立刻 client/goodbye 断开;而 REST
+    // /pairing/start 又要求客户端在线 ⇒ 二者互锁,新设备首次配对永远走不通
+    // (2026-10-25 用 aiosendspin 10.2.1 实测:server activation rejected(pairing_required))。
+    if (this.needsPairingActivation()) {
       this.roles = [];
       this.name = typeof hello.name === "string" ? hello.name : (this.clientId ?? "");
-      this.server.log("warn", `credential mismatch held: ${this.clientId} (空激活,等重新配对)`);
-      this.sendJson("server/activate", { activities: [], active_roles: [] });
+      this.codec = negotiateCodec(payload, this.server.preferredCodec);
+      this.parseHelloCapacity(hello);
+      this.parseHelloCommands(hello);
+      this.parseHelloFormats(hello);
+      if (this.legacy) {
+        // legacy 明文连接没有 Noise 会话,CPace 无从绑定 ⇒ 配对不可用。失配态只能空激活。
+        this.server.log("warn", `credential mismatch held: ${this.clientId} (legacy 明文不支持配对,空激活)`);
+        this.sendJson("server/activate", { activities: [], active_roles: [] });
+        return;
+      }
+      const why = this.handshakePskCategory === "pr" ? "配对令牌会话" : "未配对";
+      // 只登记身份:配对中不给 peer、不碰组音量,但 REST 与 PairingCoordinator 都要
+      // 按 clientId 取到这条连接(runStaticRound 等内部流程走 server.clients)。
+      this.server.onConnectionPairing(this);
+      const opened = this.server.pairing?.openWindow(this) ?? false;
+      const tail = opened ? "已激活 pairing,未配对不给播放" : "无可自动开的配对窗,空激活挂起";
+      if (this.sentinelMismatch) {
+        // 有配对记录却用 sentinel 进来:即便配对编排没挂上也必须空激活(旧口径),
+        // 文案保留 credential mismatch held —— 运维按这句查「设备丢了记录」。
+        this.server.log("warn", `credential mismatch held: ${this.clientId} (${tail})`);
+      } else {
+        this.server.log("warn", `pairing hold: ${this.clientId} ${why}(${tail})`);
+      }
+      if (!opened) {
+        // 客户端没报可用的码配对方法(或编排未挂):按 spec 挂空激活(不注册 peer、
+        // 不给播放),等运营商从 REST 显式选方法 start。
+        this.sendJson("server/activate", { activities: [], active_roles: [] });
+        return;
+      }
       return;
     }
     const supported = Array.isArray(hello.supported_roles) ? hello.supported_roles : [];
@@ -2334,6 +2386,25 @@ export class SendspinConnection {
     // 在收到它之前不认 server;此前从没发过,ESPHome 真机 ~30s 后 goodbye 离开)。
     this.sendGroupUpdate();
     this.server.onConnectionActivated(this);
+  }
+
+  /** 本连接是否只能「配对、不播放」。
+   *  没有配对记录库(pairingStore 为 null)时一律按旧行为放行:测试服与纯 legacy
+   *  部署没有配对概念。lt 是唯一可直接播放的加密会话;pr(配对令牌会话)恒需配对;
+   *  sn 需看运营商是否手工批准了未配对访问。
+   *  **凭证失配优先**:有记录却用 sentinel 进来的设备一律不许播放,哪怕配对编排
+   *  还没挂上(那时退化为空激活)——否则「删掉记录重连」就能绕过配对白拿播放权。 */
+  private needsPairingActivation(): boolean {
+    // 凭证失配最高优先:有记录却用 sentinel 进来 ⇒ 一律不许播放(否则删记录重连
+    // 就能白拿播放权),与是否挂了配对编排、是否 legacy 无关。
+    if (this.sentinelMismatch) return true;
+    if (this.legacy) return false;
+    const store = this.server.pairingStore;
+    if (!store) return false;
+    if (this.handshakePskCategory === "lt") return false;
+    if (!this.server.pairing) return false; // 无配对编排:按旧行为放行
+    if (this.handshakePskCategory === "pr") return true;
+    return !this.clientId || !store.isApproved(this.clientId);
   }
 
   private respondServerTime(payload: any): void {

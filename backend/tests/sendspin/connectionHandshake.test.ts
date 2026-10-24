@@ -563,6 +563,7 @@ describe("re-handshakeTo:不断连接换会话密钥", () => {
     });
     rh.readMessage(msg1);
     const msg2 = rh.writeMessage(new Uint8Array(0));
+    const before = h.ws.sent.length;
     await h.deliverJson({ type: "noise/handshake", payload: { data: b64urlEncode(msg2) } });
     await p;
 
@@ -570,10 +571,15 @@ describe("re-handshakeTo:不断连接换会话密钥", () => {
     expect(h.conn.handshakePskCategory).toBe("lt");
     expect((h.conn as any).pairingActivations).toBe(0);
     expect(touchRecord).toHaveBeenCalled();
-    // 会话已换:重发的 server/hello 用的是**新**密钥 ⇒ 必须用新 responder(rh)解密。
-    const last = h.ws.sent[h.ws.sent.length - 1]!;
-    const pt = rh.decrypt(last.data as Uint8Array);
-    expect(JSON.parse(Buffer.from(pt.subarray(1)).toString("utf8")).type).toBe("server/hello");
+    // 会话已换:新帧必须用**新** responder(rh)解密。re-handshake 的对端不再发
+    // client/hello,只等 server/activate ⇒ 必须直接下发激活(发 hello 会被判协议违规)。
+    const fresh = h.ws.sent.slice(before).map((f) =>
+      JSON.parse(Buffer.from(rh.decrypt(f.data as Uint8Array).subarray(1)).toString("utf8")),
+    );
+    const types = fresh.map((m) => m.type);
+    expect(types).toContain("server/activate");
+    expect(types).not.toContain("server/hello");
+    expect(fresh.find((m) => m.type === "server/activate")!.payload.activities).toEqual(["playback"]);
   });
 
   it("★ msg2 认证失败 → failRehandshake:promise reject 且清空状态(不留悬挂)", async () => {
@@ -692,5 +698,99 @@ describe("client/state 解析:available / state 门控与变化日志", () => {
     expect(h.conn.clientWantsStream()).toBe(false);
     h.conn.clientUnavailableSinceMs = Date.now() - 4000;
     expect(h.conn.clientWantsStream()).toBe(true);
+  });
+});
+
+// ==================== 未配对会话:只能激活 pairing ====================
+//
+// 2026-10-25 真机(aiosendspin 10.2.1):未配对设备用 sentinel PSK 连上,服务端一发
+// playback activate,客户端 _apply_activation 就判「未配对 + 需要未配对访问」→
+// goodbye(pairing_required) 立即断开。REST /pairing/start 又要求客户端在线 ⇒
+// 首次配对永远走不通。所以 hello 后必须按会话 PSK 类别给 pairing 或空激活。
+describe("未配对会话:激活 pairing 而非 playback", () => {
+  const storeStub = (approved: boolean, pskHex?: string) =>
+    ({
+      getRecord: () => (pskHex ? { pskHex, pskId: "x", createdAt: 0, lastUsedAt: 0 } : undefined),
+      isApproved: () => approved,
+      touchRecord: async () => {},
+    }) as any;
+
+  /** openWindow stub:记录被调 + 可选地回一条 pairing activate(真编排见 pairServer 测)。 */
+  const pairingStub = (opened = true) => {
+    const calls: any[] = [];
+    return {
+      calls,
+      openWindow: (c: any) => {
+        calls.push(c);
+        if (opened) {
+          c.sendJson("server/activate", {
+            activities: ["pairing"],
+            active_roles: [],
+            pairing: { method: "static_pin" },
+          });
+        }
+        return opened;
+      },
+    } as any;
+  };
+
+  const hello = { name: "卧室", supported_roles: ["player@v1"], supported_pair_methods: { static_pin: {} } };
+
+  it("★ 未配对 + 有码配对方法 → 只发 pairing activate,不发 group/update", async () => {
+    const { srv } = makeServer();
+    const store = storeStub(false);
+    const p = pairingStub();
+    srv.pairing = p; // completeHandshake 只注入 store;pairing 先挂上(与 index.ts 同序)
+    const h = track(await noise(srv, { pairingStore: store, helloPayload: hello }));
+    const msgs = makeReader(h).drain();
+    const acts = msgs.filter((m) => m.type === "server/activate");
+    expect(acts).toHaveLength(1);
+    const last = acts[0].payload;
+    expect(last.activities).toEqual(["pairing"]);
+    expect(last.active_roles).toEqual([]);
+    expect(p.calls).toEqual([h.conn]);
+    expect(msgs.some((m) => m.type === "group/update")).toBe(false);
+    // 身份仍要登记:REST 靠 clients 找到它才能 start/输码。
+    expect(srv.clients.get(h.conn.clientId!)).toBe(h.conn);
+  });
+
+  it("运营商已批准未配对访问 → 走 playback(客户端自己开了 unpaired_access 才接)", async () => {
+    const { srv } = makeServer();
+    const store = storeStub(true);
+    const p = pairingStub();
+    srv.pairing = p;
+    const h = track(await noise(srv, { pairingStore: store, helloPayload: hello }));
+    const msgs = makeReader(h).drain();
+    const last = msgs.filter((m) => m.type === "server/activate").pop();
+    expect(last?.payload.activities).toEqual(["playback"]);
+    expect(p.calls).toEqual([]);
+  });
+
+  it("客户端没报码配对方法 → 空激活挂起(不播放、不断连)", async () => {
+    const { srv } = makeServer();
+    const store = storeStub(false);
+    const p = pairingStub(false); // openWindow 返回 false
+    srv.pairing = p;
+    const h = track(await noise(srv, { pairingStore: store, helloPayload: { name: "无屏", supported_roles: ["player@v1"] } }));
+    const msgs = makeReader(h).drain();
+    const last = msgs.filter((m) => m.type === "server/activate").pop();
+    expect(last?.payload).toEqual({ activities: [], active_roles: [] });
+    expect(msgs.some((m) => m.type === "group/update")).toBe(false);
+    expect(p.calls).toEqual([h.conn]);
+  });
+
+  it("lt 会话(已配对) → 照旧 playback,不碰配对窗", async () => {
+    const PSK = "bb".repeat(32);
+    const { srv } = makeServer();
+    const store = storeStub(false, PSK);
+    const p = pairingStub();
+    srv.pairing = p;
+    const h = track(await noise(srv, { pairingStore: store, responderPskHex: PSK, helloPayload: hello }));
+    expect(h.conn.handshakePskCategory).toBe("lt");
+    const msgs = makeReader(h).drain();
+    const last = msgs.filter((m) => m.type === "server/activate").pop();
+    expect(last?.payload.activities).toEqual(["playback"]);
+    expect(last?.payload.active_roles).toEqual(["player@v1"]);
+    expect(p.calls).toEqual([]);
   });
 });

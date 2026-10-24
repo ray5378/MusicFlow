@@ -9,6 +9,7 @@ import {
   normalizePairMethod,
   decodePairingToken,
   deriveDynamicCode,
+  pickCodeMethod,
 } from "../../src/services/sendspin/pairServer.js";
 import { CPace, wrapKey, aeadSeal } from "../../src/services/sendspin/cpace.js";
 import { b64urlEncode, b64urlDecode } from "../../src/services/sendspin/util.js";
@@ -160,18 +161,30 @@ describe("PairingCoordinator.start", () => {
     expect(conn.sent.length).toBe(0);
   });
 
-  it("客户端未连接 / legacy 明文 / 重复 start 均拒绝", async () => {
+  it("客户端未连接 / legacy 明文 均拒绝", async () => {
     const empty = new PairingCoordinator(makeServer(), makeStore());
     await expect(empty.start("CLIENTID", "static_pin")).rejects.toThrow();
 
     const legacy = makeConn({ legacy: true });
     const c1 = new PairingCoordinator(makeServer(legacy), makeStore());
     await expect(c1.start("CLIENTID", "static_pin")).rejects.toThrow();
+  });
 
+  it("★ await_init(PAKE 未起)允许改方法重开,进 PAKE 后拒绝", async () => {
     const conn = makeConn();
-    const c2 = new PairingCoordinator(makeServer(conn), makeStore());
-    await c2.start("CLIENTID", "static_pin");
-    await expect(c2.start("CLIENTID", "static_pin")).rejects.toThrow();
+    const c = new PairingCoordinator(makeServer(conn), makeStore());
+    // 自动窗:先按客户端能力选 static。
+    expect(c.openWindow(conn)).toBe(true);
+    expect(c.getAttempt("CLIENTID")?.method).toBe("static_pairing_code");
+    // 运营商改用 dynamic:PAKE 还没起,允许替换(否则自动窗把「开始配对」按钮锁死)。
+    await c.start("CLIENTID", "dynamic_pin");
+    expect(c.getAttempt("CLIENTID")?.method).toBe("dynamic_pairing_code");
+    // 再改回 static(static 的 pair-init 不需要 commit_B,便于推进 state)。
+    await c.start("CLIENTID", "static_pairing_code");
+    // 收到 client/pair-init → await_code:CPace 已起,不许换方法。
+    await c.onPairMessage(conn, "client/pair-init", { pairing_index: 3 });
+    expect(c.getAttempt("CLIENTID")?.state).toBe("await_code");
+    await expect(c.start("CLIENTID", "static_pairing_code")).rejects.toThrow();
   });
 
   it("static: 短名方言回 static_pin", async () => {
@@ -617,5 +630,87 @@ describe("PairingCoordinator retry 与 cancel", () => {
     await coord.start("CLIENTID", "static_pin");
     expect(coord.listAttempts().length).toBe(1);
     expect(coord.listAttempts()[0].method).toBe("static_pairing_code");
+  });
+});
+
+// ==================== openWindow / pickCodeMethod ====================
+//
+// 背景(2026-10-25 真机):未配对设备用 sentinel PSK 连上,服务端发 playback activate,
+// aiosendspin 的 _apply_activation 判「未配对 + 需要未配对访问」→ 回 goodbye
+// pairing_required 并断开;而 REST /pairing/start 要求客户端在线 ⇒ 首次配对互锁。
+// 修法:hello 后自动开配对窗(只能选码配对,sn 会话选 pairing_psk 会被客户端判
+// method 与 PSK 类别不符 → UNAUTHORIZED)。
+describe("PairingCoordinator.openWindow", () => {
+  it("客户端同时报 static/dynamic → static 优先", () => {
+    const conn = makeConn();
+    const c = new PairingCoordinator(makeServer(conn), makeStore());
+    expect(c.openWindow(conn)).toBe(true);
+    expect(c.getAttempt("CLIENTID")?.method).toBe("static_pairing_code");
+    expect(lastSent(conn, "server/activate").activities).toEqual(["pairing"]);
+    expect(lastSent(conn, "server/activate").active_roles).toEqual([]);
+    expect(lastSent(conn, "server/activate").pairing.method).toBe("static_pin");
+  });
+
+  it("只报 dynamic → dynamic 且短名方言带 pin_length=6", () => {
+    const conn = makeConn({ clientHello: { supported_pair_methods: { dynamic_pin: {} } } });
+    const c = new PairingCoordinator(makeServer(conn), makeStore());
+    expect(c.openWindow(conn)).toBe(true);
+    const act = lastSent(conn, "server/activate");
+    expect(act.pairing.method).toBe("dynamic_pin");
+    expect(act.pairing.pin_length).toBe(6);
+  });
+
+  it("只报 pairing_psk → 返回 false(sn 会话不能走 pairing_psk)", () => {
+    const conn = makeConn({ clientHello: { supported_pair_methods: { pairing_psk: {} } } });
+    const c = new PairingCoordinator(makeServer(conn), makeStore());
+    expect(c.openWindow(conn)).toBe(false);
+    expect(conn.sent.length).toBe(0);
+    expect(c.getAttempt("CLIENTID")).toBeUndefined();
+  });
+
+  it("没报 supported_pair_methods → 返回 false(能力未知,交给运营商显式选)", () => {
+    const conn = makeConn({ clientHello: {} });
+    const c = new PairingCoordinator(makeServer(conn), makeStore());
+    expect(c.openWindow(conn)).toBe(false);
+    expect(conn.sent.length).toBe(0);
+  });
+
+  it("已在 await_init 的窗 → 幂等重发,不新建 attempt(pairingIndex 不漂)", () => {
+    const conn = makeConn();
+    const c = new PairingCoordinator(makeServer(conn), makeStore());
+    c.openWindow(conn);
+    const first = lastSent(conn, "server/activate");
+    const idxBefore = conn.idx;
+    expect(c.openWindow(conn)).toBe(true);
+    expect(conn.idx).toBe(idxBefore); // nextPairingIndex 没再被调用
+    expect(lastSent(conn, "server/activate")).toEqual(first);
+  });
+
+  it("已进 PAKE 的窗 → 不重发 activate(避免客户端重开 attempt 与本地状态错位)", () => {
+    const conn = makeConn();
+    const c = new PairingCoordinator(makeServer(conn), makeStore());
+    c.openWindow(conn);
+    void c.onPairMessage(conn, "client/pair-init", { pairing_index: 1 });
+    const countAfterInit = conn.sent.filter((s) => s[0] === "server/activate").length;
+    expect(c.openWindow(conn)).toBe(true);
+    expect(conn.sent.filter((s) => s[0] === "server/activate").length).toBe(countAfterInit);
+  });
+
+  it("无 clientId → false", () => {
+    const conn = makeConn({ clientId: null });
+    const c = new PairingCoordinator(makeServer(conn), makeStore());
+    expect(c.openWindow(conn)).toBe(false);
+  });
+});
+
+describe("pickCodeMethod", () => {
+  it("长短名都认,static 优先;psk-only / 空 / 非对象 → null", () => {
+    expect(pickCodeMethod({ supported_pair_methods: { static_pairing_code: {}, dynamic_pairing_code: {} } })).toBe("static_pairing_code");
+    expect(pickCodeMethod({ supported_pair_methods: { dynamic_pin: {}, static_pin: {} } })).toBe("static_pairing_code");
+    expect(pickCodeMethod({ supported_pair_methods: { dynamic_pairing_code: {} } })).toBe("dynamic_pairing_code");
+    expect(pickCodeMethod({ supported_pair_methods: { pairing_psk: {} } })).toBeNull();
+    expect(pickCodeMethod({})).toBeNull();
+    expect(pickCodeMethod(null)).toBeNull();
+    expect(pickCodeMethod({ supported_pair_methods: [] })).toBeNull();
   });
 });

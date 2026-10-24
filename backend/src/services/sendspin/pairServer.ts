@@ -27,6 +27,20 @@ export function normalizePairMethod(m: string): PairMethod | null {
   return null;
 }
 
+/** 从客户端 hello 的 supported_pair_methods 里挑一个**码配对**方法(static 优先)。
+ *  返回 null = 客户端没报(能力未知,交给运营商显式选)或只报了 pairing_psk。
+ *  绝不返回 pairing_psk:那要求先 re-handshake 到 pr 会话,sn 会话上选它会被客户端
+ *  的 _pairing_acceptable 判 method 与 PSK 类别不符 → UNAUTHORIZED。 */
+export function pickCodeMethod(hello: any): PairMethod | null {
+  const offered = hello && typeof hello === "object" ? (hello.supported_pair_methods ?? {}) : {};
+  const keys = typeof offered === "object" && offered !== null ? Object.keys(offered) : [];
+  for (const m of ["static_pairing_code", "dynamic_pairing_code"] as PairMethod[]) {
+    if (keys.some((k) => normalizePairMethod(k) === m)) return m;
+  }
+  return null;
+}
+
+
 /** 客户端方言:它 hello 里报什么方法名,activate 就回什么名。
  *  aiosendspin≤9.x 用短名(static_pin/dynamic_pin),spec 用长名。 */
 function wireMethodFor(hello: any, method: PairMethod): string {
@@ -170,20 +184,37 @@ export class PairingCoordinator {
     return [...this.attempts.keys()].map((k) => this.getAttempt(k)!);
   }
 
-  /** REST 启动配对:发 pairing activate,等客户端 pair-init。 */
-  async start(clientId: string, method: string, format: PairFormat = "digits"): Promise<void> {
-    const norm = normalizePairMethod(method);
-    if (!norm || norm === "pairing_psk") throw new Error("start 仅码配对(static/dynamic);pairing_psk 走 token 接口");
-    const conn = this.server.clients.get(clientId);
-    if (!conn || !conn.clientId) throw new Error("客户端未连接");
-    if (conn.legacy) throw new Error("legacy 明文连接无配对(配对仅加密连接可用)");
-    if (this.attempts.has(clientId)) throw new Error("该客户端已有进行中的配对");
-    const pairingIndex = conn.nextPairingIndex();
+  /** 未配对设备 hello 后自动开配对窗(REST start 的自动版:方法由客户端能力决定)。
+   *  返回 false = 客户端没报可用的码配对方法,调用方应发空激活挂起。
+   *  sn 会话不能选 pairing_psk:客户端 _pairing_acceptable 要求 method 与 PSK 类别一致
+   *  (码配对在 sentinel 会话上跑 PAKE;pairing_psk 必须先 re-handshake 到 pr 会话)。 */
+  openWindow(conn: SendspinConnection): boolean {
+    const clientId = conn.clientId;
+    if (!clientId) return false;
+    const existing = this.attempts.get(clientId);
+    if (existing) {
+      // 已在配对中(重连/重发 hello/re-handshake 后的 hello):只在还没开始 PAKE 时
+      // 幂等重发 activate;已进 PAKE 的绝不重发,否则客户端会按新 activate 重开 attempt,
+      // 与本地 pairing_index/CPace 状态错位。
+      if (existing.state === "await_init") this.sendPairingActivate(conn, existing);
+      return true;
+    }
+    const method = pickCodeMethod(conn.clientHello);
+    if (!method) return false;
+    const attempt = this.createAttempt(conn, method, "digits");
+    this.sendPairingActivate(conn, attempt);
+    this.server.log("info", `pairing window auto-opened: ${clientId} method=${method}`);
+    return true;
+  }
+
+  /** 建 attempt 并登记(不发 activate:发什么由调用方决定)。 */
+  private createAttempt(conn: SendspinConnection, method: PairMethod, format: PairFormat): Attempt {
+    const clientId = conn.clientId!;
     const attempt: Attempt = {
       clientId,
-      method: norm,
+      method,
       format,
-      pairingIndex,
+      pairingIndex: conn.nextPairingIndex(),
       round: 1,
       state: "await_init",
       gate: new StaticCodeGate(),
@@ -191,13 +222,38 @@ export class PairingCoordinator {
       msgWaiters: [],
     };
     this.attempts.set(clientId, attempt);
-    const pairing: any = { method: wireMethodFor(conn.clientHello, norm) };
-    if (norm === "dynamic_pairing_code") {
-      if (isShortDialect(conn.clientHello, norm)) pairing.pin_length = 6;
-      else pairing.format = format;
+    return attempt;
+  }
+
+  /** pairing activate 载荷:方法名按客户端方言(短名/长名),dynamic 按方言带
+   *  format 或 pin_length。 */
+  private sendPairingActivate(conn: SendspinConnection, a: Attempt): void {
+    const pairing: any = { method: wireMethodFor(conn.clientHello, a.method) };
+    if (a.method === "dynamic_pairing_code") {
+      if (isShortDialect(conn.clientHello, a.method)) pairing.pin_length = 6;
+      else pairing.format = a.format;
     }
     conn.sendJson("server/activate", { activities: ["pairing"], active_roles: [], pairing });
-    this.server.log("info", `pairing started: ${clientId} method=${norm} wire=${pairing.method}`);
+  }
+
+  /** REST 启动配对:发 pairing activate,等客户端 pair-init。
+   *  自动开的窗(state=await_init,PAKE 未起)允许改方法重开;已进入 PAKE 的不许换
+   *  (换方法会让客户端 _selected_pairing 与实际握手错位)。 */
+  async start(clientId: string, method: string, format: PairFormat = "digits"): Promise<void> {
+    const norm = normalizePairMethod(method);
+    if (!norm || norm === "pairing_psk") throw new Error("start 仅码配对(static/dynamic);pairing_psk 走 token 接口");
+    const conn = this.server.clients.get(clientId);
+    if (!conn || !conn.clientId) throw new Error("客户端未连接");
+    if (conn.legacy) throw new Error("legacy 明文连接无配对(配对仅加密连接可用)");
+    const prev = this.attempts.get(clientId);
+    if (prev) {
+      if (prev.state !== "await_init") throw new Error("该客户端已有进行中的配对");
+      clearTimeout(prev.timer);
+      this.attempts.delete(clientId);
+    }
+    const attempt = this.createAttempt(conn, norm, format);
+    this.sendPairingActivate(conn, attempt);
+    this.server.log("info", `pairing started: ${clientId} method=${norm} wire=${wireMethodFor(conn.clientHello, norm)}`);
   }
 
   /** 运营商输入码(static 8 位 / dynamic 6 位,分隔符自动剥离)。 */
@@ -215,9 +271,14 @@ export class PairingCoordinator {
     }
     a.code = digits;
     a.codeRaw = new TextEncoder().encode(digits);
-    // static:输码即开跑(若 pair-init 已到);dynamic:码就绪后等 round 推进。
-    if (a.method === "static_pairing_code" && a.state === "await_code") {
-      void this.runStaticRound(a).catch((e) => this.abort(clientId, "pairing_code_mismatch", false, String(e?.message || e)));
+    // 输码即开跑(若 pair-init 已到):static 与 dynamic 一致。
+    // 旧实现 dynamic 只在 onPairInit 里「码已就绪 → runDynamicRound」,即依赖设备
+    // 读码后再发一次 client/pair-init;而 aiosendspin 等客户端只等 server/pair-auth,
+    // 从不重发 ⇒ 永远卡在 await_code、客户端超时记一次失败(2026-10-25 实测)。
+    // 客户端真的重发 init 也安全:那时 state 已是 await_peer_auth,onPairInit 的守卫会忽略。
+    if (a.state === "await_code") {
+      const run = a.method === "static_pairing_code" ? this.runStaticRound(a) : this.runDynamicRound(a);
+      void run.catch((e) => this.abort(clientId, "pairing_code_mismatch", false, String(e?.message || e)));
     }
   }
 

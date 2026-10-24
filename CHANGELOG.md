@@ -2,6 +2,14 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.75] - 2026-10-25
+
+### Fix / Sendspin 新设备首次配对互锁(服务端与标准客户端协议四连缺陷)
+
+- 根因:未配对(sentinel)会话 hello 后服务端无条件发 `activities:["playback"]`,标准客户端(aiosendspin/ESPHome cpp)按 1.0.0-rc1 语义判 `pairing_required` 立即 goodbye 断开;而 REST `/pairing/start` 又要求客户端已在线——首次配对互锁,新设备本就配不上。
+- 修复四连:①未配对会话按凭证状态只发 `activities:["pairing"]` 或空激活(凭证失配最高优先,与 legacy/编排无关),身份照常登记,配对编排自动开窗;②动态码输码后立即开跑验配(与静态码一致,不再等设备重发 pair-init);③配对完成 re-handshake 后按 PSK 类别下发正确消息(lt 直接 playback activate + group/update,不再发 server/hello 致客户端断连);④配对成功后按 supported_roles 重协商,不再出现 paired:true 却 active_roles 为空永远不能播。
+- 验证:aiosendspin 10.2.1 真客户端 e2e(假设备→240 生产容器)全流程通过(配对码→输码→落盘→group-update→roles 重协商);tests/sendspin 54 文件 761 用例全绿;backend 全量 529 文件 7449 用例全绿。已知残留:客户端丢失本地配对记录后哨兵握手认证失败(待修,临时解法为服务端解绑后重配)。
+
 ## [4.6.74] - 2026-10-24
 
 ### Fix / SENDSPIN 流转到 AirPlay 无声(拖一下进度才出声)

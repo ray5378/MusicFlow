@@ -177,7 +177,7 @@ describe("PairingCoordinator dynamic 活路径(runDynamicRound)", () => {
     expect(lastSent(conn, "pair/abort")?.reason).toBe("pairing_code_mismatch");
   });
 
-  it("[已修复 D34] dynamic 卡在第 1 轮后:await_code 状态下重发 pair-init 会被接受并推进 PAKE", async () => {
+  it("[已修复 D34+P0-1b] dynamic 输码即推进 PAKE;重发 pair-init 被忽略", async () => {
     const nonceB = new Uint8Array(32).fill(42);
     const conn = makeConn();
     const coord = new PairingCoordinator(makeServer(conn), makeStore());
@@ -186,21 +186,20 @@ describe("PairingCoordinator dynamic 活路径(runDynamicRound)", () => {
     await coord.start("CLIENTID", "dynamic_pin");
     await coord.onPairMessage(conn, "client/pair-init", { pairing_index: 1, commit_B: b64urlEncode(commitB) });
     const nonceA = b64urlDecode(lastSent(conn, "server/pair-init").nonce_A);
-    // 运营商读到这个 nonce_A 后输码。
+    // 运营商读到这个 nonce_A 后输码。输码即开跑(dynamic 与 static 一致):
+    // 旧口径要等设备「读码后再发一次 init」,而 aiosendspin 只等 server/pair-auth、
+    // 从不重发 ⇒ 永远卡在 await_code,客户端超时记一次失败(2026-10-25 实测)。
     await coord.enterCode("CLIENTID", deriveDynamicCode(H, nonceA, nonceB));
-    expect(coord.getAttempt("CLIENTID")?.state).toBe("await_code");
-    expect(lastSent(conn, "server/pair-auth")).toBeUndefined();
+    expect(coord.getAttempt("CLIENTID")?.state).toBe("await_peer_auth");
+    expect(lastSent(conn, "server/pair-auth")).toBeDefined();
 
-    // 修复前:第 2 次 pair-init 被 await_code 挡下,既不重生成 nonce_A 也不触发
-    // runDynamicRound —— dynamic 走不通日常时序。修复后:await_code 下重发 init 会被接受、
-    // 复用同一个 nonce_A,并立即推进 PAKE。
+    // 老时序(读码后重发 init)仍要兼容:此刻已 await_peer_auth,守卫忽略重发,
+    // 不重跑一轮、不重发 nonce_A、也不重复下发 pair-auth。
     const before = conn.sent.length;
     await coord.onPairMessage(conn, "client/pair-init", { pairing_index: 1, commit_B: b64urlEncode(commitB) });
     expect(coord.getAttempt("CLIENTID")?.state).toBe("await_peer_auth");
-    expect(lastSent(conn, "server/pair-auth")).toBeDefined();
-    expect(conn.sent.length).toBeGreaterThan(before);
-    // nonce_A 已下发过 ⇒ 重发 init 不再重复下发 server/pair-init。
     expect(conn.sent.slice(before).some(([t]) => t === "server/pair-init")).toBe(false);
+    expect(conn.sent.slice(before).some(([t]) => t === "server/pair-auth")).toBe(false);
   });
 
   it("dynamic confirm:解不开 wrapped_nonce_B ⇒ 静默断连且不落盘", async () => {
