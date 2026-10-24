@@ -19,10 +19,14 @@ const WRAP_NONCE_LABEL = "sendspin-pair-nonce-wrap-v1";
 const SUITE = "CHACHA20POLY1305";
 const enc = (s: string) => new TextEncoder().encode(s);
 
-function sidFor(h: Uint8Array, idx: number): Uint8Array {
+function sidFor(h: Uint8Array, idx: number, round = 1): Uint8Array {
+  // 2026-10-24:新 spec(rc1) sid = label||h||pairing_index||round(均大端 uint32),
+  // 与 pairServer.ts buildSid 保持一致;round 在 pair-init 重发(D34)时递增。
   const b = new Uint8Array(4);
   new DataView(b.buffer).setUint32(0, idx >>> 0, false);
-  return new Uint8Array([...enc(PAKE_SID_LABEL), ...h, ...b]);
+  const r = new Uint8Array(4);
+  new DataView(r.buffer).setUint32(0, round >>> 0, false);
+  return new Uint8Array([...enc(PAKE_SID_LABEL), ...h, ...b, ...r]);
 }
 
 const B32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
@@ -243,7 +247,7 @@ describe("PairingCoordinator.onPairRetry(404-410)", () => {
     expect(auth2).toBeDefined();
     expect(auth2).not.toBe(auth1);
     // 重开的是全新 CPace 实例(旧 publicShare 用不了),新一轮 auth 仍须自洽。
-    const client2 = CPace.start({ role: "responder", prs: enc("123456"), sid: sidFor(H, 1), ad: enc("client") });
+    const client2 = CPace.start({ role: "responder", prs: enc("123456"), sid: sidFor(H, 1, 2), ad: enc("client") });
     client2.derive(b64urlDecode(auth2), enc("server"));
     await coord.onPairMessage(conn, "client/pair-auth", { pairing_index: 1, pake_msg_2: b64urlEncode(client2.publicShare) });
     const serverKc = b64urlDecode(lastSent(conn, "server/pair-confirm").server_kc);

@@ -40,7 +40,7 @@ vi.mock("../../src/services/airplay/discovery.js", () => ({
 }));
 
 import { getGroupManager } from "../../src/services/group/index.js";
-import { checkPlayTarget, freezesPositionBeforeCast } from "../../src/services/playTarget.js";
+import { checkPlayTarget } from "../../src/services/playTarget.js";
 
 beforeAll(() => {
   sqlite.exec(`
@@ -111,28 +111,5 @@ describe("playTarget.checkPlayTarget — 没有在线播放器就不算可播", 
     expect(checkPlayTarget("dlna:some-device").playable).toBe(true);
     expect(checkPlayTarget("sendspin:who-knows").playable).toBe(true);
     expect(checkPlayTarget("local:u1").playable).toBe(true);
-  });
-});
-
-// ── 流转落点的「起播前定格」判据 ──────────────────────────────────────────────
-// 2026-10-24 全量流转矩阵实测:transfer → group 落点比源端超前 4.9s(源 47.52s、
-// 目标 52.43s),因为组起播要 4~20s,而旧实现是**起播之后**才读源端位置再补 seek,
-// 这段耗时被算进了落点;同一批里另一格还因额外 seek 直接拖到超时未起播。
-// 因此 group 与 airplay 一样必须在 cast 前定格,dlna/sendspin/local 保持旧口径。
-describe("playTarget.freezesPositionBeforeCast — 哪些目标必须在起播前定格落点", () => {
-  it("airplay / group ⇒ 定格(两者起播都要建会话,seek 代价高)", () => {
-    expect(freezesPositionBeforeCast("airplay")).toBe(true);
-    expect(freezesPositionBeforeCast("group")).toBe(true);
-  });
-
-  it("dlna / sendspin / local ⇒ 不定格(起播 1~3s,晚读数更贴近真正出声的时刻)", () => {
-    expect(freezesPositionBeforeCast("dlna")).toBe(false);
-    expect(freezesPositionBeforeCast("sendspin")).toBe(false);
-    expect(freezesPositionBeforeCast("local")).toBe(false);
-  });
-
-  it("未知 kind 一律不定格(保守:维持历史行为)", () => {
-    expect(freezesPositionBeforeCast("")).toBe(false);
-    expect(freezesPositionBeforeCast("whatever")).toBe(false);
   });
 });

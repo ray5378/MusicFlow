@@ -121,7 +121,7 @@ describe("server:sendBinary / sendAudio 双路径出站", () => {
     ws.terminate();
   });
 
-  it("加密连接:sendAudio 帧头为 9B(0x04 + 8B 大端时间戳)", () => {
+  it("加密连接:sendAudio 帧头为 13B(0x04 + 8B 大端时间戳 + 4B send_ahead)", () => {
     const { srv } = makeServer();
     const { conn, ws } = makeConn(srv);
     stubNoise(conn);
@@ -129,7 +129,7 @@ describe("server:sendBinary / sendAudio 双路径出站", () => {
     const out = Buffer.from(ws.sent.at(-1)!.data);
     expect(out[0]).toBe(0x04);
     expect(out.readBigInt64BE(1)).toBe(0x0102030405060708n);
-    expect(out[9]).toBe(0xaa);
+    expect(out[13]).toBe(0xaa);
     ws.terminate();
   });
 });

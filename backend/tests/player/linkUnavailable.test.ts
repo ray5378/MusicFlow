@@ -24,8 +24,6 @@ interface Harness {
   ctrl: any;
   played: string[];
   seeks: number[];
-  /** 每次 cast 带上的起点(ms;0=从头)。起播即落位后位置不再靠 seek 补。 */
-  starts: number[];
   /** 控制 ProtocolPlayer.isAvailable(设备是否真的在线)。 */
   setAvailable(v: boolean): void;
 }
@@ -35,15 +33,10 @@ function makeQC(): Harness {
   const any = qc as any;
   const played: string[] = [];
   const seeks: number[] = [];
-  const starts: number[] = [];
   let available = true;
   const player = {
     playerId: PID,
-    playMedia: vi.fn(async (item: any, _base?: any, startMs?: number) => {
-      played.push(item.songId);
-      starts.push(startMs ?? 0);
-      return { mediaUri: "u" };
-    }),
+    playMedia: vi.fn(async (item: any) => { played.push(item.songId); return { mediaUri: "u" }; }),
     stop: vi.fn(async () => {}),
     pause: vi.fn(async () => {}),
     resume: vi.fn(async () => {}),
@@ -78,7 +71,7 @@ function makeQC(): Harness {
   any.resolveItem = async (i: any) => i;
   any.persist = () => {};
   any.schedulePreProbe = () => {};
-  return { qc, any, player, ctrl, played, seeks, starts, setAvailable: (v: boolean) => { available = v; } };
+  return { qc, any, player, ctrl, played, seeks, setAvailable: (v: boolean) => { available = v; } };
 }
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
@@ -146,10 +139,7 @@ describe("QueueController 链路不可用护栏", () => {
     await flush();
     expect(h.played).toEqual(["s1"]);          // 重投的是**当前**这首
     expect(h.any.queues.get(DEV).currentIndex).toBe(0);
-    // 起播即落位:位置交给**这一次** cast 的 startMs,不再 cast 完再 seek
-    // (AirPlay 的 seek 会重建会话;单会话设备第二次 RECORD 会挂死)。
-    expect(h.starts).toEqual([120000]);
-    expect(h.seeks).toEqual([]);
+    expect(h.seeks).toEqual([119]);            // 位置拉回 120(减 1s 抵消 cast 开销)
     expect(h.any.linkLost.has(DEV)).toBe(false);
   });
 
@@ -182,8 +172,7 @@ describe("QueueController 位置冻结(frozen)处理", () => {
     await h.qc.handleDecision("frozen", PID);
     expect(h.played).toEqual(["s1"]);        // 还是当前这首
     expect(h.any.queues.get(DEV).currentIndex).toBe(0);
-    expect(h.starts).toEqual([173600]);      // 冻结点进 cast(不再 seek 172.6)
-    expect(h.seeks).toEqual([]);
+    expect(h.seeks).toEqual([172.6]);        // 拉到冻结点(减 1s)
   });
 
   it("frozen 复查发现位置已推进 → 误报,撤销且不重投", async () => {

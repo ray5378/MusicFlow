@@ -1,12 +1,9 @@
-// 组播放链路测试:GroupProtocolPlayer(统一 pump 时间线)+ QueueController 组集成。
+// 组播放链路测试:GroupProtocolPlayer 扇出 + QueueController 组集成。
 //
-// ★ 2026-10-23 契约变更(用户拍板):群组成员只允许 sendspin / airplay,**DLNA 禁止入组**
-//   (DLNA 是各设备自拉流的扇出模型,没有共享时间线,只能 roughly 同时起播)。
-//   组的音频不再"逐成员 cast",而是**一条 pump**(ug:<groupId>)统一产出:
-//     - sendspin 成员吃 pump 下发的时间戳;
-//     - airplay 成员是 pump 的旁路 sink(经 airplayBridge 建立 RAOP 桥接会话)。
-//   因此本文件不再断言"每个成员各收到一次 playMedia",而是断言
-//   「pump 起一次 + 桥接建一次」,以及 QueueController 侧的组队列行为不变。
+// mock 说明:
+//   - dlna/control.js 全量 mock(createDlnaProtocolPlayer 返回可记录调用的 fake)
+//   - group/index.js 的 getGroupManager 用可控 stub(避免真实 GroupManager 的 DB 写入
+//     与其他测试文件并行时的数据竞争;GroupManager 本身有独立测试覆盖)
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from "vitest";
 import { QueueController } from "../../src/services/player/QueueController.js";
 import { PlayerController } from "../../src/services/player/PlayerController.js";
@@ -16,42 +13,46 @@ import { PlaybackState, type PlayerState, type ProtocolPlayer, type QueueItem } 
 import { sqlite } from "../../src/db/index.js";
 
 const h = vi.hoisted(() => {
-  /** 设备可用性表(同时充当 airplay discovery 的答案,key = 裸 deviceId)。 */
   const devices: Record<string, { available: boolean }> = {};
-  const groupStore = new Map<string, any>();
+  const groupStore = new Map<string, { id: string; name: string; memberIds: string[] }>();
   const groupOfDevice = new Map<string, string[]>();
-  /** pump 侧调用流水(sendspin 组 player)。 */
-  const spinCalls: Array<{ fn: string; args: any[] }> = [];
-  /** 桥接编排调用流水。 */
-  const bridgeCalls: Array<{ fn: string; args: any[] }> = [];
-  const failOnPlay = { on: false };
-  const groupPoll = { playing: true, paused: false, positionMs: 10000, durationMs: 100000 } as any;
-  /** sendspin 在线客户端快照(getSendspinFront 的替身)。 */
-  const spinFrontRef = { value: null as any };
+  const memberCalls: Record<string, string[]> = {};
+  const failOnPlay = new Set<string>();
 
   function fakeDlnaProtocol(deviceId: string): ProtocolPlayer {
+    const calls: string[] = (memberCalls[deviceId] ??= []);
     return {
       playerId: `dlna:${deviceId}`,
-      async playMedia() { return { mediaUri: `uri-${deviceId}` }; },
-      async stop() {},
-      async pause() {},
-      async resume() {},
-      async seek() {},
-      async setVolume() {},
+      async playMedia(item: QueueItem) {
+        calls.push(`playMedia:${item.songId}`);
+        if (failOnPlay.has(deviceId)) throw new Error("cast 失败");
+        return { mediaUri: `uri-${deviceId}` };
+      },
+      async stop() { calls.push("stop"); },
+      async pause() { calls.push("pause"); },
+      async resume() { calls.push("resume"); },
+      async seek(s: number) { calls.push(`seek:${s}`); },
+      async setVolume(v: number) { calls.push(`volume:${v}`); },
       async pollState(): Promise<PlayerState> {
-        return { playerId: `dlna:${deviceId}`, playbackState: PlaybackState.PLAYING, position: 10, duration: 100, updatedAt: Date.now() };
+        return {
+          playerId: `dlna:${deviceId}`,
+          playbackState: PlaybackState.PLAYING,
+          position: 10,
+          duration: 100,
+          mediaUri: `uri-${deviceId}`,
+          updatedAt: Date.now(),
+        };
       },
     };
   }
 
-  return { devices, groupStore, groupOfDevice, spinCalls, bridgeCalls, failOnPlay, groupPoll, spinFrontRef, fakeDlnaProtocol };
+  return { devices, groupStore, groupOfDevice, memberCalls, failOnPlay, fakeDlnaProtocol };
 });
 
 vi.mock("../../src/services/dlna/control.js", () => ({
   createDlnaProtocolPlayer: (deviceId: string) => h.fakeDlnaProtocol(deviceId),
   getEffectiveBaseUrl: () => "http://base",
   clearCurrentMedia: () => {},
-  alignDeviceToPosition: async () => {},
   getDevice: (id: string) => (h.devices[id] ? { id, available: h.devices[id].available } : undefined),
   isDeviceAvailable: (id: string) => !!h.devices[id]?.available,
   getCachedDevices: () =>
@@ -59,89 +60,22 @@ vi.mock("../../src/services/dlna/control.js", () => ({
   getDeviceStatus: async () => ({ state: "STOPPED", position: 0, duration: 0, volume: 0 }),
 }));
 
-vi.mock("../../src/services/airplay/discovery.js", () => ({
-  getAirPlayDevice: (id: string) => {
-    if (!h.devices[id]) return undefined;
-    return { id, name: `ap-${id}`, alias: "", host: "10.0.0.9", port: 7000, pk: "pk", et: "0,1", available: h.devices[id].available };
-  },
-}));
-
-vi.mock("../../src/services/group/airplayBridge.js", () => ({
-  startGroupAirPlayBridge: async (groupId: string) => {
-    // 真实实现:组内没有 airplay 成员时**直接返回 null、不产生任何 RPC**(见
-    // group/airplayBridge.ts 首行 devices.length === 0)。替身必须同形,否则
-    // 「纯 sendspin 组不该碰桥接」这条断言无从验证。
-    const g0 = h.groupStore.get(groupId);
-    const hasAp = (g0?.memberIds ?? []).some((m: string) => m.startsWith("airplay:"));
-    if (!hasAp) return null;
-    h.bridgeCalls.push({ fn: "start", args: [groupId] });
-    // 只有组内真有 airplay 成员且可用时才返回桥接信息
-    const g = h.groupStore.get(groupId);
-    const ap = (g?.memberIds ?? [])
-      .filter((m: string) => m.startsWith("airplay:"))
-      .map((m: string) => m.slice("airplay:".length))
-      .filter((id: string) => !!h.devices[id]?.available);
-    return ap.length ? { devices: ap, host: "127.0.0.1", port: 43823, minSendAheadUs: 1200000 } : null;
-  },
-  stopGroupAirPlayBridge: async (groupId: string, reason?: string) => {
-    h.bridgeCalls.push({ fn: "stop", args: [groupId, reason] });
-  },
-  seekGroupAirPlayBridge: async (groupId: string, seconds: number) => {
-    h.bridgeCalls.push({ fn: "seek", args: [groupId, seconds] });
-  },
-  setGroupAirPlayVolume: async (groupId: string, volume: number) => {
-    h.bridgeCalls.push({ fn: "volume", args: [groupId, volume] });
-  },
-}));
-
-vi.mock("../../src/services/sendspin/protocolPlayer.js", () => ({
-  createSendspinGroupPlayer: (gid: string) => ({
-    playerId: `sendspin:${gid}`,
-    async playMedia(item: any, baseUrl: string, startMs?: number, bridge?: any) {
-      h.spinCalls.push({ fn: "playMedia", args: [item, baseUrl, startMs, bridge] });
-      if (h.failOnPlay.on) throw new Error("pump 起不来");
-      return { mediaUri: `uri-pump-${gid}` };
-    },
-    async stop() { h.spinCalls.push({ fn: "stop", args: [] }); },
-    async pause() { h.spinCalls.push({ fn: "pause", args: [] }); },
-    async resume() { h.spinCalls.push({ fn: "resume", args: [] }); },
-    async seek(s: number) { h.spinCalls.push({ fn: "seek", args: [s] }); },
-    async setVolume(v: number) { h.spinCalls.push({ fn: "setVolume", args: [v] }); },
-    async pollState() { return { playerId: `sendspin:${gid}`, playbackState: PlaybackState.PLAYING, position: 10, duration: 100, updatedAt: Date.now() }; },
-  }),
-  // QueueController 还直接 import 了单设备版工厂(本文件不测单设备 sendspin)
-  createSendspinProtocolPlayer: (id: string) => h.fakeDlnaProtocol(id),
-}));
-
-vi.mock("../../src/services/sendspin/index.js", async (importOriginal) => {
-  const actual = await importOriginal<any>();
-  return {
-    ...actual,
-    getSendspinFront: () => h.spinFrontRef.value,
-    sendspinGroupPoll: async () => h.groupPoll,
-  };
-});
-
-vi.mock("../../src/services/sendspin/playerCore.js", () => ({
-  sendspinGroupName: (gid: string) => `ug:${gid}`,
-}));
-
 vi.mock("../../src/services/group/index.js", async (importOriginal) => {
   // 部分 mock:只替 getGroupManager,splitMemberId 等纯函数走真实实现(随源码演进)。
   const actual = await importOriginal<any>();
   return {
-    ...actual,
     getGroupManager: () => ({
       get: (id: string) => h.groupStore.get(id),
+      groupOfDevice: (deviceId: string) => h.groupOfDevice.get(deviceId),
       groupsOfDevice: (deviceId: string) => h.groupOfDevice.get(deviceId) || [],
       list: () => Array.from(h.groupStore.values()),
       getVolume: () => 20,
       setVolume: (_id: string, v: number) => v,
     }),
+    splitMemberId: actual.splitMemberId,
   };
 });
 
-// getSendspinFront 的可变引用(hoisted 里不能直接放循环引用,单开一个坑位)
 function makeItems(n: number): QueueItem[] {
   return Array.from({ length: n }, (_, i) => ({
     songId: `s${i + 1}`,
@@ -149,14 +83,6 @@ function makeItems(n: number): QueueItem[] {
     mime: "audio/mpeg",
     duration: 100,
   }));
-}
-
-/** 组内 sendspin 成员全部在线(组 pump 需要至少一个在线成员才会起播)。 */
-function spinAllReady() {
-  h.spinFrontRef.value = {
-    clients: new Map([["c1", { ready: true }], ["c2", { ready: true }]]),
-    groups: new Map([["ug:g1", { volume: 20, muted: false }]]),
-  };
 }
 
 beforeAll(() => {
@@ -210,96 +136,84 @@ beforeAll(() => {
   `);
 });
 
-describe("GroupProtocolPlayer:统一 pump(不再逐成员 cast)", () => {
+describe("GroupProtocolPlayer 扇出", () => {
   beforeEach(() => {
     h.devices["d1"] = { available: true };
     h.devices["d2"] = { available: false };
     h.devices["d3"] = { available: true };
     h.groupStore.clear();
     h.groupOfDevice.clear();
-    h.spinCalls.length = 0;
-    h.bridgeCalls.length = 0;
-    h.failOnPlay.on = false;
-    h.spinFrontRef.value = null;
+    h.failOnPlay.clear();
+    for (const k of Object.keys(h.memberCalls)) h.memberCalls[k].length = 0;
   });
 
-  it("playMedia:桥接建一次 + pump 起一次,桥接信息透传给 pump", async () => {
-    h.groupStore.set("g1", { id: "g1", name: "组", memberIds: ["airplay:d1", "airplay:d2"] });
+  it("playMedia 扇出到在线成员,离线成员跳过;返回 leader 的 mediaUri", async () => {
+    h.groupStore.set("g1", { id: "g1", name: "组", memberIds: ["d1", "d2"] });
     const p = createGroupProtocolPlayer("g1");
     const { mediaUri } = await p.playMedia(makeItems(1)[0], "http://base");
-    expect(mediaUri).toBe("uri-pump-g1");
-    // 离线成员 d2 不进桥接目标
-    expect(h.bridgeCalls.map((c) => c.fn)).toEqual(["start"]);
-    const pm = h.spinCalls.filter((c) => c.fn === "playMedia");
-    expect(pm).toHaveLength(1);
-    expect(pm[0].args[3]).toEqual({ devices: ["d1"], host: "127.0.0.1", port: 43823, minSendAheadUs: 1200000 });
+    expect(mediaUri).toBe("uri-d1");
+    expect(h.memberCalls["d1"]).toEqual(["playMedia:s1"]);
+    expect(h.memberCalls["d2"] ?? []).toEqual([]); // 离线成员不 cast
   });
 
-  it("纯 sendspin 组:不起桥接,pump 收到 undefined", async () => {
-    spinAllReady();
-    h.groupStore.set("g1", { id: "g1", name: "组", memberIds: ["sendspin:c1", "sendspin:c2"] });
-    await createGroupProtocolPlayer("g1").playMedia(makeItems(1)[0], "http://base");
-    expect(h.bridgeCalls).toEqual([]);
-    expect(h.spinCalls.find((c) => c.fn === "playMedia")!.args[3]).toBeUndefined();
-  });
-
-  it("stop 顺序 = 先停 pump 再拆桥接", async () => {
-    h.groupStore.set("g1", { id: "g1", name: "组", memberIds: ["airplay:d1"] });
+  it("stop/pause/resume/seek/setVolume 扇出到在线成员", async () => {
+    h.groupStore.set("g1", { id: "g1", name: "组", memberIds: ["d1", "d2", "d3"] });
     const p = createGroupProtocolPlayer("g1");
-    await p.playMedia(makeItems(1)[0], "http://base");
-    h.spinCalls.length = 0;
-    h.bridgeCalls.length = 0;
     await p.stop();
-    expect(h.spinCalls.map((c) => c.fn)).toEqual(["stop"]);
-    expect(h.bridgeCalls.map((c) => c.fn)).toEqual(["stop"]);
-  });
-
-  it("seek / setVolume:pump 与桥接两路都下发", async () => {
-    h.groupStore.set("g1", { id: "g1", name: "组", memberIds: ["airplay:d1", "sendspin:c1"] });
-    const p = createGroupProtocolPlayer("g1");
+    await p.pause();
+    await p.resume();
     await p.seek(30);
     await p.setVolume(50);
-    expect(h.spinCalls.find((c) => c.fn === "seek")!.args).toEqual([30]);
-    expect(h.bridgeCalls.find((c) => c.fn === "seek")!.args).toEqual(["g1", 30]);
-    expect(h.spinCalls.find((c) => c.fn === "setVolume")!.args).toEqual([50]);
-    expect(h.bridgeCalls.find((c) => c.fn === "volume")!.args).toEqual(["g1", 50]);
+    expect(h.memberCalls["d1"]).toEqual(["stop", "pause", "resume", "seek:30", "volume:50"]);
+    expect(h.memberCalls["d3"]).toEqual(["stop", "pause", "resume", "seek:30", "volume:50"]);
+    expect(h.memberCalls["d2"] ?? []).toEqual([]);
   });
 
-  it("无在线成员:playMedia 抛错且不建桥接;pollState 返回 BUFFERING", async () => {
-    h.devices["d1"] = { available: false };
-    h.groupStore.set("g1", { id: "g1", name: "组", memberIds: ["airplay:d1", "airplay:d2"] });
-    const p = createGroupProtocolPlayer("g1");
-    await expect(p.playMedia(makeItems(1)[0], "http://base")).rejects.toThrow("无在线成员");
-    expect(h.bridgeCalls).toEqual([]);
-    const state = await p.pollState();
-    expect(state.playbackState).toBe(PlaybackState.BUFFERING);
-    expect(state.playerId).toBe("group:g1");
-  });
-
-  it("pump 起播失败 → 立刻拆桥接(不留静音会话)", async () => {
-    h.groupStore.set("g1", { id: "g1", name: "组", memberIds: ["airplay:d1"] });
-    h.failOnPlay.on = true;
-    await expect(createGroupProtocolPlayer("g1").playMedia(makeItems(1)[0], "http://base")).rejects.toThrow("pump 起不来");
-    expect(h.bridgeCalls.map((c) => c.fn)).toEqual(["start", "stop"]);
-  });
-
-  it("pollState:airplay 成员在线时也从 pump 派生", async () => {
-    h.groupStore.set("g1", { id: "g1", name: "组", memberIds: ["airplay:d3"] });
+  it("pollState 从 leader(第一个在线成员)派生,playerId 为组 id", async () => {
+    h.groupStore.set("g1", { id: "g1", name: "组", memberIds: ["d2", "d3"] });
     const p = createGroupProtocolPlayer("g1");
     const state = await p.pollState();
     expect(state.playerId).toBe("group:g1");
     expect(state.playbackState).toBe(PlaybackState.PLAYING);
     expect(state.position).toBe(10);
+    expect(state.mediaUri).toBe("uri-d3"); // leader = d3(d2 离线)
   });
 
-  it("getGroupStatus:无 leader → STOPPED;有在线成员 → 从 pump 派生", async () => {
-    h.groupStore.set("g1", { id: "g1", name: "组", memberIds: ["airplay:d2"] }); // d2 离线 → 无 leader
+  it("无在线成员:playMedia 抛错,pollState 返回 BUFFERING(不误报 IDLE,避免被当作曲目结束)", async () => {
+    h.devices["d1"] = { available: false }; // 全离线
+    h.groupStore.set("g1", { id: "g1", name: "组", memberIds: ["d1", "d2"] });
+    const p = createGroupProtocolPlayer("g1");
+    await expect(p.playMedia(makeItems(1)[0], "http://base")).rejects.toThrow("无在线成员");
+    const state = await p.pollState();
+    expect(state.playbackState).toBe(PlaybackState.BUFFERING);
+    expect(state.playerId).toBe("group:g1");
+  });
+
+  it("部分成员 cast 失败不影响其余成员", async () => {
+    h.groupStore.set("g1", { id: "g1", name: "组", memberIds: ["d1", "d3"] });
+    h.failOnPlay.add("d1");
+    const p = createGroupProtocolPlayer("g1");
+    const { mediaUri } = await p.playMedia(makeItems(1)[0], "http://base");
+    expect(mediaUri).toBe("uri-d3"); // d1 失败,d3 成功
+    expect(h.memberCalls["d1"]).toContain("playMedia:s1");
+  });
+
+  it("全部成员 cast 失败 → 抛错", async () => {
+    h.groupStore.set("g1", { id: "g1", name: "组", memberIds: ["d1", "d3"] });
+    h.failOnPlay.add("d1");
+    h.failOnPlay.add("d3");
+    const p = createGroupProtocolPlayer("g1");
+    await expect(p.playMedia(makeItems(1)[0], "http://base")).rejects.toThrow("全部成员 cast 失败");
+  });
+
+  it("getGroupStatus:无 leader 返回 STOPPED,有 leader 返回其设备状态", async () => {
+    h.groupStore.set("g1", { id: "g1", name: "组", memberIds: ["d2"] }); // d2 离线 → 无 leader
     const idle = await getGroupStatus("g1");
     expect(idle.state).toBe("STOPPED");
-    h.groupStore.set("g1", { id: "g1", name: "组", memberIds: ["airplay:d1"] });
+    h.groupStore.set("g1", { id: "g1", name: "组", memberIds: ["d1"] });
     const s = await getGroupStatus("g1");
-    expect(s.state).toBe("PLAYING");
-    expect(s.position).toBe(10);
+    expect(s.state).toBe("STOPPED"); // mock 的 getDeviceStatus 默认 STOPPED
+    expect(s.position).toBe(0);
   });
 });
 
@@ -309,53 +223,51 @@ describe("QueueController 组集成", () => {
     h.devices["d2"] = { available: false };
     h.groupStore.clear();
     h.groupOfDevice.clear();
-    h.spinCalls.length = 0;
-    h.bridgeCalls.length = 0;
-    h.failOnPlay.on = false;
-    h.spinFrontRef.value = null;
+    h.failOnPlay.clear();
+    for (const k of Object.keys(h.memberCalls)) h.memberCalls[k].length = 0;
     vi.useFakeTimers();
   });
   afterEach(() => { vi.useRealTimers(); });
 
-  it("组队列 playFrom 起 pump;组播放期间成员个人决策被压制;组 advance 正常切歌并持久化", async () => {
-    h.groupStore.set("g1", { id: "g1", name: "组", memberIds: ["airplay:d1", "airplay:d2"] });
+  it("组队列 playFrom 扇出;组播放期间成员个人队列决策被压制;组 advance 正常切歌;组队列持久化到 group_queues", async () => {
+    h.groupStore.set("g1", { id: "g1", name: "组", memberIds: ["d1", "d2"] });
     h.groupOfDevice.set("d1", ["g1"]);
     const pc = new PlayerController();
     const qc = new QueueController();
     pc.onDecision = (d, pid) => { qc.handleDecision(d, pid).catch(() => {}); };
 
-    // 组 player:UniversalPlayer 绑定真实 GroupProtocolPlayer(内部走替身 pump/桥接)
+    // 组 player:UniversalPlayer 绑定真实 GroupProtocolPlayer
     const gup = new UniversalPlayer("group:g1", "组");
     gup.attachProtocol(createGroupProtocolPlayer("g1"));
     qc.registerPlayer("g1", gup, pc);
-    // d1 单独注册(模拟其个人播放能力,验证组播放期间的压制)
+    // d1 单独注册(模拟其个人播放能力)
     const d1up = new UniversalPlayer("dlna:d1", "d1");
     d1up.attachProtocol(h.fakeDlnaProtocol("d1") as unknown as ProtocolPlayer);
     qc.registerPlayer("d1", d1up, pc);
 
-    // 队列默认 shuffle 会随机挑首曲 → 钉成 order(本用例测扇出/压制/持久化)
+    // 队列默认 playMode="shuffle",playFrom 在 shuffle 下会忽略 startIndex 随机
+    // 挑首曲,导致"首曲 s1 → advance 到 s2"的断言随机失败。本用例测扇出/压制/
+    // 持久化,与随机无关 → 钉成 order。
     qc.setQueue("g1", [], -1, "http://base");
     qc.setPlayMode("g1", "order");
 
-    // 组播放 → 起一次 pump(在线成员 d1 进桥接目标)
+    // 组播放 → 扇出到在线成员 d1
     await qc.playFrom("g1", makeItems(2), 0, "http://base");
-    expect(h.spinCalls.filter((c) => c.fn === "playMedia")).toHaveLength(1);
-    expect(h.bridgeCalls.filter((c) => c.fn === "start")).toHaveLength(1);
+    expect(h.memberCalls["d1"]).toContain("playMedia:s1");
+    expect(h.memberCalls["d2"] ?? []).toEqual([]);
     expect(qc.snapshot("g1").isActive).toBe(true);
 
-    // d1 个人队列(异常场景):组播放期间的成员决策必须被压制
+    // d1 个人队列(异常场景,但验证组播放期间其决策被压制)
     qc.setQueue("d1", makeItems(2), 0, "http://base");
-    const before = h.spinCalls.length;
+    const before = h.memberCalls["d1"].length;
     await qc.handleDecision("advance", "dlna:d1");
-    expect(h.spinCalls.length).toBe(before);
+    expect(h.memberCalls["d1"].length).toBe(before); // 被压制,不 cast
     await qc.handleDecision("ended", "dlna:d1");
-    expect(qc.snapshot("d1").ended).toBe(false);
+    expect(qc.snapshot("d1").ended).toBe(false); // 不被标记结束
 
-    // 组 advance:切到 s2 并再次起 pump
+    // 组 advance:切到 s2 并再次扇出
     await qc.handleDecision("advance", "group:g1");
-    const pms = h.spinCalls.filter((c) => c.fn === "playMedia");
-    expect(pms).toHaveLength(2);
-    expect((pms[1].args[0] as any).songId).toBe("s2");
+    expect(h.memberCalls["d1"]).toContain("playMedia:s2");
     expect(qc.snapshot("g1").currentIndex).toBe(1);
 
     // 组队列持久化到 group_queues 表
@@ -366,7 +278,7 @@ describe("QueueController 组集成", () => {
   });
 
   it("组未在播时,成员个人决策不受压制", async () => {
-    h.groupStore.set("g1", { id: "g1", name: "组", memberIds: ["airplay:d1"] });
+    h.groupStore.set("g1", { id: "g1", name: "组", memberIds: ["d1"] });
     h.groupOfDevice.set("d1", ["g1"]);
     const pc = new PlayerController();
     const qc = new QueueController();
@@ -375,15 +287,14 @@ describe("QueueController 组集成", () => {
     d1up.attachProtocol(h.fakeDlnaProtocol("d1") as unknown as ProtocolPlayer);
     qc.registerPlayer("d1", d1up, pc);
 
-    // d1 有自己的播放队列,组队列未激活 → 正常切歌(走它自己的 player,不动 pump)
+    // d1 有自己的播放队列,组队列未激活
     qc.setQueue("d1", makeItems(2), 0, "http://base");
     await qc.handleDecision("advance", "dlna:d1");
-    expect(qc.snapshot("d1").currentIndex).toBe(1);
-    expect(h.spinCalls).toEqual([]);
+    expect(h.memberCalls["d1"]).toContain("playMedia:s2"); // 正常切歌
   });
 
-  it("clear:清组队列 → 停 pump + 拆桥接;组播放期间清成员个人队列不打断组", async () => {
-    h.groupStore.set("g1", { id: "g1", name: "组", memberIds: ["airplay:d1", "airplay:d2"] });
+  it("clear: 清组队列停播组(dlna 成员收到 stop);组播放期间清成员个人队列不打断组", async () => {
+    h.groupStore.set("g1", { id: "g1", name: "组", memberIds: ["d1", "d2"] });
     h.groupOfDevice.set("d1", ["g1"]);
     const pc = new PlayerController();
     const qc = new QueueController();
@@ -396,24 +307,21 @@ describe("QueueController 组集成", () => {
     d1up.attachProtocol(h.fakeDlnaProtocol("d1") as unknown as ProtocolPlayer);
     qc.registerPlayer("d1", d1up, pc);
 
-    // 组激活(setQueue 设 isActive=true)
+    // 组激活(setQueue 设 isActive=true,不触发 playCurrent,避开 songs 表依赖)
     qc.setQueue("g1", makeItems(2), 0, "http://base");
     expect(qc.snapshot("g1").isActive).toBe(true);
 
-    // 组播放期间清成员 d1 的个人队列 → 不停组泵
-    const stopsBefore = h.spinCalls.filter((c) => c.fn === "stop").length;
+    // 组播放期间清成员 d1 的个人队列 → 不 stop(d1 属于激活中的组)
+    const stopsBefore = (h.memberCalls["d1"] ?? []).filter(c => c === "stop").length;
     qc.setQueue("d1", makeItems(1), 0, "http://base");
     qc.clear("d1");
-    expect(h.spinCalls.filter((c) => c.fn === "stop").length).toBe(stopsBefore);
+    expect(h.memberCalls["d1"].filter(c => c === "stop").length).toBe(stopsBefore);
 
-    // 清组自身队列 → 停 pump + 拆桥接
+    // 清组自身队列 → stop 扇出到在线成员
     qc.clear("g1");
-    // clear() 内部的 stop 是 fire-and-forget,而 GroupProtocolPlayer.stop 里有
-    // `await import(...)` 链 ⇒ 必须让出一拍 microtask 才能观测到副作用。
-    await vi.advanceTimersByTimeAsync(10);
     expect(qc.snapshot("g1").items).toHaveLength(0);
     expect(qc.snapshot("g1").isActive).toBe(false);
-    expect(h.spinCalls.filter((c) => c.fn === "stop").length).toBe(1);
-    expect(h.bridgeCalls.filter((c) => c.fn === "stop")).toHaveLength(1);
+    expect(h.memberCalls["d1"]).toContain("stop");
+    expect(h.memberCalls["d2"] ?? []).toEqual([]); // d2 离线,不扇出
   });
 });

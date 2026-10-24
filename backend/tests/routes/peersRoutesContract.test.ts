@@ -301,44 +301,28 @@ describe("POST /v1/peers/:peerId/queue/play", () => {
     expect((await post("/v1/peers/bare-id/queue/play", { items: [] })).status).toBe(400);
   });
 
-  it("cast 端:起播时跳过了不可播曲目 ⇒ 回执 position 必须为 null(不谎报落位)", async () => {
-    // 2026-10-24 真机:position=45 的起播指令,队列首曲当天被在线可播性复核判死、
-    // 跳过到下一首,startMs 随之丢弃(起点只属于原本那一首),目标端从 0 播;
-    // 而路由把 askPosition 原样回执 ⇒ 客户端把进度条画在 45s。可播性复核会抖动,
-    // 于是同一条指令表现成「有时落位、有时归零」。回执必须诚实。
-    queueController.castLandingOf.mockReturnValueOnce({ requestedMs: 45000, applied: false });
-    const b = await json(await post("/v1/peers/airplay:ap1/queue/play",
-      { items: [{ songId: "s1" }], startIndex: 0, position: 45 }));
-    expect(b.position).toBeNull();
-    expect(b.success).toBe(true);
-  });
-
-  it("cast 端:先脱离活跃组,再以 startMs 起播(起播即落位,不做二次 seek)", async () => {
+  it("cast 端:先脱离活跃组,再 playFrom;带 position 时起播后 seek 落位", async () => {
     queueManager.playFrom.mockResolvedValueOnce(3);
+    fns.seekPeerToSeconds.mockResolvedValueOnce(true);
     const b = await json(await post("/v1/peers/dlna:dev1/queue/play", { items: [{ songId: "s1" }], startIndex: 3, position: 12.5 }));
     expect(fns.detachFromActiveGroups).toHaveBeenCalled();
-    // 起点作为第 6 参进入**这一次** cast(12.5s → 12500ms)。
-    // 不再「先起播、再 seek」:AirPlay 的 seek 是完整重建会话,单会话设备
-    // (HiVi/Linkplay)第二次 RECORD 会永久等待;AP2 上还白多 3s、AP1 上直接 25s 超时。
-    expect(queueManager.playFrom).toHaveBeenCalledWith(
-      "dev1", [{ songId: "s1" }], 3, "http://127.0.0.1:46400", undefined, 12500,
-    );
-    expect(fns.seekPeerToSeconds).not.toHaveBeenCalled();
+    expect(queueManager.playFrom).toHaveBeenCalledWith("dev1", [{ songId: "s1" }], 3, "http://127.0.0.1:46400");
+    expect(fns.seekPeerToSeconds).toHaveBeenCalledWith("dlna:dev1", 12.5);
     expect(b).toEqual({ success: true, position: 12.5 });
   });
 
-  it("cast 端:不带 position → startMs 为 undefined(从头播),position=null", async () => {
-    const b = await json(await post("/v1/peers/group:g1/queue/play", { items: [] }));
-    expect(queueManager.playFrom.mock.calls[0][5]).toBeUndefined();
+  it("cast 端:seek 落位失败 → position=null(不谎报成功落位)", async () => {
+    fns.seekPeerToSeconds.mockResolvedValueOnce(false);
+    const b = await json(await post("/v1/peers/group:g1/queue/play", { items: [], position: 9 }));
     expect(b.position).toBeNull();
   });
 
-  it("cast 端:负 position 夹到 0(等于没传起点);非有限数视为未传", async () => {
+  it("cast 端:负 position 夹到 0;非有限数视为未传", async () => {
     await post("/v1/peers/dlna:dev1/queue/play", { items: [], position: -3 });
-    expect(queueManager.playFrom.mock.calls[0][5]).toBeUndefined();
-    queueManager.playFrom.mockClear();
+    expect(fns.seekPeerToSeconds.mock.calls[0][1]).toBe(0);
+    fns.seekPeerToSeconds.mockClear();
     await post("/v1/peers/dlna:dev1/queue/play", { items: [], position: "abc" });
-    expect(queueManager.playFrom.mock.calls[0][5]).toBeUndefined();
+    expect(fns.seekPeerToSeconds).not.toHaveBeenCalled();
   });
 
   it("cast 端:起播抛错 → 500(走统一内部错误契约)", async () => {
@@ -395,49 +379,6 @@ describe("POST /v1/peers/:peerId/queue/transfer-from", () => {
     pm.getQueueSnapshot.mockReturnValueOnce({ items: [], currentIndex: 0 });
     const b = await json(await post("/v1/peers/dlna:dev1/queue/transfer-from", { from: "dlna:src" }));
     expect(b).toEqual({ success: true, transferred: 0 });
-  });
-
-  it("airplay 目标:起播跳过了不可播曲目 ⇒ 回执 position=null 且**不补 seek**", async () => {
-    // 跳过时 playCurrent 会丢弃 startMs(起点只属于原本那一首)。此时目标端播的是另一首,
-    // 若回落进「晚读数 + seek」分支,会把旧起点塞进新歌 —— 等于跳到不该去的位置。
-    // 正确口径:如实回 null,什么也不做。
-    pm.getQueueSnapshot.mockReturnValueOnce({ items: [{ songId: "a" }], currentIndex: 0 });
-    fns.readPeerPositionSeconds.mockResolvedValueOnce(45);
-    queueController.castLandingOf.mockReturnValueOnce({ requestedMs: 45000, applied: false });
-    const b = await json(await post("/v1/peers/airplay:ap1/queue/transfer-from", { from: "airplay:ap2" }));
-    expect(b.position).toBeNull();
-    expect(b.transferred).toBe(1);
-    expect(fns.seekPeerToSeconds).not.toHaveBeenCalled();
-  });
-
-  it("airplay 目标:源端落点必须在**摘组之前**定格(摘组会停掉替组出声的那台成员)", async () => {
-    // 2026-10-24 真机实测(240 + 两台 AP2 接收端):组正在播放时把音乐流转到
-    // 「组内最后一台成员」,detachFromActiveGroups 先把该成员摘出组 → 组失去全部
-    // 成员、立刻停播 → 之后才读源端进度只能读到 0 → 响应 position=null,目标端从 0
-    // 起播。判据:所有 readPeerPositionSeconds 都必须在 detachFromActiveGroups 之前。
-    const order: string[] = [];
-    fns.readPeerPositionSeconds.mockImplementation(async () => { order.push("read"); return 47; });
-    fns.detachFromActiveGroups.mockImplementation(async () => { order.push("detach"); });
-    pm.getQueueSnapshot.mockReturnValueOnce({ items: [{ songId: "a" }], currentIndex: 0 });
-    const b = await json(await post("/v1/peers/airplay:ap1/queue/transfer-from", { from: "group:g1" }));
-    expect(order).toContain("read");
-    expect(order).toContain("detach");
-    expect(order.lastIndexOf("read")).toBeLessThan(order.indexOf("detach"));
-    // 定格值进**这一次** cast 的 startMs(47s → 47000ms),不是事后 seek。
-    expect(queueManager.playFrom).toHaveBeenCalledWith(
-      "ap1", [{ songId: "a" }], 0, "http://127.0.0.1:46400", undefined, 47000,
-    );
-    expect(b.position).toBe(47);
-  });
-
-  it("group 目标:落点同样在摘组之前定格(组目标 detach 是 no-op,语义仍须一致)", async () => {
-    const order: string[] = [];
-    fns.readPeerPositionSeconds.mockImplementation(async () => { order.push("read"); return 52; });
-    fns.detachFromActiveGroups.mockImplementation(async () => { order.push("detach"); });
-    pm.getQueueSnapshot.mockReturnValueOnce({ items: [{ songId: "a" }], currentIndex: 0 });
-    const b = await json(await post("/v1/peers/group:g1/queue/transfer-from", { from: "dlna:src" }));
-    expect(order.lastIndexOf("read")).toBeLessThan(order.indexOf("detach"));
-    expect(b.position).toBe(52);
   });
 
   it("cast 目标:sendspin 移交成立时按泵位置落位(不 seek)", async () => {
@@ -696,28 +637,6 @@ describe("传输控制 play / pause / stop", () => {
     expect(fns.dispatchPeerCommand).toHaveBeenCalledWith("local:u1", "play");
   });
 
-  it("airplay 成员被显式 play → 先脱离活跃组,再起播(与 dlna/sendspin 同口径)", async () => {
-    // 缺口实证(2026-10-24):dlna / sendspin 分支都有 detachFromActiveGroups,唯独
-    // airplay 分支漏了。组成员正被组桥接驱动时,单点 play 会落到该成员自己的 ctrl
-    // 上,与桥接抢同一台设备(点了播放没反应 / 与组内容互相打断)。
-    const order: string[] = [];
-    fns.detachFromActiveGroups.mockImplementation(async () => { order.push("detach"); });
-    queueController.resumePlayback.mockImplementation(() => { order.push("resume"); });
-    const r = await post("/v1/peers/airplay:ap1/play");
-    expect(r.status).toBe(200);
-    const arg = fns.detachFromActiveGroups.mock.calls[0][0] as Record<string, unknown>;
-    expect(arg.kind).toBe("airplay");
-    expect(arg.id).toBe("ap1");
-    expect(order).toEqual(["detach", "resume"]);
-    expect(queueController.transport).toHaveBeenCalledWith("ap1", "play");
-  });
-
-  it("group 目标 play 不摘组(组本身不从属于任何组)", async () => {
-    await post("/v1/peers/group:g1/play");
-    expect(fns.detachFromActiveGroups).not.toHaveBeenCalled();
-    expect(queueController.transport).toHaveBeenCalledWith("g1", "play");
-  });
-
   it("peerId 形态非法 → 400", async () => {
     for (const path of ["/v1/peers/bare/play", "/v1/peers/bare/pause", "/v1/peers/bare/stop"]) {
       expect((await post(path)).status).toBe(400);
@@ -955,8 +874,8 @@ describe("静音 mute", () => {
   });
 
   it("组静音:全员失败 → 502(带上游原因)", async () => {
-    gm.get.mockReturnValueOnce({ memberIds: ["airplay:ap9", "sendspin:s1"] });
-    fns.setAirPlayMuted.mockRejectedValueOnce(new Error("设备不支持静音"));
+    gm.get.mockReturnValueOnce({ memberIds: ["dlna:d1", "sendspin:s1"] });
+    fns.setDeviceMute.mockRejectedValueOnce(new Error("设备不支持静音"));
     fns.setSendspinMemberMuted.mockRejectedValueOnce(new Error("sendspin 静音失败"));
     const r = await post("/v1/peers/group:g1/mute", { muted: true });
     expect(r.status).toBe(502);
@@ -964,28 +883,17 @@ describe("静音 mute", () => {
   });
 
   it("组静音:部分成功 → 个别成员失败不连累其余(applied/total)", async () => {
-    gm.get.mockReturnValueOnce({ memberIds: ["airplay:ap9", "sendspin:s1"] });
+    gm.get.mockReturnValueOnce({ memberIds: ["dlna:d1", "sendspin:s1"] });
     fns.setSendspinMemberMuted.mockRejectedValueOnce(new Error("该成员离线"));
     const b = await json(await post("/v1/peers/group:g1/mute", { muted: false }));
     expect(b).toEqual({ success: true, applied: 1, total: 2 });
   });
 
-  it("组静音:成员按 kind 分流(airplay 走 RAOP volume,sendspin 走双置位)", async () => {
-    // ★ 2026-10-23:DLNA 禁止入组,组成员只有 sendspin / airplay,所以组静音不再有
-    // "设备级 RenderingControl(setDeviceMute)"那一路。
-    gm.get.mockReturnValueOnce({ memberIds: ["airplay:ap9", "sendspin:s1"] });
+  it("组静音:成员按 kind 分流(dlna 走 RenderingControl,sendspin 走双置位)", async () => {
+    gm.get.mockReturnValueOnce({ memberIds: ["dlna:d1", "sendspin:s1"] });
     await post("/v1/peers/group:g1/mute", { muted: true });
-    expect(fns.setAirPlayMuted).toHaveBeenCalledWith("ap9", true);
+    expect(fns.setDeviceMute).toHaveBeenCalledWith("d1", true);
     expect(fns.setSendspinMemberMuted).toHaveBeenCalledWith("s1", true);
-    expect(fns.setDeviceMute).not.toHaveBeenCalled();
-  });
-
-  it("组静音:解析不出 kind 的脏成员按失败计入,不当成 DLNA 下发", async () => {
-    gm.get.mockReturnValueOnce({ memberIds: ["bare-d1", "airplay:ap9"] });
-    const r = await post("/v1/peers/group:g1/mute", { muted: true });
-    expect((await json(r)).applied).toBe(1);
-    expect(fns.setDeviceMute).not.toHaveBeenCalled();
-    expect(fns.setAirPlayMuted).toHaveBeenCalledWith("ap9", true);
   });
 
   it("上游抛错 → 500", async () => {

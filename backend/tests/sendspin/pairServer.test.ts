@@ -21,10 +21,14 @@ const WRAP_NONCE_LABEL = "sendspin-pair-nonce-wrap-v1";
 const SUITE = "CHACHA20POLY1305";
 const enc = (s: string) => new TextEncoder().encode(s);
 
-function sidFor(h: Uint8Array, idx: number): Uint8Array {
+function sidFor(h: Uint8Array, idx: number, round = 1): Uint8Array {
+  // 2026-10-24:新 spec(rc1) sid = label||h||pairing_index||round(均大端 uint32),
+  // 与 pairServer.ts buildSid 保持一致;round 在 pair-init 重发(D34)时递增。
   const b = new Uint8Array(4);
   new DataView(b.buffer).setUint32(0, idx >>> 0, false);
-  return new Uint8Array([...enc(PAKE_SID_LABEL), ...h, ...b]);
+  const r = new Uint8Array(4);
+  new DataView(r.buffer).setUint32(0, round >>> 0, false);
+  return new Uint8Array([...enc(PAKE_SID_LABEL), ...h, ...b, ...r]);
 }
 
 // ---- base32(RFC4648, 无 padding 语义由解码侧补位) ----
@@ -422,7 +426,8 @@ async function beginDynamicRound() {
   const nonceA = b64urlDecode(lastSent(conn, "server/pair-init").nonce_A);
   const code = deriveDynamicCode(h, nonceA, nonceB);
   await coord.enterCode("CLIENTID", code);
-  // 设备重发 init(D34 已修复:await_code 状态下被接受并推进 PAKE)
+  // 设备重发 init(D34 已修复:await_code 状态下被接受并推进 PAKE;
+  // onPairRetry 使 round=2,sid 随之带 round=2 —— 与 buildSid 新口径一致)
   await coord.onPairMessage(conn, "client/pair-init", { pairing_index: 1, commit_B: b64urlEncode(commitB) });
   const sid = sidFor(h, 1);
   const client = CPace.start({ role: "responder", prs: enc(code), sid, ad: enc("client") });

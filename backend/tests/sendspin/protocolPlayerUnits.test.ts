@@ -235,23 +235,21 @@ describe("createSendspinGroupPlayer:组内 sendspin 成员共用一个 pump", ()
 
   describe("playMedia", () => {
     it("无在线成员 → 直接抛错(不允许投进空组)", async () => {
-      // 只有一个 airplay 成员、又没带桥接参数:纯 airplay 组要靠桥接 sink 消费同一 pump,
-      // 不带桥接等于没有人消费这条流,与"空组"同义。
-      h.group = { memberIds: ["airplay:d1"] };
+      h.group = { memberIds: ["dlna:d1"] };
       h.front = frontWith({});
-      await expect(createSendspinGroupPlayer(GID).playMedia(item(), "http://eff")).rejects.toThrow(/无在线成员/);
+      await expect(createSendspinGroupPlayer(GID).playMedia(item(), "http://eff")).rejects.toThrow(/无在线 sendspin 成员/);
       expect(h.groupPlay).not.toHaveBeenCalled();
     });
 
     it("组不存在 → 同样按无成员处理", async () => {
       h.group = null;
-      await expect(createSendspinGroupPlayer(GID).playMedia(item(), "http://eff")).rejects.toThrow(/无在线成员/);
+      await expect(createSendspinGroupPlayer(GID).playMedia(item(), "http://eff")).rejects.toThrow(/无在线 sendspin 成员/);
     });
 
     it("组有成员但 sendspin 前端还没起来(front 为空)→ 按无在线成员处理", async () => {
       h.group = { memberIds: ["sendspin:c1"] };
       h.front = undefined;
-      await expect(createSendspinGroupPlayer(GID).playMedia(item(), "http://eff")).rejects.toThrow(/无在线成员/);
+      await expect(createSendspinGroupPlayer(GID).playMedia(item(), "http://eff")).rejects.toThrow(/无在线 sendspin 成员/);
     });
 
     it("正常起播:先灌持久音量,再下发 play,返回 token 流地址", async () => {
