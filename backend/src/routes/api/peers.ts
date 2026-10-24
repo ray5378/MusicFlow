@@ -356,6 +356,27 @@ app.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
           ? (askPosition ?? await readPeerPositionSeconds(fromPeerId))
           : srcPosEarly)
       : null;
+    // ★ AirPlay 目标 + 带起点:先把源曲灌进服务端整曲缓冲(membuf)再 cast。
+    //   sendspin 泵源是自拉流,**不经过** /rest/stream 的 membuf —— 转到 AirPlay 时
+    //   回环流冷启动,web 源整曲缓冲单次 deadline 短,冷取流一旦失败推流全程饥饿
+    //   (设备 PLAYING 但无数据 → 无声,拖一下进度重建会话才出声;240 实证 2026-10-24)。
+    //   DLNA 源不受影响:其播放路径本就经 /rest/stream 把整曲灌进了 membuf。
+    //   有界等 8s:落地 ⇒ 回环流预取命中秒供流;未落地 ⇒ 回环流搭车在途预取或直通,
+    //   最坏退化成起播稍慢,不再出现「会话活着但永远没数据」。
+    if (parsedTo.kind === "airplay" && !borrow.armed && inCastPos !== null && inCastPos > 0) {
+      const warmSongId = items[start]?.songId;
+      if (typeof warmSongId === "string" && warmSongId) {
+        try {
+          const { prefetchSong, prefetchHit } = await import("../../services/source/prefetchCache.js");
+          if (!prefetchHit(warmSongId)) {
+            await Promise.race([
+              prefetchSong(warmSongId).catch(() => {}),
+              new Promise((r) => setTimeout(r, 8000)),
+            ]);
+          }
+        } catch { /* 预热失败不挡流转 */ }
+      }
+    }
     try {
       startedIdx = await getQueueManager().playFrom(
         parsedTo.id, items, start, getDlnaBaseUrl(c), undefined,
