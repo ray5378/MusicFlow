@@ -2,6 +2,31 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.73] - 2026-10-24
+
+### Fix / Sendspin 对齐 1.0.0-rc1(ESPHome 2026.10.x 固件)——13B 帧头/配对 sid round/音量命令能力合并
+
+**背景**:esphome 2026.9.1 → 2026.10.1,sendspin 组件升 sendspin-cpp 0.9.3(实现 Sendspin 1.0.0-rc1),
+四处协议位移叠加出全链无声/设备身份断裂/播放卡顿/配对失败/音量不下发一组症状。
+
+**修复**:
+
+1. **音频帧头 9B → 13B**(`1B type + 8B ts + 4B send_ahead` 大端 μs)——新固件的规范字段,
+   旧 9B 对 2026.10 固件每包 `Error decoding FLAC frame: -2` 整链无声
+   (`framing.ts`,保留 `SENDSPIN_AUDIO_HEADER=9` 回退开关)。
+2. **配对 PAKE sid 加 round**:新 spec `sid = label‖h‖pairing_index‖round`(均大端 uint32);
+   旧口径(无 round)与 2026.10 固件 CPace 校验必 `pairing_code_mismatch`(`pairServer.ts`)。
+3. **`supported_commands` 移位合并**:spec 1.0 把它从 hello 的 `player@v1_support` 挪到
+   client/state 的 player 对象;服务端在 `applyClientState` 合并,并在首次学到 volume
+   能力时立即补发权威音量——修复「前端拖音量条设备不变」与「重连后音量不恢复」(`server.ts`)。
+4. **基线回滚 6492b20**(去 cliairplay 同步桥接),保留 hostname+psk 设备身份与批准文案;
+   真机 esp32-player2 已完成 static_pairing_code 配对(`paired=True`,记录双端落盘)。
+
+**验证**:真机 esp32-player2(2026.10.0 固件)FLAC 播放正常;配对 paired=True;
+音量下发首帧 state 即服务端补发值(修复前恒开机默认 20);tsc 干净;
+framing+pairServer 测试 5/5 绿。`docs/sendspin-权威方案文档.md` 已增补 rc1 对照表
+并反转坑 A1 结论(见 5bae341)。
+
 ## [4.6.72] - 2026-10-24
 
 ### Chore / undici 升到 ^8.12.3(`v4.6.71` 的 security 门禁被新披露漏洞打红)
