@@ -338,6 +338,13 @@ export class BridgeSession {
     this.ingestAudio({ tsUs: 0n, generation: 0, sequence: 0, payload });
   }
 
+  /** AP2 realtime 接点(Phase 6b):按 CHUNK_LEN=352 帧(输出速率 s16le/2ch)拉取一块;
+   *  null = 会话已停/代次中止(AP2 pumpRealtime 随即退出)。纯数据面:
+   *  桥不感知 AP2,只暴露"拉块"能力;重采样/对齐/补静音全在本类内完成。 */
+  pullOutChunk(): Promise<Buffer | null> {
+    return this.pullChunk();
+  }
+
   /** 48k s16le 入队(bridgeServer AUDIO 回调)。返回输入积压 ms(§4.4 overflow 判定)。
    *  Phase 5:旧 generation 的迟到帧(BOUNDARY 清队后的在途残余)直接丢弃并计数
    *  —— BLK-02 判据「旧 generation 帧丢弃计数 > 0」的落点(绝不入队、绝不立锚)。 */

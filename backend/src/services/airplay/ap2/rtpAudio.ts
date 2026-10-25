@@ -82,28 +82,59 @@ export class RtpRealtimeSender {
   }
 }
 
-/** UDP 发送小封装（包级 sendto，错误不中断流）。 */
+/** UDP 发送小封装（包级 sendto，错误不中断流；错误经 onError 上报供上层判定）。 */
 export class UdpAudioSink {
   private udp: import("node:dgram").Socket | null = null;
   private host = "";
   private port = 0;
+  /** 连续发送错误数（成功发送会清零）；用于上层判定「端口不可达」并收敛状态。 */
+  private errorStreak = 0;
+  private lastErrorText: string | null = null;
+
+  constructor(private readonly opts: { onError?: (e: Error) => void } = {}) {}
 
   async connect(host: string, port: number): Promise<void> {
     const dgram = await import("node:dgram");
     this.udp = dgram.createSocket("udp4");
     this.host = host;
     this.port = port;
-    this.udp.on("error", () => {
-      /* 单包错误不中断；持续错误由上层超时/统计发现 */
+    this.errorStreak = 0;
+    this.lastErrorText = null;
+    this.udp.on("error", (e: Error) => {
+      // 单包错误不中断；持续错误由上层（连续错误阈值）收敛为链路失败。
+      this.errorStreak++;
+      this.lastErrorText = e.message;
+      this.opts.onError?.(e);
     });
   }
 
+  /** 发送一包；`onSent` 在 send 回调成功后触发（用于清错误连击计数）。 */
   send(pkt: Buffer): void {
-    this.udp?.send(pkt, this.port, this.host);
+    const sock = this.udp;
+    if (!sock) return;
+    sock.send(pkt, this.port, this.host, (err) => {
+      if (err) {
+        this.errorStreak++;
+        this.lastErrorText = err.message;
+        this.opts.onError?.(err);
+        return;
+      }
+      this.errorStreak = 0;
+    });
+  }
+
+  get stats(): { errorStreak: number; lastError: string | null } {
+    return { errorStreak: this.errorStreak, lastError: this.lastErrorText };
   }
 
   destroy(): void {
-    this.udp?.close();
+    const sock = this.udp;
     this.udp = null;
+    if (!sock) return;
+    try {
+      sock.close();
+    } catch {
+      /* 已关闭 */
+    }
   }
 }

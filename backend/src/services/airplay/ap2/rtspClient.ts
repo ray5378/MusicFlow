@@ -147,6 +147,10 @@ export class Ap2RtspClient extends EventEmitter {
   private readonly framer = new HttpFramer();
   private cseq = 0;
   private dataHandler: ((chunk: Buffer) => void) | null = null;
+  /** 已发出过 'close'（底层 socket 关闭只上报一次，避免双通道重复）。 */
+  private closeEmitted = false;
+  /** 主动 destroy() 时置位：不把「我方拆除」误报成「链路断开」。 */
+  private intentionalClose = false;
 
   /** 已连接并（可选）加密升级后的底层 socket。 */
   get connected(): boolean {
@@ -160,6 +164,8 @@ export class Ap2RtspClient extends EventEmitter {
   /** 连接明文 TCP。 */
   async connect(host: string, port: number): Promise<void> {
     const net = await import("node:net");
+    this.closeEmitted = false;
+    this.intentionalClose = false;
     this.socket = await new Promise<Socket>((resolve, reject) => {
       const s = net.createConnection({ host, port }, () => resolve(s));
       s.on("error", reject);
@@ -180,12 +186,22 @@ export class Ap2RtspClient extends EventEmitter {
     // 重新挂接：HapChannel 上的明文 → framer
     this.channel.on("data", (plain: Buffer) => this.feed(plain));
     this.channel.on("error", (e: Error) => this.emit("error", e));
+    // 加密通道关闭 = 控制面链路断开（RECORD 中途断链的检测点）。
+    this.channel.on("close", () => this.emitClose());
   }
 
   private attachSocket(socket: Socket): void {
     this.dataHandler = (chunk: Buffer) => this.feed(chunk);
     socket.on("data", this.dataHandler);
     socket.on("error", (e: Error) => this.emit("error", e));
+    socket.on("close", () => this.emitClose());
+  }
+
+  /** 链路关闭上报（幂等；主动 destroy 不上报）。 */
+  private emitClose(): void {
+    if (this.closeEmitted || this.intentionalClose) return;
+    this.closeEmitted = true;
+    this.emit("close");
   }
 
   private feed(chunk: Buffer): void {
@@ -221,6 +237,7 @@ export class Ap2RtspClient extends EventEmitter {
   }
 
   destroy(): void {
+    this.intentionalClose = true;
     this.channel?.destroy();
     this.socket?.destroy();
     this.channel = null;
