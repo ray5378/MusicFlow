@@ -13,6 +13,9 @@
 //   2) 床侧落盘路径存在且可写：AP2_PCM_OUT（默认 /tmp/ap2recv/out.pcm），跑前清空
 //   3) 网络可达：脚本所在机能直连 AP2_HOST:AP2_PORT
 //   4) 配对 PIN：AP2_PIN（床缺省 3939，transient 会话 hkp=4 免持久凭据）
+//      ⚠ 本脚本**不能**用来验证「免 PIN 重连」：它每次都是新进程，且不接收已持久化的
+//      凭据（ap2Stream.ts:208-222：无 creds ⇒ 无条件 pairNewDevice）⇒ 跑两次必两次要
+//      PIN，会得到假 FAIL。免 PIN 验证入口见 scripts/ap2-pin-reuse.ts。
 //
 // 用法：
 //   MF_AP2_E2E=1 AP2_HOST=192.168.10.230 AP2_PORT=7200 AP2_PIN=3939 \
@@ -81,7 +84,10 @@ const USAGE = `用法（手动，CI 不跑）：
   npx tsx scripts/ap2-e2e.ts
 
 前置：床已起（/root/ap2_bed.sh start 3，三端口 LISTEN）、AP2_PCM_OUT 已清空、
-      PIN 为 3939（transient hkp=4）。`;
+      PIN 为 3939（transient hkp=4）。
+
+⚠ 本脚本不能验证「免 PIN 重连」（不接收已持久化凭据 ⇒ 必然假 FAIL）；
+  免 PIN 验证入口见 scripts/ap2-pin-reuse.ts。`;
 
 /** 双音（440Hz + 1000Hz，幅度 6000/4000，立体声同相）s16le @ rate。 */
 function dualTone(seconds: number, rate: number): Buffer {
@@ -161,7 +167,12 @@ async function main(): Promise<void> {
     sourceRate: SRC_RATE,
     preferredRate: PREF_RATE,
     spf: SPF,
-    hkp: 4, // transient：不落持久凭据，床重启后仍可复用 PIN
+    // ⚠ 本脚本**不能**用来验「6a 重启免 PIN」：每次都是新进程，且不接收已持久化的凭据
+    //   （ap2Stream.ts:208-222：无 creds ⇒ 无条件 pairNewDevice，必弹 PIN）⇒ 跑两次会
+    //   两次都要 PIN，得到假 FAIL。免 PIN 验证入口见 scripts/ap2-pin-reuse.ts。
+    //   hkp 缺省 4（e2e 场景）；需要生产口径时用 MF_AP2_E2E_HKP=2 覆盖，缺省行为不变。
+    //   注：hkp 不决定 pairing 是否落库 —— pair-setup 请求头恒为 hkp: 2（ap2Session.ts:40/:92）。
+    hkp: Number(process.env["MF_AP2_E2E_HKP"] ?? 4),
     latencyMin: LATENCY_MIN,
     latencyMax: LATENCY_MAX,
     sink: RTP_DUMP ? makeDumpSink(RTP_DUMP) : undefined,
