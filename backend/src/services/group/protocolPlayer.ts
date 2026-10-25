@@ -9,11 +9,14 @@
 import { getGroupManager, splitMemberId } from "./index.js";
 import { createDlnaProtocolPlayer, getDevice, getDeviceStatus, isDeviceAvailable } from "../dlna/control.js";
 import { createAirPlayProtocolPlayer } from "../airplay/protocolPlayer.js";
-import { getAirPlayStatus, isAirPlayDeviceDisabled } from "../airplay/control.js";
+import { getAirPlayStatus, isAirPlayDeviceDisabled, isAirplayBridgeEnabled, isBridgeOwned, bridgePrepareDevice, bridgeStopDevice } from "../airplay/control.js";
+import { bridgeSocketPath } from "../airplay/bridgeChannel.js";
+import type { BridgeSocketSpec } from "../sendspin/bridgeAttach.js";
 import { getSendspinFront } from "../sendspin/index.js";
 import { sendspinGroupName } from "../sendspin/playerCore.js";
 import { PlaybackState, type PlayerState, type ProtocolPlayer, type QueueItem } from "../player/types.js";
 import { createLogger } from "../../utils/logger.js";
+import { randomBytes } from "node:crypto";
 
 /** 组内成员按 kind 拆分(裸 id)。dlna 含历史裸写法(仅旧组,新提交已禁)。 */
 export function splitGroupMembers(groupId: string): { dlna: string[]; airplay: string[]; spin: string[] } {
@@ -109,8 +112,10 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
     op: (p: ProtocolPlayer) => Promise<unknown>,
   ): Promise<{ fulfilled: number; rejected: number }> {
     // dlna 与 airplay 成员一起逐设备扇出(airplay 用独立 cast,不进 sendspin pump)。
+    // Phase 3(MAJ-06):桥占用设备(owner=bridge)的传输由组泵承担 —— 逐成员扇出
+    // (stop/pause/resume/seek/setVolume)必须跳过它,否则会与桥会话互踩。
     const dlnaIds = getOnlineMemberIds(groupId);
-    const apIds = getOnlineAirplayIds(groupId);
+    const apIds = getOnlineAirplayIds(groupId).filter((d) => !isBridgeOwned(d));
     if (dlnaIds.length === 0 && apIds.length === 0) {
       log.debug(`[group][${opName}] ${groupId}: 无在线 DLNA/AirPlay 成员,跳过扇出`);
       return { fulfilled: 0, rejected: 0 };
@@ -130,13 +135,54 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
     return { fulfilled: results.length - failed.length, rejected: failed.length };
   }
 
-  /** sendspin 子集单发组指令(共享 pump,非逐成员扇出)。无 sendspin 成员直接跳过。 */
+  /** sendspin 子集单发组指令(共享 pump,非逐成员扇出)。无 sendspin 成员直接跳过。
+   *  Phase 3:bridge 规格透传到组泵(spinOnline=0 时无组泵,路由本就不会进 bridge)。 */
   async function spinOp(op: (p: ProtocolPlayer) => Promise<unknown>): Promise<void> {
     if (splitGroupMembers(groupId).spin.length === 0) return;
     // 动态导入:QC → 本文件 → sendspin/protocolPlayer → player/index → QC 成环,
     // 静态边会 TDZ,沿用 emitMediaChanged 同构。
     const { createSendspinGroupPlayer } = await import("../sendspin/protocolPlayer.js");
     await op(createSendspinGroupPlayer(groupId));
+  }
+
+  // ---- Phase 3:桥接路由(§5.1 路由快照 + §5.5 owner token + MAJ-07 降级) ----
+
+  /** 活跃桥路由:groupId → 已成功 bridgePrepare 的设备/token(流内不切路由;
+   *  seek 重建不重 prepare,自然切歌/新 playMedia 重建路由)。 */
+  const activeBridgeRoutes = new Map<string, BridgeSocketSpec[]>();
+
+  /** 拆本组桥路由:逐设备 bridgeStop + 清 owner。幂等。 */
+  async function teardownBridgeRoute(): Promise<void> {
+    const route = activeBridgeRoutes.get(groupId);
+    if (!route) return;
+    activeBridgeRoutes.delete(groupId);
+    await Promise.allSettled(route.map((r) => bridgeStopDevice(r.token, r.deviceId)));
+  }
+
+  /** 准备桥路由:逐设备生成 token → bridgePrepare(§4.1 顺序 ①)。
+   *  单设备失败(MAJ-07)→ 记入 fallback,该设备本流回落 solo cast;
+   *  全部失败 → 返回 null(整组退回 legacy 路由,与 flag=0 同行为)。
+   *  返回:成功规格数组 + 需回落 solo cast 的设备列表。 */
+  async function prepareBridgeRoute(
+    apOnline: string[],
+  ): Promise<{ sockets: BridgeSocketSpec[]; soloFallback: string[] } | null> {
+    if (!isAirplayBridgeEnabled() || apOnline.length === 0) return null;
+    const sockets: BridgeSocketSpec[] = [];
+    const soloFallback: string[] = [];
+    for (const d of apOnline) {
+      const token = randomBytes(12).toString("hex");
+      try {
+        // socketPath 在主进程按同一实现计算(bridgeSocketPath,<100B 断言在此抛)。
+        bridgeSocketPath(d, token);
+        await bridgePrepareDevice(d, token, "raop");
+        sockets.push({ deviceId: d, socketPath: bridgeSocketPath(d, token), token, protocol: "raop" });
+      } catch (e) {
+        log.warn(`[group][bridge] ${groupId}: bridgePrepare 失败 device=${d} → 本流回落 solo cast: ${(e as Error)?.message || e}`);
+        soloFallback.push(d);
+      }
+    }
+    if (sockets.length === 0) return null;
+    return { sockets, soloFallback };
   }
 
   return {
@@ -148,18 +194,30 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
       if (dlnaOnline.length === 0 && apOnline.length === 0 && spinOnline.length === 0) {
         throw new Error(`组 ${groupId} 无在线成员,无法播放`);
       }
+      // 上一条桥路由先拆(新 playMedia 重建路由;同代次 socket 会话随之回收)。
+      await teardownBridgeRoute();
+      // 路由快照(§5.1):bridgeEnabled && spin>0 && ap>0 → "bridge";
+      // 否则 "legacy-cast"(flag=0 时与旧行为逐字节同路径)。
+      const bridgeRoute = spinOnline.length > 0 ? await prepareBridgeRoute(apOnline) : null;
       const jobs: Array<Promise<{ mediaUri: string }>> = [];
       if (spinOnline.length > 0) {
         // sendspin 子集共用一个 pump 同一时间线(多房间同步),不是逐成员 cast。
         jobs.push((async () => {
           const { createSendspinGroupPlayer } = await import("../sendspin/protocolPlayer.js");
-          return createSendspinGroupPlayer(groupId).playMedia(item, baseUrl);
+          return createSendspinGroupPlayer(groupId).playMedia(
+            item, baseUrl, 0,
+            bridgeRoute ? { sockets: bridgeRoute.sockets } : undefined,
+          );
         })());
       }
       for (const d of dlnaOnline) jobs.push(createDlnaProtocolPlayer(d).playMedia(item, baseUrl));
-      // airplay 成员逐设备独立 cast(与 DLNA 同为自拉流语义;起播即落位由各自
-      // protocolPlayer.playMedia 的 startMs 语义承担,组路径不传偏移)。
-      for (const d of apOnline) jobs.push(createAirPlayProtocolPlayer(d).playMedia(item, baseUrl));
+      // airplay 成员:bridge 成功者**不**solo cast(桥消费组泵 PCM,§2.1);
+      // prepare 失败者回落 solo cast(MAJ-07:绝不出现「在组里但无声且状态正常」)。
+      const apSolo = bridgeRoute
+        ? apOnline.filter((d) => bridgeRoute.soloFallback.includes(d))
+        : apOnline;
+      if (bridgeRoute) activeBridgeRoutes.set(groupId, bridgeRoute.sockets);
+      for (const d of apSolo) jobs.push(createAirPlayProtocolPlayer(d).playMedia(item, baseUrl));
       const results = await Promise.allSettled(jobs);
       const ok = results.find(r => r.status === "fulfilled");
       if (!ok) throw new Error(`组 ${groupId} 全部成员 cast 失败`);
@@ -170,7 +228,13 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
       // 上报用的 mediaUri 取首个成功的(状态派生仍走 leader,见 pollState)。
       return (ok as PromiseFulfilledResult<{ mediaUri: string }>).value;
     },
-    async stop() { await fanOut("stop", p => p.stop()); await spinOp(p => p.stop()); },
+    async stop() {
+      // 组停 = 流终态:先扇出/组停(桥成员被 stopGroupCore 清桥、发 BOUNDARY{stop}),
+      // 再拆桥会话(bridgeStop TEARDOWN RAOP + 清 owner)。
+      await fanOut("stop", p => p.stop());
+      await spinOp(p => p.stop());
+      await teardownBridgeRoute();
+    },
     async pause() { await fanOut("pause", p => p.pause()); await spinOp(p => p.pause()); },
     async resume() { await fanOut("resume", p => p.resume()); await spinOp(p => p.resume()); },
     async seek(seconds: number) {

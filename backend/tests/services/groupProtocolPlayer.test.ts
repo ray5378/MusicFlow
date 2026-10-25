@@ -116,6 +116,14 @@ vi.mock("../../src/services/airplay/control.js", () => ({
     volume: 40,
     muted: false,
   }),
+  // Phase 3 桥接路由:开关关死 → prepareBridgeRoute 直接跳过(纯 sendspin/dlna 原语义);
+  // fanOut 过滤无桥占用设备(恒 false → airplay 成员原样扇出)。
+  isAirplayBridgeEnabled: () => false,
+  isBridgeOwned: () => false,
+  bridgePrepareDevice: async () => {
+    throw new Error("bridgePrepareDevice 不应在桥接开关关闭时被调用");
+  },
+  bridgeStopDevice: async () => {},
 }));
 
 vi.mock("../../src/services/airplay/protocolPlayer.js", () => {

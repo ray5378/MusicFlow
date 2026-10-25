@@ -83,8 +83,15 @@ export interface QueueItem {
 /** 协议端点接口:DLNA / 未来 Cast 都实现这个。对照 MA 协议 player 契约。 */
 export interface ProtocolPlayer {
   playerId: string;
-  /** 执行播放一首(Stop→Set→wait→Play)。返回上报用的 mediaUri。 */
-  playMedia(item: QueueItem, baseUrl: string, startMs?: number): Promise<{ mediaUri: string }>;
+  /** 执行播放一首(Stop→Set→wait→Play)。返回上报用的 mediaUri。
+   *  Phase 3 桥接(可选第 4 参):组路由为 bridge 时,主进程把 bridgePrepare 好
+   *  的 socket 规格传给 sendspin 组 player(其余协议实现忽略该参数)。 */
+  playMedia(
+    item: QueueItem,
+    baseUrl: string,
+    startMs?: number,
+    bridge?: { sockets: Array<{ deviceId: string; socketPath: string; token: string; protocol: string }> },
+  ): Promise<{ mediaUri: string }>;
   stop(): Promise<void>;
   pause(): Promise<void>;
   resume(): Promise<void>;

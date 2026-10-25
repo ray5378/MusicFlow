@@ -38,16 +38,22 @@ export type AirplayChildEvent = { t: "sessionEnded"; deviceId: string } & Airpla
 // ------------------------- Phase 2:桥接 op 载荷(§6.2) -------------------------
 
 /** bridgePrepare 参数(§4.1):socketPath 由主进程按 bridgeSocketPath() 计算后下发
- *  (deviceId/token 只进 hash 与 CONFIG payload,不进文件名)。 */
+ *  (deviceId/token 只进 hash 与 CONFIG payload,不进文件名)。
+ *  Phase 3:host/port/pk/et 供桥会话向设备做 RTSP 握手(旧墙钟出声);
+ *  缺省 host 时退化为 Phase 2 仅-listener 语义(dry,供落盘/测试)。 */
 export interface BridgePrepareArgs {
   deviceId: string;
   socketPath: string;
   token: string;
   protocol: BridgeProtocol;
+  host?: string;
+  port?: number;
+  pk?: string;
+  et?: string;
 }
 
-/** bridgePrepare 返回。Phase 2 仅启动 MFAB listener;§4.1 的 RTSP 握手字段
- *  (announce/setup/record、rate、latencyFrames)在 Phase 3 接 RAOP 驱动后补全。 */
+/** bridgePrepare 返回。Phase 3:桥会话已对设备完成 RTSP 握手(或 dry 模式仅 listener);
+ *  §4.1 的 announce/setup/record 明细字段与 latencyFrames 在 Phase 4 锚点接入时补全。 */
 export interface BridgePreparedResult {
   listening: true;
   socketPath: string;

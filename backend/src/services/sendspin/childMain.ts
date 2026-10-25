@@ -38,6 +38,7 @@ import {
   joinGroupCore,
   leaveGroupCore,
 } from "./playerCore.js";
+import { syncGroupBridges, detachGroupBridge, type BridgeSocketSpec } from "./bridgeAttach.js";
 import type { QueueItem } from "../player/types.js";
 import { isLogLevel, setLogLevel } from "../../utils/logger.js";
 
@@ -163,13 +164,52 @@ export class SendspinChildController extends ChildRpcHost<SendspinChildToParent,
       }
       case "groupPlay": {
         // 用户组起播:共享组＋单 pump 同一时间线(多房间同步),成员离线自动跳过。
+        // Phase 3:p.bridge.sockets(主进程 bridgePrepare 产物)透传给 playGroupCore
+        // 同步到组桥集合;只接受主进程下发的 socket,不自行发现 AirPlay。
         if (!srv) throw new Error("sendspin server 未运行");
         const members = Array.isArray(p.members) ? p.members.map(String) : [];
+        const bridgeSockets: BridgeSocketSpec[] | undefined =
+          Array.isArray(p.bridge?.sockets) && p.bridge.sockets.length > 0
+            ? p.bridge.sockets
+            : undefined;
         playGroupCore(srv, String(p.group), members, p.item as QueueItem, (cid, songId, message) => {
           this.emit({ t: "playFailed", clientId: cid, songId, message });
-        }, p.seekPositionMs as number | undefined);
+        }, p.seekPositionMs as number | undefined, bridgeSockets);
         this.requestSnapshot(true);
         return null;
+      }
+      case "bridgeAttach": {
+        // Phase 3:向指定组挂桥(不触发起播;组已在播时下一帧即开始投递)。
+        if (!srv) throw new Error("sendspin server 未运行");
+        const specs: BridgeSocketSpec[] = Array.isArray(p.sockets) ? p.sockets : [];
+        syncGroupBridges(srv.group(String(p.group)), specs);
+        this.requestSnapshot(true);
+        return { attached: srv.group(String(p.group)).bridges.size };
+      }
+      case "bridgeDetach": {
+        if (!srv) throw new Error("sendspin server 未运行");
+        const removed = detachGroupBridge(srv.group(String(p.group)), String(p.deviceId));
+        this.requestSnapshot(true);
+        return { removed };
+      }
+      case "bridgeStatus": {
+        // 组桥状态(子进程侧事实):group/deviceId/generation/state/统计。
+        const out: unknown[] = [];
+        for (const g of srv?.groups.values() ?? []) {
+          for (const [deviceId, h] of g.bridges) {
+            const st = typeof h.stats === "function" ? h.stats() : undefined;
+            out.push({
+              group: g.name,
+              deviceId,
+              generation: typeof h.generation === "number" ? h.generation : null,
+              state: st?.state ?? null,
+              sentFrames: st?.sentFrames ?? null,
+              maxQueueMs: st?.maxQueueMs ?? null,
+              droppedFrames: st?.droppedFrames ?? null,
+            });
+          }
+        }
+        return out;
       }
       case "groupStop": {
         stopGroupCore(srv, String(p.group));

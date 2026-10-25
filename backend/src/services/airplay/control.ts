@@ -24,6 +24,8 @@ import { createAirPlaySession } from "./session.js";
 import type { AirplaySessionEndInfo } from "./sessionRuntime.js";
 import { createLogger } from "../../utils/logger.js";
 import { getAirPlayVolumeState, saveAirPlayVolumeState, deleteAirPlayVolumeState, DEFAULT_AIRPLAY_VOLUME } from "./deviceState.js";
+import { bridgeSocketPath } from "./bridgeChannel.js";
+import type { BridgeProtocol } from "./rates.js";
 
 // 解码/缓冲层(ffmpeg spawn + 有界 PCM 队列 + 音量 dB 换算)已抽到 ./decoder.ts ——
 // airplay 子进程要复用同一份实现,但不能经由本模块(会拖进 DB/DLNA/peer 等主进程态)。
@@ -259,6 +261,66 @@ function hasActiveSession(deviceId: string): boolean {
   return sessions.has(deviceId);
 }
 
+// ==================== Phase 3:桥接路由 flag + session owner(MAJ-06) ====================
+
+/** 桥接路径总开关(§Phase 3):`MUSICFLOW_AIRPLAY_BRIDGE=0` 时整条桥接路径
+ *  完全不激活(路由不 prepare、组不挂桥,纯 sendspin 组逐字节同行为)。 */
+export function isAirplayBridgeEnabled(): boolean {
+  return process.env.MUSICFLOW_AIRPLAY_BRIDGE !== "0";
+}
+
+/** 桥会话 owner 登记(deviceId → sessionToken,主进程侧事实)。
+ *  语义:owner={kind:"bridge", token} 与 native cast 互斥 —— stop 路径必须跳过
+ *  桥占用的设备(MAJ-06,否则 DLNA 互斥等 stop 链路会误杀桥会话),native cast
+ *  到桥占用设备直接拒绝。登记点 = bridgePrepareDevice 成功后;清除点 = bridgeStopDevice。 */
+const bridgeOwners = new Map<string, string>();
+
+export function registerBridgeOwner(deviceId: string, token: string): void {
+  bridgeOwners.set(deviceId, token);
+}
+
+export function clearBridgeOwner(deviceId: string): void {
+  bridgeOwners.delete(deviceId);
+}
+
+/** 该设备是否被桥会话占用(owner.kind === "bridge")。 */
+export function isBridgeOwned(deviceId: string): boolean {
+  return bridgeOwners.has(deviceId);
+}
+
+/** 主进程编排:对一台 AirPlay 设备做 bridgePrepare(§4.1 顺序 ①)。
+ *  生成 socket 路径(sha1 前 11 位 base36,<100B 断言)→ RPC 到 airplay 子进程
+ *  (RTSP 握手 + MFAB listener)→ 成功后登记 owner。 */
+export async function bridgePrepareDevice(
+  deviceId: string,
+  token: string,
+  protocol: BridgeProtocol,
+): Promise<{ listening: true; socketPath: string }> {
+  const dev = getAirPlayDevice(deviceId);
+  if (!dev) throw new Error(`AirPlay 设备不存在: ${deviceId}`);
+  const socketPath = bridgeSocketPath(deviceId, token);
+  const r = await airplaySupervisor.rpc<{ listening: true; socketPath: string }>("bridgePrepare", {
+    deviceId,
+    socketPath,
+    token,
+    protocol,
+    host: dev.host,
+    port: dev.port,
+    pk: (dev as { pk?: string }).pk,
+    et: (dev as { et?: string }).et,
+  });
+  registerBridgeOwner(deviceId, token);
+  return r;
+}
+
+/** 主进程编排:按 token 拆桥会话(bridgeStop)并清 owner。deviceId 供清 owner,可省。 */
+export async function bridgeStopDevice(token: string, deviceId?: string): Promise<void> {
+  if (deviceId) bridgeOwners.delete(deviceId);
+  if (airplaySupervisor.isRunning()) {
+    await airplaySupervisor.rpc("bridgeStop", { token }).catch(() => { /* 子进程没跑 → 无会话 */ });
+  }
+}
+
 /** 停止一个会话:fork 走 RPC(子进程内 TEARDOWN + kill ffmpeg);in-proc 就地停。 */
 async function stopSession(deviceId: string): Promise<void> {
   if (isAirPlayForkMode()) {
@@ -305,6 +367,11 @@ export async function stopAirPlaySessionsForHost(host: string): Promise<string[]
   const h = host.toLowerCase();
   for (const d of getAirPlayDevices()) {
     if (d.host && d.host.toLowerCase() === h && hasActiveSession(d.id)) {
+      // MAJ-06:桥会话(owner=bridge)不归 DLNA 互斥管 —— 误杀会让整组桥静默。
+      if (isBridgeOwned(d.id)) {
+        log.debug(`双协议互斥:跳过桥占用设备(owner=bridge) ${d.id}`);
+        continue;
+      }
       // ① 先冻结队列:挡住 IDLE → advance → 重新 cast 的二阶反杀。
       try {
         const { getQueueController } = await import("../player/index.js");
@@ -323,8 +390,13 @@ export async function stopAirPlaySessionsForHost(host: string): Promise<string[]
   return stopped;
 }
 
-/** Stop an active AirPlay session (used by device management: delete/disable). */
+/** Stop an active AirPlay session (used by device management: delete/disable).
+ *  MAJ-06:桥占用设备(owner=bridge)不走此路径 —— 桥会话由编排侧 bridgeStop 显式回收。 */
 export async function stopAirPlaySession(deviceId: string): Promise<void> {
+  if (isBridgeOwned(deviceId)) {
+    log.debug(`stopAirPlaySession: 跳过桥占用设备(owner=bridge) ${deviceId}`);
+    return;
+  }
   await withDeviceGate(deviceId, () => stopSession(deviceId));
 }
 
@@ -730,6 +802,10 @@ export async function castToAirPlayDevice(opts: AirPlayCastOptions): Promise<{ m
 async function castUnlocked(opts: AirPlayCastOptions): Promise<{ mediaUri: string }> {
   if (isAirPlayDeviceDisabled(opts.deviceId)) {
     throw new Error("该 AirPlay 设备已被禁用");
+  }
+  // Phase 3 互斥(owner=bridge):桥会话占用期间拒绝 native cast(与 §5.5 owner token 一致)。
+  if (isBridgeOwned(opts.deviceId)) {
+    throw new Error("该设备由桥接会话占用(owner=bridge),native cast 与 bridge 互斥");
   }
   if (isAirPlayForkMode()) {
     await castViaChild(opts);
@@ -1265,10 +1341,12 @@ export function isAirPlayEnabled(): boolean {
  *  目标是零常驻资源(无网络监听/无定时器/无会话/无 peer/无 player 注册)。幂等。
  *  由插件管理页关闭 airplay-renderer 或启动时未启用时调用。 */
 export async function stopAirPlayService(): Promise<void> {
-  // 0. fork 模式:先停推流子进程(其 stop 语义 = 停全部会话 + TEARDOWN + kill ffmpeg)。
+  // 0. fork 模式:先停推流子进程(其 stop 语义 = 停全部会话 + TEARDOWN + kill ffmpeg;
+  //    子进程 onStop 亦会停全部桥会话)。owner 登记一并清空(服务级终态)。
   if (isAirPlayForkMode()) {
     try { await airplaySupervisor.stop(); } catch { /* ignore */ }
   }
+  bridgeOwners.clear();
   // 1. 停掉全部活跃会话(RAOP TEARDOWN + ffmpeg kill),释放音频资源。
   const activeIds = Array.from(sessions.keys());
   for (const id of activeIds) {

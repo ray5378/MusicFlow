@@ -6,11 +6,12 @@
 // 通用部分(心跳 / 快照节流 / req→res 回包 / stop 生命周期)在
 // `../rendererHost/childHost.js`;本文件只做 AirPlay 的 op 表:
 //   cast / stopSession / stopAll / pause / resume / seek / setVolumeDb
-//   + Phase 2 桥接:bridgePrepare / bridgeStop(§6.2;PCM 不走 JSON IPC,
-//     落盘模式由 env MFAB_DUMP_PATH 控制,供 Phase 2 出口判据 ④ / soak 使用)。
+//   + Phase 3 桥接:bridgePrepare / bridgeStop / bridgeStatus(§6.2;PCM 不走 JSON IPC)。
+//     桥会话 = BridgeSession(BridgeServer listener + 48k→44.1k 重采样 + RAOP 旧墙钟出声);
+//     与 native cast 互斥:cast 到桥占用设备直接拒绝,bridgePrepare 先停同设备 native 会话。
 import { ChildRpcHost } from "../rendererHost/childHost.js";
 import { AirplaySessionRuntime } from "./sessionRuntime.js";
-import { BridgeServer } from "./bridgeServer.js";
+import { BridgeSessionManager } from "./bridgeSession.js";
 import type {
   AirplayChildToParent,
   AirplaySnapshot,
@@ -26,8 +27,8 @@ export type ChildSend = (msg: AirplayChildToParent) => void;
 export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, AirplaySnapshot> {
   readonly runtime: AirplaySessionRuntime;
 
-  /** Phase 2 桥接 listener,按 sessionToken 索引(bridgePrepare/bridgeStop 管理)。 */
-  private readonly bridgeServers = new Map<string, BridgeServer>();
+  /** Phase 3 桥会话表,按 sessionToken 索引(bridgePrepare/bridgeStop 管理)。 */
+  private readonly bridgeSessions = new BridgeSessionManager();
 
   constructor(send: ChildSend) {
     // hooks 里的 onChanged 要回调到本控制器(触发快照),而 super() 之前还不能用 this
@@ -54,7 +55,7 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
       buildState: () => this.buildState(),
       dispatch: (op, payload) => this.dispatch(op, payload),
       onStop: () => {
-        void this.stopAllBridges();
+        void this.bridgeSessions.stopAll();
         runtime.stopAll();
       },
     });
@@ -70,6 +71,10 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
   private async dispatch(op: string, p: any): Promise<unknown> {
     switch (op) {
       case "cast": {
+        // Phase 3 互斥(MAJ-06):native cast 与桥会话互斥 —— 桥占用的设备拒绝 native。
+        if (this.bridgeSessions.has(String(p?.deviceId ?? ""))) {
+          throw new Error("该设备由桥接会话占用(owner=bridge),native cast 与 bridge 互斥");
+        }
         await this.runtime.cast(p as AirplayCastArgs);
         this.requestSnapshot(true);
         return null;
@@ -112,57 +117,47 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
         return null;
       }
       case "bridgePrepare": {
-        // Phase 2:仅启动 MFAB listener(不做 RAOP 驱动;§4.1 握手字段 Phase 3 补全)。
+        // Phase 3:桥会话 = listener + 重采样 + RAOP 旧墙钟出声(host 缺省 = dry)。
         const result: BridgePreparedResult = await this.prepareBridge(p as BridgePrepareArgs);
         return result;
       }
       case "bridgeStop": {
-        // 按 sessionToken 停对应 bridge listener;未知 token 幂等返回。
-        await this.stopBridge(String(p?.token ?? ""));
+        // 按 sessionToken 停对应桥会话;未知 token 幂等返回。
+        await this.bridgeSessions.stop(String(p?.token ?? ""));
         return null;
+      }
+      case "bridgeStatus": {
+        // 桥会话状态(诊断/soak):deviceId/token/socket/streaming/统计。
+        return this.bridgeSessions.list();
       }
       default:
         throw new Error(`未知 airplay rpc op: ${op}`);
     }
   }
 
-  // ------------------------- Phase 2:桥接 listener 管理 -------------------------
+  // ------------------------- Phase 3:桥会话管理 -------------------------
 
   private async prepareBridge(args: BridgePrepareArgs): Promise<BridgePreparedResult> {
-    const { deviceId, socketPath, token, protocol } = args;
+    const { deviceId, socketPath, token, protocol, host, port, pk, et } = args;
     if (!deviceId || !socketPath || !token) {
       throw new Error("bridgePrepare: deviceId/socketPath/token 必填");
     }
-    const existing = this.bridgeServers.get(token);
-    if (existing) {
-      if (existing.listeningOn === socketPath) {
-        return { listening: true, socketPath };
-      }
-      await existing.close();
-      this.bridgeServers.delete(token);
-    }
-    const server = new BridgeServer({
+    // native → bridge 接管:先停同设备的 native 会话(反向互斥由 cast 分支保证)。
+    if (this.runtime.has(deviceId)) await this.runtime.stop(deviceId);
+    // MFAB_DUMP_PATH 仍生效于 dry/无 consumer 场景(BridgeSession 自带 onAudio,
+    // 落盘由 dry 模式 + 无 RAOP 的 BridgeServer dumpPath 承担 —— 桥出声时落盘关闭)。
+    const prepared = await this.bridgeSessions.prepare({
       deviceId,
       token,
       protocol,
-      // 落盘模式(env 级开关):把重采样后的 PCM 写文件,供出口判据 ④ / soak 使用。
-      dumpPath: process.env.MFAB_DUMP_PATH || undefined,
+      socketPath,
+      host,
+      port,
+      pk,
+      et,
+      dry: !host,
     });
-    await server.listen(socketPath);
-    this.bridgeServers.set(token, server);
-    return { listening: true, socketPath };
-  }
-
-  private async stopBridge(token: string): Promise<void> {
-    const server = this.bridgeServers.get(token);
-    if (!server) return;
-    this.bridgeServers.delete(token);
-    await server.close();
-  }
-
-  private async stopAllBridges(): Promise<void> {
-    const all = [...this.bridgeServers.values()];
-    this.bridgeServers.clear();
-    for (const server of all) await server.close();
+    this.requestSnapshot(true);
+    return { listening: true, socketPath: prepared.socketPath };
   }
 }

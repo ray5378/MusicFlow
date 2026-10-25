@@ -11,6 +11,7 @@
 import type { QueueItem } from "../player/types.js";
 import type { SendspinServer, SendspinConnection, SendspinGroup } from "./server.js";
 import { pumpFor, peekPump, transferPumpTo, stopGroupPump } from "./streamEngine.js";
+import { syncGroupBridges, clearGroupBridges, type BridgeSocketSpec } from "./bridgeAttach.js";
 import { FIRST_FRAME_LEAD_US, FRAME_MS } from "./streamEngine.js";
 import { nowUs } from "./clock.js";
 import { SAMPLE_RATE, CHANNELS, decodeToF32 } from "./encoding.js";
@@ -252,12 +253,18 @@ export function playCore(
   /** MA `play_index(seek_position=N)` 等价通道:新流从该位置起(音源 -ss)。
    *  必须在 pump.stop() 之后装填(stop 清 pendingSeekMs 属"旧上下文丢弃"语义)。 */
   seekPositionMs?: number,
+  /** Phase 3 桥接:主进程 bridgePrepare 好的 socket 规格集合。
+   *  undefined = 不动既有桥(旧调用方零变化);传数组 = 同步到该集合(幂等,
+   *  规格未变热复用 —— seek 重建路径靠它保持桥连接,BLK-02)。 */
+  bridge?: BridgeSocketSpec[],
 ): void {
   clearPauseState(srv, clientId);
   if (!srv) return; // 无 server 时无推流可言(原 playMedia 在 !srv 时 throw,由调用方处理)
   const conn = srv.clients.get(clientId);
   // 同一时间线推流:组 = 以 clientId 命名的组(多客户端场景由注册层归并)。
   const g = srv.group(clientId);
+  // 桥同步(§2.1 并行集合,绝不进 members):先于借流/起播注册,组泵首帧即可投递。
+  if (bridge) syncGroupBridges(g, bridge);
   // ★ 借流:这一首若正好是源端**正在播**的那首,就把源端那条已解码的流整体接过来
   //   —— 目标端不启 ffmpeg、不 seek、不预缓冲,首帧现成即出声。不成立即静默回退。
   const arm = borrowFor(g, item);
@@ -361,10 +368,15 @@ export function playGroupCore(
   onPlayFailed: PlayFailedSink = () => {},
   /** MA `play_index(seek_position=N)` 等价通道(用户组重建流起点)。 */
   seekPositionMs?: number,
+  /** Phase 3 桥接:主进程 bridgePrepare 好的 socket 规格集合(语义同 playCore)。 */
+  bridge?: BridgeSocketSpec[],
 ): void {
   clearPauseState(srv, groupName);
   if (!srv) return;
   const g = srv.group(groupName);
+  // 桥同步(§2.1 并行集合):幂等,规格未变热复用(seek 重建不拆桥,BLK-02)。
+  // ⚠️ 借流/重建路径都先到这里 —— 组泵照搬,桥挂在本组,原样跟随。
+  if (bridge) syncGroupBridges(g, bridge);
   // ★ 借流(见 playCore 同名段落):用户组作目标时同样适用 —— 泵照搬,成员原样。
   const arm = borrowFor(g, item);
   if (arm) {
@@ -409,11 +421,14 @@ export function playGroupCore(
   });
 }
 
-/** 用户组停止核心:打断 pump＋清状态＋stream/end(成员保留,下次起播复用)。 */
+/** 用户组停止核心:打断 pump＋清状态＋stream/end(成员保留,下次起播复用)。
+ *  Phase 3:同时**清桥**(stopGroupCore 是真正的终态停止,与 seek 重建不同 ——
+ *  桥的 socket 会话由主进程编排侧 bridgeStop 回收)。 */
 export function stopGroupCore(srv: SendspinServer | null, groupName: string): void {
   if (!srv) return;
   const g = srv.group(groupName);
   pumpFor(srv, g).stop();
+  clearGroupBridges(g);
   g.positionMs = 0;
   g.current = null;
   g.frozenDurationMs = 0;
@@ -703,9 +718,13 @@ export function seekCore(srv: SendspinServer | null, clientId: string, seconds: 
     };
     if (clientId.startsWith("ug:")) {
       const memberIds = Array.from(g.members, (m) => m.clientId).filter((id): id is string => !!id);
-      playGroupCore(srv, clientId, memberIds, item, onFailed, clampedMs);
+      // 桥透传(Phase 3,seekCore 重建必须保持桥):读本组当前生效规格原样传回,
+      // syncGroupBridges 对未变规格热复用句柄(不重连,BLK-02)。
+      // 可选读取:最小组桩(单测)没有 bridgeSpecs 字段 —— 与流引擎对 stub 组的可选调用风格一致
+      const bridgeSpecs = g.bridgeSpecs?.length > 0 ? g.bridgeSpecs : undefined;
+      playGroupCore(srv, clientId, memberIds, item, onFailed, clampedMs, bridgeSpecs);
     } else {
-      playCore(srv, clientId, item, onFailed, clampedMs);
+      playCore(srv, clientId, item, onFailed, clampedMs, g.bridgeSpecs?.length > 0 ? g.bridgeSpecs : undefined);
     }
     // 暂停中 seek:重建流后立刻恢复暂停(playCore 会把 pump 的 paused 置回 false)。
     if (wasPaused) pauseCore(srv, clientId);

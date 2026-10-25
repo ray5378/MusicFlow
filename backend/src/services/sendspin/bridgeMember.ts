@@ -83,6 +83,10 @@ export class BridgeMember {
     });
   }
 
+  get deviceId(): string {
+    return this.opts.deviceId;
+  }
+
   get generation(): number {
     return this.gen;
   }
@@ -119,6 +123,12 @@ export class BridgeMember {
     this.seq.reset(gen);
     this.source.clearQueue();
     this.source.enqueue(encodeBoundary(gen, this.seq.take(), reason));
+  }
+
+  /** 不换代只发 BOUNDARY(clearPlayback → track / finishPlayback → stop,§6.2)。
+   *  「BOUNDARY 不拆会话,一次 seek 发两次无害」(§4.3)—— 与 notifyGeneration 并存。 */
+  sendBoundary(reason: BridgeBoundaryReason): void {
+    this.source.enqueue(encodeBoundary(this.seq.generation, this.seq.take(), reason));
   }
 
   stats(): BridgeMemberStats {

@@ -31,6 +31,7 @@ import { sendspinSupervisor } from "./supervisor.js";
 import { getPlayerController, getQueueController } from "../player/index.js";
 import { getGroupManager, splitMemberId } from "../group/index.js";
 import { createLogger } from "../../utils/logger.js";
+import type { BridgeSocketSpec } from "./bridgeAttach.js";
 
 // debug:协议层边界日志。sendspin 的 seek 有 in-proc / fork 两条实现、以及
 // 用户组单发第三种入口,统一在这里打「目标秒数 + 模式 + 耗时」—— 拖动后无声时
@@ -89,7 +90,7 @@ export function createSendspinGroupPlayer(userGroupId: string): ProtocolPlayer {
   const groupName = sendspinGroupName(userGroupId);
   return {
     playerId,
-    async playMedia(item: QueueItem, baseUrl: string, startMs = 0) {
+    async playMedia(item: QueueItem, baseUrl: string, startMs = 0, bridge?: { sockets: BridgeSocketSpec[] }) {
       const members = await onlineSendspinMembers(userGroupId);
       if (members.length === 0) {
         throw new Error(`组 ${userGroupId} 无在线 sendspin 成员,无法播放`);
@@ -100,7 +101,8 @@ export function createSendspinGroupPlayer(userGroupId: string): ProtocolPlayer {
       // ug 组懒创建缺省 volume=100:起播前先灌 GroupManager 持久值(空组/重启后一致)。
       try { await sendspinGroupTransport(groupName, "volume", getGroupManager().getVolume(userGroupId)); }
       catch { /* 回填失败不挡起播,status 仍回持久值 */ }
-      await sendspinGroupPlay(groupName, members, item, startMs);
+      // Phase 3:bridge 规格原样透传(index.ts fork/in-proc 双路都不丢弃)。
+      await sendspinGroupPlay(groupName, members, item, startMs, bridge);
       schedulePlayingReport(playerId, item.duration ?? 0);
       return { mediaUri: streamUrl };
     },

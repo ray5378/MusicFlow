@@ -45,6 +45,30 @@ import { recordProbedRate } from "../playerRate.js";
 import { b64urlDecode, b64urlEncode } from "./util.js";
 import type { PairingStore } from "./pairingStore.js";
 import type { PairingCoordinator } from "./pairServer.js";
+import type { BridgeBoundaryReason } from "../airplay/bridgeChannel.js";
+import type { BridgeSocketSpec } from "./bridgeAttach.js";
+
+/** 桥投递句柄(sendspin 侧对一座桥的最小接口)。
+ *  BridgeMember 满足该接口;单测用桩实现(纯内存)。 */
+export interface SendspinBridgeHandle {
+  readonly deviceId: string;
+  /** 入队一帧 48k s16le/2ch PCM(桥内部自带有界队列,立即返回)。 */
+  pushAudio(pcm: Uint8Array, tsUs: bigint): void;
+  /** 流代次变更:清旧代次队列并发 BOUNDARY(§4.4)。 */
+  notifyGeneration(generation: number, reason: BridgeBoundaryReason): void;
+  /** 不换代只发 BOUNDARY(clearPlayback/finishPlayback)。 */
+  sendBoundary(reason: BridgeBoundaryReason): void;
+  start?(): void;
+  stop(): void;
+  /** 诊断(bridgeStatus op;缺省无)。 */
+  readonly generation?: number;
+  stats?(): {
+    state?: string;
+    sentFrames?: number;
+    maxQueueMs?: number;
+    droppedFrames?: number;
+  };
+}
 
 export interface SendspinServerOptions {
   pairkeys: Identity;
@@ -663,6 +687,29 @@ export class SendspinGroup {
   }
   private encoders = new Map<string, ChunkEncoder>();
 
+  // ---- 桥接集合(Phase 3,§2.1):与 members **并行**的 AirPlay 桥投递目标 ----
+  //
+  // 桥成员不是 WS 连接:不进 server/state、不参与 legacy 判定 / sink 自愈 /
+  // 音量同步 / keepStream 门禁,故绝不加入 members(51+ 测试与既有语义零变化)。
+  // 投递点在 pushFrame 的 pcm:100 编码组循环体里(BLK-01 虚拟组保证组存在)。
+  /** deviceId → 桥投递句柄(BridgeMember 满足该接口;测试可注入桩)。 */
+  readonly bridges = new Map<string, SendspinBridgeHandle>();
+  /** 当前生效的桥规格(bridgeAttach 同步时记录;seekCore 重建路径据此透传)。 */
+  bridgeSpecs: BridgeSocketSpec[] = [];
+
+  hasBridges(): boolean {
+    return this.bridges.size > 0;
+  }
+
+  /** streamEngine 重锚钩子(§4.3 唯一落点,Phase 3 由 GroupPump 重锚分支调用):
+   *  把新流代次推给全部桥 —— 桥清旧代次队列并发 BOUNDARY。 */
+  notifyBridgeGeneration(generation: number, reason: BridgeBoundaryReason): void {
+    if (this.bridges.size === 0) return;
+    for (const b of this.bridges.values()) {
+      try { b.notifyGeneration(generation, reason); } catch { /* 单桥失败不连累 */ }
+    }
+  }
+
   constructor(name: string, server: SendspinServer) {
     this.name = name;
     this.server = server;
@@ -865,15 +912,23 @@ export class SendspinGroup {
     return this.pushedSamples > 0 && this.pushedBytes > 0;
   }
 
-  /** 实测「压缩字节/秒」。样本数 → 秒;无样本时按 codec 名义值回落。 */
+  /** 实测「压缩字节/秒」。样本数 → 秒;无样本时按 codec 名义值回落。
+   *  ⚠️ 桥接组(§6.2):桥恒按 PCM 口径消费 192000B/s(48k/s16le/2ch,重采样前),
+   *  FLAC 实测/名义值会**低估**桥的吞吐 → 有桥时取 max(实测, PCM 名义值);
+   *  无实测且桥在场时直接按 PCM 名义值。 */
   encodedBytesPerSec(): number {
     if (this.pushedSamples > 0 && this.pushedBytes > 0) {
       const secs = this.pushedSamples / SAMPLE_RATE;
-      if (secs > 0) return this.pushedBytes / secs;
+      if (secs > 0) {
+        const measured = this.pushedBytes / secs;
+        if (this.bridges.size > 0) return Math.max(measured, SAMPLE_RATE * 2 * 2);
+        return measured;
+      }
     }
     // 名义值(实测出来前只用一两帧,影响可忽略):
     //   PCM 48k/16/2 = 192000 B/s;FLAC 取 0.7 × PCM(偏保守 → 钳制更紧,更安全)。
     const codec = [...this.members][0]?.codec ?? "pcm";
+    if (this.bridges.size > 0) return SAMPLE_RATE * 2 * 2;
     return codec === "pcm" ? SAMPLE_RATE * 2 * 2 : SAMPLE_RATE * 2 * 2 * 0.7;
   }
 
@@ -1147,6 +1202,15 @@ export class SendspinGroup {
       }
       g.members.push(c);
     }
+    // ★ BLK-01(桥接解耦,§2.1):桥成员不是 WS 成员,但 pcm:100 组的编码必须照常
+    //   发生,否则「只有桥、没有真实 pcm 成员」时本函数返回 0 → 上游判零产出
+    //   (STALL_GRACE → maxSilentDegrade 5s)→ 放弃本曲提前切歌。
+    //   虚拟组 members=[] ⇒ 内层成员下发自然不执行,而编码/ring/sum 照常发生 ——
+    //   「pcm:100 的编码与是否存在真实成员」完全解耦。
+    if (this.bridges.size > 0) {
+      const pcmKey = this.encoderKey("pcm", 100);
+      if (!groups.has(pcmKey)) groups.set(pcmKey, { codec: "pcm", gain: 100, members: [] });
+    }
 
     const before = this.deliveredPeak;
     let peak = before;
@@ -1189,6 +1253,14 @@ export class SendspinGroup {
           // 同一份字节分发给组内全部成员 —— 字节与时间戳序列完全一致。
           for (const c of g.members) c.sendAudio(ts, data);
           if (n > 0) ring.push({ tsUs: ts, durUs: Math.round((n * 1_000_000) / SAMPLE_RATE), data });
+          // 桥投递(§6.2):挂在 pcm:100 组的 chunk 循环体里 —— 桥按
+          // s16le/48k/2ch 消费(与 PCM 编码器字面输出一致,即 MFAB AUDIO payload)。
+          // 逐 chunk 用真实起点 ts(与成员下发同源),绝不复用组起始 ts。
+          if (this.bridges.size > 0 && g.codec === "pcm" && g.gain === 100) {
+            for (const b of this.bridges.values()) {
+              try { b.pushAudio(data, ts); } catch { /* 单桥失败不连累组泵 */ }
+            }
+          }
         }
         // 时间戳一律以**实测样本数**推进,见 EncodedChunk.frameSamples。
         //
@@ -1362,6 +1434,10 @@ export class SendspinGroup {
         c.sendJson("stream/clear", {});
       } catch { /* 单成员发送失败不连累其余 */ }
     }
+    // 桥:切歌/seek 清缓冲 → BOUNDARY{track}(不拆会话;§6.2「clearPlayback 发 boundary」)。
+    for (const b of this.bridges.values()) {
+      try { b.sendBoundary("track"); } catch { /* 单桥失败不连累 */ }
+    }
   }
 
   /** `silentState=true`: 只发 `stream/end` 收尾流,**不发 `group/update(stopped)`**。
@@ -1376,8 +1452,14 @@ export class SendspinGroup {
       c.sendJson("stream/end", {});
       if (!opts?.silentState) c.sendGroupUpdate();
     }
+    // 桥:流收尾 → BOUNDARY{stop}(airplay 侧据此进入收尾;§6.2)。
+    for (const b of this.bridges.values()) {
+      try { b.sendBoundary("stop"); } catch { /* 单桥失败不连累 */ }
+    }
   }
-  /** 关闭全部编码器(含 flac 的 ffmpeg 持续进程),返回关掉的数量(供回收上报)。 */
+  /** 关闭全部编码器(含 flac 的 ffmpeg 持续进程),返回关掉的数量(供回收上报)。
+   *  ⚠️ BLK-02:**不得**在这里清 bridges —— seek 走 playGroupCore 内的 g.close(),
+   *  桥要热复用;桥生命周期由 syncGroupBridges / stopGroupCore 显式管理。 */
   close(): number {
     let n = 0;
     for (const e of this.encoders.values()) {

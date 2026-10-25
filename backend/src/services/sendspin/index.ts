@@ -63,6 +63,7 @@ import { setServer, getServer } from "./runtime.js";
 import { getSendspinFront as getSendspinFrontImpl } from "./proxy.js";
 import { sendspinSupervisor } from "./supervisor.js";
 import { isForkMode } from "./mode.js";
+import type { BridgeSocketSpec } from "./bridgeAttach.js";
 import { markPauseStopIssued } from "../player/pauseStopSettle.js";
 import { sqlite } from "../../db/index.js";
 import { createLogger } from "../../utils/logger.js";
@@ -755,8 +756,9 @@ export async function sendspinGroupPlay(
   memberIds: string[],
   item: { songId: string; title?: string; artist?: string; album?: string; coverArt?: string; duration?: number },
   startMs?: number,
-  /** AirPlay 桥接目标:组内 airplay 成员挂在同一条 pump 上(见 group/airplayBridge.ts)。 */
-  bridge?: { devices: string[]; host: string; port: number; minSendAheadUs?: number },
+  /** AirPlay 桥接目标(Phase 3,§4.1):主进程已 bridgePrepare 的 socket 列表。
+   *  子进程/组侧按规格建 BridgeMember 连接,只消费主进程下发的 socket,不自行发现 AirPlay。 */
+  bridge?: { sockets: BridgeSocketSpec[] },
 ): Promise<void> {
   if (isForkMode()) {
     if (!sendspinSupervisor.isRunning()) throw new Error("sendspin 服务未运行");
@@ -765,16 +767,17 @@ export async function sendspinGroupPlay(
       members: memberIds,
       item,
       seekPositionMs: startMs,
-      ...(bridge && bridge.devices.length > 0 ? { bridge } : {}),
+      ...(bridge && bridge.sockets.length > 0 ? { bridge } : {}),
     });
     return;
   }
   const { playGroupCore } = await import("./playerCore.js");
   const srv = getServer();
   if (!srv) throw new Error("sendspin 服务未运行");
+  // in-proc 同样透传 bridge —— 不得静默丢弃(旧注释指向不存在的 group/airplayBridge.ts,已删)。
   playGroupCore(srv, groupName, memberIds, item as any, (cid, songId, message) => {
     log.warn(`sendspin group play ${songId} failed(group=${cid}): ${message}`);
-  }, startMs);
+  }, startMs, bridge?.sockets);
 }
 
 /** 用户组停止(成员保留,下次起播复用)。 */

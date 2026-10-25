@@ -24,6 +24,7 @@ import { nowUs } from "./clock.js";
 import { PcmWindow, WindowEvictedError, WINDOW_HIGH_SEC, type WindowSource } from "./streamSource.js";
 import { recordSendspinDebug, refreshSendspinDebugEnabled } from "./debugLog.js";
 import type { SendspinServer, SendspinGroup } from "./server.js";
+import { bridgeStartLeadUs } from "../airplay/bridgeMath.js";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("Sendspin");
@@ -462,6 +463,17 @@ export class GroupPump {
   /** 起播窗口判定:是否已有一次 play 在飞(见 playInFlight)。 */
   get busy(): boolean { return this.playInFlight; }
 
+  /** 流代次(§4.3):`(epoch, timelineReseed)` 二元组的乘法混合。
+   *  - 每次「新建播放上下文」都是新代次:新歌起播 / seek(epoch++)、rehost(只动
+   *    timelineReseed,🔴 禁止给 rehost 加 epoch++,否则 :759 推流循环立即退出);
+   *  - **乘法混合而非加法**:`epoch + reseed` 在两者交替自增时会撞出同一个和
+   *    (epoch=2,reseed=0 与 epoch=1,reseed=1 都得 2);`1_000_003` 取大于
+   *    timelineReseed 实际取值范围的质数。
+   *  消费点:重锚分支(唯一落点,BLK-02)经 group.notifyBridgeGeneration 推给桥。 */
+  get generation(): number {
+    return this.epoch * 1_000_003 + this.timelineReseed;
+  }
+
   /** 当前**正在播**的歌 id(未在播为空串)。
    *  ⚠️ 移交判定必须看它而不能只看 `active`:`active` 在 `running=true` 而首帧
    *  还没产出时就已经为真,拿它当"有流可借"会借到一条半成品。 */
@@ -814,6 +826,14 @@ export class GroupPump {
           const reseed = !firstFrame;
           consumedReseed = this.timelineReseed;
           firstFrame = false;
+          // ★ 桥代次钩子(§4.3,唯一落点,BLK-02 不新增 bridgeTimelineReset):
+          //   这里同时持有 myEpoch 与 this.group,一次覆盖 seek/track(epoch 变)与
+          //   rehost(timelineReseed 变)。seek 时 epoch 跳 2、投递路径只见最终值,
+          //   恰好只发一次 BOUNDARY;同代次重复触发由桥侧幂等。禁定时器轮询。
+          this.group.notifyBridgeGeneration?.(
+            this.epoch * 1_000_003 + this.timelineReseed,
+            reseed ? "rehost" : "track",
+          );
           // ★ 重锚这一拍同步刷新上报下界:泵移交(rehost)把下界改成目标落点,seek 把
           //   下界写成目标位置 —— 这里不取,移交后目标端的进度会从
           //   (落点 − 缓冲深度) 一路爬上来,看起来像"没对齐"。
@@ -842,9 +862,17 @@ export class GroupPump {
           //   - 旧行为:lead = send_ahead ⇒ 想缓冲 10s 就必须静默 10s;
           //   - 新行为:lead = min(send_ahead, 800ms) ⇒ 起播延迟恒 ≈0.8s,
           //     缓冲深度由 pushLoop 顶到插件配置的 prefill_buffer_ms(默认 3s)。
-          const anchorLead = prefillEnabled()
-            ? Math.min(aheadUs, ANCHOR_SAFE_LEAD_US)
-            : (reseed ? reseedLead : aheadUs);
+          // ★ 桥接路由绕过 800ms 截断(MAJ-01/§3.4):桥成员上报的冷/热启动 lead
+          //   只在 anchorLead 里生效,**绝不并入 commonSendAheadUs()** —— 帧头
+          //   9B 不含 send_ahead,并进去会让真实 ESP32 恒定 +3.7s 偏移(回归断言
+          //   钉住 commonSendAheadUs 不被污染)。warm/cold Phase 3 一律按 cold 保守
+          //   (R2:未收到 CONFIG 回执前不作 warm 假设)。
+          //   非 bridge 路径行为零变化(三元分支原样保留)。
+          const anchorLead = this.group.hasBridges?.() === true
+            ? Math.max(aheadUs, bridgeStartLeadUs([{ warm: false }]))
+            : prefillEnabled()
+              ? Math.min(aheadUs, ANCHOR_SAFE_LEAD_US)
+              : (reseed ? reseedLead : aheadUs);
           const lead = BigInt(Math.max(anchorLead, FIRST_FRAME_LEAD_US));
           // ⚠️ 锚点必须**严格大于已发出的最后一个时间戳**(= 此刻的 cursorUs)。
           // 时间线游标按 `round(produced/采样率)` 步进,与墙钟速率几乎相等但不完全相等:
