@@ -130,6 +130,9 @@ export class Ap2StreamSession {
           type: AP2_REALTIME_STREAM_TYPE,
           ct: AP2_ALAC_CODEC,
           sr: this.opts.sampleRate,
+          // AirplayAudFmt：ALAC_44100_16_2 = 1<<18、ALAC_48000_16_2 = 1<<20
+          // （bed Stream.__init__ 必读 audioFormat，缺失直接 500）
+          audioFormat: this.opts.sampleRate === 48000 ? 1 << 20 : 1 << 18,
           spf: this.opts.spf,
           shk: this.streamKey,
           controlPort: this.localControlPort,
