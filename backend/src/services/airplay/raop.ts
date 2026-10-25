@@ -19,7 +19,8 @@ import * as net from "net";
 import * as dgram from "dgram";
 import { publicEncrypt, createPublicKey, randomBytes, constants, createCipheriv } from "crypto";
 import { ntpFromHostUs, nowUs } from "../../utils/hostClock.js";
-import { ntpToRtpMod } from "./bridgeMath.js";
+import { audibleAtUs, ntpToRtpMod, sendAtUs } from "./bridgeMath.js";
+import { RAOP_SAFETY_MS } from "./rates.js";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("RAOP");
@@ -260,6 +261,25 @@ export interface RaopConnectOptions {
 
 export type PcmProducer = () => Promise<Buffer | null>;
 
+/** 桥接锚点(§3.3/MAJ-09:四字段必须一起写;由 bridgeMath.computeBridgeAnchors 产出,
+ *  BridgeSession 用首帧 tsUs 与 RECORD 协商 L 组装)。 */
+export interface RaopBridgeAnchor {
+  /** RTP base(32 位回绕安全、352 对齐;baseTs/startTs/headTs 三者同值)。 */
+  baseTs: number;
+  startTs: number;
+  headTs: number;
+  /** = ntpFromHostUs(A′ − L);A′ = A + 重采样群延迟补偿(MIN-01,computeBridgeAnchors 内)。 */
+  startNtp: bigint;
+  /** 补偿后的映射锚点 A′(host µs):接收端播放 RTP baseTs 的时刻。 */
+  anchorUsShifted: bigint;
+  /** 内容首样本应可听时刻 A(host µs,组时间线域;对齐/漂移换算基准)。 */
+  anchorUs: bigint;
+  /** L(帧;RECORD 协商,不得为 0 —— 接收端保持缓冲深度,§3.3)。 */
+  latencyFrames: number;
+  /** 输出采样率(AP1 = 44100;48k 直通协议 = 48000)。 */
+  rate: number;
+}
+
 // ---------------------------------------------------------------------------
 // RTSP request builder
 // ---------------------------------------------------------------------------
@@ -310,6 +330,9 @@ export class RaopPlayer {
   private destroying = false;
   private stats: { chunks: number; maxGapMs: number; reanchors: number; lastSendMs: number; startMs: number } | null = null;
   private lossRequests = 0;
+  /** 桥接路径 latePackets(§3.3):sendAt 已过期仍「追发但不改 RTP 映射」的包数。
+   *  连续过期说明启动 lead 不足 —— 由上层(BridgeSession stats tick)报警/重锚。 */
+  private bridgeLatePackets = 0;
 
   // runtime state for the app layer
   positionSec = 0;
@@ -353,6 +376,31 @@ export class RaopPlayer {
       elapsedMs: Math.max(0, Date.now() - s.startMs),
       lossRequests: this.lossRequests,
     };
+  }
+
+  /** 桥接路径 latePackets(§3.3;BridgeSession stats tick 消费)。 */
+  get bridgeLateCount(): number {
+    return this.bridgeLatePackets;
+  }
+
+  /** RECORD 协商的接收端缓冲深度(帧)—— 锚点公式 L 的唯一来源(§3.3:L = latencyFrames/rate
+   *  不得归零,接收端保持缓冲深度;RECORD reply 的 Audio-Latency 可抬高,缺省 1s)。 */
+  get negotiatedLatencyFrames(): number {
+    return this.latencyFrames;
+  }
+
+  /** 桥接路径内容跳段(§4.5 欠料超上限 skip / 时间线重锚):RTP 时间线前移 frames 帧。
+   *
+   *  为什么动 startTs 而不是 baseTs(MAJ-09 语义保持):
+   *  - positionSec = (headTs − baseTs)/rate 必须恒等于**内容位置** —— baseTs 是
+   *    内容零点的 RTP 锚,永不移动;
+   *  - startTs 前移 frames 后,sendSync 的 NTP = startNtp + (headTs − startTs)/rate
+   *    恰好把「跳过的 frames」折算进播放头推进 —— 接收端学到的时间线映射
+   *    (RTP ↔ 可听时刻)保持自洽,已发包不受影响。
+   *  (注:普通重叠裁头不需要本方法 —— 丢弃输出样本后追加流仍连续,RTP 自洽。) */
+  bridgeSkipFrames(frames: number): void {
+    if (!Number.isFinite(frames) || frames <= 0) return;
+    this.startTs = (this.startTs + Math.round(frames)) >>> 0;
   }
 
   private async bindUdp(): Promise<void> {
@@ -824,6 +872,111 @@ export class RaopPlayer {
     if (s) {
       const secs = (Date.now() - s.startMs) / 1000;
       log.info(`stream done: ${s.chunks} chunks / ${secs.toFixed(1)}s = ${(s.chunks / Math.max(secs, 0.001)).toFixed(1)}/s (expect ${(44100 / CHUNK_LEN).toFixed(1)}), maxGap=${s.maxGapMs.toFixed(0)}ms, reanchors=${s.reanchors}, loss=${this.lossRequests}`);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 桥接推流路径(Phase 4,spec §3.3/§3.5/§4.5)—— 与旧 stream() 物理分离
+  // -------------------------------------------------------------------------
+
+  /** 等到目标 host µs 时刻(桥接节拍专用)。
+   *  循环上限 50ms 重读时钟:node 定时器只会晚不会早,保证「不早于 sendAt」判据;
+   *  假时钟(测试)与真实定时器解耦时也只多轮询不挂死。 */
+  private async waitUntilUs(targetUs: bigint): Promise<void> {
+    for (;;) {
+      const delayUs = Number(targetUs - nowUs());
+      if (delayUs <= 0) return;
+      await new Promise((r) => setTimeout(r, Math.min(delayUs / 1000, 50)));
+    }
+  }
+
+  /**
+   * AirPlay 桥接专用推流(四锚点精确驱动,§3.3/§4.5)。
+   *
+   * 与旧 `stream()`(native cast,墙钟 drift-corrected accumulator)物理分离,互不共用节拍:
+   *   - 锚点:四字段一次写齐(MAJ-09)—— baseTs/startTs/headTs 同值 + startNtp = ntp(A′−L);
+   *     RTP↔NTP 映射 = SYNC 的 (headTs−L) ↔ startNtp+(headTs−startTs)/rate,首包可听 = A′。
+   *   - 节拍:sendAt(i) = audibleAt(i) − L − SAFETY(§3.3),audibleAt(i) = A′ + i·352/rate;
+   *     迟到追发不改映射,记 latePackets(连续过期 = lead 不足,上层报警/重锚)。
+   *   - 跳段:BridgeSession 漂移对齐发现欠料超上限时经 bridgeSkipFrames() 前移 startTs,
+   *     本循环每包按 startTs + idx·CHUNK_LEN 重算 headTs,自动跟随(baseTs 不动 ⇒
+   *     positionSec 恒等于内容位置);普通重叠裁头丢弃输出样本即可,RTP 自洽。
+   *   - 无 ack 诚实语义(§3.5):本路径绝不伪造设备播放确认;锚点经 scheduledAnchorUs 上报。
+   *   - 🔉 bridge 路径禁用 prepareSeek()/setStartPosition()/cast seekSec(AirPlay 无 seek,
+   *     seek = 重建会话/换代次,§5.4)。
+   */
+  async streamBridge(producer: PcmProducer, session: RaopSession, anchor: RaopBridgeAnchor): Promise<void> {
+    if (session.audioPort) this.serverAudioPort = session.audioPort;
+    if (session.controlPort) this.serverControlPort = session.controlPort;
+    this.producer = producer;
+    this.paused = false;
+    this.streaming = true;
+    this.syncLoop();
+    this.stats = { chunks: 0, maxGapMs: 0, reanchors: 0, lastSendMs: performance.now(), startMs: Date.now() };
+    // 🔴 四字段锚点一次写齐(MAJ-09/§3.3):baseTs/startTs/headTs 同值 + startNtp = ntp(A′−L)。
+    //    只替换其中两个会让 positionSec / SYNC 映射当场错乱;模域 >>> 0(MAJ-10)。
+    this.baseTs = anchor.baseTs >>> 0;
+    this.startTs = anchor.startTs >>> 0;
+    this.headTs = anchor.headTs >>> 0;
+    this.startNtp = anchor.startNtp;
+    // L 不得归零(§3.3):RECORD 协商的接收端保持深度;SYNC offset4 与锚点公式用同一值。
+    if (Number.isFinite(anchor.latencyFrames) && anchor.latencyFrames > 0) {
+      this.latencyFrames = Math.max(1, Math.round(anchor.latencyFrames));
+    }
+    this.positionSec = ts2ms((this.headTs - this.baseTs) >>> 0, this.opts.sampleRate) / 1000;
+    this.bridgeLatePackets = 0;
+    const rate = this.opts.sampleRate;
+    let idx = 0; // 已发包数(内容样本 [idx·352, (idx+1)·352) 的序号)
+    let firstSyncSent = false;
+    let burst = 0;
+    while (this.streaming && !this.destroying) {
+      if (this.paused) {
+        // 冻结 RTP 时钟(与 stream() 同语义):不出包,headTs 不推进。
+        await new Promise((r) => setTimeout(r, 100));
+        continue;
+      }
+      // 先取料再等节拍:producer 阻塞(欠料)期间越过 sendAt ⇒ 记 latePackets,追发不改映射。
+      const pcm = await this.producer();
+      if (pcm === null || this.destroying) {
+        log.warn(`bridge stream break: pcm=${pcm !== null} destroying=${this.destroying} streaming=${this.streaming}`);
+        break;
+      }
+      // 发送节拍(§3.3):sendAt = audibleAt − L − SAFETY(换算唯一出处 bridgeMath)。
+      const audible = audibleAtUs(idx * CHUNK_LEN, anchor.anchorUsShifted, rate);
+      const sendAt = sendAtUs(audible, anchor.latencyFrames, rate);
+      if (nowUs() < sendAt) {
+        burst = 0;
+        await this.waitUntilUs(sendAt);
+      } else {
+        this.bridgeLatePackets++;
+        if (++burst >= 16) {
+          // 连续追赶也让出事件循环(与 stream() 同理:勿饿死 IPC/RTSP 处理)。
+          burst = 0;
+          await new Promise((r) => setImmediate(r));
+        }
+      }
+      // headTs 每包按 startTs + idx·CHUNK_LEN 重算:裁头(bridgeSkipFrames)前移 startTs 后自动跟随。
+      this.headTs = (this.startTs + idx * CHUNK_LEN) >>> 0;
+      if (!this.sendChunk(pcm)) {
+        log.warn(`bridge stream break: sendChunk false, audioSocket=${!!this.audioSocket} destroying=${this.destroying}`);
+        break;
+      }
+      // libraop 语义:首包发出后才发首条 SYNC(接收端有真实数据可锚定)。
+      // 此刻 headTs 已被 sendChunk 推进一包 ⇒ SYNC 映射恒定带 ≤8ms 共模滞后
+      // (与旧 stream()/libraop 同一口径;同组各设备一致,不影响互相对齐)。
+      if (!firstSyncSent) { firstSyncSent = true; this.sendSync(true); }
+      idx++;
+      this.stats.chunks++;
+      const nowSend = performance.now();
+      const gap = nowSend - this.stats.lastSendMs;
+      if (gap > this.stats.maxGapMs) this.stats.maxGapMs = gap;
+      this.stats.lastSendMs = nowSend;
+    }
+    this.streaming = false;
+    const s = this.stats;
+    if (s) {
+      const secs = (Date.now() - s.startMs) / 1000;
+      log.info(`bridge stream done: ${s.chunks} chunks / ${secs.toFixed(1)}s, maxGap=${s.maxGapMs.toFixed(0)}ms, latePackets=${this.bridgeLatePackets}, loss=${this.lossRequests}`);
     }
   }
 

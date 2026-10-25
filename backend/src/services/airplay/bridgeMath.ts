@@ -80,9 +80,12 @@ export function computeBridgeAnchors(opts: {
   chunkLen?: number;
   /** 已按「截断+对齐」处理过的 RTP base;缺省从 A′ 推导。 */
   rtpBase?: number;
+  /** 是否做重采样群延迟补偿(Phase 4):48k 直通(无重采样器)时传 false,
+   *  否则 A′ 会多偏 16/48000 ≈ 0.333ms。缺省 true(44.1k 重采样路径,MIN-01)。 */
+  compensateGroupDelay?: boolean;
 }): BridgeAnchors {
   const chunkLen = opts.chunkLen ?? 352;
-  const gdUs = groupDelayUs(opts.rate);
+  const gdUs = opts.compensateGroupDelay === false ? 0 : groupDelayUs(opts.rate);
   const anchorUsShifted = opts.anchorUs + BigInt(Math.round(gdUs));
   const latencyUs = BigInt(Math.round((opts.latencyFrames / opts.rate) * 1e6));
   const startNtp = ntpFromHostUs(anchorUsShifted - latencyUs);
