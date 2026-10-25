@@ -3,12 +3,14 @@
 // 通用信封来自 `../rendererHost/ipcProtocol.js`;这里只定义 AirPlay 自己的载荷:
 //   - 快照:各设备的会话态(设备发现/DB/peer 都留在主进程,不进快照);
 //   - 就绪信息:子进程自报已加载(无 DB,故只需一个标记);
-//   - 事件:sessionEnded → 主进程上报 IDLE(等价 DLNA 的 GENA,让队列自动续播)。
+//   - 事件:sessionEnded → 主进程上报 IDLE(等价 DLNA 的 GENA,让队列自动续播);
+//   - Phase 2 桥接:bridgePrepare / bridgeStop 的载荷(§6.2,PCM 不走 JSON IPC)。
 //
 // ⚠️ 快照刻意**不含** PSK / token URL 之外的敏感信息;streamUrl 本身是 DLNA 的
 //    短期 token 化地址,主进程已经持有,镜像一份只为 peerStatus.trackUri 用。
 import type { HostToChild, ChildToHost, StateEnvelope } from "../rendererHost/ipcProtocol.js";
 import type { AirplaySessionMirrorRow } from "./sessionRuntime.js";
+import type { BridgeProtocol } from "./rates.js";
 
 // 业务侧常用的载荷类型从一处透出(type-only,运行时无 import)。
 export type { AirplayCastArgs, AirplaySessionMirrorRow, AirplayRuntimeHooks, AirplaySessionEndInfo } from "./sessionRuntime.js";
@@ -32,6 +34,29 @@ export interface AirplayReadyInfo {
  *  不得污染新曲的 tracker),并用真实落点驱动自动续播。
  *  loudnessStderr 可附解码器全量 stderr(P0-4 解析 loudnorm 用,截断传,无则省略)。 */
 export type AirplayChildEvent = { t: "sessionEnded"; deviceId: string } & AirplaySessionEndInfo;
+
+// ------------------------- Phase 2:桥接 op 载荷(§6.2) -------------------------
+
+/** bridgePrepare 参数(§4.1):socketPath 由主进程按 bridgeSocketPath() 计算后下发
+ *  (deviceId/token 只进 hash 与 CONFIG payload,不进文件名)。 */
+export interface BridgePrepareArgs {
+  deviceId: string;
+  socketPath: string;
+  token: string;
+  protocol: BridgeProtocol;
+}
+
+/** bridgePrepare 返回。Phase 2 仅启动 MFAB listener;§4.1 的 RTSP 握手字段
+ *  (announce/setup/record、rate、latencyFrames)在 Phase 3 接 RAOP 驱动后补全。 */
+export interface BridgePreparedResult {
+  listening: true;
+  socketPath: string;
+}
+
+/** bridgeStop 参数:按 sessionToken 停对应 bridge listener(§6.2 token 语义)。 */
+export interface BridgeStopArgs {
+  token: string;
+}
 
 /** 主进程 → 子进程:除通用 req/stop 外无附加消息。 */
 export type AirplayHostExtra = never;

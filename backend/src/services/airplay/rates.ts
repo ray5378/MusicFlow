@@ -54,6 +54,25 @@ export const BRIDGE_BACKOFF_BASE_MS = 5_000;
 /** 断连重连退避:上限。 */
 export const BRIDGE_BACKOFF_MAX_MS = 30_000;
 
+// ---------------------------------------------------------------------------
+// 桥队列水位与心跳(Phase 2;MIN-05:阈值按"秒"计量、按输入速率 48k 折算,
+// 字节数只进日志 —— 上面两个 *_BYTES 常量仅供日志换算对照,判定一律走 *_MS)
+// ---------------------------------------------------------------------------
+
+/** 输入 PCM 码率:48k × s16le(2B) × 2ch = 192000 B/s(重采样**前**口径)。 */
+export const BRIDGE_PCM_BYTES_PER_SEC = 192_000;
+
+/** 发送端高水位:告警线(2s × 192000B/s ≈ 384KB)。 */
+export const BRIDGE_QUEUE_HIGH_WATER_MS = 2_000;
+/** 发送端硬上限:断连线(8s × 192000B/s ≈ 1.5MB;禁止丢最旧帧,直接断连重退避)。 */
+export const BRIDGE_QUEUE_HARD_CAP_MS = 8_000;
+/** airplay 接收侧 PCM 积压上限(§4.4:8s,同 48k 口径;超过断连报 overflow,让发送侧重连)。 */
+export const BRIDGE_RECEIVE_OVERFLOW_MS = 8_000;
+/** 心跳间隔(发送端;接收端 2s 无帧判 stalled,间隔须显著小于该值)。 */
+export const BRIDGE_HEARTBEAT_INTERVAL_MS = 1_000;
+/** 接收端 stall 判定:2s 未收到任何帧(§4.2)。 */
+export const BRIDGE_STALL_NO_FRAME_MS = 2_000;
+
 /** RAOP 发送节拍安全余量(吸收 25ms 泵抖动与 socket 调度)。 */
 export const RAOP_SAFETY_MS = 50;
 

@@ -5,14 +5,19 @@
 //
 // 通用部分(心跳 / 快照节流 / req→res 回包 / stop 生命周期)在
 // `../rendererHost/childHost.js`;本文件只做 AirPlay 的 op 表:
-//   cast / stopSession / stopAll / pause / resume / seek / setVolumeDb。
+//   cast / stopSession / stopAll / pause / resume / seek / setVolumeDb
+//   + Phase 2 桥接:bridgePrepare / bridgeStop(§6.2;PCM 不走 JSON IPC,
+//     落盘模式由 env MFAB_DUMP_PATH 控制,供 Phase 2 出口判据 ④ / soak 使用)。
 import { ChildRpcHost } from "../rendererHost/childHost.js";
 import { AirplaySessionRuntime } from "./sessionRuntime.js";
+import { BridgeServer } from "./bridgeServer.js";
 import type {
   AirplayChildToParent,
   AirplaySnapshot,
   AirplayStateEnvelope,
   AirplayCastArgs,
+  BridgePrepareArgs,
+  BridgePreparedResult,
 } from "./ipcProtocol.js";
 
 /** 子进程对主进程的发送通道(child.ts 注入 process.send 的安全包装;测试注入数组)。 */
@@ -20,6 +25,9 @@ export type ChildSend = (msg: AirplayChildToParent) => void;
 
 export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, AirplaySnapshot> {
   readonly runtime: AirplaySessionRuntime;
+
+  /** Phase 2 桥接 listener,按 sessionToken 索引(bridgePrepare/bridgeStop 管理)。 */
+  private readonly bridgeServers = new Map<string, BridgeServer>();
 
   constructor(send: ChildSend) {
     // hooks 里的 onChanged 要回调到本控制器(触发快照),而 super() 之前还不能用 this
@@ -45,7 +53,10 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
       send,
       buildState: () => this.buildState(),
       dispatch: (op, payload) => this.dispatch(op, payload),
-      onStop: () => runtime.stopAll(),
+      onStop: () => {
+        void this.stopAllBridges();
+        runtime.stopAll();
+      },
     });
     this.runtime = runtime;
     holder.ctl = this;
@@ -100,8 +111,58 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
         this.runtime.setVolumeDb(String(p.deviceId), Number(p.db) || -144);
         return null;
       }
+      case "bridgePrepare": {
+        // Phase 2:仅启动 MFAB listener(不做 RAOP 驱动;§4.1 握手字段 Phase 3 补全)。
+        const result: BridgePreparedResult = await this.prepareBridge(p as BridgePrepareArgs);
+        return result;
+      }
+      case "bridgeStop": {
+        // 按 sessionToken 停对应 bridge listener;未知 token 幂等返回。
+        await this.stopBridge(String(p?.token ?? ""));
+        return null;
+      }
       default:
         throw new Error(`未知 airplay rpc op: ${op}`);
     }
+  }
+
+  // ------------------------- Phase 2:桥接 listener 管理 -------------------------
+
+  private async prepareBridge(args: BridgePrepareArgs): Promise<BridgePreparedResult> {
+    const { deviceId, socketPath, token, protocol } = args;
+    if (!deviceId || !socketPath || !token) {
+      throw new Error("bridgePrepare: deviceId/socketPath/token 必填");
+    }
+    const existing = this.bridgeServers.get(token);
+    if (existing) {
+      if (existing.listeningOn === socketPath) {
+        return { listening: true, socketPath };
+      }
+      await existing.close();
+      this.bridgeServers.delete(token);
+    }
+    const server = new BridgeServer({
+      deviceId,
+      token,
+      protocol,
+      // 落盘模式(env 级开关):把重采样后的 PCM 写文件,供出口判据 ④ / soak 使用。
+      dumpPath: process.env.MFAB_DUMP_PATH || undefined,
+    });
+    await server.listen(socketPath);
+    this.bridgeServers.set(token, server);
+    return { listening: true, socketPath };
+  }
+
+  private async stopBridge(token: string): Promise<void> {
+    const server = this.bridgeServers.get(token);
+    if (!server) return;
+    this.bridgeServers.delete(token);
+    await server.close();
+  }
+
+  private async stopAllBridges(): Promise<void> {
+    const all = [...this.bridgeServers.values()];
+    this.bridgeServers.clear();
+    for (const server of all) await server.close();
   }
 }
