@@ -329,9 +329,13 @@ describe("Ap2RtspClient 加密通道端到端（本地假 accessory，双侧 HAP
           const want = handler(startLine);
           if (want.reply === false) return; // 显式不回包（超时用例）；undefined = 正常回包
           const body = want.body ?? Buffer.alloc(0);
+          // 回显请求 CSeq（不再硬编码 1）：客户端已改成按 CSeq 配对在途请求，
+          // 假件若固定回 1，第 2 个之后的请求永远配不上，只能等满超时。
+          const cseqLine = got.head.split("\r\n").find((l) => /^cseq:/i.test(l));
+          const cseq = cseqLine ? cseqLine.slice(cseqLine.indexOf(":") + 1).trim() : "1";
           const head =
             `RTSP/1.0 ${want.status} ${want.status === 200 ? "OK" : "Not Found"}\r\n` +
-            `CSeq: 1\r\nContent-Length: ${body.length}\r\n\r\n`;
+            `CSeq: ${cseq}\r\nContent-Length: ${body.length}\r\n\r\n`;
           chan.write(Buffer.concat([Buffer.from(head, "latin1"), body]));
         });
       });
@@ -413,5 +417,305 @@ describe("Ap2RtspClient 加密通道端到端（本地假 accessory，双侧 HAP
     const e = new RtspError("plain");
     expect(e.status).toBe(0);
     expect(e.name).toBe("RtspError");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 事件驱动派发（10ms 轮询 → 在途表 + 按 CSeq 配对）
+// ---------------------------------------------------------------------------
+// 这里全部用「明文 TCP + 假 accessory 直接写字节」驱动：被测的是派发路径本身，
+// 与加密层无关；明文可让断言精确控制「一帧塞两个响应」「CSeq 错配」「缺 CSeq」。
+const nowUs = (): number => Number(process.hrtime.bigint() / 1000n);
+const ms = (us: number): number => us / 1000;
+
+interface RawReq {
+  startLine: string;
+  method: string;
+  cseq: number;
+  body: Buffer;
+}
+
+/** 明文假 accessory：把每个完整请求交给 handler，由 handler 决定回什么字节。 */
+function startRawAccessory(
+  handler: (req: RawReq, sock: Socket) => void,
+): Promise<{ port: number; close: () => void; sockets: Socket[] }> {
+  return new Promise((resolve) => {
+    const sockets: Socket[] = [];
+    const srv = createServer((sock: Socket) => {
+      sockets.push(sock);
+      sock.on("error", () => {
+        /* 断链属预期（destroy 用例） */
+      });
+      const framer = new HttpFramer();
+      sock.on("data", (chunk: Buffer) => {
+        framer.push(chunk);
+        for (;;) {
+          const got = framer.extract();
+          if (!got) break;
+          const lines = got.head.split("\r\n");
+          const startLine = lines[0]!;
+          const cseqLine = lines.find((l) => /^cseq:/i.test(l));
+          const cseq = cseqLine ? Number(cseqLine.slice(cseqLine.indexOf(":") + 1).trim()) : Number.NaN;
+          handler({ startLine, method: startLine.split(" ")[0] ?? "", cseq, body: got.body }, sock);
+        }
+      });
+    });
+    srv.listen(0, "127.0.0.1", () => {
+      resolve({
+        port: (srv.address() as AddressInfo).port,
+        sockets,
+        close: () => {
+          for (const s of sockets) s.destroy();
+          srv.close();
+        },
+      });
+    });
+  });
+}
+
+/** 造一个 RTSP 响应报文；`cseq: null` = 故意不回 CSeq（测宽松兜底）。 */
+function rtspResp(opts: { status?: number; cseq?: number | null; body?: Buffer }): Buffer {
+  const body = opts.body ?? Buffer.alloc(0);
+  const lines = [`RTSP/1.0 ${opts.status ?? 200} OK`];
+  if (opts.cseq !== null && opts.cseq !== undefined) lines.push(`CSeq: ${opts.cseq}`);
+  lines.push(`Content-Length: ${body.length}`);
+  return Buffer.concat([Buffer.from(lines.join("\r\n") + "\r\n\r\n", "latin1"), body]);
+}
+
+describe("Ap2RtspClient 事件驱动派发（在途表 + CSeq 配对）", () => {
+  it("响应到达即 resolve：无 10ms 网格，实测 max < 5ms", async () => {
+    const acc = await startRawAccessory((req, sock) => {
+      // 收到请求立刻回包（本地回环，端到端 = write→dispatch→resolve）
+      sock.write(rtspResp({ cseq: req.cseq, body: Buffer.from("ok") }));
+    });
+    const client = new Ap2RtspClient();
+    try {
+      await client.connect("127.0.0.1", acc.port);
+      // 预热一次（首包含 socket 首包/事件循环冷启动噪声，不计入统计）
+      await client.request({ method: "OPTIONS", url: "*", common: COMMON });
+      const samplesUs: number[] = [];
+      for (let i = 0; i < 5; i++) {
+        const t0 = nowUs();
+        const resp = await client.request({ method: "OPTIONS", url: "*", common: COMMON });
+        samplesUs.push(nowUs() - t0);
+        expect(resp.status).toBe(200);
+      }
+      const worstMs = Math.max(...samplesUs.map(ms));
+      console.log(`[证据] 响应到达→resolve 5 次(ms)=${samplesUs.map((u) => ms(u).toFixed(3)).join("/")} max=${worstMs.toFixed(3)}`);
+      expect(worstMs).toBeLessThan(5);
+      expect(client.pendingCount).toBe(0);
+    } finally {
+      client.destroy();
+      acc.close();
+    }
+  });
+
+  it("一帧内背靠背到达的两个响应全部抽干，且按 CSeq 各自配对（非先到先得）", async () => {
+    const box: { sock: Socket | null } = { sock: null };
+    const cseqs: number[] = [];
+    const acc = await startRawAccessory((req, sock) => {
+      box.sock = sock;
+      cseqs.push(req.cseq);
+    });
+    const client = new Ap2RtspClient();
+    try {
+      await client.connect("127.0.0.1", acc.port);
+      const p1 = client.request({ method: "SETUP", url: "rtsp://127.0.0.1/a", common: COMMON });
+      const p2 = client.request({ method: "POST", url: "/feedback", common: COMMON });
+      await until(() => cseqs.length === 2);
+      expect(cseqs).toEqual([1, 2]);
+      // 顺序故意倒着塞：若实现是 FIFO 取第一个响应，body 就会串位
+      box.sock!.write(Buffer.concat([
+        rtspResp({ cseq: cseqs[1]!, body: Buffer.from("second") }),
+        rtspResp({ cseq: cseqs[0]!, body: Buffer.from("first") }),
+      ]));
+      const [r1, r2] = await Promise.all([p1, p2]);
+      expect(r1.body.toString("ascii")).toBe("first");
+      expect(r2.body.toString("ascii")).toBe("second");
+      expect(client.pendingCount).toBe(0);
+    } finally {
+      client.destroy();
+      acc.close();
+    }
+  });
+
+  it("CSeq 不匹配的响应被丢弃：不猜、不误唤醒，调用方拿到超时", async () => {
+    const acc = await startRawAccessory((req, sock) => {
+      sock.write(rtspResp({ cseq: req.cseq + 99 })); // 故意错配
+    });
+    const client = new Ap2RtspClient();
+    try {
+      await client.connect("127.0.0.1", acc.port);
+      await expect(client.request({
+        method: "SETUP",
+        url: "rtsp://127.0.0.1/a",
+        common: COMMON,
+        timeoutMs: 60,
+      })).rejects.toThrow(/超时/);
+      expect(client.pendingCount).toBe(0);
+    } finally {
+      client.destroy();
+      acc.close();
+    }
+  });
+
+  it("响应缺 CSeq 且仅在途 1 条 → 宽松兜底认领（兼容不回显 CSeq 的对端）", async () => {
+    const acc = await startRawAccessory((_req, sock) => {
+      sock.write(rtspResp({ cseq: null, body: Buffer.from("no-cseq") }));
+    });
+    const client = new Ap2RtspClient();
+    try {
+      await client.connect("127.0.0.1", acc.port);
+      const resp = await client.request({
+        method: "SETUP",
+        url: "rtsp://127.0.0.1/a",
+        common: COMMON,
+        timeoutMs: 300,
+      });
+      expect(resp.status).toBe(200);
+      expect(resp.body.toString("ascii")).toBe("no-cseq");
+      expect(client.pendingCount).toBe(0);
+    } finally {
+      client.destroy();
+      acc.close();
+    }
+  });
+
+  it("响应缺 CSeq 且两条在途 → 丢弃（不抛硬币），两条都按超时收场", async () => {
+    const cseqs: number[] = [];
+    const acc = await startRawAccessory((req, sock) => {
+      cseqs.push(req.cseq);
+      if (cseqs.length === 2) sock.write(rtspResp({ cseq: null })); // 两条都在途后才发无 CSeq 响应
+    });
+    const client = new Ap2RtspClient();
+    try {
+      await client.connect("127.0.0.1", acc.port);
+      const p1 = client.request({ method: "SETUP", url: "rtsp://127.0.0.1/a", common: COMMON, timeoutMs: 80 });
+      const p2 = client.request({ method: "POST", url: "/feedback", common: COMMON, timeoutMs: 80 });
+      const results = await Promise.allSettled([p1, p2]);
+      expect(results.map((r) => r.status)).toEqual(["rejected", "rejected"]);
+      for (const r of results) {
+        expect((r as PromiseRejectedResult).reason).toBeInstanceOf(RtspError);
+        expect(((r as PromiseRejectedResult).reason as Error).message).toMatch(/超时/);
+      }
+      expect(client.pendingCount).toBe(0);
+    } finally {
+      client.destroy();
+      acc.close();
+    }
+  });
+
+  it("destroy() 立即 reject 在途请求（实测 < 5ms，不等 8s 超时）", async () => {
+    const acc = await startRawAccessory(() => {
+      /* 静默：永不回包 */
+    });
+    const client = new Ap2RtspClient();
+    try {
+      await client.connect("127.0.0.1", acc.port);
+      let rejectedAtUs = 0;
+      const p = client.request({
+        method: "SETUP",
+        url: "rtsp://127.0.0.1/a",
+        common: COMMON,
+        timeoutMs: 5000,
+      }).catch((e: Error) => {
+        rejectedAtUs = nowUs();
+        throw e;
+      });
+      const t0 = nowUs();
+      client.destroy();
+      await expect(p).rejects.toThrow("链路已关闭");
+      const dtMs = ms(rejectedAtUs - t0);
+      console.log(`[证据] destroy()→reject 耗时(ms)=${dtMs.toFixed(3)}`);
+      expect(dtMs).toBeLessThan(5);
+      expect(client.pendingCount).toBe(0);
+    } finally {
+      client.destroy();
+      acc.close();
+    }
+  });
+
+  it("transport.write 抛错 → 立即以同一错误 reject（不伪装成超时）+ 摘表", async () => {
+    const acc = await startRawAccessory(() => {
+      /* 静默 */
+    });
+    const client = new Ap2RtspClient();
+    try {
+      await client.connect("127.0.0.1", acc.port);
+      const boom = new Error("EPIPE 假写失败");
+      // 用一个只会炸的假通道顶替真实 transport（测的是写失败分支）
+      const fakeChannel = {
+        write(): void {
+          throw boom;
+        },
+        destroy(): void {
+          /* 无底层资源 */
+        },
+      };
+      (client as unknown as { channel: unknown }).channel = fakeChannel;
+      const t0 = nowUs();
+      await expect(client.request({
+        method: "SETUP",
+        url: "rtsp://127.0.0.1/a",
+        common: COMMON,
+        timeoutMs: 5000,
+      })).rejects.toThrow("EPIPE 假写失败");
+      const dtMs = ms(nowUs() - t0);
+      console.log(`[证据] write 抛错→reject 耗时(ms)=${dtMs.toFixed(3)}`);
+      expect(dtMs).toBeLessThan(5);
+      expect(client.pendingCount).toBe(0); // 写失败必须摘表，不许挂到超时
+    } finally {
+      client.destroy();
+      acc.close();
+    }
+  });
+
+  it("timeoutMs=30 的超时兜底仍然生效（事件驱动不得吞掉超时）", async () => {
+    const acc = await startRawAccessory(() => {
+      /* 静默 */
+    });
+    const client = new Ap2RtspClient();
+    try {
+      await client.connect("127.0.0.1", acc.port);
+      const t0 = nowUs();
+      await expect(client.request({
+        method: "SETUP",
+        url: "rtsp://127.0.0.1/a",
+        common: COMMON,
+        timeoutMs: 30,
+      })).rejects.toThrow(/超时/);
+      const dtMs = ms(nowUs() - t0);
+      console.log(`[证据] timeoutMs=30 实际耗时(ms)=${dtMs.toFixed(3)}`);
+      expect(dtMs).toBeGreaterThanOrEqual(25);
+      expect(dtMs).toBeLessThan(500);
+      expect(client.pendingCount).toBe(0);
+    } finally {
+      client.destroy();
+      acc.close();
+    }
+  });
+
+  it("反向请求（accessory → controller）丢弃且不影响后续响应配对", async () => {
+    const acc = await startRawAccessory((req, sock) => {
+      // 先塞一个反向请求，再塞本次请求的响应（很可能落进同一个 data 事件）
+      sock.write(Buffer.from("OPTIONS * RTSP/1.0\r\nCSeq: 1\r\nContent-Length: 0\r\n\r\n", "latin1"));
+      sock.write(rtspResp({ cseq: req.cseq, body: Buffer.from("after-reverse") }));
+    });
+    const client = new Ap2RtspClient();
+    try {
+      await client.connect("127.0.0.1", acc.port);
+      const resp = await client.request({
+        method: "SETUP",
+        url: "rtsp://127.0.0.1/a",
+        common: COMMON,
+        timeoutMs: 300,
+      });
+      expect(resp.status).toBe(200);
+      expect(resp.body.toString("ascii")).toBe("after-reverse");
+      expect(client.pendingCount).toBe(0);
+    } finally {
+      client.destroy();
+      acc.close();
+    }
   });
 });

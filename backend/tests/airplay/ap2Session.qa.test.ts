@@ -85,7 +85,11 @@ async function startFakeAccessory(): Promise<FakeAccessory> {
             body = bplistEncode({ eventPort: 0 });
           }
         }
-        const head = `RTSP/1.0 ${status} ${status === 200 ? "OK" : "Err"}\r\nCSeq: 1\r\nContent-Length: ${body.length}\r\n\r\n`;
+        // 回显请求 CSeq（不再硬编码 1）：客户端按 CSeq 配对在途请求，
+        // 假件固定回 1 会让 RECORD(cseq=2)/SETUP(stream,cseq=3) 永远配不上。
+        const cseqLine = got.head.split("\r\n").find((l) => /^cseq:/i.test(l));
+        const cseq = cseqLine ? cseqLine.slice(cseqLine.indexOf(":") + 1).trim() : "1";
+        const head = `RTSP/1.0 ${status} ${status === 200 ? "OK" : "Err"}\r\nCSeq: ${cseq}\r\nContent-Length: ${body.length}\r\n\r\n`;
         chan.write(Buffer.concat([Buffer.from(head, "latin1"), body]));
       }
     });
