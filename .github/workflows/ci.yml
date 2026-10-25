@@ -92,6 +92,18 @@ name: ci
 #      必须是「有 `_airplay` 记录 && protovers ≥ 1.1」;`_airplay` down 必须撤能力而设备
 #      可用性仍归 `_raop`;AP1 投屏入口(castToAirPlayDevice)不得提前分流。破坏全静默:
 #      多出一批投不了的设备 / 所有设备都被判成 AP2 / 关掉 AP2 仍长期显示支持。
+#  25. AirPlay ↔ Sendspin 桥接守卫(scripts/check-airplay-bridge.mjs)——Phase 8 的 14 条不变量:
+#      ① 锚点链只许 host µs(hrtime.bigint)不得混 Date.now/performance.now/Unix ms;② latencyFrames
+#      不得下沉归零;③ 时序常量唯一源且取值钉死(48000/44100、147/160、冷启动 lead 4500/2500ms、
+#      桥缓冲上下限 384K/1536K、ANCHOR_SAFE_LEAD_US、0.3627);④ PCM 不得走 JSON/base64 IPC;
+#      ⑤ 不得复活 start(anchorUnixMs);⑥ 组指令 fanOut 必须跳过桥占用设备;⑦ members 不得弱化成
+#      Set<any>(编译期保护)也不得把 bridges 并进 members;⑧ commonSendAheadUs 体内不得吃桥 lead
+#      (MAJ-01:并进去全组 +3.7s);⑨ pushFrame 必须留 pcm:100 虚拟组补偿(BLK-01);⑩ playGroupCore
+#      与组关闭路径不得清 bridges(BLK-02);⑪ generation 必须取 epoch*1_000_003+timelineReseed、
+#      rehost 不得 epoch++;⑫ RAOP RECORD 四锚点同域(baseTs 在赋值列表、先 >>> 0 再 % CHUNK_LEN);
+#      ⑬ 不得伪造 acked、上报字段名必须 scheduledAnchorUs;⑭ 桥 socket 路径必须 mfab/<短 hash>,
+#      deviceId/token 只进 sha1 输入不进文件名。破坏全是静默的:先晚 3.7 秒才出声、起播把桥会话
+#      清掉只剩一路、锚点被墙钟回拨带歪后整组飘音、桥音频被组增益二次处理。
 # 镜像发布仍由 build.yml(v* tag)负责,与本 CI 互不影响。
 
 on:
@@ -298,6 +310,20 @@ jobs:
       - uses: actions/checkout@v4
       - name: 校验 _airplay 只打能力不建表、判据为 protovers ≥ 1.1、AP1 投屏入口未改
         run: node backend/scripts/check-airplay-ap2-discovery.mjs
+
+  # Phase 8(桥接):AirPlay1/2 ↔ Sendspin 桥的 14 条静态不变量。守卫**只认非注释行**
+  # (先剥 `//`、`/* */`、`<!-- -->` 再匹配),不会自己把自己查红;14 条都做过
+  # 「造最小违规 → 必须红且只红这一条 → 还原即绿」的反证(反证脚本见 docs 复盘)。
+  # 钉的都是踩过的坑:桥 lead 混进 commonSendAheadUs(MAJ-01 全组 +3.7s)、起播清 bridges
+  # 导致桥会话消失(BLK-02)、缺 pcm:100 虚拟组使桥音频被组增益二次处理(BLK-01)、
+  # generation 单世代号在重播种后撞值、RECORD 四锚点不同域导致 RTP 时间戳漂移。
+  airplay-bridge-guard:
+    name: "AirPlay↔Sendspin 桥接守卫(14 条:锚点/常量唯一源/虚拟组/世代号/socket 路径)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 校验桥接 14 条不变量(锚点链/常量唯一源/虚拟组补偿/世代号/RECORD 四锚点)
+        run: node backend/scripts/check-airplay-bridge.mjs
 
   # 2026-09-27:后端路由按业务域拆分后,7 处路径耦合的静态守卫全部静默失同步
   # (3 处假红 + 3 处假绿)。守卫盯的是源码内容,却没人盯「源码还在不在那个位置」——
