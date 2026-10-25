@@ -356,7 +356,19 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
         return { ...s, playerId };
       }
       if (leader.kind === "airplay") {
-        // airplay leader:状态从设备会话态派生(sessionView 同源)。
+        // §5.5(MAJ-06):桥占用设备的传输由组泵承担。此时该设备的 **solo 会话视图恒空**
+        // (RAOP 会话归 bridge 所有,getAirPlayStatus 看不到)→ 若照旧从 AirPlay 会话派生
+        // 会恒报 IDLE/STOPPED → PlaybackTracker 判"曲目自然结束" → idle_early 复查走同一条
+        // 错路也非 PLAYING → 放行切歌 → clearPlayback 打断桥流 → 每 ~5s 无限重启
+        // (2026-10-26 隔离环境 A/B 实测:同组仅换 memberIds 顺序,leader=sendspin 稳定
+        // PLAYING 且 idle_early=0;leader=airplay 恒 STOPPED 且 idle_early 4 次/22s)。
+        // 组内存在 sendspin 成员(桥的 PCM 源即组泵)时,状态必须改从共享组泵派生。
+        if (isBridgeOwned(leader.id) && splitGroupMembers(groupId).spin.length > 0) {
+          const { createSendspinGroupPlayer } = await import("../sendspin/protocolPlayer.js");
+          const s = await createSendspinGroupPlayer(groupId).pollState();
+          return { ...s, playerId };
+        }
+        // airplay leader(非桥占用,独立 solo cast):状态从设备会话态派生(sessionView 同源)。
         const s = await createAirPlayProtocolPlayer(leader.id).pollState();
         return { ...s, playerId };
       }
@@ -402,7 +414,22 @@ export async function getGroupStatus(groupId: string): Promise<{
     };
   }
   if (leader.kind === "airplay") {
-    // airplay leader:会话态同步取值(无会话/已结束时回设备档案态,position=0)。
+    // §5.5 同 pollState:桥占用时 solo 会话视图恒空,必须改从共享组泵派生
+    // (否则 /v1/peers/group:<id>/status 在桥播放全程恒报 STOPPED)。
+    if (isBridgeOwned(leader.id) && splitGroupMembers(groupId).spin.length > 0) {
+      const { sendspinGroupPoll } = await import("../sendspin/index.js");
+      const gname = sendspinGroupName(groupId);
+      const gst = await sendspinGroupPoll(gname).catch(() => ({ playing: false, paused: false, positionMs: 0, durationMs: 0 }));
+      return {
+        state: gst.paused ? "PAUSED" : gst.playing ? "PLAYING" : "STOPPED",
+        position: Math.floor(gst.positionMs / 1000),
+        duration: Math.floor(gst.durationMs / 1000),
+        volume: persistedVolume,
+        muted: false,
+        updatedAt: Date.now(),
+      };
+    }
+    // airplay leader(非桥占用,独立 solo cast):会话态同步取值(无会话/已结束时回设备档案态,position=0)。
     const st = getAirPlayStatus(leader.id);
     const state = st.playbackState === PlaybackState.PLAYING ? "PLAYING"
       : st.playbackState === PlaybackState.PAUSED ? "PAUSED" : "STOPPED";
