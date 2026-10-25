@@ -20,6 +20,7 @@
 import { BridgeServer, type BridgeAudioEvent, type BridgeServerHandlers } from "./bridgeServer.js";
 import { bridgeSocketPath } from "./bridgeChannel.js";
 import {
+  BRIDGE_MAX_HELD_AUDIO_US,
   BRIDGE_PCM_BYTES_PER_SEC,
   BRIDGE_WARM_START_LEAD_US,
   PROTOCOL_CAPS,
@@ -27,6 +28,7 @@ import {
   SENDSPIN_RATE,
   type BridgeProtocol,
 } from "./rates.js";
+import { computeBridgeBackoffMs } from "./bridgeSource.js";
 import { PolyphaseResampler, floatToPcmS16, pcmS16ToFloat } from "./resampler.js";
 import { computeBridgeAnchors, driftCorrection, type BridgeAnchors } from "./bridgeMath.js";
 import { nowUs } from "../../utils/hostClock.js";
@@ -221,6 +223,8 @@ export interface BridgeSessionStats {
   skippedFrames: number;
   /** |drift| > 1ms 的对齐次数(§4.5 realigned)。 */
   realignments: number;
+  /** 旧 generation 帧/队列丢弃计数(Phase 5 BLK-02 判据:seek/rehost 后 > 0)。 */
+  staleFramesDropped: number;
 }
 
 export class BridgeSession {
@@ -239,13 +243,14 @@ export class BridgeSession {
   private readonly resampler: PolyphaseResampler | null;
 
   /** 48k s16le 入队(桥帧 payload 原样 + tsUs)。 */
-  private inQueue: Array<{ buf: Buffer; tsUs: bigint }> = [];
+  private inQueue: Array<{ buf: Buffer; tsUs: bigint; generation: number }> = [];
   private inBytes = 0;
   /** 输出速率 s16le 出缓冲(producer 逐 352 帧切割)。 */
   private outBuf: Buffer = Buffer.alloc(0);
   readonly stats: BridgeSessionStats = {
     framesIn: 0, chunksOut: 0, silenceChunks: 0,
     insertedFrames: 0, droppedFrames: 0, skippedFrames: 0, realignments: 0,
+    staleFramesDropped: 0,
   };
   private streamPromise: Promise<void> | null = null;
 
@@ -262,6 +267,16 @@ export class BridgeSession {
   private maxQueueMs = 0;
   private deltaSamples: number[] = [];
   private statsTimer: NodeJS.Timeout | null = null;
+
+  // ---- Phase 5:生命周期(代次重锚 / 暂停 / stall / RAOP 重连) ----
+  /** 推流被终态打断(boundary/stall):producer 立刻返回 null,旧 streamBridge 循环退出。 */
+  private streamAborted = false;
+  /** 组泵暂停状态(HEARTBEAT flags bit1,§5.4)。 */
+  private pausedState = false;
+  private pausedAtUs: bigint | null = null;
+  /** RAOP 会话级重连退避(设备离线/推流异常断;与 sendspin 侧 BridgeSource 退避同参数)。 */
+  private raopReconnectTimer: NodeJS.Timeout | null = null;
+  private raopReconnectAttempt = 0;
 
   constructor(opts: BridgeSessionOpts) {
     this.opts = opts;
@@ -285,6 +300,9 @@ export class BridgeSession {
         this.connected = ev.connected;
         if (!ev.connected) log.warn(`bridge session 断开: device=${this.deviceId} reason=${ev.reason ?? "-"}`);
       },
+      onBoundary: (gen, reason) => this.onBoundary(gen, reason),
+      onStall: () => this.onLinkStall(),
+      onHeartbeat: (gen, seq, paused) => this.onBridgeHeartbeat(paused === true),
       onOverflow: (ms) => log.warn(`bridge overflow: device=${this.deviceId} backlog=${Math.round(ms)}ms`),
       log: (...args: unknown[]) => log.info(args.map((a) => String(a)).join(" ")),
     };
@@ -320,16 +338,22 @@ export class BridgeSession {
     this.ingestAudio({ tsUs: 0n, generation: 0, sequence: 0, payload });
   }
 
-  /** 48k s16le 入队(bridgeServer AUDIO 回调)。返回输入积压 ms(§4.4 overflow 判定)。 */
+  /** 48k s16le 入队(bridgeServer AUDIO 回调)。返回输入积压 ms(§4.4 overflow 判定)。
+   *  Phase 5:旧 generation 的迟到帧(BOUNDARY 清队后的在途残余)直接丢弃并计数
+   *  —— BLK-02 判据「旧 generation 帧丢弃计数 > 0」的落点(绝不入队、绝不立锚)。 */
   private ingestAudio(a: BridgeAudioEvent): number {
     if (this.closed) return this.backlogMs();
-    if (a.tsUs !== 0n) this.generation = a.generation;
+    if (a.tsUs !== 0n && a.generation !== 0 && a.generation < this.generation) {
+      this.stats.staleFramesDropped += a.payload.byteLength >> 2;
+      return this.backlogMs();
+    }
+    if (a.tsUs !== 0n && a.generation !== 0) this.generation = a.generation;
     const buf = Buffer.from(a.payload.buffer, a.payload.byteOffset, a.payload.byteLength);
     if (this.firstFrameTsUs === null && a.tsUs !== 0n) {
       this.firstFrameTsUs = a.tsUs;
       void this.maybeBeginStream();
     }
-    this.inQueue.push({ buf, tsUs: a.tsUs });
+    this.inQueue.push({ buf, tsUs: a.tsUs, generation: a.generation });
     this.inBytes += buf.length;
     this.stats.framesIn += buf.length >> 2;
     return this.backlogMs();
@@ -337,6 +361,84 @@ export class BridgeSession {
 
   private backlogMs(): number {
     return Math.round((this.inBytes / BRIDGE_PCM_BYTES_PER_SEC) * 1000);
+  }
+
+  // ---- Phase 5:生命周期(§5.2/§5.4) ------------------------------------
+
+  /** 流代次变更(BOUNDARY,§4.3/§5.4):
+   *  - track/seek/rehost:清旧代次队列 + 计入 staleFramesDropped + 重锚 —— 新代次
+   *    首帧确立新 A ⇒ 新 scheduledAnchorUs(可 grep `ev:"gen"` + `ev:"anchor"`);
+   *  - stop:流终态(跨源切歌/组停),停推流;RAOP 会话由编排侧 bridgeStop 拆。 */
+  private onBoundary(generation: number, reason: string): void {
+    if (this.closed) return;
+    log.info(`[airplay-bridge] ${JSON.stringify({ ev: "gen", dev: this.deviceId, gen: generation >>> 0, prevGen: this.generation, reason })}`);
+    // 清旧代次:入队未消费 + 出缓冲未切割的全部计入丢弃。
+    const stale = (this.inBytes >> 2) + (this.outBuf.length >> 2);
+    this.inQueue = [];
+    this.inBytes = 0;
+    this.outBuf = Buffer.alloc(0);
+    if (stale > 0) this.stats.staleFramesDropped += stale;
+    this.generation = generation >>> 0;
+    this.firstFrameTsUs = null;
+    this.aligner = null;
+    this.anchors = null;
+    this.anchorUs = null;
+    this.commandedLeadUs = null;
+    if (reason === "stop") {
+      // 终态:停推流(保留 listener 与 RAOP 会话;编排侧 bridgeStop 负责拆会话)。
+      this.streamAborted = true;
+      this.player?.flush();
+      return;
+    }
+    // track/seek/rehost:热复用 RAOP 会话,推流循环立刻退出,新代次首帧重新起流
+    // (player.flush 置 started=false ⇒ 新流首包带 0xE0 marker,接收端重锚)。
+    this.streamAborted = true;
+    this.player?.flush();
+  }
+
+  /** 链路 stall(2s 无任何帧,含心跳):sendspin 子进程死亡/链路断。
+   *  §5.2「sendspin 子进程崩溃 ⇒ airplay 侧无残留播放」:立刻停推流(不写静音),
+   *  保留 listener 等重连;BridgeMember 重连成功会发 BOUNDARY{rehost} ⇒ 走 onBoundary 重锚。 */
+  private onLinkStall(): void {
+    if (this.closed || !this.aligner) return;
+    log.warn(`[airplay-bridge] link stall: device=${this.deviceId} 停推流,等待发送侧重连(无残留播放)`);
+    this.streamAborted = true;
+    this.player?.flush();
+    this.aligner = null;
+    this.anchors = null;
+    this.anchorUs = null;
+    this.commandedLeadUs = null;
+    this.firstFrameTsUs = null;
+  }
+
+  /** 组泵暂停/恢复(HEARTBEAT flags bit1,§5.4)。
+   *  暂停:冻结推流(不写静音/不动 headTs/不计 latePackets),心跳维持不触发 stalled。
+   *  恢复:≤45s 按「继续」(streamBridge 恢复后 sendAt pacing 自动 rebase,drift 由
+   *  tsUs 重对齐);>45s 按「锚点不可达」重新锚定(丢弃更早内容)。 */
+  private onBridgeHeartbeat(paused: boolean): void {
+    if (this.closed || paused === this.pausedState) return;
+    this.pausedState = paused;
+    if (paused) {
+      this.pausedAtUs = nowUs();
+      log.info(`[airplay-bridge] ${JSON.stringify({ ev: "pause", dev: this.deviceId, gen: this.generation })}`);
+      this.player?.pause();
+      return;
+    }
+    const heldUs = this.pausedAtUs !== null ? Number(nowUs() - this.pausedAtUs) : 0;
+    this.pausedAtUs = null;
+    log.info(`[airplay-bridge] ${JSON.stringify({ ev: "resume", dev: this.deviceId, gen: this.generation, heldUs })}`);
+    this.player?.resume();
+    if (heldUs > BRIDGE_MAX_HELD_AUDIO_US) {
+      // §5.4:暂停超 45s ⇒ 锚点不可达 —— 重锚到恢复时刻(新代次语义,旧内容丢弃)。
+      log.warn(`[airplay-bridge] resume after ${Math.round(heldUs / 1000)}ms > 45s: re-anchor(锚点不可达,丢弃更早内容)`);
+      this.streamAborted = true;
+      this.player?.flush();
+      this.aligner = null;
+      this.anchors = null;
+      this.anchorUs = null;
+      this.commandedLeadUs = null;
+      this.firstFrameTsUs = null;
+    }
   }
 
   /** 锚点落定 + 进入四锚点驱动推流(dry / 未连接 / 未 connect / 已起流均不动作)。 */
@@ -363,6 +465,7 @@ export class BridgeSession {
     this.commandedLeadUs = plan.commandedLeadUs;
     this.anchors = plan.anchors;
     this.aligner = new BridgeTimelineAligner(plan.anchorUs, rate);
+    this.streamAborted = false;
     this.emitAnchorReport(plan, latencyFrames);
     this.streamPromise = player
       .streamBridge(() => this.pullChunk(), session, {
@@ -375,10 +478,65 @@ export class BridgeSession {
         latencyFrames,
         rate,
       })
+      .then(() => {
+        // 正常结束(producer null / 终态):stall/boundary 场景由对应路径处置;
+        // 设备侧 RAOP 断开(sendChunk false) ⇒ 走 RAOP 重连(§5.2 设备级重连必须新会话)。
+        if (!this.closed && this.connected && !this.streamAborted) this.scheduleRaopReconnect("stream ended");
+      })
       .catch((e) => {
         log.warn(`bridge raop stream ended: device=${this.deviceId} err=${(e as Error)?.message || e}`);
+        if (!this.closed && this.connected && !this.streamAborted) this.scheduleRaopReconnect("stream error");
       });
     this.startStatsTick();
+  }
+
+  /** RAOP 会话级重连(§5.2「桥设备重连必须重建 RAOP 会话」):5s/30s ±20% 退避。
+   *  重连成功后重新 RECORD(新 baseTs/startNtp)并对齐器复位 —— 下一帧 AUDIO 用
+   *  新会话重新锚定(新 scheduledAnchorUs)。仅推流异常断开时触发(boundary/stall
+   *  不触发:那些场景会话仍健康)。 */
+  private scheduleRaopReconnect(reason: string): void {
+    if (this.closed || this.raopReconnectTimer) return;
+    this.raopReconnectAttempt++;
+    const delay = computeBridgeBackoffMs(this.raopReconnectAttempt, Math.random());
+    log.warn(`[airplay-bridge] raop reconnect in ${delay}ms (attempt ${this.raopReconnectAttempt}, ${reason}) device=${this.deviceId}`);
+    this.raopReconnectTimer = setTimeout(() => {
+      this.raopReconnectTimer = null;
+      void this.reconnectRaop();
+    }, delay);
+    this.raopReconnectTimer.unref?.();
+  }
+
+  private async reconnectRaop(): Promise<void> {
+    if (this.closed || !this.connected) return;
+    // 标记 degraded:推流停,对齐器复位,等新会话 + 新帧重锚(重连窗口内旧队列清空)。
+    this.streamAborted = true;
+    this.aligner = null;
+    this.anchors = null;
+    this.anchorUs = null;
+    this.commandedLeadUs = null;
+    this.firstFrameTsUs = null;
+    this.inQueue = [];
+    this.inBytes = 0;
+    this.outBuf = Buffer.alloc(0);
+    const oldPlayer = this.player;
+    const player = new RaopPlayer({
+      host: this.opts.host ?? "",
+      port: this.opts.port ?? 5000,
+      pk: this.opts.pk,
+      et: this.opts.et,
+    });
+    try {
+      const session = await player.connect();
+      this.raopSession = session;
+      this.player = player;
+      this.raopReconnectAttempt = 0;
+      log.info(`[airplay-bridge] raop reconnected: device=${this.deviceId}(新 RECORD,等待新代次首帧重锚)`);
+      try { oldPlayer?.forceClose(); } catch { /* ignore */ }
+    } catch (e) {
+      try { player.forceClose(); } catch { /* ignore */ }
+      log.warn(`[airplay-bridge] raop reconnect failed: device=${this.deviceId} err=${(e as Error)?.message || e}`);
+      this.scheduleRaopReconnect("reconnect failed");
+    }
   }
 
   /** §3.5 无 ack 诚实语义:只上报 scheduled anchor,绝不假装收到设备播放确认。 */
@@ -432,7 +590,7 @@ export class BridgeSession {
       ev: "tick",
       dev: this.deviceId,
       gen: this.generation,
-      state: this.aligner ? "live" : (this.connected ? "connected" : "listening"),
+      state: this.pausedState ? "paused" : this.aligner ? "live" : (this.connected ? "connected" : "listening"),
       clock: "local-rtp-ntp",
       queueMs,
       maxQueueMs: this.maxQueueMs,
@@ -451,7 +609,7 @@ export class BridgeSession {
    *  欠料等待 waitDataMs,超时补静音(保持 RTP 时钟连续,宁出静音不断流;
    *  补块计入内容时间线,对齐不破)。返回 null = 会话已停止(结束 stream 循环)。 */
   private async pullChunk(): Promise<Buffer | null> {
-    if (this.closed) return null;
+    if (this.closed || this.streamAborted) return null;
     const need = CHUNK_LEN * 4;
     const deadline = Date.now() + this.waitDataMs;
     while (this.outBuf.length < need) {
@@ -481,7 +639,7 @@ export class BridgeSession {
   }
 
   /** 单帧处理:对齐(§4.5)→ 重采样 → 裁头出清 → 追加输出。 */
-  private resampleIn(entry: { buf: Buffer; tsUs: bigint }): void {
+  private resampleIn(entry: { buf: Buffer; tsUs: bigint; generation: number }): void {
     const aligner = this.aligner;
     const rate = this.outRate;
     if (aligner && entry.tsUs !== 0n) {
@@ -529,9 +687,15 @@ export class BridgeSession {
   async stop(): Promise<void> {
     this.closed = true;
     this.connected = false;
+    this.pausedState = false;
+    this.streamAborted = true;
     if (this.statsTimer) {
       clearInterval(this.statsTimer);
       this.statsTimer = null;
+    }
+    if (this.raopReconnectTimer) {
+      clearTimeout(this.raopReconnectTimer);
+      this.raopReconnectTimer = null;
     }
     const server = this.server;
     this.server = null;
@@ -559,6 +723,10 @@ export class BridgeSession {
     generation: number;
     latencyFrames: number | null;
     latePackets: number;
+    /** 组泵暂停中(§5.4;推流被冻结,不写静音不计 late)。 */
+    paused: boolean;
+    /** RAOP 重连退避进行中(设备离线 degraded)。 */
+    reconnecting: boolean;
   } {
     return {
       deviceId: this.deviceId,
@@ -572,6 +740,8 @@ export class BridgeSession {
       generation: this.generation,
       latencyFrames: this.player?.negotiatedLatencyFrames ?? null,
       latePackets: this.player?.bridgeLateCount ?? 0,
+      paused: this.pausedState,
+      reconnecting: this.raopReconnectTimer !== null,
     };
   }
 }

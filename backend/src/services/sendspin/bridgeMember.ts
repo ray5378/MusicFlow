@@ -65,6 +65,9 @@ export class BridgeMember {
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private gen = 0;
   private everConnected = false;
+  /** 组泵暂停指示(Phase 5 §5.4):经 HEARTBEAT flags bit1 下发,airplay 侧据此
+   *  冻结推流(不写静音/不计 latePackets),区别于链路死亡 stalled。 */
+  private pausedForBridge = false;
 
   constructor(opts: BridgeMemberOpts) {
     this.opts = opts;
@@ -194,8 +197,21 @@ export class BridgeMember {
     this.everConnected = true;
   }
 
+  /** 组泵暂停/恢复(Phase 5 §5.4):状态变化立即直发一条带 pause 标志的心跳
+   *  (不等下个 1s 周期,让 airplay 侧尽快冻结/恢复),此后周期心跳持续携带该标志。 */
+  setPaused(paused: boolean): void {
+    if (this.pausedForBridge === paused) return;
+    this.pausedForBridge = paused;
+    this.opts.log?.(`bridge pump ${paused ? "paused" : "resumed"} (generation=${this.gen})`);
+    this.sendHeartbeat();
+  }
+
+  get paused(): boolean {
+    return this.pausedForBridge;
+  }
+
   private sendHeartbeat(): void {
     if (this.source.state !== "live") return;
-    this.source.sendNow(encodeHeartbeat(this.seq.generation, this.seq.take()));
+    this.source.sendNow(encodeHeartbeat(this.seq.generation, this.seq.take(), this.pausedForBridge));
   }
 }

@@ -58,6 +58,8 @@ export interface SendspinBridgeHandle {
   notifyGeneration(generation: number, reason: BridgeBoundaryReason): void;
   /** 不换代只发 BOUNDARY(clearPlayback/finishPlayback)。 */
   sendBoundary(reason: BridgeBoundaryReason): void;
+  /** 组泵暂停/恢复指示(Phase 5 §5.4,经 HEARTBEAT flags bit1 下发;缺省无 = 桩不感知)。 */
+  setPaused?(paused: boolean): void;
   start?(): void;
   stop(): void;
   /** 诊断(bridgeStatus op;缺省无)。 */
@@ -708,6 +710,42 @@ export class SendspinGroup {
     for (const b of this.bridges.values()) {
       try { b.notifyGeneration(generation, reason); } catch { /* 单桥失败不连累 */ }
     }
+  }
+
+  /** 组泵暂停/恢复指示(Phase 5 §5.4,pauseCore/resumePumpCore 调用):
+   *  经 HEARTBEAT flags 下发到每座桥,airplay 侧冻结推流(不写静音/不计 late)。
+   *  可 grep:`bridge-pause group=… paused=… n=…`。 */
+  setBridgesPaused(paused: boolean): void {
+    if (this.bridges.size === 0) return;
+    let n = 0;
+    for (const b of this.bridges.values()) {
+      try {
+        b.setPaused?.(paused);
+        n++;
+      } catch { /* 单桥失败不连累 */ }
+    }
+    if (n > 0) this.server.log("info", `bridge-pause group=${this.name} paused=${paused} n=${n}`);
+  }
+
+  /** 播中回填一座新桥(§5.2「加入 AirPlay:从当前/未来 ring 回填」):
+   *  把 pcm:100 组 late-join ring 里**未来还没播**的 chunk 按原 tsUs 原序推给该桥
+   *  (桥侧对齐器以首帧 tsUs 立锚;过于陈旧的内容由可达性重锚/drift 出清)。
+   *  @returns 回填帧数(诊断)。 */
+  backfillBridge(deviceId: string): number {
+    const b = this.bridges.get(deviceId);
+    if (!b) return 0;
+    const ring = this.recentByGroup.get(this.encoderKey("pcm", 100));
+    if (!ring || ring.length === 0) return 0;
+    let n = 0;
+    for (const e of ring) {
+      if (!e.data || e.data.length === 0) continue;
+      try {
+        b.pushAudio(e.data, e.tsUs);
+        n++;
+      } catch { /* 单桥失败不连累 */ }
+    }
+    if (n > 0) this.server.log("info", `bridge-backfill group=${this.name} device=${deviceId} frames=${n}`);
+    return n;
   }
 
   constructor(name: string, server: SendspinServer) {

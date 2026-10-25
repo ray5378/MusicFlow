@@ -12,6 +12,7 @@
 import { ChildRpcHost } from "../rendererHost/childHost.js";
 import { AirplaySessionRuntime } from "./sessionRuntime.js";
 import { BridgeSessionManager } from "./bridgeSession.js";
+import { cleanupStaleBridgeSockets } from "./bridgeChannel.js";
 import type {
   AirplayChildToParent,
   AirplaySnapshot,
@@ -61,6 +62,10 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
     });
     this.runtime = runtime;
     holder.ctl = this;
+    // Phase 5(§5.2):子进程启动即清扫无 listener 的陈旧 mfab socket
+    // (fire-and-forget;探针连接被拒才删,绝不影响将要 listen 的路径 ——
+    // BridgeServer.listen 自身仍会先 unlink 自己的路径)。
+    void cleanupStaleBridgeSockets().catch(() => { /* 清理失败不拖垮启动 */ });
   }
 
   buildState(): AirplayStateEnvelope {

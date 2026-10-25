@@ -18,6 +18,92 @@ import { PlaybackState, type PlayerState, type ProtocolPlayer, type QueueItem } 
 import { createLogger } from "../../utils/logger.js";
 import { randomBytes } from "node:crypto";
 
+// ---- Phase 3/5:活跃桥路由(§5.1 路由快照 + §5.5 owner token)----
+// groupId → 已成功 bridgePrepare 的设备/token(流内不切路由;seek 重建不重 prepare,
+// 自然切歌/新 playMedia 重建路由)。模块级:跨 player 实例共享,流内成员变化
+// (bridgeJoinMember/bridgeLeaveMember)与 airplay 子进程重启(rebuildBridgeRoutes)都要读它。
+const activeBridgeRoutes = new Map<string, BridgeSocketSpec[]>();
+
+/** 生成新的桥会话 token(§5.5 owner token;与 playMedia 路径同一格式)。 */
+const newBridgeToken = (): string => randomBytes(12).toString("hex");
+
+/** 该组当前是否走桥接路由(§5.2 流内成员变化的路由判定依据)。 */
+export function isBridgeRouteActive(groupId: string): boolean {
+  return (activeBridgeRoutes.get(groupId)?.length ?? 0) > 0;
+}
+
+/** 播中加入一台 AirPlay 到桥路由(§5.2:「bridgePrepare + 从 pump ring 回填,
+ *  不 rejoinMembersAirplay」)。桥路由未激活时返回 false(调用方回落 legacy join)。
+ *  抛错 = bridgePrepare 失败(调用方按 MAJ-07 降级:回落 solo cast)。 */
+export async function bridgeJoinMember(groupId: string, deviceId: string): Promise<boolean> {
+  const route = activeBridgeRoutes.get(groupId);
+  if (!route || !isAirplayBridgeEnabled()) return false;
+  if (route.some((r) => r.deviceId === deviceId)) return true; // 已在路由内,幂等
+  const token = newBridgeToken();
+  bridgeSocketPath(deviceId, token); // <100B 断言(与 playMedia 路径同源)
+  await bridgePrepareDevice(deviceId, token, "raop");
+  const spec: BridgeSocketSpec = { deviceId, socketPath: bridgeSocketPath(deviceId, token), token, protocol: "raop" };
+  route.push(spec);
+  const groupName = sendspinGroupName(groupId);
+  const r = await import("../sendspin/index.js");
+  const sync = await r.sendspinGroupBridgeSync(groupName, [...route]);
+  log.info(`[group][bridge] ${groupId}: 播中加入 device=${deviceId} sync=${sync.synced} backfill=${sync.backfilled} frames`);
+  return true;
+}
+
+/** 播中摘除一台 AirPlay(§5.2:「bridgeStop(device);设备回到可 cast 状态」)。
+ *  幂等:不在路由内返回 false。 */
+export async function bridgeLeaveMember(groupId: string, deviceId: string): Promise<boolean> {
+  const route = activeBridgeRoutes.get(groupId);
+  if (!route) return false;
+  const idx = route.findIndex((r) => r.deviceId === deviceId);
+  if (idx < 0) return false;
+  const [removed] = route.splice(idx, 1);
+  const groupName = sendspinGroupName(groupId);
+  const r = await import("../sendspin/index.js");
+  await r.sendspinGroupBridgeSync(groupName, [...route]).catch(() => null); // 泵侧摘句柄(best-effort)
+  await bridgeStopDevice(removed.token, deviceId);
+  log.info(`[group][bridge] ${groupId}: 播中摘除 device=${deviceId}(设备回到可 cast 状态)`);
+  return true;
+}
+
+/** airplay 子进程重启后的桥路由重建(§5.2「airplay 子进程崩溃」行):
+ *  逐设备用**原 token** 重发 bridgePrepare(同 socketPath ⇒ 泵侧 BridgeMember
+ *  退避重连即接上,BOUNDARY{rehost} 新 generation 自动产生)。幂等、全 best-effort。 */
+export async function rebuildBridgeRoutes(): Promise<number> {
+  let ok = 0;
+  for (const [groupId, route] of activeBridgeRoutes) {
+    for (const spec of route) {
+      try {
+        await bridgePrepareDevice(spec.deviceId, spec.token, spec.protocol);
+        ok++;
+      } catch (e) {
+        log.warn(`[group][bridge] ${groupId}: 子进程重启重建失败 device=${spec.deviceId}: ${(e as Error)?.message || e}`);
+      }
+    }
+  }
+  if (activeBridgeRoutes.size > 0) {
+    log.info(`[group][bridge] 子进程重启重建: ${ok}/${[...activeBridgeRoutes.values()].reduce((n, r) => n + r.length, 0)} 座桥已重锚定`);
+  }
+  return ok;
+}
+
+/** 设备离线(mDNS byebye,§5.2):立刻从全部活跃桥路由摘除(不等重连),
+ *  逐组 bridgeSync 摘泵句柄 + bridgeStop 清会话/owner;设备重新上线按「加入」处理。 */
+export async function notifyAirplayDeviceOffline(deviceId: string): Promise<number> {
+  let n = 0;
+  for (const [groupId, route] of [...activeBridgeRoutes]) {
+    if (!route.some((r) => r.deviceId === deviceId)) continue;
+    try {
+      if (await bridgeLeaveMember(groupId, deviceId)) n++;
+    } catch (e) {
+      log.warn(`[group][bridge] ${groupId}: 离线摘除失败 device=${deviceId}: ${(e as Error)?.message || e}`);
+    }
+  }
+  if (n > 0) log.info(`[group][bridge] 设备离线: device=${deviceId} 已从 ${n} 个组桥路由摘除(标 offline,重连按加入处理)`);
+  return n;
+}
+
 /** 组内成员按 kind 拆分(裸 id)。dlna 含历史裸写法(仅旧组,新提交已禁)。 */
 export function splitGroupMembers(groupId: string): { dlna: string[]; airplay: string[]; spin: string[] } {
   const g = getGroupManager().get(groupId);
@@ -146,10 +232,8 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
   }
 
   // ---- Phase 3:桥接路由(§5.1 路由快照 + §5.5 owner token + MAJ-07 降级) ----
-
-  /** 活跃桥路由:groupId → 已成功 bridgePrepare 的设备/token(流内不切路由;
-   *  seek 重建不重 prepare,自然切歌/新 playMedia 重建路由)。 */
-  const activeBridgeRoutes = new Map<string, BridgeSocketSpec[]>();
+  // activeBridgeRoutes 在模块层(见文件顶部):跨 player 实例共享,供
+  // bridgeJoinMember/bridgeLeaveMember/rebuildBridgeRoutes 等流内成员变化操作访问。
 
   /** 拆本组桥路由:逐设备 bridgeStop + 清 owner。幂等。 */
   async function teardownBridgeRoute(): Promise<void> {

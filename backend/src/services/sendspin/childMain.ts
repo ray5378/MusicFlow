@@ -37,8 +37,10 @@ import {
   announceProbeCore,
   joinGroupCore,
   leaveGroupCore,
+  bridgeSyncCore,
 } from "./playerCore.js";
 import { syncGroupBridges, detachGroupBridge, type BridgeSocketSpec } from "./bridgeAttach.js";
+import { cleanupStaleBridgeSockets } from "../airplay/bridgeChannel.js";
 import type { QueueItem } from "../player/types.js";
 import { isLogLevel, setLogLevel } from "../../utils/logger.js";
 
@@ -64,6 +66,9 @@ export class SendspinChildController extends ChildRpcHost<SendspinChildToParent,
       onStop: () => deps.stopRuntime(),
     });
     this.deps = deps;
+    // Phase 5(§5.2):子进程启动即清扫陈旧 mfab socket(探针连接被拒才删,
+    // 活 listener 不动);fire-and-forget,绝不阻塞启动。
+    void cleanupStaleBridgeSockets().catch(() => { /* 清理失败不拖垮启动 */ });
   }
 
   /** 组装快照消息。⚠️ 配对记录剥离 pskHex/pskId —— 配对密钥永不出子进程。 */
@@ -228,6 +233,15 @@ export class SendspinChildController extends ChildRpcHost<SendspinChildToParent,
         const removed = leaveGroupCore(srv, String(p.group), String(p.clientId));
         this.requestSnapshot(true);
         return removed;
+      }
+      case "bridgeSync": {
+        // Phase 5(§5.2):主进程把桥规格同步到活跃组(播中加入带 ring 回填 /
+        // 摘除 / 子进程重启后 re-attach),规格数组即目标态,幂等。
+        if (!srv) throw new Error("sendspin server 未运行");
+        const sockets = Array.isArray(p?.sockets) ? (p.sockets as BridgeSocketSpec[]) : [];
+        const backfilled = bridgeSyncCore(srv, String(p.group), sockets);
+        this.requestSnapshot(true);
+        return { synced: sockets.length, backfilled };
       }
       case "poll": {
         const st = pollCore(srv, String(p.clientId));

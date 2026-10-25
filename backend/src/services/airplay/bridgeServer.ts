@@ -23,6 +23,7 @@ import {
   bridgeSocketPath,
   decodeBoundaryReason,
   decodeConfigPayload,
+  FRAME_FLAG_PAUSED,
   FRAME_HEADER_SIZE,
   FRAME_TYPE,
   type BridgeFrame,
@@ -63,7 +64,8 @@ export interface BridgeServerHandlers {
   /** 返回当前 PCM backlog(ms);> overflowMs 时服务器断连该会话。 */
   onAudio?: (audio: BridgeAudioEvent) => number | void;
   onBoundary?: (generation: number, reason: string) => void;
-  onHeartbeat?: (generation: number, sequence: number) => void;
+  /** paused = HEARTBEAT flags bit1(§5.4 组泵暂停指示;Phase 5)。 */
+  onHeartbeat?: (generation: number, sequence: number, paused?: boolean) => void;
   onSession?: (ev: BridgeSessionEvent) => void;
   onStall?: () => void;
   onOverflow?: (backlogMs: number) => void;
@@ -289,7 +291,7 @@ export class BridgeServer {
         return;
       }
       case FRAME_TYPE.HEARTBEAT:
-        this.handlers.onHeartbeat?.(frame.generation, frame.sequence);
+        this.handlers.onHeartbeat?.(frame.generation, frame.sequence, (frame.flags & FRAME_FLAG_PAUSED) !== 0);
         return;
       case FRAME_TYPE.STATS:
         return; // Phase 2 只透传计数,不解析

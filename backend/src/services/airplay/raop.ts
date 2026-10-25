@@ -20,7 +20,7 @@ import * as dgram from "dgram";
 import { publicEncrypt, createPublicKey, randomBytes, constants, createCipheriv } from "crypto";
 import { ntpFromHostUs, nowUs } from "../../utils/hostClock.js";
 import { audibleAtUs, ntpToRtpMod, sendAtUs } from "./bridgeMath.js";
-import { RAOP_SAFETY_MS } from "./rates.js";
+import { BRIDGE_RESUME_REBASE_US, RAOP_SAFETY_MS } from "./rates.js";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("RAOP");
@@ -929,6 +929,8 @@ export class RaopPlayer {
     let idx = 0; // 已发包数(内容样本 [idx·352, (idx+1)·352) 的序号)
     let firstSyncSent = false;
     let burst = 0;
+    /** pacing 重锚偏移(§5.4 暂停恢复):只影响 sendAt,RTP 映射不动。 */
+    let pacingShiftUs = 0n;
     while (this.streaming && !this.destroying) {
       if (this.paused) {
         // 冻结 RTP 时钟(与 stream() 同语义):不出包,headTs 不推进。
@@ -942,17 +944,33 @@ export class RaopPlayer {
         break;
       }
       // 发送节拍(§3.3):sendAt = audibleAt − L − SAFETY(换算唯一出处 bridgeMath)。
+      // pacingShiftUs:暂停恢复/长饥饿后的 pacing 重锚(§5.4)—— sendAt 落后墙钟超过
+      // BRIDGE_RESUME_REBASE_US ⇒ 内容时间线未变而墙钟前跳,把 pacing 参考前移,
+      // RTP 映射(startTs/startNtp)不动,恢复段不计 latePackets;恢复首包立即发出。
       const audible = audibleAtUs(idx * CHUNK_LEN, anchor.anchorUsShifted, rate);
-      const sendAt = sendAtUs(audible, anchor.latencyFrames, rate);
+      const sendAt = sendAtUs(audible, anchor.latencyFrames, rate) + pacingShiftUs;
       if (nowUs() < sendAt) {
         burst = 0;
         await this.waitUntilUs(sendAt);
+        if (this.paused) {
+          // 等待期间被暂停:冻结(不发包、headTs 不推进;本包 ≤8ms 内容让位给暂停点)。
+          continue;
+        }
       } else {
-        this.bridgeLatePackets++;
-        if (++burst >= 16) {
-          // 连续追赶也让出事件循环(与 stream() 同理:勿饿死 IPC/RTSP 处理)。
-          burst = 0;
-          await new Promise((r) => setImmediate(r));
+        const lagUs = Number(nowUs() - sendAt);
+        if (lagUs > BRIDGE_RESUME_REBASE_US) {
+          // 暂停恢复/长饥饿:整体时间线落后墙钟 → pacing 前移,恢复首包立即发,
+          // 后续包按新节拍(不重取料,已取到的本包照发 —— 不得造成内容缺口)。
+          pacingShiftUs += BigInt(lagUs);
+          log.info(`bridge pacing rebase: +${lagUs}µs (pause/starvation recovery, RTP 映射不动) idx=${idx}`);
+        } else {
+          this.bridgeLatePackets++;
+          if (++burst >= 4) {
+            // 连续追赶也让出事件循环(与 stream() 同理:勿饿死 IPC/RTSP 处理;
+            // Phase 5 由 16 放宽到 4:追发段最长 4 连发,IPC 响应更及时)。
+            burst = 0;
+            await new Promise((r) => setImmediate(r));
+          }
         }
       }
       // headTs 每包按 startTs + idx·CHUNK_LEN 重算:裁头(bridgeSkipFrames)前移 startTs 后自动跟随。

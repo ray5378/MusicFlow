@@ -49,7 +49,9 @@ export interface RendererHostOptions<TMirror, TReady, TSnapshot, TEvent, THooks 
   /** state 快照重建镜像。 */
   applyState: (mirror: TMirror, snapshot: TSnapshot) => void;
   /** 业务事件分发(hooks 由 setHooks 提供)。 */
-  onEvent?: (event: TEvent, hooks: THooks) => void;
+  onEvent?: (event: TEvent, hooks: THooks) => void;  /** 子进程就绪(mainReady;含计划外崩溃后的退避重启,Phase 5):业务侧据此做
+   *  崩溃后状态重建(如桥路由重 prepare)。首次启动也回调,业务侧须幂等。 */
+  onChildReady?: (info: { respawn: boolean }) => void;
   /** 就绪日志里的镜像摘要(如 `port=38927 serverId=…`)。 */
   describeMirror?: (mirror: TMirror) => string;
   rpcTimeoutMs?: number;
@@ -83,7 +85,10 @@ export class RendererHostSupervisor<
   private startedAt = 0;
   private lastHeartbeat = 0;
   private heartbeatCheck: ReturnType<typeof setInterval> | null = null;
-  private hooks: THooks | null = null;
+  /** 业务 hooks(setHooks 注入;protected 供子类在生命周期回调里分发,Phase 5)。 */
+  protected hooks: THooks | null = null;
+  /** 是否成功 spawn 过至少一次(用于 onChildReady.respawn 判定)。 */
+  private everSpawned = false;
   private pendingBootCleanup: (() => void) | null = null;
   /** 最近一次发出的 RPC 名(诊断:心跳超时那一刻在跟子进程要什么)。 */
   private lastRpcOp = "";
@@ -201,6 +206,10 @@ export class RendererHostSupervisor<
         if (raw?.t === "mainReady") {
           cleanup();
           this.opts.applyReady?.(this.mirror, raw as unknown as TReady);
+          // 就绪回调(Phase 5):首次启动 respawn=false;崩溃退避重启 respawn=true。
+          const respawn = this.everSpawned;
+          this.everSpawned = true;
+          try { this.opts.onChildReady?.({ respawn }); } catch { /* 业务回调失败不拖垮宿主 */ }
           resolve();
         }
       };

@@ -16,6 +16,8 @@
  */
 
 import { createHash } from "node:crypto";
+import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
@@ -34,8 +36,9 @@ export const MAX_PAYLOAD_BYTES = 1024 * 1024;
 export const FRAME_TYPE = { AUDIO: 1, BOUNDARY: 2, CONFIG: 3, HEARTBEAT: 4, STATS: 5 } as const;
 export type FrameType = (typeof FRAME_TYPE)[keyof typeof FRAME_TYPE];
 
-/** flags bit0=keyframe,其余保留。 */
+/** flags bit0=keyframe,bit1=paused(HEARTBEAT 专用:组泵暂停指示,Phase 5 §5.4),其余保留。 */
 export const FRAME_FLAG_KEYFRAME = 0x0001;
+export const FRAME_FLAG_PAUSED = 0x0002;
 
 export interface BridgeFrame {
   type: FrameType;
@@ -168,9 +171,14 @@ export function encodeBoundary(generation: number, sequence: number, reason: Bri
   });
 }
 
-/** HEARTBEAT:空 payload;接收端 2s 未收到任何帧判 stalled。 */
-export function encodeHeartbeat(generation: number, sequence: number): Buffer {
-  return encodeFrame({ type: FRAME_TYPE.HEARTBEAT, flags: 0, generation, sequence, tsUs: 0n, payload: new Uint8Array(0) });
+/** HEARTBEAT:空 payload;接收端 2s 未收到任何帧判 stalled。
+ *  paused=true 置 flags bit1(§5.4):组泵暂停指示 —— 接收端据此冻结推流
+ *  (不写静音/不计 latePackets),与「链路死亡 stalled」区分。 */
+export function encodeHeartbeat(generation: number, sequence: number, paused = false): Buffer {
+  return encodeFrame({
+    type: FRAME_TYPE.HEARTBEAT, flags: paused ? FRAME_FLAG_PAUSED : 0,
+    generation, sequence, tsUs: 0n, payload: new Uint8Array(0),
+  });
 }
 
 /** 解析并校验 CONFIG payload(字段缺失/口径不符即抛,调用方断连)。 */
@@ -250,4 +258,44 @@ export function bridgeSocketPath(deviceId: string, token: string, platform: Node
     throw new Error(`mfab socket path too long (${Buffer.byteLength(p)}B, limit 100): ${p}`);
   }
   return p;
+}
+
+// ---------------------------------------------------------------------------
+// 残留 socket 清理(Phase 5,§5.2「主进程重启」行)
+// ---------------------------------------------------------------------------
+
+/** 启动时清理 `<tmpdir>/mfab/` 下陈旧 `.sock`:探针连接被拒(ECONNREFUSED)= 无活
+ *  listener ⇒ unlink。否则主进程/子进程重启后首个流可能被陈旧 socket 文件干扰,
+ *  且垃圾文件无界堆积。Windows 命名管道由内核回收,无需处理。
+ *  @returns 清理的文件数(诊断;失败逐个吞掉,绝不阻塞启动)。 */
+export async function cleanupStaleBridgeSockets(opts?: { dir?: string; probeTimeoutMs?: number }): Promise<number> {
+  if (process.platform === "win32") return 0;
+  const dir = opts?.dir ?? path.join(os.tmpdir(), "mfab");
+  const timeoutMs = opts?.probeTimeoutMs ?? 300;
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(dir).filter((f) => f.endsWith(".sock"));
+  } catch {
+    return 0; // 目录不存在 = 无残留
+  }
+  let removed = 0;
+  for (const name of entries) {
+    const p = path.join(dir, name);
+    const alive = await new Promise<boolean>((resolve) => {
+      const sock = net.connect(p);
+      const done = (ok: boolean) => {
+        try { sock.destroy(); } catch { /* ignore */ }
+        resolve(ok);
+      };
+      const timer = setTimeout(() => done(false), timeoutMs);
+      sock.once("connect", () => { clearTimeout(timer); done(true); });
+      sock.once("error", () => { clearTimeout(timer); done(false); });
+    });
+    if (alive) continue;
+    try {
+      fs.unlinkSync(p);
+      removed++;
+    } catch { /* 已被并发清理 */ }
+  }
+  return removed;
 }

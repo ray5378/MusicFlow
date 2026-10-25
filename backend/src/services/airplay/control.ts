@@ -748,6 +748,9 @@ export function deleteAirPlayDeviceRecord(deviceId: string): boolean {
   // 永久删除 = 这台设备从没配置过:持久音量/静音一并清掉,避免设备重新被发现时
   // 带着旧设置"复活"(与 sendspin 解绑清整行同语义)。
   deleteAirPlayVolumeState(deviceId);
+  // Phase 6a 凭据契约:hap_credentials 是 airplay_devices 的列,随本行 DELETE
+  // 一并消失 —— 设备被删除即自动「清凭据回到配对窗」,无需额外清理;6a 的
+  // pairingContract 只负责另一条失效路径(verify 连续失败 N 次)。
   lastCast.delete(deviceId);
   import("./discovery.js").then(({ removeAirPlayDevice }) => {
     removeAirPlayDevice(deviceId);
@@ -932,6 +935,12 @@ async function ensureAirplayHost(): Promise<void> {
       // 时由 handleAirplaySessionEnded 抑制过期 IDLE(见其注释)。
       onSessionEnded: (deviceId, info) =>
         void handleAirplaySessionEnded(deviceId, info?.loudnessStderr ?? "", undefined, info),
+      // Phase 5(§5.2):子进程崩溃重启成功后重建桥路由(原 token 重发 bridgePrepare,
+      // 泵侧 BridgeMember 退避重连同 socketPath 即接上,BOUNDARY{rehost} 新 generation)。
+      onBridgeChildRestarted: () =>
+        void import("../group/protocolPlayer.js")
+          .then((m) => m.rebuildBridgeRoutes())
+          .catch((err) => log.warn("桥路由重建失败(忽略)", { err: (err as Error)?.message || err })),
     });
     await airplaySupervisor.start();
   })().finally(() => { hostStarting = null; });
@@ -1317,10 +1326,23 @@ export function startAirPlayService(): void {
   startAirPlayDiscovery();
   onAirPlayEvent((e) => {
     if (e.type === "byebye") {
+      // Phase 5(§5.2 桥设备离线):桥占用设备**不等重连** —— 立刻从全部活跃桥
+      // 路由摘除(bridgeStop + 清 owner,标 offline);设备重新上线按「加入」处理。
+      if (isBridgeOwned(e.id)) {
+        void import("../group/protocolPlayer.js")
+          .then((m) => m.notifyAirplayDeviceOffline(e.id))
+          .catch((err) => log.warn("桥设备离线摘除失败(忽略)", { deviceId: e.id, err: (err as Error)?.message || err }));
+        return;
+      }
       // Device vanished → force-stop any active session.
       if (hasActiveSession(e.id)) void stopAirPlaySession(e.id);
     }
   });
+  // 主进程重启残留清理(§5.2):清扫无 listener 的陈旧 mfab socket(fire-and-forget)。
+  void import("./bridgeChannel.js")
+    .then((m) => m.cleanupStaleBridgeSockets())
+    .then((n) => { if (n > 0) log.info(`mfab 残留 socket 清理: ${n} 个`); })
+    .catch(() => { /* 清理失败不拖垮启动 */ });
   // fork 模式:顺带把推流子进程拉起来(不阻塞启动流程;投屏时还有懒启动兜底)。
   if (isAirPlayForkMode()) {
     void ensureAirplayHost().catch((err) => log.error("airplay 子进程启动失败", { err: (err as Error)?.message || err }));

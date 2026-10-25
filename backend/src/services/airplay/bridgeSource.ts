@@ -159,8 +159,10 @@ export class BridgeSource {
         this.opts.log?.(`bridge backpressure ${Math.round(queuedMs)}ms > ${this.highWaterMs}ms (maxQueueMs=${Math.round(this.maxQueueMs)})`);
         this.opts.onBackpressure?.(queuedMs);
       }
-    } else {
+    } else if (this.backpressureActive) {
+      // 低水位恢复(Phase 5):回到 < highWater,背压解除(可 grep)。
       this.backpressureActive = false;
+      this.opts.log?.(`bridge backpressure recovered ${Math.round(queuedMs)}ms <= ${this.highWaterMs}ms`);
     }
     this.drain();
   }
@@ -203,7 +205,10 @@ export class BridgeSource {
 
   private setState(state: BridgeLinkState, info?: { reason?: string }): void {
     if (this.state_ === state) return;
+    const prev = this.state_;
     this.state_ = state;
+    // 状态机迁移日志(Phase 5 出口判据:live→stalled→connecting→live 序列可 grep)。
+    this.opts.log?.(`bridge link state: ${prev}→${state}${info?.reason ? ` (${info.reason})` : ""}`);
     this.opts.onStateChange?.(state, info);
   }
 

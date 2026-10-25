@@ -18,7 +18,25 @@ import path from "path";
 import fs from "fs";
 import { randomUUID } from "crypto";
 
-const dir = path.join(os.tmpdir(), "mf-test-data", `t-${randomUUID()}`);
+// ---- 陈旧测试数据目录清扫(housekeeping,Phase 5)----
+// 每个测试文件都在 mf-test-data 下留一个 t-<uuid> 目录;长期不清会在 CI/开发机上
+// 无界堆积(230 实测堆到 13GB → ENOSPC 打满磁盘)。这里在 setup 阶段顺手清扫
+// mtime 超过 6h 的陈旧目录:正在运行的会话(刚创建/mtime 新鲜)绝不受影响,
+// 跨进程并发(forks)也安全 —— 只删「6 小时没人碰过」的目录。
+const dataRoot = path.join(os.tmpdir(), "mf-test-data");
+try {
+  for (const e of fs.readdirSync(dataRoot)) {
+    if (!e.startsWith("t-")) continue;
+    const p = path.join(dataRoot, e);
+    try {
+      if (Date.now() - fs.statSync(p).mtimeMs > 6 * 3_600_000) {
+        fs.rmSync(p, { recursive: true, force: true });
+      }
+    } catch { /* 单目录失败忽略(可能正被并发使用) */ }
+  }
+} catch { /* 根目录不存在 = 无残留 */ }
+
+const dir = path.join(dataRoot, `t-${randomUUID()}`);
 fs.mkdirSync(dir, { recursive: true });
 process.env.DATA_DIR = dir;
 const { initDatabase } = await import("../src/db/index.js");

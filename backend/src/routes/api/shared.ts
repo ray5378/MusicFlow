@@ -649,7 +649,9 @@ export async function borrowLandingConfirmed(toPeerId: string, expectSeconds: nu
 }
 
 export async function detachFromActiveGroups(parsed: { kind: string; id: string }): Promise<void> {
-  if (parsed.kind !== "dlna" && parsed.kind !== "sendspin") return;
+  // Phase 5(§5.2):airplay 也允许 —— 显式操控 AirPlay 成员先摘组(否则是 no-op,
+  // 桥上留孤儿成员),摘除链路经 alignGroupMembers 按 bridge/legacy 路由分别处置。
+  if (parsed.kind !== "dlna" && parsed.kind !== "sendspin" && parsed.kind !== "airplay") return;
   const bare = splitMemberId(parsed.kind === "sendspin" ? `sendspin:${parsed.id}` : parsed.id)?.id ?? parsed.id;
   const gid = getQueueController().activeGroupOfDevice(bare);
   if (!gid) return;
@@ -681,16 +683,41 @@ export async function alignGroupMembers(groupId: string, added: string[], remove
     });
   }
   if (apAdded.length > 0) {
-    // airplay 成员加入:同样 cast 当前曲,但起点编进**本次 cast**(起播即落位,
-    // AirPlay seek 是完整重建会话,绝不能先起播再 seek)。
-    getQueueController().rejoinMembersAirplay(groupId, apAdded).catch((e: any) => {
-      log.warn(`[group] ${groupId}: airplay 成员加入对齐失败: ${e?.message || e}`);
-    });
+    // airplay 成员加入(Phase 5 §5.2):桥路由活跃 → bridgePrepare + 泵 ring 回填
+    // (不 rejoinMembersAirplay);legacy 路由 → 旧行为(cast 当前曲,起点编进 cast)。
+    // MAJ-07:bridgeJoin 失败 → 该设备回落 solo cast(与起播路径同口径)。
+    const { isBridgeRouteActive, bridgeJoinMember } = await import("../../services/group/protocolPlayer.js");
+    if (isBridgeRouteActive(groupId)) {
+      for (const d of apAdded) {
+        try {
+          const joined = await bridgeJoinMember(groupId, d);
+          if (!joined) throw new Error("桥路由未激活");
+        } catch (e: any) {
+          log.warn(`[group] ${groupId}: airplay 成员 ${d} 桥加入失败 → 回落 solo cast: ${e?.message || e}`);
+          getQueueController().rejoinMembersAirplay(groupId, [d]).catch((e2: any) => {
+            log.warn(`[group] ${groupId}: airplay 成员 ${d} solo 回落加入失败: ${e2?.message || e2}`);
+          });
+        }
+      }
+    } else {
+      // airplay 成员加入:同样 cast 当前曲,但起点编进**本次 cast**(起播即落位,
+      // AirPlay seek 是完整重建会话,绝不能先起播再 seek)。
+      getQueueController().rejoinMembersAirplay(groupId, apAdded).catch((e: any) => {
+        log.warn(`[group] ${groupId}: airplay 成员加入对齐失败: ${e?.message || e}`);
+      });
+    }
   }
   for (const deviceId of apRemoved) {
     try {
-      const { stopAirPlay } = await import("../../services/airplay/control.js");
-      await stopAirPlay(deviceId);
+      // Phase 5 §5.2:桥路由活跃 → bridgeLeaveMember(bridgeStop + 摘泵句柄,设备
+      // 回到可 cast 状态);legacy 路由 → 旧行为(stopAirPlay)。
+      const { isBridgeRouteActive, bridgeLeaveMember } = await import("../../services/group/protocolPlayer.js");
+      if (isBridgeRouteActive(groupId)) {
+        await bridgeLeaveMember(groupId, deviceId);
+      } else {
+        const { stopAirPlay } = await import("../../services/airplay/control.js");
+        await stopAirPlay(deviceId);
+      }
     } catch (e: any) {
       log.warn(`[group] ${groupId}: airplay 成员 ${deviceId} 摘除断开失败: ${e?.message || e}`);
     }

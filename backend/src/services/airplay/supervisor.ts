@@ -32,6 +32,9 @@ export interface AirplayHostHooks {
    *  info 携带落点 + `current`(是否仍是该设备的当前会话);current=false 时
    *  主进程必须**抑制**这条过期 IDLE —— 它属于上一首,会污染新曲的 tracker。 */
   onSessionEnded?: (deviceId: string, info?: AirplaySessionEndInfo) => void;
+  /** Phase 5(§5.2):airplay 子进程崩溃退避重启完成 —— 主进程据此重建桥路由
+   *  (原 token 重发 bridgePrepare,泵侧 BridgeMember 退避重连自动接上)。 */
+  onBridgeChildRestarted?: () => void;
 }
 
 class AirplaySupervisor extends RendererHostSupervisor<
@@ -52,6 +55,11 @@ class AirplaySupervisor extends RendererHostSupervisor<
       // mainReady 载荷只有 pid,无需落镜。
       applyState: (m, s) => {
         m.sessions = new Map(s.sessions.map((r) => [r.deviceId, r]));
+      },
+      // Phase 5:子进程崩溃退避重启成功(respawn=true)→ 业务钩子重建桥路由。
+      onChildReady: ({ respawn }) => {
+        if (!respawn) return;
+        try { this.hooks?.onBridgeChildRestarted?.(); } catch { /* 重建失败不拖垮宿主 */ }
       },
       onEvent: (ev, hooks) => {
         if (ev.t === "sessionEnded") {

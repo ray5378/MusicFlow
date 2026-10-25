@@ -515,6 +515,29 @@ export function leaveGroupCore(srv: SendspinServer | null, groupName: string, cl
   return false;
 }
 
+/** 桥集合同步核心(Phase 5,§5.2「加入/摘除 AirPlay」):
+ *  把主进程下发的桥规格同步到活跃组的 bridges(幂等;热复用语义见 syncGroupBridges),
+ *  并对**新加入**的桥做 late-join ring 回填(从当前/未来内容起播,不从 0 开始)。
+ *  fork 经 childMain "bridgeSync" op 下发;in-proc 由 index.ts 直调。
+ *  @returns 新回填帧数总数(诊断)。 */
+export function bridgeSyncCore(
+  srv: SendspinServer | null,
+  groupName: string,
+  sockets: BridgeSocketSpec[],
+  factory?: Parameters<typeof syncGroupBridges>[2],
+): number {
+  if (!srv) return 0;
+  const g = srv.group(groupName);
+  const before = new Set((g.bridgeSpecs ?? []).map((s) => s.deviceId));
+  syncGroupBridges(g, sockets, factory);
+  let backfilled = 0;
+  for (const spec of sockets) {
+    if (before.has(spec.deviceId)) continue; // 热复用句柄:已在流内,不重复回填
+    backfilled += g.backfillBridge(spec.deviceId);
+  }
+  return backfilled;
+}
+
 // ==================== 暂停:三态广播 + 自动 stop 看门狗 ====================
 //
 // 对齐 MA `controllers/player_queues/controller.py:733-756` 的 `_watch_pause`:
@@ -631,6 +654,9 @@ export function pauseCore(srv: SendspinServer | null, clientId: string): void {
   const g = resolveLiveGroup(srv, clientId);
   g.paused = true;
   pumpFor(srv, g).pause();
+  // Phase 5(§5.4):暂停指示下发到桥 —— airplay 侧冻结推流(不写静音/不计
+  // latePackets),与「链路死亡 stalled」区分;心跳维持,不触发 stalled 误判。
+  try { g.setBridgesPaused(true); } catch { /* 单桥失败不连累 */ }
   broadcastGroupState(srv, clientId, g);
   // ⚠️ 只有「真的有曲目在播」才埋看门狗。设备未起播(队列空 / 只是挂了个暂停
   // 标记)时 pause 也会走到这里,若无条件 arm,30s 后会把一台并未在播的设备
@@ -648,6 +674,10 @@ export function resumePumpCore(srv: SendspinServer | null, clientId: string): vo
     broadcastGroupState(srv, clientId, g);
   }
   pumpFor(srv, g).resume();
+  // Phase 5(§5.4):恢复指示。暂停 ≤45s ⇒ 桥按「继续」处理(原 A/B 不动,
+  // sendAt pacing 自动 rebase,drift 由 tsUs 自然重对齐);>45s ⇒ 桥按「锚点不可达」
+  // 重新锚定(bridgeSession 侧判定)。
+  try { g.setBridgesPaused(false); } catch { /* 单桥失败不连累 */ }
 }
 
 /** seek 核心 —— **MA 权威语义**(controllers/player_queues/controller.py `seek` @862,

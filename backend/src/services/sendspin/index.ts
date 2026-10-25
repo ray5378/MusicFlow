@@ -814,6 +814,25 @@ export async function sendspinGroupLeave(groupName: string, clientId: string): P
   return leaveGroupCore(getServer(), groupName, clientId);
 }
 
+/** 用户组桥集合同步(Phase 5,§5.2「加入/摘除 AirPlay」+ 子进程重启 re-attach):
+ *  把目标桥规格数组同步到活跃组(热复用/停旧起新/摘除),新加入者做 ring 回填。
+ *  返回 { synced, backfilled } 供调用方日志。 */
+export async function sendspinGroupBridgeSync(
+  groupName: string,
+  sockets: BridgeSocketSpec[],
+): Promise<{ synced: number; backfilled: number }> {
+  if (isForkMode()) {
+    if (!sendspinSupervisor.isRunning()) return { synced: 0, backfilled: 0 };
+    return sendspinSupervisor.rpc<{ synced: number; backfilled: number }>("bridgeSync", {
+      group: groupName,
+      sockets,
+    });
+  }
+  const { bridgeSyncCore } = await import("./playerCore.js");
+  const backfilled = bridgeSyncCore(getServer(), groupName, sockets);
+  return { synced: sockets.length, backfilled };
+}
+
 /** 用户组传输指令(stop/pause/resume/seek/volume):core 函数本就 group-name 无关
  *  (经 srv.group(name)),fork 经既有 transport op 下发,子进程零改动。 */
 export async function sendspinGroupTransport(
