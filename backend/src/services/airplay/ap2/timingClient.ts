@@ -44,6 +44,9 @@ export function buildNtpRequest(seq: number, lastReplyTs: Buffer, nowMs: number)
 /** 单条 TCP 排水通道：连接、保活、断线重连（指数退避封顶 2s）。 */
 class DrainChannel extends EventEmitter {
   private socket: Socket | null = null;
+  /** 在途 dial 的 socket（connect 回调未到之前）。destroy() 必须一并销毁，
+   *  否则会漏一条 TCP，且回调随后把 socket 落成 ⇒ connected 被置回 true。 */
+  private pending: Socket | null = null;
   private host = "";
   private port = 0;
   private closed = false;
@@ -59,7 +62,21 @@ class DrainChannel extends EventEmitter {
 
   private dial(): Promise<void> {
     return new Promise((resolve, reject) => {
+      let settled = false;
+      const settle = (): void => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
       const s = createConnection({ host: this.host, port: this.port }, () => {
+        // destroy() 可能抢在 connect 回调之前发生：此时不得落成 socket，
+        // 也不得注册 close ⇒ 不重连；更不得把 connected 置回 true。
+        if (this.closed || this.pending !== s) {
+          s.destroy();
+          settle(); // 已收敛，resolve 以免调用方 await 挂死
+          return;
+        }
+        this.pending = null;
         this.retry = 0;
         this.socket = s;
         s.on("data", () => {
@@ -69,9 +86,23 @@ class DrainChannel extends EventEmitter {
         s.on("error", () => {
           /* close 会跟随触发 */
         });
-        resolve();
+        settle();
       });
-      s.once("error", reject);
+      this.pending = s;
+      s.once("error", (e: Error) => {
+        if (this.pending === s) this.pending = null;
+        // 已 destroy：收敛（不上抛，也不重连）
+        if (this.closed) settle();
+        else {
+          settled = true;
+          reject(e);
+        }
+      });
+      s.once("close", () => {
+        // destroy() 在途时：socket 既不触发 connect 也不报错，只触发 close
+        // ⇒ 必须在这里兜底，否则 dial() 的 promise 永不 settle（调用方 await 挂死）。
+        if (this.closed) settle();
+      });
     });
   }
 
@@ -92,8 +123,11 @@ class DrainChannel extends EventEmitter {
   destroy(): void {
     this.closed = true;
     if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
     this.socket?.destroy();
     this.socket = null;
+    this.pending?.destroy(); // 在途 dial：一并销毁，杜绝漏一条 TCP
+    this.pending = null;
   }
 
   get connected(): boolean {

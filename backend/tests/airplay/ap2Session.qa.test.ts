@@ -399,6 +399,71 @@ describe("异常路径（批 4 纪律：明确状态 + 无悬挂资源）", () =
     }
   });
 
+  it("destroy() 抢在 dial 完成前：在途 socket 一并销毁（connected 不回弹、不重连）", async () => {
+    let conns = 0;
+    const serverSockets: Socket[] = [];
+    const srv: Server = createServer((s: Socket) => {
+      conns++;
+      serverSockets.push(s);
+      s.on("error", () => {
+        /* ignore */
+      });
+      s.on("data", () => {
+        /* 排水 */
+      });
+    });
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+    const port = (srv.address() as AddressInfo).port;
+    const ch = new EventTimingChannels();
+    try {
+      // connect() 内部同步建好 pending socket 后立刻 destroy ⇒ dial 必定还在途
+      const p = ch.connect("127.0.0.1", { eventPort: port, timingPort: port });
+      ch.destroy();
+      await p; // 必须不挂死；且回调不得把 connected 置回 true
+      expect(ch.ntpConnected).toBe(false);
+
+      await sleep(700); // 覆盖退避窗口（100ms 起）
+      const after = conns;
+      for (const s of serverSockets) s.destroy(); // 逼重连路径现形
+      await sleep(700);
+      expect(conns).toBe(after); // 不再增长 ⇒ 无重连、无漏建 TCP
+      expect(ch.ntpConnected).toBe(false);
+    } finally {
+      ch.destroy();
+      for (const s of serverSockets) s.destroy();
+      srv.close();
+    }
+  });
+
+  it("供给器抛错：pumpRealtime 收敛为 error + lastError 有值，且异常仍上抛调用方", async () => {
+    const acc = await startFakeAccessory();
+    const client = new Ap2RtspClient();
+    await client.connect("127.0.0.1", acc.port);
+    client.upgradeToEncrypted(SHARED);
+    const session = new Ap2StreamSession({
+      host: "127.0.0.1", port: acc.port, controllerId: "F00FBABE0008", client, sourceRate: 48000,
+    });
+    const provider = {
+      pull: async (): Promise<Buffer | null> => {
+        throw new Error("桥队列已废：pull 崩了");
+      },
+    };
+    try {
+      await session.open();
+      // ① 异常必须上抛（不吞）
+      await expect(session.pumpRealtime(provider)).rejects.toThrow("pull 崩了");
+      // ② 状态机必须收敛（不能停在 open）
+      expect(session.currentState).toBe("error");
+      expect(session.stats.linkLoss).toBe("provider-error");
+      expect(session.stats.lastError).toBe("桥队列已废：pull 崩了");
+      // ③ 收敛后不得再推流
+      expect(() => session.pump(pcm(352))).toThrow(Ap2StreamError);
+    } finally {
+      await session.close();
+      acc.close();
+    }
+  });
+
   it("排水通道断线后重连，destroy() 后不再重连（无悬挂定时器）", async () => {
     let conns = 0;
     const serverSockets: Socket[] = [];
@@ -421,6 +486,9 @@ describe("异常路径（批 4 纪律：明确状态 + 无悬挂资源）", () =
       // 服务器侧强拆 → 退避重连（100ms 起）
       for (const s of serverSockets) s.destroy();
       await until(() => conns > 2, 3000);
+      // event/timing 两条通道各自重连，第二条 accept 可能晚于第一条 ⇒ 先等齐再取基线，
+      // 否则「兄弟连接的 accept」会在 destroy() 之后落定，被误判成「destroy 后又发起了连接」。
+      await sleep(400);
       ch.destroy();
       const afterDestroy = conns;
       await sleep(700); // 覆盖退避窗口

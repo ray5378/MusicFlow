@@ -31,6 +31,7 @@ import { bplistDecode, bplistEncode, type PlistValue } from "./bplist.js";
 import { AlacEncoder } from "./alac.js";
 import { RtpRealtimeSender, UdpAudioSink } from "./rtpAudio.js";
 import { EventTimingChannels } from "./timingClient.js";
+import { AP2_TRACE_LOOP_SAMPLES, AP2_TRACE_ON, Ap2OpenTrace, nowUs } from "./ap2Trace.js";
 import { AP2_RATES } from "../rates.js";
 import { PolyphaseResampler, pcmS16ToFloat, floatToPcmS16 } from "../resampler.js";
 import { createLogger } from "../../../utils/logger.js";
@@ -161,6 +162,8 @@ export class Ap2StreamSession {
   private lastError: string | null = null;
   /** 链路失败原因（ev:"link-loss" 的 reason；空 = 未发生）。 */
   private linkLossReason: string | null = null;
+  /** 首包延迟分解埋点（MUSICFLOW_AP2_TRACE=1 才有实例；否则恒为 null ⇒ 打点分支零开销）。 */
+  private readonly trace: Ap2OpenTrace | null;
   /** client 事件监听器引用（cleanup 时精确摘除，避免悬挂监听）。 */
   private readonly onClientClose = (): void => this.failLink("rtsp-close", "rtsp");
   private readonly onClientError = (e: Error): void => {
@@ -172,6 +175,7 @@ export class Ap2StreamSession {
     this.opts = { sourceRate: 48000, spf: 352, ...options };
     this.encoder = new AlacEncoder({ spf: this.opts.spf });
     this.streamKey = options.shk ?? randomBytes(32);
+    this.trace = AP2_TRACE_ON ? new Ap2OpenTrace(options.controllerId) : null;
   }
 
   get streamInfo(): Ap2StreamInfo | null {
@@ -270,6 +274,7 @@ export class Ap2StreamSession {
         }),
         timeoutMs: this.opts.timeoutMs,
       });
+      if (this.trace) this.trace.markSetupResp(nowUs()); // 埋点起点：SETUP(stream) 响应到达
       const streamBody = this.parsePlist(streamResp.body);
       const st = this.firstStream(streamBody);
       if (!st || typeof st.dataPort !== "number") {
@@ -297,13 +302,22 @@ export class Ap2StreamSession {
       // 4) 排水通道 + 周期 NTP（bed 丢弃；真机 NTP 应答处理留后续批次）
       this.timing = new EventTimingChannels();
       if (eventPort && timingPort) {
+        let tConn0 = 0;
+        if (this.trace) tConn0 = nowUs();
         await this.timing.connect(host, { eventPort, timingPort });
+        if (this.trace) this.trace.markTiming(tConn0, nowUs()); // #1 设备侧 accept
         this.timing.startNtp(1000);
       }
 
       // 5) UDP 出口 + 打包器（端口不可达经 onError/回调上报，连续超限即收敛）
       this.sink = this.opts.sink ?? new UdpAudioSink({ onError: (e: Error) => this.onSinkError(e) });
       await this.sink.connect(host, st.dataPort);
+      if (this.trace) {
+        // #4/#7：UdpAudioSink 自己在 connect() 里分段计时（注入的假出口没有该字段 ⇒ 0）
+        const span = (this.sink as { connectSpanUs?: { dgramImportUs: number; socketUs: number } | null })
+          .connectSpanUs ?? null;
+        this.trace.markDgram(span?.dgramImportUs ?? 0, span?.socketUs ?? 0);
+      }
       this.sender = new RtpRealtimeSender(this.streamKey);
 
       this.info = {
@@ -318,6 +332,7 @@ export class Ap2StreamSession {
         resampled: decision.resampled,
         spf: this.opts.spf,
       };
+      if (this.trace) this.trace.markOpenDone(nowUs());
       this.state = "open";
       return this.info;
     } catch (e) {
@@ -374,17 +389,44 @@ export class Ap2StreamSession {
     const periodMs = (this.opts.spf / rate) * 1000;
     let total = 0;
     let nextAt = Date.now();
-    for (;;) {
-      if (this.state !== "open") break; // 链路已收敛（error/closed）：立即停止拉取
-      const pcm = await pull();
-      if (!pcm) break;
-      total += this.pump(pcm);
-      const srcFrames = pcm.length / 4;
-      const outFrames = this.resampler ? Math.ceil((srcFrames * rate) / this.opts.sourceRate) : srcFrames;
-      nextAt += periodMs * Math.max(1, Math.floor(outFrames / this.opts.spf));
-      const wait = nextAt - Date.now();
-      if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-      else nextAt = Date.now(); // 落后重置锚点，避免追赶抖动
+    if (this.trace) this.trace.markPumpEnter(nowUs()); // #3 与 open() 结束时刻之差
+    try {
+      for (;;) {
+        if (this.state !== "open") break; // 链路已收敛（error/closed）：立即停止拉取
+        let tPull0 = 0;
+        let tWall0 = 0;
+        if (this.trace) {
+          tPull0 = nowUs();
+          tWall0 = Date.now();
+        }
+        const pcm = await pull();
+        if (this.trace) this.trace.markFirstPull(tPull0, nowUs(), Date.now() - tWall0); // #2
+        if (!pcm) break;
+        const before = this.sentPackets;
+        total += this.pump(pcm);
+        if (this.trace && this.sentPackets > before) this.trace.markFirstSend(nowUs());
+        const srcFrames = pcm.length / 4;
+        const outFrames = this.resampler ? Math.ceil((srcFrames * rate) / this.opts.sourceRate) : srcFrames;
+        nextAt += periodMs * Math.max(1, Math.floor(outFrames / this.opts.spf));
+        const wait = nextAt - Date.now();
+        const tSched = this.trace ? nowUs() : 0;
+        if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+        else nextAt = Date.now(); // 落后重置锚点，避免追赶抖动
+        if (this.trace) {
+          // #3：实际唤醒 − 计划唤醒（wait≤0 时计划值取 0）
+          this.trace.sampleLoopDelay(nowUs() - tSched - (wait > 0 ? wait * 1000 : 0));
+          // 样本够数就出报告：不等整场结束，避免中途被杀时拿不到数据
+          if (this.trace.loopSamples >= AP2_TRACE_LOOP_SAMPLES) this.trace.emit(rate);
+        }
+      }
+    } catch (e) {
+      // 供给器（或循环体）抛错：先按 failLink 纪律收敛状态机，再把异常交给调用方
+      // —— 绝不吞异常，调用方仍要看到它；但状态不能停在 open（与 :failLink 一致）。
+      this.lastError = e instanceof Error ? e.message : String(e);
+      this.failLink("provider-error", "pump");
+      throw e;
+    } finally {
+      this.trace?.emit(rate); // 会话提前结束（null 供给/断链/异常）也要如实出一行
     }
     return total;
   }

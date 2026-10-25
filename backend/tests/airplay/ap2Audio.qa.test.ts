@@ -138,11 +138,12 @@ describe("RtpRealtimeSender", () => {
   const enc = new AlacEncoder({ spf: SPF });
 
   /** 镜像加密侧的解密（node crypto，AAD 绑定校验）。 */
-  function decryptPacket(pkt: Buffer, sessionKey: Buffer): { plain: Buffer; seq: number; ts: number; ssrc: number; pt: number } {
+  function decryptPacket(pkt: Buffer, sessionKey: Buffer): { plain: Buffer; seq: number; ts: number; ssrc: number; pt: number; marker: number } {
     const seq = pkt.readUInt16BE(2);
     const ts = pkt.readUInt32BE(4);
     const ssrc = pkt.readUInt32BE(8);
     const pt = pkt[1]! & 0x7f;
+    const marker = (pkt[1]! & 0x80) >>> 7; // RTP M 位（bit7）
     const nonce8 = pkt.subarray(pkt.length - 8);
     const n12 = Buffer.alloc(12);
     nonce8.copy(n12, 4);
@@ -152,7 +153,7 @@ describe("RtpRealtimeSender", () => {
     // ⚠️ Node ≥24：decipher 不会自动取输入尾部 16B 当 tag，必须显式 setAuthTag
     d.setAuthTag(body.subarray(body.length - 16));
     const plain = Buffer.concat([d.update(body.subarray(0, body.length - 16)), d.final()]);
-    return { plain, seq, ts, ssrc, pt };
+    return { plain, seq, ts, ssrc, pt, marker };
   }
 
   it("包结构与推进：0x80 头/PT96/seq++/ts+=352/ssrc，长度 = 12+密文+16tag+8nonce", () => {
@@ -187,6 +188,38 @@ describe("RtpRealtimeSender", () => {
     expect(decryptPacket(pkt, key).seq).toBe(0xffff);
     const pkt2 = sender.next(enc.encodeFrame(Buffer.alloc(1408)), SPF);
     expect(decryptPacket(pkt2, key).seq).toBe(0);
+  });
+
+  // ==================== RTP marker(M)：协议保真（A/B 实测：cliairplay 每场首包 M=1） ====================
+  it("M 位：会话首包=1、第二包起恒 0（PT 不受 marker 位影响）", () => {
+    const sender = new RtpRealtimeSender(key);
+    const p1 = sender.next(enc.encodeFrame(Buffer.alloc(1408)), SPF);
+    expect(decryptPacket(p1, key).marker).toBe(1);
+    expect(p1[1]! & 0x80).toBe(0x80);
+    expect(decryptPacket(p1, key).pt).toBe(96); // 0x80|96 掩码回 96
+    const p2 = sender.next(enc.encodeFrame(Buffer.alloc(1408)), SPF);
+    const p3 = sender.next(enc.encodeFrame(Buffer.alloc(1408)), SPF);
+    expect(decryptPacket(p2, key).marker).toBe(0);
+    expect(decryptPacket(p3, key).marker).toBe(0);
+    expect(decryptPacket(p2, key).pt).toBe(96);
+    // 3 包连续：seq/ts 语义不受 marker 改动影响
+    expect(decryptPacket(p2, key).seq).toBe(1);
+    expect(decryptPacket(p3, key).ts).toBe(SPF * 2);
+  });
+
+  it("M 位：新一轮会话（新 sender，等价 open() 重建）首包重新为 1，旧会话不串味", () => {
+    const s1 = new RtpRealtimeSender(key, { ssrc: 0x11111111 });
+    expect(decryptPacket(s1.next(enc.encodeFrame(Buffer.alloc(1408)), SPF), key).marker).toBe(1);
+    expect(decryptPacket(s1.next(enc.encodeFrame(Buffer.alloc(1408)), SPF), key).marker).toBe(0);
+    // 旧实例继续发：仍是 0（不是新一轮）
+    expect(decryptPacket(s1.next(enc.encodeFrame(Buffer.alloc(1408)), SPF), key).marker).toBe(0);
+    // 新实例：重新出现首包 1，且 seq/ts 从头开始
+    const s2 = new RtpRealtimeSender(key, { ssrc: 0x22222222 });
+    const q1 = s2.next(enc.encodeFrame(Buffer.alloc(1408)), SPF);
+    expect(decryptPacket(q1, key).marker).toBe(1);
+    expect(decryptPacket(q1, key).seq).toBe(0);
+    expect(decryptPacket(q1, key).ts).toBe(0);
+    expect(decryptPacket(s2.next(enc.encodeFrame(Buffer.alloc(1408)), SPF), key).marker).toBe(0);
   });
 });
 

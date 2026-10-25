@@ -98,13 +98,19 @@ export interface ProtocolCaps {
   rate: number;
   clock: "ntp" | "ptp";
   encryption: "none" | "alac-chacha";
-  /** 96=RAOP, 102=realtime, 103=buffered。 */
-  streamType: 96 | 102 | 103;
+  /** 96 = RAOP(AP1) 与 AP2 realtime **共用**；103 = AP2 buffered。
+   *  🔴 原写的 102 无任何接收端源码支撑，已更正为 96：权威依据
+   *  `/tmp/ap2recv/ap2/connections/stream.py:12`（`REALTIME = 96` / `BUFFERED = 103`），
+   *  非 96 床侧 `Stream.__init__` 会走 buffered 分支；发送侧权威常量见
+   *  `ap2/ap2Stream.ts` 的 `AP2_REALTIME_STREAM_TYPE`（同为此值）。
+   *  ⚠️ 96 同时代表两种协议 ⇒ `streamType` **不能单独区分协议**，必须连带看
+   *  `encryption`（RAOP = `none`，AP2 realtime = `alac-chacha`）。 */
+  streamType: 96 | 103;
 }
 
 export const PROTOCOL_CAPS: Record<BridgeProtocol, ProtocolCaps> = {
   "raop":         { rate: AIRPLAY1_RATE, clock: "ntp", encryption: "none",        streamType: 96  },
   "ap2-compat":   { rate: AIRPLAY1_RATE, clock: "ntp", encryption: "none",        streamType: 96  },
-  "ap2-realtime": { rate: 48000,         clock: "ntp", encryption: "alac-chacha", streamType: 102 },
+  "ap2-realtime": { rate: 48000,         clock: "ntp", encryption: "alac-chacha", streamType: 96  },
   "ap2-buffered": { rate: 48000,         clock: "ptp", encryption: "alac-chacha", streamType: 103 },
 };

@@ -9,6 +9,7 @@
 //     与批 1 nonce8() 实测互操作一致）
 // 不带 RFC2198 冗余（feature bit 61 才启用，Bed/真机均不要求）。
 import { createCipheriv } from "node:crypto";
+import { AP2_TRACE_ON, nowUs } from "./ap2Trace.js";
 
 const TAG_LEN = 16;
 const NONCE_LEN = 8;
@@ -39,6 +40,13 @@ export interface RtpRealtimeOptions {
 export class RtpRealtimeSender {
   private seq = 0;
   private ts = 0;
+  /** 本会话（spurt）是否还没发过包 —— **仅首包**置 marker(M=1)。
+   *  依据 e2e A/B 实测：cliairplay 每场会话的第一个音频包 marker=1、其后为 0，
+   *  接收端据此判定「新会话/新 spurt 起点」。
+   *  ⚠️ 作用域严格是「一个 RtpRealtimeSender 实例」= 一个 open() 出来的流会话：
+   *  `Ap2StreamSession.open()` 每次都 new 一个 sender ⇒ 重跑新一轮自动回到 true，
+   *  跨会话不会串味。除首包外**任何情况都不得置 1**（包括丢 / 跳跃 / 补静音之后）。 */
+  private firstPacket = true;
   private readonly ssrc: number;
   private readonly pt: number;
   private nonceCounter = 0;
@@ -63,7 +71,8 @@ export class RtpRealtimeSender {
   next(alacFrame: Buffer, samplesPerFrame: number): Buffer {
     const header = Buffer.alloc(12);
     header[0] = 0x80; // V=2, P=0, X=0, CC=0
-    header[1] = this.pt & 0x7f; // M=0, PT
+    // M(bit7) 仅会话首包置 1（协议保真，见 firstPacket 注释）；PT 保持原值。
+    header[1] = (this.firstPacket ? 0x80 : 0x00) | (this.pt & 0x7f);
     header.writeUInt16BE(this.seq & 0xffff, 2);
     header.writeUInt32BE(this.ts >>> 0, 4);
     header.writeUInt32BE(this.ssrc >>> 0, 8);
@@ -78,6 +87,7 @@ export class RtpRealtimeSender {
 
     this.seq = (this.seq + 1) & 0xffff;
     this.ts = (this.ts + samplesPerFrame) >>> 0;
+    this.firstPacket = false; // 出包后即失效：后续包恒 M=0
     return pkt;
   }
 }
@@ -90,12 +100,17 @@ export class UdpAudioSink {
   /** 连续发送错误数（成功发送会清零）；用于上层判定「端口不可达」并收敛状态。 */
   private errorStreak = 0;
   private lastErrorText: string | null = null;
+  /** 埋点：connect() 内「动态 import」与「建 socket」两段耗时（µs）。门控关时恒为 null。 */
+  connectSpanUs: { dgramImportUs: number; socketUs: number } | null = null;
 
   constructor(private readonly opts: { onError?: (e: Error) => void } = {}) {}
 
   async connect(host: string, port: number): Promise<void> {
+    const t0 = AP2_TRACE_ON ? nowUs() : 0;
     const dgram = await import("node:dgram");
+    const t1 = AP2_TRACE_ON ? nowUs() : 0;
     this.udp = dgram.createSocket("udp4");
+    if (AP2_TRACE_ON) this.connectSpanUs = { dgramImportUs: t1 - t0, socketUs: nowUs() - t1 };
     this.host = host;
     this.port = port;
     this.errorStreak = 0;
