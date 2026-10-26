@@ -70,8 +70,11 @@ export const LATE_JOIN_RING_MAX_US = 35_000_000;
 // 桥不再实时消费 raw cursor 域 ts(旧实现 commandedLead ≈ 预填充深度,实测恒
 // 10.584s,而桥队列硬上限 8s < 一次全量回填 11.6s → 必然重连风暴)。pushFrame
 // 只写 ring(带内容代次戳),由每组 250ms 补投定时器按时间窗统一推桥:窗口以
-// **原 ts 域**表述,投递时做 `ts' = ts − commonSendAheadUs`(桥对齐器
-// send_ahead=0 语义)—— 桥侧「某帧变得可听」的时刻与真实设备严格对齐。
+// **原 ts 域**表述,**投递时原 ts 原样投递**(2026-10-26 起,贴组时间线):
+// 设备的帧 ts T 在墙钟 T 出声(esp32 按时间戳排程),桥侧可听时刻 = 收到的时间戳,
+// ⇒ 同一帧两边同一墙钟出声。旧实现做 `ts' = ts − commonSendAheadUs` 会让桥整体
+// 早 sendAhead(实测 500ms),并把首个交付帧压到 `now+1.0s` —— 低于 RAOP 可达线
+// `L(1s)+SAFETY(50ms)`,导致每次切歌都自锚到 `now+2.5s`(1.5s 静默 + 1.48s 内容被裁)。
 /** 桥补投定时器周期(ms)。1s 宽的投递窗口下,250ms 一投余量充足且字节平滑。 */
 export const BRIDGE_PUSH_TICK_MS = 250;
 /** 投递窗口上沿(µs,原 ts 域):只投 ts ≤ now+2.5s 的帧,桥队列水位有界,

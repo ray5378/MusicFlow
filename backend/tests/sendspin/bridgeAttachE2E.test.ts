@@ -195,13 +195,12 @@ describe("B) 组泵 → 真桥 E2E(出口判据:组泵 PCM 逐字节到 MFAB AUD
       // §6.2 窗口化:pushFrame 只入 ring,投递由每组补投定时器(250ms)完成;
       // 此处帧起始 ts 取在投递窗口内,并显式驱动一次 tick(不等定时器,判据确定)。
       const ts0 = nowUs() + 2_000_000n;
-      const ahead = BigInt(g.commonSendAheadUs()); // 无真实成员 → 回落 800ms
       const got = await g.pushFrame(ts0, new Float32Array(960));
       g.bridgePushTick();
       expect(got).toBe(960); // BLK-01:无真实成员也照常产出
       await until(() => recv.audio.length >= 2, "audio x2");
-      expect(recv.audio[0]).toMatchObject({ tsUs: ts0 - ahead, generation: 0, sequence: 1 });
-      expect(recv.audio[1]!.tsUs).toBe(ts0 + BigInt(Math.round((480 * 1_000_000) / 48000)) - ahead); // 逐 chunk 真实起点(转换后)
+      expect(recv.audio[0]).toMatchObject({ tsUs: ts0, generation: 0, sequence: 1 });
+      expect(recv.audio[1]!.tsUs).toBe(ts0 + BigInt(Math.round((480 * 1_000_000) / 48000))); // 逐 chunk 真实起点(转换后)
       expect(Buffer.from(recv.audio[0]!.payload).equals(payload0)).toBe(true);
       expect(Buffer.from(recv.audio[1]!.payload).equals(payload1)).toBe(true);
 

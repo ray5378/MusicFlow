@@ -137,10 +137,18 @@ export class BridgeTimelineAligner {
         this.pos += insert;
       }
     } else if (plan.drop > 0) {
-      // 内容超前(重叠):不推进 pos —— 从后续重采样输出中丢弃 drop 帧(takeDrop),
-      // 追加流保持连续,内容位置自动回落到源时间线(RTP 侧无需跳帧)。
-      drop = plan.drop;
-      this.drops += drop;
+      // 内容落后于已写流(重叠):这些帧已被更早写出的内容/静音覆盖,只能裁掉 ——
+      // 不推进 pos,从后续重采样输出中丢弃(takeDrop),追加流保持连续。
+      //
+      // ⚠️ 只补记「尚未排队」的重叠量:pendingDrops 已在队列里等 takeDrop 消费,
+      //    若每帧再按**绝对** drift 重记(旧实现),pos 在被全部裁掉时不前进 ⇒
+      //    同一段重叠被逐帧重复记账 ⇒ 队列三角累计。2026-10-26 真机实锤:
+      //    切歌重锚只有 1.48s 重叠,队列却累计到 43s(1914975 帧)⇒ 之后 43 秒
+      //    100% 输出被裁(只剩补静音),可闻 = 切歌后约 45 秒无声,而 bridge
+      //    state 全程 live、queueMs 仅 4-12ms(极易误判成"桥没在播")。
+      const overlap = Math.max(0, plan.drop - this.drops);
+      drop = overlap;
+      this.drops += overlap;
     }
     this.lastDrift = Math.round((plan.diff / this.rate) * 1e6);
     const realigned = Math.abs(this.lastDrift) > 1000;

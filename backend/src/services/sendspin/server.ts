@@ -767,8 +767,8 @@ export class SendspinGroup {
   /** 播中回填一座新桥(§5.2「加入 AirPlay:从当前/未来 ring 回填」):
    *  可听域窗口化版本 —— 只把 ring 中落在投递窗口
    *  `[now + BRIDGE_PUSH_FLOOR_US, now + BRIDGE_PUSH_HORIZON_US]`(原 ts 域)、
-   *  且属于**当前内容代次**的帧推给该桥;投递时做 `ts' = ts − commonSendAheadUs`
-   *  (桥对齐器 send_ahead=0 语义,可听时刻与真实设备对齐);回填总量按
+   *  且属于**当前内容代次**的帧推给该桥;**原 ts 原样投递**(贴组时间线:同一帧在
+   *  真实设备与桥同一墙钟出声,见 deliverBridgeWindow 注释);回填总量按
    *  BRIDGE_BACKFILL_MAX_US 封顶(防御,常态窗口宽 1s 远达不到)。回填后登记
    *  该桥水位,250ms 补投定时器(bridgePushTick)从水位处按窗口继续补投 ——
    *  不再把整个 ring(可达 10s+)一次性灌进桥队列(旧实现 8s 硬上限重连根因)。
@@ -779,12 +779,10 @@ export class SendspinGroup {
     const ring = this.recentByGroup.get(this.encoderKey("pcm", 100));
     if (!ring || ring.length === 0) return 0;
     const now = nowUs();
-    const sendAheadUs = this.commonSendAheadUs();
     const lo = now + BigInt(BRIDGE_PUSH_FLOOR_US);
     const hi = now + BigInt(BRIDGE_PUSH_HORIZON_US);
     const epoch = this.bridgeContentEpoch;
     const capUs = BigInt(BRIDGE_BACKFILL_MAX_US);
-    const ahead = BigInt(Math.round(sendAheadUs));
     let totalUs = 0n;
     let n = 0;
     let last = 0n;
@@ -795,7 +793,7 @@ export class SendspinGroup {
       if (e.tsUs > hi) break; // 窗口外(未来):交给补投定时器
       if (totalUs + BigInt(e.durUs) > capUs) continue; // 回填总量上限(防御;跳过异常大帧继续扫)
       try {
-        b.pushAudio(e.data, e.tsUs - ahead);
+        b.pushAudio(e.data, e.tsUs); // 贴组时间线:与真实设备的可听时刻同值(见 deliverBridgeWindow 注释)
       } catch { /* 单桥失败不连累 */ break; }
       n++;
       totalUs += BigInt(e.durUs);
@@ -841,10 +839,9 @@ export class SendspinGroup {
         // 挪进 per-bridge try —— tick 内任何异常都不得冒泡打断定时器循环。
         const ring = this.recentByGroup.get(this.encoderKey("pcm", 100));
         if (!ring || ring.length === 0) return;
-        const sendAheadUs = this.commonSendAheadUs();
         const lo = now + BigInt(BRIDGE_PUSH_FLOOR_US);
         const hi = now + BigInt(BRIDGE_PUSH_HORIZON_US);
-        this.deliverBridgeWindow(b, deviceId, ring, sendAheadUs, lo, hi);
+        this.deliverBridgeWindow(b, deviceId, ring, lo, hi);
       } catch { /* 单桥失败不连累组泵 */ }
     }
   }
@@ -852,19 +849,17 @@ export class SendspinGroup {
   /** 单桥窗口投递:从水位(缺失/0n 哨兵 = 当前代次尚未投递)向后扫描 ring:
    *  - 旧内容代次帧:跳过(见 notifyBridgeGeneration 的 epoch 注释);
    *  - ts < lo(已入可听域之下):丢弃(桥来不及排程),水位推过不再重扫;
-   *  - ts ∈ [lo, hi]:以 ts' = ts − sendAheadUs 投递,水位推过;
+   *  - ts ∈ [lo, hi]:**原 ts 原样**投递(贴组时间线),水位推过;
    *  - ts > hi:break(顺延到下一 tick,不投不推)。
    *  @returns 本轮实际投递帧数。 */
   private deliverBridgeWindow(
     b: SendspinBridgeHandle,
     deviceId: string,
     ring: Array<{ tsUs: bigint; durUs: number; data: Uint8Array; ep?: number }>,
-    sendAheadUs: number,
     lo: bigint,
     hi: bigint,
   ): number {
     const epoch = this.bridgeContentEpoch;
-    const ahead = BigInt(Math.round(sendAheadUs));
     let last = this.bridgeWatermarks.get(deviceId) ?? 0n;
     let n = 0;
     for (const e of ring) {
@@ -877,7 +872,7 @@ export class SendspinGroup {
       }
       if (e.tsUs > hi) break; // 顺延
       try {
-        b.pushAudio(e.data, e.tsUs - ahead);
+        b.pushAudio(e.data, e.tsUs);
       } catch { /* 单桥失败不连累 */ break; }
       n++;
       last = e.tsUs;

@@ -101,7 +101,6 @@ describe("① BLK-01:桥在场 ⇒ pcm:100 编码与真实成员解耦", () => {
     const enc = new PhaseEncoder([1000]);
     const b = bridgeStub("ap-1");
     const g = groupWith({ "pcm:100": enc }, [b]);
-    const ahead = BigInt(g.commonSendAheadUs()); // 无成员 → 回落 800ms
     const ts0 = nowUs() + 2_000_000n; // 投递窗口 [now+1.5s, now+2.5s] 内
 
     const got = await g.pushFrame(ts0, PCM());
@@ -111,7 +110,7 @@ describe("① BLK-01:桥在场 ⇒ pcm:100 编码与真实成员解耦", () => {
     expect(enc.encodeCalls).toBe(1); // 虚拟组照常编码
     expect(g.hasBridges()).toBe(true);
     expect(b.pushed).toHaveLength(1);
-    expect(b.pushed[0]!.ts).toBe(ts0 - ahead); // 可听域转换 ts' = ts − sendAhead
+    expect(b.pushed[0]!.ts).toBe(ts0); // 贴组时间线:X = 组 ts(与真实设备可听时刻同值)
   });
 
   it("无桥无成员 → 返回 0,虚拟组不建、编码器不创建(非桥路径行为零变化)", async () => {
@@ -137,7 +136,7 @@ describe("① BLK-01:桥在场 ⇒ pcm:100 编码与真实成员解耦", () => {
     expect(m.sent[0]!.data[0]).toBe(0xab); // 成员吃 flac 字节
     expect(b.pushed).toHaveLength(1);
     expect(b.pushed[0]!.data[0]).toBe(0xcd); // 桥吃 PCM 字节 —— 两条通路不混流
-    expect(b.pushed[0]!.ts).toBe(ts0 - BigInt(g.commonSendAheadUs())); // 可听域转换
+    expect(b.pushed[0]!.ts).toBe(ts0); // 贴组时间线:X = 组 ts(与真实设备可听时刻同值)
   });
 
   it("多桥:同一份字节 + 相同时间戳分发给每座桥(与成员下发同源)", async () => {
@@ -171,9 +170,8 @@ describe("① BLK-01:桥在场 ⇒ pcm:100 编码与真实成员解耦", () => {
     }
     // 逐 chunk 时间戳按 frameSamples 推进(与成员同源)并做可听域转换,不复用组起始 ts:
     // 第 2 chunk 起点 = 第 1 chunk 时长 = 1000 样本 / 48kHz ≈ 20833µs
-    const ahead = BigInt(g.commonSendAheadUs());
-    expect(b1.pushed[0]!.ts).toBe(ts0 - ahead);
-    expect(b1.pushed[1]!.ts).toBe(ts0 + BigInt(Math.round((1000 * 1_000_000) / SAMPLE_RATE)) - ahead);
+    expect(b1.pushed[0]!.ts).toBe(ts0);
+    expect(b1.pushed[1]!.ts).toBe(ts0 + BigInt(Math.round((1000 * 1_000_000) / SAMPLE_RATE)));
   });
 });
 

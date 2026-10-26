@@ -165,13 +165,12 @@ describe("QA① join→leave→join 循环 3 次:session 计数==设备数 + rin
       expect(g.bridges.size).toBe(1);
       const handle = made[made.length - 1]!;
       // ★ 窗口化回填(§6.2):只投 [now+FLOOR 1.5s, now+HORIZON 2.5s] 内的当前代次帧,
-      //    原序 + 可听域转换 ts' = ts − sendAhead;floor 下/horizon 上/空包一律不投。
-      const ahead = BigInt(g.commonSendAheadUs()); // 成员桩未上报 → 回落 800ms
+      //    原序 + 贴组时间线:X = 组 ts(与真实设备可听时刻同值);floor 下/horizon 上/空包一律不投。
       const win = ring.filter((e) => e.data.length > 0 && e.tsUs >= NOW + 1_500_000n && e.tsUs <= NOW + 2_500_000n);
       expect(win.length).toBe(2); // +1.5s(恰在 floor 上沿)与 +2.0s 两帧
       expect(backfilled).toBe(win.length);
       const pushedTs = (handle.pushAudio as any).mock.calls.map((c: unknown[]) => c[1] as bigint);
-      expect(pushedTs).toEqual(win.map((e) => e.tsUs - ahead));
+      expect(pushedTs).toEqual(win.map((e) => e.tsUs));
       for (let i = 1; i < pushedTs.length; i++) expect(pushedTs[i]! > pushedTs[i - 1]!).toBe(true);
       // leave
       await mgr.stop(token);
