@@ -572,11 +572,16 @@ function resolveLiveGroup(srv: SendspinServer, clientId: string): SendspinGroup 
   // 尚未 rejoin)回落单设备组,与旧行为一致 —— 热重连语义不受影响:rejoin 后
   // conn.group 指回在册组,直通。仅视图层,不改组管理写路径。
   if (live && typeof live === "object" && srv.groups.get(live.name) === live) return live;
-  if (conn) {
+  // 仅当 conn.group 存在但注册表身份校验失败(陈旧悬挂指针)才做权威重建扫描;
+  // conn 从未入组时无悬挂指针可重建,直接落单设备组(与 2C 前行为一致,
+  // TTS announce 的瞬态挂载 playerCore:930 也不改变视图)——
+  // 同时不强迫调用方携带 groups 注册表(最小组桩免隐式依赖)。
+  if (live) {
     for (const [reGrpName, reGrp] of srv.groups) {
       if (!reGrpName.startsWith("ug:")) continue;
-      const reMem = (reGrp as unknown as { members?: Set<unknown> }).members;
-      if (reMem && typeof reMem.has === "function" && reMem.has(conn)) return reGrp;
+      // members 本就是 Set<SendspinConnection>(server.ts SendspinGroup 类字段,
+      // 恒有定义;守卫 ⑦ 钉的声明),直接用正式类型,不走 as unknown 链。
+      if (reGrp.members.has(conn)) return reGrp;
     }
   }
   return srv.group(clientId);
@@ -831,13 +836,12 @@ export function pollCore(srv: SendspinServer | null, clientId: string): { playin
   // [conn-group-diag] 临时诊断(复现假 IDLE 自持循环用,复现完撤):conn.group 与
   // 「真正含此连接的 ug: 组」失配时打一行 —— 失配 ⇒ playing 恒 false ⇒
   // idle_early 复查(同 pollState 源)结构性确认已停放行切歌。
-  if (srv) {
+  if (srv && srv.groups) {
     const diagConn = srv.clients.get(clientId) as (SendspinConnection & { group?: { name?: string } }) | undefined;
     let diagTrueUg = "-";
     for (const [diagName, diagGrp] of srv.groups) {
       if (!diagName.startsWith("ug:")) continue;
-      const diagMem = (diagGrp as unknown as { members?: Set<unknown> }).members;
-      if (diagMem && typeof diagMem.has === "function" && diagConn && diagMem.has(diagConn)) { diagTrueUg = diagName; break; }
+      if (diagConn && diagGrp.members.has(diagConn)) { diagTrueUg = diagName; break; }
     }
     const diagConnGrp = diagConn?.group?.name ?? "-";
     if (diagTrueUg !== "-" && diagConnGrp !== diagTrueUg) {
