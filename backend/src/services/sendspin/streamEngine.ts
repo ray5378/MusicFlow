@@ -18,7 +18,7 @@
 // 通过 overridePumpSource 可注入测试音源(真实本地 WAV),默认走
 // ensurePlayableStream 解析真实网络曲源。
 
-import { PREFILL_BUFFER_MAX_MS, PREFILL_BUFFER_MIN_MS } from "./constants.js";
+import { BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US, PREFILL_BUFFER_MAX_MS, PREFILL_BUFFER_MIN_MS } from "./constants.js";
 import { SAMPLE_RATE, CHANNELS } from "./encoding.js";
 import { nowUs } from "./clock.js";
 import { PcmWindow, WindowEvictedError, WINDOW_HIGH_SEC, type WindowSource } from "./streamSource.js";
@@ -876,8 +876,17 @@ export class GroupPump {
           //   桩兼容:最小测试桩无 hasDirectMembers → 按 undefined !== true 视作
           //   纯桥组(维持 2026-10-25 深锚语义,既有 ③ 用例不破)。
           //   非 bridge 路径行为零变化(三元分支原样保留)。
-          const anchorLead = this.group.hasBridges?.() === true && this.group.hasDirectMembers?.() !== true
-            ? Math.max(aheadUs, bridgeStartLeadUs([{ warm: false }]))
+          // ★ 混合组也必须抬 lead(2026-10-26 真机:每首歌开头必丢)。原实现让混合组
+          //   回落 800ms 截断 ⇒ lead = min(sendAhead 500ms, 800ms) = 500ms,而桥投递
+          //   窗口下沿是 1.5s ⇒ 组开播就把「桥来不及排程」的前 1s 内容推过去,桥只能
+          //   从窗口下沿接(水位推过),用户实测「SENDSPIN 已出声、AirPlay 还没声、
+          //   整首开头丢」。抬到「下沿 + 一个补投周期」后首帧即落窗内 ⇒ 开头零丢失;
+          //   代价 = 每首歌起播多等 ~1.25s(全组一致,组内同步与时间线语义不变,
+          //   仍**不是** cold 深锚 4.5s —— 直连 esp32 不承受秒级跳变)。
+          const anchorLead = this.group.hasBridges?.() === true
+            ? this.group.hasDirectMembers?.() !== true
+              ? Math.max(aheadUs, bridgeStartLeadUs([{ warm: false }])) // 纯桥组:深锚
+              : Math.max(aheadUs, BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US) // 混合组:覆盖桥下沿
             : prefillEnabled()
               ? Math.min(aheadUs, ANCHOR_SAFE_LEAD_US)
               : (reseed ? reseedLead : aheadUs);

@@ -75,6 +75,7 @@ vi.mock("../../src/services/sendspin/streamSource.js", () => {
 import { GroupPump } from "../../src/services/sendspin/streamEngine.js";
 import { nowUs } from "../../src/services/sendspin/clock.js";
 import { bridgeStartLeadUs } from "../../src/services/airplay/bridgeMath.js";
+import { BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US } from "../../src/services/sendspin/constants.js";
 
 const server = { log: () => {} } as any;
 
@@ -285,6 +286,25 @@ describe("③ 桥在场绕过 800ms 钳制(MAJ-01)", () => {
 });
 
 describe("③b 深锚仅纯桥组(E3 判决,2026-10-26)", () => {
+  it("③c 混合组(桥+直连成员)→ lead 抬到桥投递下沿+补投周期(开头不丢),且非深锚", async () => {
+    H.rows = [{ id: "row-5m", duration: 10 }];
+    const { g, genCalls } = makeGroup({ hasBridges: () => true });
+    g.members.add({ id: "esp-1" }); // 直连成员在场 ⇒ 混合组
+    const pump = new GroupPump(server, g);
+    await pump.play("song-e2");
+    await waitSlices(1);
+    releaseOne();
+    await waitGen(genCalls, 1);
+
+    const leadUs = Number(g.timelineBaseUs - nowUs());
+    // 必须覆盖桥投递下沿(1.5s)+ 补投周期(250ms) = 1.75s;扣观测噪声 300ms
+    expect(leadUs).toBeGreaterThanOrEqual(BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US - 300_000);
+    // 仍是混合组语义:远小于 cold 深锚 4.5s(直连 esp32 不承受秒级跳变)
+    expect(leadUs).toBeLessThan(3_000_000);
+    releaseSlices(); // EOF 收尾
+    await waitInactive(pump, 5000);
+  }, 30_000);
+
   it("纯桥组(hasDirectMembers()=false)挂桥 → 深锚保留:lead ≥ cold 4.5s", async () => {
     H.rows = [{ id: "row-5", duration: 10 }];
     const { g, genCalls } = makeGroup({ hasBridges: () => true, hasDirectMembers: () => false });
@@ -300,7 +320,7 @@ describe("③b 深锚仅纯桥组(E3 判决,2026-10-26)", () => {
     await waitInactive(pump, 5000);
   }, 30_000);
 
-  it("混合组(有直连成员)挂桥 → 退回 800ms 截断:lead <1.5s(不是桥 cold lead)", async () => {
+  it("混合组(有直连成员)挂桥 → lead 覆盖桥投递下沿(1.75s),仍不是 cold 深锚", async () => {
     H.rows = [{ id: "row-6", duration: 10 }];
     const { g, genCalls } = makeGroup({ hasBridges: () => true, hasDirectMembers: () => true });
     const pump = new GroupPump(server, g);
@@ -310,13 +330,15 @@ describe("③b 深锚仅纯桥组(E3 判决,2026-10-26)", () => {
     await waitGen(genCalls, 1);
 
     const leadUs = Number(g.timelineBaseUs - nowUs());
-    expect(leadUs).toBeGreaterThan(500_000); // ≥800ms(扣观测时刻噪声)
-    expect(leadUs).toBeLessThan(1_500_000); // <1.5s:800ms 截断语义,不是 4.5s 深锚
+    // 2026-10-26 新契约:必须覆盖桥投递下沿(1.5s),否则组一开播就把桥来不及
+    // 排程的前段内容推过去 ⇒ 真机「SENDSPIN 已出声、AirPlay 还没声、开头整段丢」。
+    expect(leadUs).toBeGreaterThanOrEqual(1_500_000);
+    expect(leadUs).toBeLessThan(3_000_000); // 仍是混合组语义:不是 4.5s cold 深锚
     releaseSlices(); // EOF 收尾
     await waitInactive(pump, 5000);
   }, 30_000);
 
-  it("混合组挂桥 vs 无桥组 → 直连成员首帧 anchor 一致(v4.6.76 语义回归)", async () => {
+  it("混合组挂桥 → 全组等桥:比无桥组多等 ≈(1.75s−0.8s),组内仍是同一 anchor", async () => {
     H.rows = [{ id: "row-7", duration: 10 }, { id: "row-8", duration: 10 }]; // 双行:两次 play 各 shift 一行
     const mixed = makeGroup({ hasBridges: () => true, hasDirectMembers: () => true });
     const pumpMixed = new GroupPump(server, mixed.g);
@@ -338,7 +360,9 @@ describe("③b 深锚仅纯桥组(E3 判决,2026-10-26)", () => {
     releaseSlices(); // EOF 收尾
     await waitInactive(pumpPlain, 5000);
 
-    // 两者都 ≈800ms 截断;差值仅为两次观测的时刻噪声(远小于 4.5s−0.8s 的深锚差)
-    expect(Math.abs(leadMixed - leadPlain)).toBeLessThan(500_000);
+    // 2026-10-26 契约反转:桥在场时全组等桥(无桥组仍 800ms 截断)。固定差值 ≈
+    // 1.75s − 0.8s = 950ms;上下界留出观测噪声,同时排除「无差异」与「4.5s 深锚」。
+    expect(leadMixed - leadPlain).toBeGreaterThan(500_000);
+    expect(leadMixed - leadPlain).toBeLessThan(1_500_000);
   }, 30_000);
 });

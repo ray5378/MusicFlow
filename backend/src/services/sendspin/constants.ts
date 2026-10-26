@@ -86,6 +86,14 @@ export const BRIDGE_PUSH_HORIZON_US = 2_500 * 1000;
 /** 投递窗口下沿(µs,原 ts 域):ts < now+1.5s 的帧不再投递 —— 桥(AirPlay
  *  发送侧)来不及为其建立稳定排程,宁可由可达性重锚接手也不喂「马上要响」的帧。 */
 export const BRIDGE_PUSH_FLOOR_US = 1_500_000;
+/** 混合组(桥 + 直连成员)的锚点 lead 下限(µs)= 桥下沿 + 一个补投周期。
+ *  为什么必须有:混合组不能深锚(直连 esp32 硬同步阈值 5ms,见 streamEngine 注释),
+ *  历史上回落到 prefill 的 min(sendAhead, 800ms)=500ms;而桥的投递窗口下沿是
+ *  BRIDGE_PUSH_FLOOR_US(1.5s)⇒ 组一开播就把「桥来不及排程」的前 1s 内容推过去,
+ *  桥只能从窗口下沿接 ⇒ 真机表现「SENDSPIN 已经出声、AirPlay 还没声,整首开头丢」。
+ *  抬到 下沿 + 补投周期后,首帧本身即落在窗口内 ⇒ 开头零丢失。
+ *  代价 = 每首歌起播多等 ~1.25s(全组一致,不破坏组内同步)。 */
+export const BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US = BRIDGE_PUSH_FLOOR_US + BRIDGE_PUSH_TICK_MS * 1000;
 /** 播中回填单桥总量上限(µs)。常态窗口宽仅 1s,远达不到;纯防御异常大帧。 */
 export const BRIDGE_BACKFILL_MAX_US = 6_000_000;
 
