@@ -27,7 +27,6 @@ import {
 import { BridgeMember } from "../../src/services/sendspin/bridgeMember.js";
 import { SendspinGroup } from "../../src/services/sendspin/server.js";
 import { bridgeSyncCore } from "../../src/services/sendspin/playerCore.js";
-import { LATE_JOIN_KEEP_PAST_US } from "../../src/services/sendspin/constants.js";
 import { CHUNK_LEN, RaopPlayer, type RaopSession } from "../../src/services/airplay/raop.js";
 import { computeBridgeAnchors } from "../../src/services/airplay/bridgeMath.js";
 import { nowUs, setNowUsOverride } from "../../src/utils/hostClock.js";
@@ -145,14 +144,16 @@ describe("QA① join→leave→join 循环 3 次:session 计数==设备数 + rin
       return h;
     };
 
-    // 预置 ring:用真实 pushFrame 按真实时间线灌 6 个 chunk(现在 −0.5s ~ +2.5s)
-    const nowUs0 = nowUs();
+    // 预置 ring:用真实 pushFrame 灌 6 个 chunk(−0.5s … +2.0s)。
+    // 冻结墙钟让投递窗口/水位判定全确定(afterEach 统一 setNowUsOverride(null))。
+    const NOW = 1_000_000_000n;
+    setNowUsOverride(() => NOW);
     for (let k = 0; k < 6; k++) {
-      const ts = nowUs0 + BigInt(k * 500_000 - 500_000); // −0.5s … +2.0s
+      const ts = NOW + BigInt(k * 500_000 - 500_000); // −0.5s … +2.0s
       await g.pushFrame(ts, new Float32Array(1200));
     }
-    const ring = (g as any).recentByGroup.get("pcm:100") as Array<{ tsUs: bigint; data: Uint8Array }>;
-    expect(ring.length).toBeGreaterThan(0);
+    const ring = (g as any).recentByGroup.get("pcm:100") as Array<{ tsUs: bigint; durUs: number; data: Uint8Array }>;
+    expect(ring.length).toBe(6);
 
     for (let cycle = 1; cycle <= 3; cycle++) {
       const token = `tok-cycle${cycle}`;
@@ -163,14 +164,15 @@ describe("QA① join→leave→join 循环 3 次:session 计数==设备数 + rin
       const backfilled = bridgeSyncCore(srv, "ug:g-qa5", [spec], factory);
       expect(g.bridges.size).toBe(1);
       const handle = made[made.length - 1]!;
-      // 回填发生且原序:句柄收到的 tsUs 与 ring 完全同序同值
-      expect(backfilled).toBeGreaterThan(0);
+      // ★ 窗口化回填(§6.2):只投 [now+FLOOR 1.5s, now+HORIZON 2.5s] 内的当前代次帧,
+      //    原序 + 可听域转换 ts' = ts − sendAhead;floor 下/horizon 上/空包一律不投。
+      const ahead = BigInt(g.commonSendAheadUs()); // 成员桩未上报 → 回落 800ms
+      const win = ring.filter((e) => e.data.length > 0 && e.tsUs >= NOW + 1_500_000n && e.tsUs <= NOW + 2_500_000n);
+      expect(win.length).toBe(2); // +1.5s(恰在 floor 上沿)与 +2.0s 两帧
+      expect(backfilled).toBe(win.length);
       const pushedTs = (handle.pushAudio as any).mock.calls.map((c: unknown[]) => c[1] as bigint);
-      expect(pushedTs).toEqual(ring.map((e) => e.tsUs));
+      expect(pushedTs).toEqual(win.map((e) => e.tsUs - ahead));
       for (let i = 1; i < pushedTs.length; i++) expect(pushedTs[i]! > pushedTs[i - 1]!).toBe(true);
-      // ★ 内容贴近泵当前位置:最早回填 ts ≥ now − KEEP_PAST − 容差(500ms)
-      const earliest = Number(pushedTs[0]! - nowUs());
-      expect(earliest).toBeGreaterThanOrEqual(-Number(LATE_JOIN_KEEP_PAST_US) - 500_000);
       // leave
       await mgr.stop(token);
       expect(mgr.list()).toHaveLength(0);

@@ -782,6 +782,7 @@ export class SendspinGroup {
     let last = 0n;
     for (const e of ring) {
       if (e.ep !== undefined && e.ep !== epoch) continue; // 旧内容代次:不可信,跳过
+      if (!e.data || e.data.length === 0) continue; // 空包必跳过(2026-09-17 ESPHome:严格端收空包判 Invalid data)
       if (e.tsUs < lo) continue; // 已入可听域之下:桥来不及排程,不回填
       if (e.tsUs > hi) break; // 窗口外(未来):交给补投定时器
       if (totalUs + BigInt(e.durUs) > capUs) continue; // 回填总量上限(防御;跳过异常大帧继续扫)
@@ -858,6 +859,7 @@ export class SendspinGroup {
     let n = 0;
     for (const e of ring) {
       if (e.ep !== undefined && e.ep !== epoch) continue;
+      if (!e.data || e.data.length === 0) continue; // 空包必跳过(2026-09-17 ESPHome:严格端收空包判 Invalid data)
       if (last !== 0n && e.tsUs <= last) continue;
       if (e.tsUs < lo) {
         last = e.tsUs; // 丢弃,但水位推过(不再重扫)

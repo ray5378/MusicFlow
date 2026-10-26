@@ -12,6 +12,7 @@ import { bridgeSocketPath } from "../../src/services/airplay/bridgeChannel.js";
 import { BridgeServer } from "../../src/services/airplay/bridgeServer.js";
 import { BridgeMember } from "../../src/services/sendspin/bridgeMember.js";
 import { SendspinGroup } from "../../src/services/sendspin/server.js";
+import { nowUs } from "../../src/services/sendspin/clock.js";
 import {
   syncGroupBridges,
   detachGroupBridge,
@@ -166,10 +167,11 @@ describe("B) 组泵 → 真桥 E2E(出口判据:组泵 PCM 逐字节到 MFAB AUD
       backoffDelayMs: () => 20,
     });
     member.start();
+    let g: SendspinGroup | undefined; // 提升作用域:finally 停补投定时器用
     try {
       await until(() => bs.stats().sessionsAccepted === 1, "accepted");
 
-      const g = new SendspinGroup("g-e2e", { log() {} } as any);
+      g = new SendspinGroup("g-e2e", { log() {} } as any);
       syncGroupBridges(g, [{ deviceId, socketPath: bs.listeningOn!, token, protocol: "raop" }], () => member as any);
       expect(g.hasBridges()).toBe(true);
       expect(g.bridges.size).toBe(1);
@@ -190,11 +192,16 @@ describe("B) 组泵 → 真桥 E2E(出口判据:组泵 PCM 逐字节到 MFAB AUD
         close() {},
       });
 
-      const got = await g.pushFrame(0n, new Float32Array(960));
+      // §6.2 窗口化:pushFrame 只入 ring,投递由每组补投定时器(250ms)完成;
+      // 此处帧起始 ts 取在投递窗口内,并显式驱动一次 tick(不等定时器,判据确定)。
+      const ts0 = nowUs() + 2_000_000n;
+      const ahead = BigInt(g.commonSendAheadUs()); // 无真实成员 → 回落 800ms
+      const got = await g.pushFrame(ts0, new Float32Array(960));
+      g.bridgePushTick();
       expect(got).toBe(960); // BLK-01:无真实成员也照常产出
       await until(() => recv.audio.length >= 2, "audio x2");
-      expect(recv.audio[0]).toMatchObject({ tsUs: 0n, generation: 0, sequence: 1 });
-      expect(recv.audio[1]!.tsUs).toBe(BigInt(Math.round((480 * 1_000_000) / 48000))); // 逐 chunk 真实起点
+      expect(recv.audio[0]).toMatchObject({ tsUs: ts0 - ahead, generation: 0, sequence: 1 });
+      expect(recv.audio[1]!.tsUs).toBe(ts0 + BigInt(Math.round((480 * 1_000_000) / 48000)) - ahead); // 逐 chunk 真实起点(转换后)
       expect(Buffer.from(recv.audio[0]!.payload).equals(payload0)).toBe(true);
       expect(Buffer.from(recv.audio[1]!.payload).equals(payload1)).toBe(true);
 
@@ -209,6 +216,7 @@ describe("B) 组泵 → 真桥 E2E(出口判据:组泵 PCM 逐字节到 MFAB AUD
       expect(recv.boundaries[1]![1]).toBe("track");
       expect(recv.boundaries[1]![0]).toBe(9);
     } finally {
+      g?.stopBridgePushTimer(); // 窗口化:sync 起了补投定时器,收尾停表
       member.stop();
       await bs.close();
     }

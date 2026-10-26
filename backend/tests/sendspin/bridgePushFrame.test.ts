@@ -7,9 +7,10 @@
 //   ③ clearPlayback/finishPlayback → BOUNDARY{track/stop}(§4.4);
 //   ④ encodedBytesPerSec:有桥恒 ≥192000B/s(48k/s16le/2ch),FLAC 实测/名义不得低估桥吞吐;
 //   ⑤ 无桥无成员 → 返回 0(原语义,行为零变化)。
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { SendspinGroup } from "../../src/services/sendspin/server.js";
 import { SAMPLE_RATE, type EncodedChunk } from "../../src/services/sendspin/encoding.js";
+import { nowUs } from "../../src/services/sendspin/clock.js";
 
 const PCM_BYTES_PER_SEC = SAMPLE_RATE * 2 * 2; // 192000
 
@@ -79,29 +80,38 @@ function bridgeStub(deviceId: string, opts: { boundaryThrows?: boolean } = {}) {
   };
 }
 
-/** 建组:预置编码器(键 = `codec:gain`)+ 预挂桥句柄。 */
+/** 建组:预置编码器(键 = `codec:gain`)+ 预挂桥句柄;登记 liveGroups 供收尾停表。 */
+const liveGroups: SendspinGroup[] = [];
 function groupWith(encoders: Record<string, PhaseEncoder>, bridges: ReturnType<typeof bridgeStub>[] = []): SendspinGroup {
   const g = new SendspinGroup("g-push", { log() {} } as any);
   for (const [key, enc] of Object.entries(encoders)) (g as any).encoders.set(key, enc);
   for (const b of bridges) g.bridges.set(b.deviceId, b as any);
+  liveGroups.push(g);
   return g;
 }
+afterEach(() => {
+  // 窗口化迁移注:pushFrame(桥在场)会起每组 250ms 补投定时器,测试收尾显式停表。
+  for (const g of liveGroups.splice(0)) g.stopBridgePushTimer();
+});
 
 const PCM = (n = 1200) => new Float32Array(n);
 
 describe("① BLK-01:桥在场 ⇒ pcm:100 编码与真实成员解耦", () => {
-  it("★ members=∅ + 桥在场 → pushFrame 返回 >0,桥收到 PCM 字节(真实起点 ts)", async () => {
+  it("★ members=∅ + 桥在场 → pushFrame 返回 >0;补投 tick 派发,桥收 PCM 字节(可听域 ts)", async () => {
     const enc = new PhaseEncoder([1000]);
     const b = bridgeStub("ap-1");
     const g = groupWith({ "pcm:100": enc }, [b]);
+    const ahead = BigInt(g.commonSendAheadUs()); // 无成员 → 回落 800ms
+    const ts0 = nowUs() + 2_000_000n; // 投递窗口 [now+1.5s, now+2.5s] 内
 
-    const got = await g.pushFrame(0n, PCM());
+    const got = await g.pushFrame(ts0, PCM());
+    g.bridgePushTick(); // §6.2 窗口化:pushFrame 只入 ring,投递由补投 tick 完成
 
     expect(got).toBe(1000); // 判据核心:>0 —— 没有虚拟组时这里是 0 → 上游放弃本曲
     expect(enc.encodeCalls).toBe(1); // 虚拟组照常编码
     expect(g.hasBridges()).toBe(true);
     expect(b.pushed).toHaveLength(1);
-    expect(b.pushed[0]!.ts).toBe(0n); // chunk 真实起点 = 组起始 ts(单 chunk)
+    expect(b.pushed[0]!.ts).toBe(ts0 - ahead); // 可听域转换 ts' = ts − sendAhead
   });
 
   it("无桥无成员 → 返回 0,虚拟组不建、编码器不创建(非桥路径行为零变化)", async () => {
@@ -118,13 +128,16 @@ describe("① BLK-01:桥在场 ⇒ pcm:100 编码与真实成员解耦", () => {
     const m = conn("A", "flac");
     g.add(m);
 
-    const got = await g.pushFrame(0n, PCM());
+    const ts0 = nowUs() + 2_000_000n; // 投递窗口内
+    const got = await g.pushFrame(ts0, PCM());
+    g.bridgePushTick(); // §6.2 窗口化:投递由补投 tick 完成
 
     expect(got).toBe(1000); // max(组累计交付): pcm 1000 > flac 800
     expect(m.sent).toHaveLength(1);
     expect(m.sent[0]!.data[0]).toBe(0xab); // 成员吃 flac 字节
     expect(b.pushed).toHaveLength(1);
     expect(b.pushed[0]!.data[0]).toBe(0xcd); // 桥吃 PCM 字节 —— 两条通路不混流
+    expect(b.pushed[0]!.ts).toBe(ts0 - BigInt(g.commonSendAheadUs())); // 可听域转换
   });
 
   it("多桥:同一份字节 + 相同时间戳分发给每座桥(与成员下发同源)", async () => {
@@ -146,7 +159,9 @@ describe("① BLK-01:桥在场 ⇒ pcm:100 编码与真实成员解耦", () => {
     const g = groupWith({}, [b1, b2]);
     (g as any).encoders.set("pcm:100", enc);
 
-    await g.pushFrame(0n, PCM());
+    const ts0 = nowUs() + 2_000_000n; // 投递窗口内(两 chunk 均落在窗内)
+    await g.pushFrame(ts0, PCM());
+    g.bridgePushTick(); // §6.2 窗口化:投递由补投 tick 完成
 
     expect(b1.pushed).toHaveLength(2);
     expect(b2.pushed).toHaveLength(2);
@@ -154,10 +169,11 @@ describe("① BLK-01:桥在场 ⇒ pcm:100 编码与真实成员解耦", () => {
       expect(Buffer.from(b1.pushed[i]!.data).equals(b2.pushed[i]!.data)).toBe(true);
       expect(b1.pushed[i]!.ts).toBe(b2.pushed[i]!.ts);
     }
-    // 逐 chunk 时间戳按 frameSamples 推进(与成员同源),不复用组起始 ts:
+    // 逐 chunk 时间戳按 frameSamples 推进(与成员同源)并做可听域转换,不复用组起始 ts:
     // 第 2 chunk 起点 = 第 1 chunk 时长 = 1000 样本 / 48kHz ≈ 20833µs
-    expect(b1.pushed[0]!.ts).toBe(0n);
-    expect(b1.pushed[1]!.ts).toBe(BigInt(Math.round((1000 * 1_000_000) / SAMPLE_RATE)));
+    const ahead = BigInt(g.commonSendAheadUs());
+    expect(b1.pushed[0]!.ts).toBe(ts0 - ahead);
+    expect(b1.pushed[1]!.ts).toBe(ts0 + BigInt(Math.round((1000 * 1_000_000) / SAMPLE_RATE)) - ahead);
   });
 });
 

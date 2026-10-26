@@ -72,6 +72,7 @@ import path from "node:path";
 import { SendspinGroup } from "../../src/services/sendspin/server.js";
 import { GroupPump } from "../../src/services/sendspin/streamEngine.js";
 import { SAMPLE_RATE, type EncodedChunk } from "../../src/services/sendspin/encoding.js";
+import { nowUs } from "../../src/services/sendspin/clock.js";
 import { BridgeSessionManager } from "../../src/services/airplay/bridgeSession.js";
 import { isAirplayBridgeEnabled } from "../../src/services/airplay/control.js";
 import { createGroupProtocolPlayer } from "../../src/services/group/protocolPlayer.js";
@@ -124,9 +125,17 @@ function bridgeStub(deviceId: string, opts: { pushThrows?: boolean } = {}) {
 
 const PCM = (n = 1200) => new Float32Array(n);
 
+const liveGroups: SendspinGroup[] = [];
+
 describe("QA① BLK-01 组合反例:members=∅ + 2 桥 + flac 编码器在场", () => {
-  it("pushFrame>0;两桥收同一份 PCM(0xcd),不吃 flac 字节;虚拟组只建一次", async () => {
+  afterEach(() => {
+    // 窗口化迁移注:pushFrame(桥在场)会起每组 250ms 补投定时器,测试收尾显式停表。
+    for (const g of liveGroups.splice(0)) g.stopBridgePushTimer();
+  });
+
+  it("pushFrame>0;帧入 ring 后由补投 tick 派发:两桥各收同一份 PCM(0xcd)、ts 已减 sendAhead、窗外帧不收", async () => {
     const g = new SendspinGroup("g-qa3", { log() {} } as any);
+    liveGroups.push(g);
     const flac = new PhaseEncoder([800], 0xab);
     const pcm = new PhaseEncoder([1000], 0xcd);
     (g as any).encoders.set("flac:100", flac);
@@ -135,8 +144,11 @@ describe("QA① BLK-01 组合反例:members=∅ + 2 桥 + flac 编码器在场",
     const b2 = bridgeStub("ap-2");
     g.bridges.set("ap-1", b1 as any);
     g.bridges.set("ap-2", b2 as any);
+    const ahead = BigInt(g.commonSendAheadUs()); // 无成员 → 回落 DEFAULT_MIN_BUFFER_MS(800ms)
+    const ts0 = nowUs() + 2_000_000n; // 投递窗口 [now+FLOOR 1.5s, now+HORIZON 2.5s] 内
 
-    const got = await g.pushFrame(0n, PCM());
+    const got = await g.pushFrame(ts0, PCM());
+    g.bridgePushTick(); // §6.2 窗口化:pushFrame 只入 ring,投递由补投 tick(单写者)完成
 
     expect(got).toBe(1000); // >0:虚拟组让编码与「有无真实成员」解耦
     expect(pcm.encodeCalls).toBe(1);
@@ -145,22 +157,35 @@ describe("QA① BLK-01 组合反例:members=∅ + 2 桥 + flac 编码器在场",
     expect(b2.pushed).toHaveLength(1);
     expect(Buffer.from(b1.pushed[0]!.data).equals(b2.pushed[0]!.data)).toBe(true);
     expect(b1.pushed[0]!.data[0]).toBe(0xcd); // 桥吃 PCM,不吃 flac(0xab)
-    expect(b1.pushed[0]!.ts).toBe(0n);
+    expect(b1.pushed[0]!.ts).toBe(ts0 - ahead); // 可听域转换 ts' = ts − sendAhead
+    // 窗外帧不收:horizon 外(+5s)与 floor 下(+0.5s)均不投,且不污染水位
+    await g.pushFrame(nowUs() + 5_000_000n, PCM());
+    await g.pushFrame(nowUs() + 500_000n, PCM());
+    g.bridgePushTick();
+    expect(b1.pushed).toHaveLength(1);
+    expect(b2.pushed).toHaveLength(1);
   });
 
-  it("单桥 pushAudio 抛错 → 另一桥照常收流,pushFrame 返回值不受损", async () => {
+  it("单桥 pushAudio 抛错 → 另一桥照常收流,pushFrame 返回值不受损,补投定时器续投", async () => {
     const g = new SendspinGroup("g-qa3b", { log() {} } as any);
-    (g as any).encoders.set("pcm:100", new PhaseEncoder([1000], 0xcd));
+    liveGroups.push(g);
+    (g as any).encoders.set("pcm:100", new PhaseEncoder([1000, 1000], 0xcd));
     const bad = bridgeStub("ap-bad", { pushThrows: true });
     const good = bridgeStub("ap-good");
     g.bridges.set("ap-bad", bad as any);
     g.bridges.set("ap-good", good as any);
 
-    const got = await g.pushFrame(0n, PCM());
+    const got = await g.pushFrame(nowUs() + 2_000_000n, PCM());
+    g.bridgePushTick();
 
     expect(got).toBe(1000);
-    expect(bad.pushFailures).toBe(1);
+    expect(bad.pushFailures).toBe(1); // 单桥失败不连累组泵与另一桥
     expect(good.pushed).toHaveLength(1);
+    // 下一帧进窗 → tick 续投:好桥继续收,坏桥继续被隔离,组泵无感
+    await g.pushFrame(nowUs() + 2_100_000n, PCM());
+    g.bridgePushTick();
+    expect(good.pushed).toHaveLength(2);
+    expect(bad.pushFailures).toBe(2);
   });
 });
 

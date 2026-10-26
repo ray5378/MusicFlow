@@ -15,6 +15,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { BridgeMember } from "../../src/services/sendspin/bridgeMember.js";
 import { bridgeSyncCore } from "../../src/services/sendspin/playerCore.js";
 import { SendspinGroup } from "../../src/services/sendspin/server.js";
+import { nowUs } from "../../src/utils/hostClock.js";
 import { BridgeSource, computeBridgeBackoffMs, type BridgeSocketLike } from "../../src/services/airplay/bridgeSource.js";
 import { bridgeSocketPath } from "../../src/services/airplay/bridgeChannel.js";
 import { BridgeServer } from "../../src/services/airplay/bridgeServer.js";
@@ -139,20 +140,28 @@ describe("SendspinGroup.setBridgesPaused(§5.4)", () => {
     expect(h2.paused).toBe(false);
   });
 
-  it("★ backfillBridge:把 pcm:100 ring 原序回填给指定桥", () => {
+  it("★ backfillBridge:只回填可听域窗口内当前代次帧(原序 + ts' 转换),空包/窗外不回填", () => {
     const fakeSrv = { log: () => {}, clients: new Map(), groups: new Map() };
     const g = new SendspinGroup("ug:p5b", fakeSrv as any);
     const h = mkFakeHandle("d1");
     (g.bridges as Map<string, unknown>).set("d1", h);
     const anyG = g as any;
+    const now = nowUs();
+    const ahead = BigInt(g.commonSendAheadUs()); // 无成员 → 回落 800ms
     anyG.recentByGroup.set(anyG.encoderKey("pcm", 100), [
-      { tsUs: 100n, durUs: 1000, data: new Uint8Array(10) },
-      { tsUs: 200n, durUs: 1000, data: new Uint8Array(12) },
-      { tsUs: 300n, durUs: 1000, data: new Uint8Array(0) }, // 空包跳过
+      { tsUs: now + 500_000n, durUs: 1000, data: new Uint8Array(10) }, // floor 下:不回填
+      { tsUs: now + 2_000_000n, durUs: 1000, data: new Uint8Array(10) }, // 窗口内
+      { tsUs: now + 2_400_000n, durUs: 1000, data: new Uint8Array(0) }, // 空包跳过(2026-09-17 ESPHome)
+      { tsUs: now + 2_300_000n, durUs: 1000, data: new Uint8Array(12) }, // 窗口内
+      { tsUs: now + 3_000_000n, durUs: 1000, data: new Uint8Array(10) }, // horizon 上:不回填
     ]);
-    expect(g.backfillBridge("d1")).toBe(2); // 空包不计
-    expect(h.pushed.map((p) => p.tsUs)).toEqual([100n, 200n]); // 原序原 tsUs
+    expect(g.backfillBridge("d1")).toBe(2); // 空包不计、窗外两帧不回填
+    expect(h.pushed.map((p) => p.tsUs)).toEqual([
+      now + 2_000_000n - ahead,
+      now + 2_300_000n - ahead,
+    ]); // 原序 + 可听域转换 ts' = ts − sendAhead
     expect(g.backfillBridge("missing")).toBe(0);
+    g.stopBridgePushTimer(); // backfill 会起补投定时器,收尾停表
   });
 });
 
