@@ -114,6 +114,7 @@ app.get("/v1/groups/:id/delays", permMiddleware(PERM.RENDERER_USE), (c) => {
   const d = getGroupDelays(id);
   return c.json({
     airplayMs: d.airplayMs,
+    airplay2Ms: d.airplay2Ms,
     sendspinMs: d.sendspinMs,
     minMs: GROUP_DELAY_MIN_MS,
     maxMs: GROUP_DELAY_MAX_MS,
@@ -133,18 +134,27 @@ app.put("/v1/groups/:id/delays", permMiddleware(PERM.RENDERER_USE), async (c) =>
     return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.group.notFound"), 404);
   }
   // 内存值先更新(落库在后):Sendspin 侧下一次 pushFrame 立刻按新值打戳 = 真·实时。
-  const next = setGroupDelays(id, { airplayMs: body.airplayMs, sendspinMs: body.sendspinMs });
+  const next = setGroupDelays(id, {
+    airplayMs: body.airplayMs,
+    airplay2Ms: body.airplay2Ms,
+    sendspinMs: body.sendspinMs,
+  });
   // AirPlay 侧的锚点(startNtp)在桥会话建立时就算死了,中途改 anchorShiftUs 不生效。
   // 因此只有「AirPlay 值真的变了且该组桥在跑」时,才重建该组桥换立即生效
   // (代价:该组 AirPlay 成员约 1~2s 静音;Sendspin 成员不受影响)。
   let rebuilt = 0;
-  if (next.airplayMs !== before.airplayMs && isBridgeRouteActive(id)) {
+  // AP1 与 AP2 走的是同一个 anchorShiftUs,同样在会话建立时算死 ⇒ 两格任一变化都要重建。
+  if (
+    (next.airplayMs !== before.airplayMs || next.airplay2Ms !== before.airplay2Ms) &&
+    isBridgeRouteActive(id)
+  ) {
     try {
       rebuilt = await rebuildBridgeRoutes(id);
     } catch { /* 重建失败不影响保存结果:下次会话按新值建立 */ }
   }
   return c.json({
     airplayMs: next.airplayMs,
+    airplay2Ms: next.airplay2Ms,
     sendspinMs: next.sendspinMs,
     minMs: GROUP_DELAY_MIN_MS,
     maxMs: GROUP_DELAY_MAX_MS,

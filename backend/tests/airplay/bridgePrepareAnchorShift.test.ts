@@ -19,6 +19,7 @@ const h = vi.hoisted(() => {
     supervisorRunning: true,
     globalShiftUs: 7_777,
     groupShift: new Map<string, number>(),
+    group2Shift: new Map<string, number>(),
   };
   return { devices, rpcCalls, state };
 });
@@ -54,7 +55,9 @@ vi.mock("../../src/services/airplay/bridgeCalib.js", () => ({
 vi.mock("../../src/services/group/delayCalib.js", () => ({
   airplayDelayUsOf: (groupId: string | null | undefined) =>
     (groupId && h.state.groupShift.get(groupId)) || 0,
-  getGroupDelays: () => ({ airplayMs: 0, sendspinMs: 0 }),
+  airplay2DelayUsOf: (groupId: string | null | undefined) =>
+    (groupId && h.state.group2Shift.get(groupId)) || 0,
+  getGroupDelays: () => ({ airplayMs: 0, airplay2Ms: 0, sendspinMs: 0 }),
 }));
 
 import {
@@ -74,6 +77,7 @@ beforeEach(() => {
   h.state.supervisorRunning = true;
   h.state.globalShiftUs = 7_777;
   h.state.groupShift = new Map([["g1", 123_000], ["g2", -45_000], ["g-zero", 0]]);
+  h.state.group2Shift = new Map([["g1", 66_000], ["g2", -77_000], ["g-zero", 0]]);
   h.state.rpcResult = { listening: true, socketPath: "/tmp/mf-ab.sock" };
   h.devices.a1 = { id: "a1", name: "客厅", host: "192.168.1.20", port: 7000, pk: "PK1", et: "0,1", available: true };
   clearBridgeOwner("a1");
@@ -113,6 +117,35 @@ describe("bridgePrepareDevice:anchorShiftUs 取值面", () => {
   it("负补偿(该侧更早出声)原样下发", async () => {
     await bridgePrepareDevice("a1", "token-6", "raop", "g2");
     expect(h.rpcCalls[0].payload.anchorShiftUs).toBe(-45_000);
+  });
+});
+
+describe("bridgePrepareDevice:anchorShiftUs 按成员协议分格(AP1 / AP2 互不干扰)", () => {
+  it("协议 ap2-realtime → 读 airplay2 格(同一 groupId 下与 AP1 值可以完全不同)", async () => {
+    await bridgePrepareDevice("a1", "token-ap2", "ap2-realtime", "g1");
+    expect(h.rpcCalls[0].payload.anchorShiftUs).toBe(66_000);
+    expect(h.rpcCalls[0].payload.anchorShiftUs).not.toBe(123_000);
+  });
+
+  it("协议 raop → 仍读 airplay 格(新增第三格不得改写 AP1 成员的既有取值)", async () => {
+    await bridgePrepareDevice("a1", "token-ap1", "raop", "g1");
+    expect(h.rpcCalls[0].payload.anchorShiftUs).toBe(123_000);
+  });
+
+  it("同一组两台成员协议不同 → 各取各的格(混合组的落点本来就不是一个数)", async () => {
+    await bridgePrepareDevice("a1", "t-1", "raop", "g1");
+    await bridgePrepareDevice("a1", "t-2", "ap2-realtime", "g1");
+    expect(h.rpcCalls.map((c) => c.payload.anchorShiftUs)).toEqual([123_000, 66_000]);
+  });
+
+  it("负的 AP2 补偿原样下发(该侧更早出声)", async () => {
+    await bridgePrepareDevice("a1", "token-ap2-neg", "ap2-realtime", "g2");
+    expect(h.rpcCalls[0].payload.anchorShiftUs).toBe(-77_000);
+  });
+
+  it("AP2 成员但无组上下文 → 仍回落全局旧值(solo cast 不读按组格)", async () => {
+    await bridgePrepareDevice("a1", "token-ap2-solo", "ap2-realtime");
+    expect(h.rpcCalls[0].payload.anchorShiftUs).toBe(7_777);
   });
 });
 

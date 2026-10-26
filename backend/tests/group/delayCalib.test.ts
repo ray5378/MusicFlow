@@ -9,6 +9,7 @@ import {
   GROUP_DELAY_MAX_MS,
   GROUP_DELAY_MIN_MS,
   GROUP_DELAY_STEP_MS,
+  airplay2DelayUsOf,
   airplayDelayUsOf,
   clampGroupDelayMs,
   getGroupDelays,
@@ -59,38 +60,38 @@ describe("clampGroupDelayMs", () => {
 
 describe("getGroupDelays / setGroupDelays", () => {
   it("新组两列默认 0(不补偿)", () => {
-    expect(getGroupDelays(GID)).toEqual({ airplayMs: 0, sendspinMs: 0 });
+    expect(getGroupDelays(GID)).toEqual({ airplayMs: 0, airplay2Ms: 0, sendspinMs: 0 });
   });
 
   it("写入后立即读到(内存先更新,真·实时依赖这一点)", () => {
     const next = setGroupDelays(GID, { airplayMs: 120, sendspinMs: -80 });
-    expect(next).toEqual({ airplayMs: 120, sendspinMs: -80 });
-    expect(getGroupDelays(GID)).toEqual({ airplayMs: 120, sendspinMs: -80 });
+    expect(next).toEqual({ airplayMs: 120, airplay2Ms: 0, sendspinMs: -80 });
+    expect(getGroupDelays(GID)).toEqual({ airplayMs: 120, airplay2Ms: 0, sendspinMs: -80 });
   });
 
   it("只传一侧时另一侧保持原值(避免前端漏字段把值清零)", () => {
     setGroupDelays(GID, { airplayMs: 100, sendspinMs: 0 });
     const after = setGroupDelays(GID, { sendspinMs: 60 });
-    expect(after).toEqual({ airplayMs: 100, sendspinMs: 60 });
+    expect(after).toEqual({ airplayMs: 100, airplay2Ms: 0, sendspinMs: 60 });
   });
 
   it("落库成功:清缓存后仍读到新值(不是只活在内存里)", () => {
     setGroupDelays(GID, { airplayMs: -300, sendspinMs: 300 });
     invalidateGroupDelays(GID);
-    expect(getGroupDelays(GID)).toEqual({ airplayMs: -300, sendspinMs: 300 });
+    expect(getGroupDelays(GID)).toEqual({ airplayMs: -300, airplay2Ms: 0, sendspinMs: 300 });
   });
 
   it("越界写入被钳制后回读一致", () => {
     const next = setGroupDelays(GID, { airplayMs: 1e9, sendspinMs: -1e9 });
-    expect(next).toEqual({ airplayMs: GROUP_DELAY_MAX_MS, sendspinMs: GROUP_DELAY_MIN_MS });
+    expect(next).toEqual({ airplayMs: GROUP_DELAY_MAX_MS, airplay2Ms: 0, sendspinMs: GROUP_DELAY_MIN_MS });
     invalidateGroupDelays(GID);
-    expect(getGroupDelays(GID)).toEqual({ airplayMs: GROUP_DELAY_MAX_MS, sendspinMs: GROUP_DELAY_MIN_MS });
+    expect(getGroupDelays(GID)).toEqual({ airplayMs: GROUP_DELAY_MAX_MS, airplay2Ms: 0, sendspinMs: GROUP_DELAY_MIN_MS });
   });
 
   it("未知组 id → 全 0(不抛,不误伤别的组)", () => {
-    expect(getGroupDelays("nope")).toEqual({ airplayMs: 0, sendspinMs: 0 });
-    expect(getGroupDelays(undefined)).toEqual({ airplayMs: 0, sendspinMs: 0 });
-    expect(getGroupDelays(null)).toEqual({ airplayMs: 0, sendspinMs: 0 });
+    expect(getGroupDelays("nope")).toEqual({ airplayMs: 0, airplay2Ms: 0, sendspinMs: 0 });
+    expect(getGroupDelays(undefined)).toEqual({ airplayMs: 0, airplay2Ms: 0, sendspinMs: 0 });
+    expect(getGroupDelays(null)).toEqual({ airplayMs: 0, airplay2Ms: 0, sendspinMs: 0 });
   });
 });
 
@@ -121,16 +122,53 @@ describe("返回值不共享可变对象(O2)", () => {
     first.airplayMs = 9999;
     first.sendspinMs = -9999;
     // 缓存未被改写:再读仍是落库值。
-    expect(getGroupDelays(GID)).toEqual({ airplayMs: 120, sendspinMs: -80 });
+    expect(getGroupDelays(GID)).toEqual({ airplayMs: 120, airplay2Ms: 0, sendspinMs: -80 });
     invalidateGroupDelays(GID);
-    expect(getGroupDelays(GID)).toEqual({ airplayMs: 120, sendspinMs: -80 });
+    expect(getGroupDelays(GID)).toEqual({ airplayMs: 120, airplay2Ms: 0, sendspinMs: -80 });
 
     // 全局默认同理:改一个「缺 groupId」的返回值,不得让后续读到非 0。
     const zero = getGroupDelays(undefined);
     zero.airplayMs = 500;
-    expect(getGroupDelays(undefined)).toEqual({ airplayMs: 0, sendspinMs: 0 });
-    expect(getGroupDelays(null)).toEqual({ airplayMs: 0, sendspinMs: 0 });
-    expect(getGroupDelays("no-such-group")).toEqual({ airplayMs: 0, sendspinMs: 0 });
+    expect(getGroupDelays(undefined)).toEqual({ airplayMs: 0, airplay2Ms: 0, sendspinMs: 0 });
+    expect(getGroupDelays(null)).toEqual({ airplayMs: 0, airplay2Ms: 0, sendspinMs: 0 });
+    expect(getGroupDelays("no-such-group")).toEqual({ airplayMs: 0, airplay2Ms: 0, sendspinMs: 0 });
+  });
+});
+
+describe("AirPlay 2 第三格(airplay2Ms)", () => {
+  it("三格各自独立读写(AP1 与 AP2 不是同一个数)", () => {
+    const next = setGroupDelays(GID, { airplayMs: 120, airplay2Ms: -45, sendspinMs: 80 });
+    expect(next).toEqual({ airplayMs: 120, airplay2Ms: -45, sendspinMs: 80 });
+    expect(getGroupDelays(GID)).toEqual({ airplayMs: 120, airplay2Ms: -45, sendspinMs: 80 });
+  });
+
+  it("只改第三格时 AP1 / Sendspin 两格不动(前端逐格调不会被互相清零)", () => {
+    setGroupDelays(GID, { airplayMs: 100, airplay2Ms: 20, sendspinMs: 60 });
+    const after = setGroupDelays(GID, { airplay2Ms: 7 });
+    expect(after).toEqual({ airplayMs: 100, airplay2Ms: 7, sendspinMs: 60 });
+  });
+
+  it("第三格同样过 ±30s 钳制(不过 clamp 就会把越界值写进内存+DB)", () => {
+    expect(setGroupDelays(GID, { airplay2Ms: 1e9 }).airplay2Ms).toBe(GROUP_DELAY_MAX_MS);
+    expect(setGroupDelays(GID, { airplay2Ms: -1e9 }).airplay2Ms).toBe(GROUP_DELAY_MIN_MS);
+  });
+
+  it("第三格真的落库:清缓存后仍读到(不是只活在内存里)", () => {
+    setGroupDelays(GID, { airplay2Ms: -250 });
+    invalidateGroupDelays(GID);
+    expect(getGroupDelays(GID).airplay2Ms).toBe(-250);
+  });
+
+  it("airplay2DelayUsOf = airplay2Ms×1000,且不受 AP1 格影响(串格会在这里被抓)", () => {
+    setGroupDelays(GID, { airplayMs: 90, airplay2Ms: -30, sendspinMs: 0 });
+    expect(airplay2DelayUsOf(GID)).toBe(-30_000);
+    expect(airplayDelayUsOf(GID)).toBe(90_000);
+  });
+
+  it("只设 AP1 格 ⇒ 第三格仍为 0(继承只发生在 DB 补列那一刻,读路径不代填)", () => {
+    setGroupDelays(GID, { airplayMs: 55, sendspinMs: 0 });
+    expect(getGroupDelays(GID).airplay2Ms).toBe(0);
+    expect(airplay2DelayUsOf(GID)).toBe(0);
   });
 });
 

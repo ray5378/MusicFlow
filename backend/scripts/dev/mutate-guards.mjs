@@ -58,6 +58,7 @@ const PF = "backend/src/services/source/prefetchCache.ts";
 const WD = "backend/src/services/group/watchdog.ts";
 const DC = "backend/src/services/group/delayCalib.ts";
 const API = "backend/src/routes/api/groups.ts";
+const CTL = "backend/src/services/airplay/control.ts";
 
 /**
  * 每条 = 一处违规手法。
@@ -295,6 +296,46 @@ const CASES = [
     to:
       '      seen.add(m);\n    }\n    const newOnes = memberIds.filter(m => !g.memberIds.includes(m));\n      if (seen.has(m)) throw new Error("成员列表不能重复");',
     expect: "顺序颠倒",
+  },
+
+  // ===== G13 AP1/AP2 延迟分格 =====
+  // 价值:第三格是新增概念,断言一旦恒真就没人会发现「AP2 成员实际在读 AP1 的值」——
+  // 表现为用户调 AP2 那一格完全没反应,或反过来把 AP1 成员拉偏。
+  {
+    id: "G13-a",
+    guard: "group",
+    why: "airplay2DelayUsOf 偷读 airplayMs 格(第三格形同虚设,AP2 成员跟着 AP1 的标定值跑)",
+    file: DC,
+    from: "  return getGroupDelays(groupId).airplay2Ms * 1000;",
+    to: "  return getGroupDelays(groupId).airplayMs * 1000;",
+    expect: "airplay2DelayUsOf 存在且只读 airplay2Ms 格",
+  },
+  {
+    id: "G13-b",
+    guard: "group",
+    why: "bridgePrepareDevice 把 AP2 分支也接到 AP1 取值口(同组 AP2 成员用错补偿)",
+    file: CTL,
+    from: "(isAp2BridgeProtocol(protocol) ? airplay2DelayUsOf(groupId) : airplayDelayUsOf(groupId))",
+    to: "(isAp2BridgeProtocol(protocol) ? airplayDelayUsOf(groupId) : airplayDelayUsOf(groupId))",
+    expect: "bridgePrepareDevice 按成员协议分格",
+  },
+  {
+    id: "G13-c",
+    guard: "group",
+    why: "读路径漏列新列(第三格恒读 0,UI 永远显示不入 DB 的值)",
+    file: DC,
+    from: "        a2: playerGroups.airplay2DelayMs,\n",
+    to: "",
+    expect: "getGroupDelays 的 select 必须列 airplay2DelayMs",
+  },
+  {
+    id: "G13-d",
+    guard: "group",
+    why: "PUT 的重建条件漏掉 airplay2Ms(只改 AP2 那一格时调了没反应)",
+    file: API,
+    from: "(next.airplayMs !== before.airplayMs || next.airplay2Ms !== before.airplay2Ms) &&",
+    to: "(next.airplayMs !== before.airplayMs) &&",
+    expect: "PUT delays 的重建条件必须覆盖 airplay2Ms",
   },
 
   // ===== check-airplay-bridge.mjs(⑮⑯⑰) =====

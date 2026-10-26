@@ -58,6 +58,7 @@ describe("/v1/groups/:id/delays", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as any;
     expect(body.airplayMs).toBe(0);
+    expect(body.airplay2Ms).toBe(0);
     expect(body.sendspinMs).toBe(0);
     expect(body.minMs).toBe(-30000);
     expect(body.maxMs).toBe(30000);
@@ -83,6 +84,60 @@ describe("/v1/groups/:id/delays", () => {
     const body = (await get.json()) as any;
     expect(body.airplayMs).toBe(120);
     expect(body.sendspinMs).toBe(-60);
+  });
+
+  it("PUT 一次写三侧 airplay/airplay2/sendspin,回读三项都一致", async () => {
+    const uid = seedAdmin();
+    const g = getGroupManager().createGroup("混合组", [], uid);
+    const headers = adminHeaders(uid);
+    const put = await app.request(`/rest/api/v1/groups/${g.id}/delays`, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ airplayMs: 120, airplay2Ms: -45, sendspinMs: -60 }),
+    });
+    expect(put.status).toBe(200);
+    const saved = (await put.json()) as any;
+    expect(saved.airplayMs).toBe(120);
+    expect(saved.airplay2Ms).toBe(-45);
+    expect(saved.sendspinMs).toBe(-60);
+
+    const get = await app.request(`/rest/api/v1/groups/${g.id}/delays`, { headers });
+    const body = (await get.json()) as any;
+    expect(body.airplayMs).toBe(120);
+    expect(body.airplay2Ms).toBe(-45);
+    expect(body.sendspinMs).toBe(-60);
+  });
+
+  it("只改第三格时 AP1 / Sendspin 两格不受影响(前端逐格调不会互相清零)", async () => {
+    const uid = seedAdmin();
+    const g = getGroupManager().createGroup("只调AP2", [], uid);
+    const headers = adminHeaders(uid);
+    await app.request(`/rest/api/v1/groups/${g.id}/delays`, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ airplayMs: 80, airplay2Ms: 10, sendspinMs: 20 }),
+    });
+    const res = await app.request(`/rest/api/v1/groups/${g.id}/delays`, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ airplay2Ms: -70 }),
+    });
+    const body = (await res.json()) as any;
+    expect(body.airplayMs).toBe(80);
+    expect(body.airplay2Ms).toBe(-70);
+    expect(body.sendspinMs).toBe(20);
+  });
+
+  it("第三格同样被钳到 ±30s(绕过 clamp 会把越界值写进 DB)", async () => {
+    const uid = seedAdmin();
+    const g = getGroupManager().createGroup("AP2越界", [], uid);
+    const res = await app.request(`/rest/api/v1/groups/${g.id}/delays`, {
+      method: "PUT",
+      headers: adminHeaders(uid),
+      body: JSON.stringify({ airplay2Ms: 999999 }),
+    });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as any).airplay2Ms).toBe(30000);
   });
 
   it("越界值被钳到 ±30s 而不是 400", async () => {

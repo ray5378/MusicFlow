@@ -806,6 +806,25 @@ export function initDatabase() {
       sqlite.exec("ALTER TABLE player_groups ADD COLUMN sendspin_delay_ms INTEGER NOT NULL DEFAULT 0");
       log.info("player_groups 新增 sendspin_delay_ms 列");
     }
+    // 结构升级(2026-10-27):AP2 realtime 出声链路接通后,AirPlay 侧必须按协议拆两格。
+    // 新增列**继承当时 airplay_delay_ms 的非零值**:用户此前标定的是整体(TL delay),
+    // 分成两格后若让 AP2 侧凭空归零,等于把已经调好的组悄悄打散。继承后可以各自再微调。
+    // 全 0 的组(绝大多数)不受影响 —— 值为 0 时不复制,保持「三项干净」。
+    if (!cols.includes("airplay2_delay_ms")) {
+      sqlite.exec("ALTER TABLE player_groups ADD COLUMN airplay2_delay_ms INTEGER NOT NULL DEFAULT 0");
+      let carried = 0;
+      try {
+        const row = sqlite
+          .prepare("SELECT COUNT(*) AS n, MAX(ABS(airplay_delay_ms)) AS mx FROM player_groups")
+          .get() as { n?: unknown; mx?: unknown } | undefined;
+        const mx = Math.round(Number(row?.mx));
+        if (Number(row?.n) > 0 && Number.isFinite(mx) && mx !== 0) {
+          sqlite.prepare("UPDATE player_groups SET airplay2_delay_ms = airplay_delay_ms").run();
+          carried = mx;
+        }
+      } catch { /* 聚合失败 → 保持 0 */ }
+      log.info(`player_groups 新增 airplay2_delay_ms 列(继承既有 airplay_delay_ms,峰值 ${carried}ms)`);
+    }
   } catch (e) {
     log.warn(`player_groups 补列失败: ${e instanceof Error ? e.message : e}`);
   }

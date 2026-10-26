@@ -239,6 +239,7 @@ const miss = (label) => `未找到 ${label}(实现改名/迁移?请同步本条�
 const GROUP_INDEX = "backend/src/services/group/index.ts";
 const DELAY_CALIB = "backend/src/services/group/delayCalib.ts";
 const API_GROUPS = "backend/src/routes/api/groups.ts";
+const AIRPLAY_CONTROL = "backend/src/services/airplay/control.ts";
 const GROUP_WATCHDOG = "backend/src/services/group/watchdog.ts";
 const QUEUE_CTL = "backend/src/services/player/QueueController.ts";
 const SPIN_SERVER = "backend/src/services/sendspin/server.ts";
@@ -623,10 +624,12 @@ console.log("===== G10 延迟补偿参数域(±30s / 步进 10ms 单一源 + 写
   pin("GROUP_DELAY_STEP_MS", "10");
   const setB = bodyByName(dc, atLineStart("setGroupDelays"));
   check(
-    "setGroupDelays 两侧取值都过 clampGroupDelayMs(绕过即把越界值写进内存+DB)",
+    "setGroupDelays 三侧取值都过 clampGroupDelayMs(绕过即把越界值写进内存+DB)",
     setB !== null &&
-      count(setB, "clampGroupDelayMs(") >= 2,
-    setB === null ? miss("setGroupDelays") : `clamp 调用 ${setB === null ? 0 : count(setB, "clampGroupDelayMs(")} 处(应 ≥2:airplay + sendspin)`,
+      count(setB, "clampGroupDelayMs(") >= 3,
+    setB === null
+      ? miss("setGroupDelays")
+      : `clamp 调用 ${setB === null ? 0 : count(setB, "clampGroupDelayMs(")} 处(应 ≥3:airplay + airplay2 + sendspin)`,
   );
   const api = code(API_GROUPS);
   const putSeg = sliceBetween(api, 'app.put("/v1/groups/:id/delays"', 'app.delete("/v1/groups/:id"');
@@ -647,23 +650,94 @@ console.log("===== G11 延迟只在读视图,不得进 PlayerGroup 实体 / pers
   const gi = code(GROUP_INDEX);
   const entB = bodyByHead(gi, /(?:^|\n)export\s+interface\s+PlayerGroup\b/);
   check(
-    "PlayerGroup 实体接口不得含 airplayDelayMs / sendspinDelayMs",
-    entB !== null && count(entB, "airplayDelayMs") === 0 && count(entB, "sendspinDelayMs") === 0,
+    "PlayerGroup 实体接口不得含 airplayDelayMs / airplay2DelayMs / sendspinDelayMs",
+    entB !== null &&
+      count(entB, "airplayDelayMs") === 0 &&
+      count(entB, "airplay2DelayMs") === 0 &&
+      count(entB, "sendspinDelayMs") === 0,
     entB === null
       ? miss("interface PlayerGroup")
       : "实体带上延迟字段 ⇒ 任何 persist/emit 都会拿内存里的旧值覆盖 DB 值",
   );
   const viewB = bodyByHead(gi, /(?:^|\n)export\s+interface\s+PlayerGroupWithMembers\b/);
   check(
-    "读视图 PlayerGroupWithMembers 必须带两个延迟字段(前端回显不能丢)",
-    viewB !== null && viewB.includes("airplayDelayMs") && viewB.includes("sendspinDelayMs"),
-    viewB === null ? miss("interface PlayerGroupWithMembers") : "读视图缺延迟字段 ⇒ 弹窗回显恒 0,用户以为没保存",
+    "读视图 PlayerGroupWithMembers 必须带三个延迟字段(前端回显不能丢)",
+    viewB !== null &&
+      viewB.includes("airplayDelayMs") &&
+      viewB.includes("airplay2DelayMs") &&
+      viewB.includes("sendspinDelayMs"),
+    viewB === null
+      ? miss("interface PlayerGroupWithMembers")
+      : "读视图缺延迟字段 ⇒ 弹窗回显恒 0,用户以为没保存",
   );
   const perB = bodyByName(gi, atLineStart("persist"));
   check(
     "persist 不得写延迟字段(否则改名/调音量会把 DB 里的延迟冲掉)",
-    perB !== null && count(perB, "airplayDelayMs") === 0 && count(perB, "sendspinDelayMs") === 0,
+    perB !== null &&
+      count(perB, "airplayDelayMs") === 0 &&
+      count(perB, "airplay2DelayMs") === 0 &&
+      count(perB, "sendspinDelayMs") === 0,
     perB === null ? miss("persist") : "persist 写了延迟字段 ⇒ 组改名/调音量后延迟被整行 upsert 冲回默认值",
+  );
+}
+
+// ===========================================================================
+// G13 AirPlay 1 / AirPlay 2 延迟分格(第三格 airplay2_delay_ms)
+// ===========================================================================
+console.log("===== G13 AP1/AP2 延迟必须按成员协议分格(混合组里各读各的) =====");
+{
+  const dc = code(DELAY_CALIB);
+  const ap1B = bodyByName(dc, atLineStart("airplayDelayUsOf"));
+  check(
+    "airplayDelayUsOf 只读 airplayMs 格(读到 airplay2Ms ⇒ AP1 成员被 AP2 的值带着跑偏)",
+    ap1B !== null && /\.airplayMs\s*\*\s*1000/.test(ap1B) && count(ap1B, "airplay2Ms") === 0,
+    ap1B === null ? miss("airplayDelayUsOf") : "AP1 取值口串到 AP2 格 ⇒ 混合组里 AP1 成员被 AP2 的标定值拉偏",
+  );
+  const ap2B = bodyByName(dc, atLineStart("airplay2DelayUsOf"));
+  check(
+    "airplay2DelayUsOf 存在且只读 airplay2Ms 格(反向串格同样炸)",
+    ap2B !== null && /\.airplay2Ms\s*\*\s*1000/.test(ap2B) && count(ap2B, "airplayMs") === 0,
+    ap2B === null ? miss("airplay2DelayUsOf") : "AP2 取值口串到 AP1 格 ⇒ 第三格形同虚设",
+  );
+  const getB = bodyByName(dc, atLineStart("getGroupDelays"));
+  check(
+    "getGroupDelays 的 select 必须列 airplay2DelayMs(漏列 ⇒ 第三格恒读 0)",
+    getB !== null && getB.includes("playerGroups.airplay2DelayMs"),
+    getB === null ? miss("getGroupDelays") : "读路径没列新列 ⇒ 保存成功但读回 0,用户以为没存上",
+  );
+  const setB = bodyByName(dc, atLineStart("setGroupDelays"));
+  check(
+    "setGroupDelays 必须把 airplay2Ms 落库(只改内存 ⇒ 重启即回 0)",
+    setB !== null && setB.includes("airplay2DelayMs:"),
+    setB === null ? miss("setGroupDelays") : "写路径漏写新列 ⇒ 重启后 AP2 补偿丢失",
+  );
+  const ctl = code(AIRPLAY_CONTROL);
+  // bodyByName 在本签名上会误判:返回类型是对象字面量 `Promise<{ ... }>`,
+  // 而它的 body 查找规则「遇 `{` 看前一个非空格是不是 `:`」正好被这个类型命中,
+  // 于是取回来的是返回类型而不是函数体。这里显式跳过 `<...>` 再取第一个 `{`。
+  const headAt = ctl.search(/(?:^|\n)[ \t]*export\s+async\s+function\s+bridgePrepareDevice\b/);
+  const gtAt = headAt === -1 ? -1 : ctl.indexOf(">", headAt);
+  const openAt = gtAt === -1 ? -1 : ctl.indexOf("{", gtAt);
+  const prepB = openAt === -1 ? null : sliceBraces(ctl, openAt);
+  check(
+    "bridgePrepareDevice 按成员协议分格:两个取值口同在,分支判据是 isAp2BridgeProtocol(protocol)",
+    prepB !== null &&
+      count(prepB, "airplay2DelayUsOf(") === 1 &&
+      count(prepB, "airplayDelayUsOf(") === 1 &&
+      /isAp2BridgeProtocol\(\s*protocol\s*\)/.test(prepB),
+    prepB === null
+      ? miss("bridgePrepareDevice")
+      : `ap2 口=${prepB === null ? 0 : count(prepB, "airplay2DelayUsOf(")} ap1 口=${
+          prepB === null ? 0 : count(prepB, "airplayDelayUsOf(")
+        } 判据=${prepB === null ? "-" : /isAp2BridgeProtocol\(\s*protocol\s*\)/.test(prepB)}`,
+  );
+  // AP2 侧同样是把锚点在会话建立时算死 ⇒ 第三格变了不重建桥 = 「只改 AP2」调了没反应。
+  const api = code(API_GROUPS);
+  const putSeg = sliceBetween(api, 'app.put("/v1/groups/:id/delays"', 'app.delete("/v1/groups/:id"');
+  check(
+    "PUT delays 的重建条件必须覆盖 airplay2Ms(只判 airplayMs ⇒ 只改 AP2 那格时不生效)",
+    putSeg !== null && /next\.airplay2Ms\s*!==\s*before\.airplay2Ms/.test(putSeg),
+    putSeg === null ? miss('app.put("/v1/groups/:id/delays")') : "重建条件漏了 airplay2Ms",
   );
 }
 

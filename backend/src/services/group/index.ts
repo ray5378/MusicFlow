@@ -106,15 +106,25 @@ export interface GroupMemberInfo {
 export interface PlayerGroupWithMembers extends PlayerGroup {
   members: GroupMemberInfo[];
   /** 延迟补偿回显(ms):**正数 = 该侧更晚出声,负数 = 该侧更早出声**。
-   *  只在「读视图」里带出(不写进 PlayerGroup/persist),避免与落库路径耦合。 */
+   *  三格:AP1 / AP2 / Sendspin。只在「读视图」里带出(不写进 PlayerGroup/persist),
+   *  避免与落库路径耦合 —— 见 G11:实体带上延迟字段会被 persist 的整行 upsert 冲回默认值。 */
   airplayDelayMs: number;
+  airplay2DelayMs: number;
   sendspinDelayMs: number;
 }
 
 /** 读视图附加的延迟补偿字段(供前端回显;不存在即 0)。 */
-function delayView(id: string): { airplayDelayMs: number; sendspinDelayMs: number } {
+function delayView(id: string): {
+  airplayDelayMs: number;
+  airplay2DelayMs: number;
+  sendspinDelayMs: number;
+} {
   const d = getGroupDelays(id);
-  return { airplayDelayMs: d.airplayMs, sendspinDelayMs: d.sendspinMs };
+  return {
+    airplayDelayMs: d.airplayMs,
+    airplay2DelayMs: d.airplay2Ms,
+    sendspinDelayMs: d.sendspinMs,
+  };
 }
 
 const GROUP_NAME_MAX = 50;

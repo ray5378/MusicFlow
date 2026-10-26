@@ -826,6 +826,19 @@
       </div>
 
       <div style="display:flex;align-items:center;gap:12px;margin-top:16px;">
+        <div style="width:96px;font-size:13px;">AirPlay 2</div>
+        <el-input-number
+          v-model="delayAirplay2"
+          :min="delayMin" :max="delayMax" :step="delayStep" :step-strictly="true"
+          controls-position="right" style="width:150px"
+        />
+        <span style="font-size:12px;color:var(--el-text-color-secondary);">ms</span>
+      </div>
+      <div style="font-size:12px;color:var(--el-text-color-secondary);line-height:1.5;margin:6px 0 0 108px;">
+        {{ t('groups.delayAirplay2Hint') }}
+      </div>
+
+      <div style="display:flex;align-items:center;gap:12px;margin-top:16px;">
         <div style="width:96px;font-size:13px;">Sendspin</div>
         <el-input-number
           v-model="delaySendspin"
@@ -839,7 +852,7 @@
       </div>
 
       <div style="margin-top:16px;padding:9px 12px;background:var(--el-fill-color-light);border-radius:6px;font-size:12px;line-height:1.6;">
-        {{ delayDiffText }}
+        <div v-for="(line, i) in delayDiffLines" :key="i">{{ line }}</div>
       </div>
       <div style="font-size:12px;color:var(--el-text-color-secondary);line-height:1.6;margin-top:10px;">
         {{ delayRangeText }}
@@ -1149,24 +1162,31 @@ function openOutputConfig(peerIds: string[], name: string): void {
 const showDelay = ref(false);
 const delayGroup = ref<any>(null);
 const delayAirplay = ref(0);
+const delayAirplay2 = ref(0);
 const delaySendspin = ref(0);
 const delayMin = ref(-30000);
 const delayMax = ref(30000);
 const delayStep = ref(10);
 const delaySaving = ref(false);
 
-/** 差值 = AirPlay − Sendspin:>0 表示 AirPlay 更晚,<0 表示 AirPlay 更早。 */
-const delayDiffMs = computed(() => (delayAirplay.value || 0) - (delaySendspin.value || 0));
-
-const delayDiffText = computed(() => {
-  const d = delayDiffMs.value;
-  if (!d) return t("groups.delayDiffSame");
+/** 某一侧相对 Sendspin 的差值说明(>0 = 该侧更晚)。
+ *  AP1 与 AP2 各出一格:混合组里两条链路的抵达延迟本就不是一个数,合成一行会把两边都糊掉。 */
+function diffLineOf(value: number, side: string): string {
+  const d = (value || 0) - (delaySendspin.value || 0);
+  if (!d) return t("groups.delayDiffSame", { side });
   const head = d > 0
-    ? t("groups.delayDiffLater", { ms: Math.abs(d) })
-    : t("groups.delayDiffEarlier", { ms: Math.abs(d) });
-  const tip = d > 0 ? t("groups.delayDiffTipLater") : t("groups.delayDiffTipEarlier");
+    ? t("groups.delayDiffLater", { ms: Math.abs(d), side })
+    : t("groups.delayDiffEarlier", { ms: Math.abs(d), side });
+  const tip = d > 0
+    ? t("groups.delayDiffTipLater", { side })
+    : t("groups.delayDiffTipEarlier", { side });
   return `${head} ${tip}`;
-});
+}
+
+const delayDiffLines = computed(() => [
+  diffLineOf(delayAirplay.value, "AirPlay"),
+  diffLineOf(delayAirplay2.value, "AirPlay 2"),
+]);
 
 const delayRangeText = computed(() =>
   t("groups.delayRange", {
@@ -1179,11 +1199,13 @@ const delayRangeText = computed(() =>
 /** 卡片上的延迟补偿回显(ms):正数=更晚、负数=更早;两侧都 0 → 空串(不占位)。 */
 function delayBadge(g: any): string {
   const a = Number(g?.airplayDelayMs || 0);
+  const a2 = Number(g?.airplay2DelayMs || 0);
   const b = Number(g?.sendspinDelayMs || 0);
-  if (!a && !b) return "";
+  if (!a && !a2 && !b) return "";
   const fmt = (v: number) => (v > 0 ? `+${v}` : `${v}`);
   const parts: string[] = [];
   if (a) parts.push(`AirPlay ${fmt(a)}ms`);
+  if (a2) parts.push(`AP2 ${fmt(a2)}ms`);
   if (b) parts.push(`Sendspin ${fmt(b)}ms`);
   return t("groups.delayBadge", { text: parts.join(" / ") });
 }
@@ -1194,6 +1216,7 @@ async function openDelay(g: any): Promise<void> {
     const r = await api.get(`/rest/api/v1/groups/${g.id}/delays`);
     const d = r.data || {};
     delayAirplay.value = Number(d.airplayMs ?? 0);
+    delayAirplay2.value = Number(d.airplay2Ms ?? 0);
     delaySendspin.value = Number(d.sendspinMs ?? 0);
     if (typeof d.minMs === "number") delayMin.value = d.minMs;
     if (typeof d.maxMs === "number") delayMax.value = d.maxMs;
@@ -1208,6 +1231,7 @@ async function openDelay(g: any): Promise<void> {
 /** 一侧都不补偿(两侧归零)。 */
 function resetDelay(): void {
   delayAirplay.value = 0;
+  delayAirplay2.value = 0;
   delaySendspin.value = 0;
 }
 
@@ -1218,6 +1242,7 @@ async function saveDelay(): Promise<void> {
   try {
     const r = await api.put(`/rest/api/v1/groups/${g.id}/delays`, {
       airplayMs: delayAirplay.value,
+      airplay2Ms: delayAirplay2.value,
       sendspinMs: delaySendspin.value,
     });
     showDelay.value = false;

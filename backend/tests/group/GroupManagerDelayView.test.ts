@@ -101,11 +101,12 @@ describe("splitMemberId:命名空间解析", () => {
 });
 
 describe("读视图延迟补偿(delayView)", () => {
-  it("getWithMembers 带出 airplayDelayMs/sendspinDelayMs", () => {
+  it("getWithMembers 带出 airplayDelayMs/airplay2DelayMs/sendspinDelayMs", () => {
     const g = gm.createGroup("延迟组", []);
-    setGroupDelays(g.id, { airplayMs: 120, sendspinMs: -80 });
+    setGroupDelays(g.id, { airplayMs: 120, airplay2Ms: -45, sendspinMs: -80 });
     const view = gm.getWithMembers(g.id)!;
     expect(view.airplayDelayMs).toBe(120);
+    expect(view.airplay2DelayMs).toBe(-45);
     expect(view.sendspinDelayMs).toBe(-80);
   });
 
@@ -113,9 +114,11 @@ describe("读视图延迟补偿(delayView)", () => {
     const g = gm.createGroup("干净实体", []);
     setGroupDelays(g.id, { airplayMs: 50, sendspinMs: 60 });
     expect(g).not.toHaveProperty("airplayDelayMs");
+    expect(g).not.toHaveProperty("airplay2DelayMs");
     expect(g).not.toHaveProperty("sendspinDelayMs");
     expect(gm.get(g.id)).not.toHaveProperty("airplayDelayMs");
     expect(gm.list()[0]).not.toHaveProperty("sendspinDelayMs");
+    expect(gm.list()[0]).not.toHaveProperty("airplay2DelayMs");
     // 读视图才有
     expect(gm.listWithMembers()[0].airplayDelayMs).toBe(50);
   });
@@ -125,6 +128,7 @@ describe("读视图延迟补偿(delayView)", () => {
     invalidateGroupDelays(g.id);
     const view = gm.getWithMembers(g.id)!;
     expect(view.airplayDelayMs).toBe(0);
+    expect(view.airplay2DelayMs).toBe(0);
     expect(view.sendspinDelayMs).toBe(0);
   });
 

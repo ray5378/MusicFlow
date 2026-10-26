@@ -2,6 +2,50 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.7.0] - 2026-10-27
+
+### Feature / 群组延迟补偿增加 AirPlay 2 独立一格:AP1 / AP2 / Sendspin 三侧各调
+
+- 入口:群组卡片「延迟补偿」弹窗新增 **AirPlay 2** 一行(原先只有 AirPlay 与 Sendspin);差值提示改为按侧各出一行(都以 Sendspin 为基准),卡片徽章在三者非 0 时分别回显。
+- 为什么要拆:AirPlay 1 走 44.1kHz 重采样 + 明文 RTSP,AirPlay 2 走 48kHz 直通 + 加密链路,两条路的抵达延迟不是同一个物理量。原先共用 `airplay_delay_ms`,混合组里调一格会同时动两台设备,等于让用户在 AP1 与 AP2 之间来回凑,谁也调不准。
+- 取值是**逐成员**而不是按组:`bridgePrepareDevice` 的 `anchorShiftUs` 按该成员自身的桥协议二选一 —— `isAp2BridgeProtocol(protocol)` 命中读 `airplay2_delay_ms`,否则仍读 `airplay_delay_ms`(AP1 的取值表达式一字未改)。同一混合组里 AP1 成员与 AP2 成员各读各的格子。
+- 持久化:新增 `player_groups.airplay2_delay_ms`(幂等 `ALTER TABLE ADD COLUMN`)。**升级时把既有 `airplay_delay_ms` 的非零值复制过来** —— 用户此前标定过的组不会因分格而凭空归零;继承值与 AP2 实际链路有偏差属于预期,之后各调一格即可。全 0 的组不复制,保持三项干净。
+- 接口 `GET/PUT /rest/api/v1/groups/:id/delays` 增 `airplay2Ms`;PUT 的重建桥条件由「只判 airplayMs」扩为「airplayMs 或 airplay2Ms 任一变化」—— AP2 的锚点同样在会话建立时算死,不重建就等于「只改 AP2 那一格」调了没反应。
+- 验证:`delayCalib` 新增第三格六项用例(三格独立读写 / 只改第三格 / ±30s 钳制 / 落库回读 / 单位换算不串格 / 只设 AP1 时第三格仍 0)+ 路由三项 + 读视图三项;`bridgePrepareAnchorShift` 补 AP2/AP1 分格取值五例(含「同一组两台成员各取各格」与「无组上下文仍回落全局值」);`tests/group|routes|airplay` 59 文件 894 用例全绿;群组守卫 41 条断言全绿(含新增 **G13 AP1/AP2 不得串格** 4 条),变异反证 36/36 条都能被真实违规打红。
+
+### Feature / AirPlay 2 全链路打通:配对 → 准入 → 逐成员选协议 → 出声
+
+- 配对:新增 `POST /rest/api/v1/airplay/devices/:deviceId/pair`(4 位 PIN,HAP 配对凭证入 `airplay_devices.hap_credentials`);`controllerId` 持久化到 settings —— 该 id 一变,库里所有凭证全部失效,因此必须持久化。
+- 准入:`selectable` 的**唯一判据**是 `control.ts::isAirPlayMemberSelectable`(支持 AP2 但未配对 ⇒ 不可选、不可入组),前端不持有第二套判据。`GET /v1/airplay/devices` 返回全部设备(含未配对)并带 `ap2Capable/ap2Paired/selectable`,由选择器与群组候选各自过滤。
+- 协议逐成员选:`selectAirPlayBridgeProtocol` 按「开关 + 设备 supportsAp2 + 已配对」三重判据,只出 `raop` 或 `ap2-realtime`(**禁用** ap2-compat 与 buffered)。同一混合组里 HiVi(仅支持 AP1)与 AP2 设备并存时按各自能力走,不是组级开关。
+- 出声:`BridgeSession` 增与 RAOP 并列的第二个出口 `runAp2Output`(纯驱动,共用唯一的 `planBridgeAnchor` 锚点与唯一的 `BridgeTimelineAligner`;48k 直通不重采样;late-skip 30ms;暂停不拉块;abort/failLink 立即退出)。
+- 延迟标定结论:`AP2_EFFECTIVE_LATENCY_FRAMES` 保持 11025 —— 230 测试床实测 pop 侧中位 0.194ms 只是地板值,而 `latencyMin` 是设备要求的最小提前量,低估会 underrun、高估不吃亏。
+- 兜底:成员桥断开经 snapshot 降级标志 + 5s 看门狗摘桥并回落 AP1 solo(**不在会话内切协议**);`prepareBridge` 错误按 `ap2-<stage>` 前缀化以复用既有 soloFallback;未配对设备不摘组、回落 AP1、标为需重新配对,只有新加入严格禁止。
+- 验证:新增 ap2ControllerId / ap2PairService / groupAp2Gate / airplayPairRoute / ap2ProtocolSelect / bridgeAp2Output / groupAp2Route 七个测试文件。
+
+### Fix / 30-60 秒假歌三处漏网
+
+- 判官顺序:几 KB 的 JSON/HTML 错误页原先先被「<64KB」的弱信号拦下(判成「太小,重试一次」),永远走不到 magic 检测。改为**先 sniffMagic**(不是音频 = 硬结论,10MB 的 HTML 也照样不是音频 → `markUnplayable` → 换源),`too-small` 降级为之后的弱信号。
+- 流式窗口提前 EOF:该路径从来没有「已交付时长 vs 声明时长」的比较,所谓「交给播放侧探测」实际交给了不存在的探测器。补上:交付时长与声明时长之差 > 80s ⇒ `markUnplayable` + `ev=stream-truncated`。注:交错样本必须除 `SAMPLE_RATE * CHANNELS`,只除采样率等于把 80s 判死线悄悄放宽到 160s。
+- `contentEnded` 与 `endedNaturally` 语义分离:截断时若按 `endedNaturally` 驱动收尾,`current` 不清空 ⇒ 整组卡在 PLAYING。改为按 `contentEnded` 收尾,`endedNaturally` 只回答「算不算自然播完」。
+- 单曲循环防死循环:同一 songId 连续判死 2 次 ⇒ 跳下一首(播够 30 秒且未判死才清零)。
+- 验证:240 真机复现并修复 —— `ev=stream-truncated song=258298a0 expectedSec=276 deliveredSec=60 missingSec=216` ⇒ 自动跳下一首,不再卡住。
+
+### Fix / 播放器页加载(常卡在「等待播放器」)
+
+- axios 超时 15s→6s;GET 在无响应时自动重试一次(有响应的一律不重试);加载失败**不再伪装成空列表**,保留上次列表并给行内错误条与就地重试;懒加载改为「成功才注销」loader,失败可重入。
+- 设备分区的 loading 罩改为「只有首次且列表为空才罩」,避免每次刷新都闪骨架。
+
+### Fix / 群组回归守卫体系带出的两处真缺陷
+
+- 桥会话播放中音量落不到 RAOP;全成员 cast 失败时桥路由泄漏、设备被 owner=bridge 永久占用(此后所有 native cast 被拒)。
+- 另修:历史含 DLNA 成员的组被永久锁死(准入改为只校验新加入成员);`getGroupDelays` 返回共享可变默认对象(任一调用方改写会污染全局默认与所有无行组)。
+- 体系:群组不变量守卫 G1–G12(35 条)+ 本次新增 G13(4 条);配套变异反证工具用于证明断言不是恒真式,覆盖率棘轮门禁把 airplay 86.2→92.5 / group 76.4→98.8 行覆盖钉住。
+
+### Docs / 文档瘦身 32.6%
+
+- 删已被代码推翻的旧方案正文、跨文档重复表、过程台账与排期噪音;两份历史方案压成「落地状态表 + 决策 + 推导 + 病根」;修正过期口径;4 份旧调研归档到 docs/archive 并加索引。
+
 ## [4.6.77] - 2026-10-26
 
 ### Feature / 群组延迟补偿(按组 A/V 标定):AirPlay 与 Sendspin 各自可调 ±30s,正数更晚 / 负数更早

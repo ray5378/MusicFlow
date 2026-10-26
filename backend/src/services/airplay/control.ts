@@ -20,7 +20,7 @@ import { airplaySupervisor } from "./supervisor.js";
 import { rpcFireAndForget } from "../rendererHost/front.js";
 import { getAirPlayDevice, getAirPlayDevices, onAirPlayEvent, startAirPlayDiscovery, stopAirPlayDiscovery, setAirPlayPersist, removeAirPlayDevice, type AirPlayDevice } from "./discovery.js";
 import { getBridgeAvShiftUs } from "./bridgeCalib.js";
-import { airplayDelayUsOf } from "../group/delayCalib.js";
+import { airplay2DelayUsOf, airplayDelayUsOf } from "../group/delayCalib.js";
 import { getEffectiveBaseUrl, getCachedDevices, setDeviceVolume, setDeviceMute, stopDevicePlayback, loopbackBase } from "../dlna/control.js";
 import { sqlite } from "../../db/index.js";
 import { createAirPlaySession } from "./session.js";
@@ -322,7 +322,12 @@ export async function bridgePrepareDevice(
     // A/V 标定位移:HiVi 不回报 Audio-Latency ⇒ L_true 不可知,靠该值补齐常量差。
     // **正数 = 内容落点整体后移 = AirPlay 更晚出声;负数 = 更早**。
     // 有组上下文一律取按组值(用户可在播放器里逐组调);无组上下文回落全局旧值。
-    anchorShiftUs: groupId ? airplayDelayUsOf(groupId) : getBridgeAvShiftUs(),
+    // **这是「逐成员」而不是「按组」的一步**:同一个 groupId 下,AP2 成员读 airplay2 格、
+    // AP1 成员读 airplay 格 —— 两条链路的抵达延迟不是同一个数,混用会让用户在两台设备间来回凑。
+    // AP1 分支的取值表达式一字未改(只有新增的三元判断包在外面)。
+    anchorShiftUs: groupId
+      ? (isAp2BridgeProtocol(protocol) ? airplay2DelayUsOf(groupId) : airplayDelayUsOf(groupId))
+      : getBridgeAvShiftUs(),
     // AP2 realtime:建链载荷(controllerId + 已切分凭据)。**只在协议确为 AP2 时下发** ——
     // RAOP 载荷逐字节不变(未配对导致 undefined 时桥侧按「AP2 载荷缺失」快速失败,
     // 主进程按 MAJ-07 回落该设备本流 solo cast,不会静默无声)。
