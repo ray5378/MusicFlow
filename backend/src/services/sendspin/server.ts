@@ -781,7 +781,7 @@ export class SendspinGroup {
     let n = 0;
     let last = 0n;
     for (const e of ring) {
-      if (e.ep !== undefined && e.ep !== epoch) continue; // 旧内容代次:不可信,跳过
+      if (e.ep !== epoch) continue; // S2(QA):严格相等当前代次才回填(ep 缺失=未打戳=不可信)
       if (!e.data || e.data.length === 0) continue; // 空包必跳过(2026-09-17 ESPHome:严格端收空包判 Invalid data)
       if (e.tsUs < lo) continue; // 已入可听域之下:桥来不及排程,不回填
       if (e.tsUs > hi) break; // 窗口外(未来):交给补投定时器
@@ -826,14 +826,16 @@ export class SendspinGroup {
       this.stopBridgePushTimer();
       return;
     }
-    const ring = this.recentByGroup.get(this.encoderKey("pcm", 100));
-    if (!ring || ring.length === 0) return;
     const now = nowUs();
-    const sendAheadUs = this.commonSendAheadUs();
-    const lo = now + BigInt(BRIDGE_PUSH_FLOOR_US);
-    const hi = now + BigInt(BRIDGE_PUSH_HORIZON_US);
     for (const [deviceId, b] of this.bridges) {
       try {
+        // S3(QA):ring 获取与公共 sendAhead 计算都可能触到异常成员/组状态,
+        // 挪进 per-bridge try —— tick 内任何异常都不得冒泡打断定时器循环。
+        const ring = this.recentByGroup.get(this.encoderKey("pcm", 100));
+        if (!ring || ring.length === 0) return;
+        const sendAheadUs = this.commonSendAheadUs();
+        const lo = now + BigInt(BRIDGE_PUSH_FLOOR_US);
+        const hi = now + BigInt(BRIDGE_PUSH_HORIZON_US);
         this.deliverBridgeWindow(b, deviceId, ring, sendAheadUs, lo, hi);
       } catch { /* 单桥失败不连累组泵 */ }
     }
@@ -858,7 +860,7 @@ export class SendspinGroup {
     let last = this.bridgeWatermarks.get(deviceId) ?? 0n;
     let n = 0;
     for (const e of ring) {
-      if (e.ep !== undefined && e.ep !== epoch) continue;
+      if (e.ep !== epoch) continue; // S2(QA):严格相等当前代次才投 —— ep 缺失=未打戳=不可信
       if (!e.data || e.data.length === 0) continue; // 空包必跳过(2026-09-17 ESPHome:严格端收空包判 Invalid data)
       if (last !== 0n && e.tsUs <= last) continue;
       if (e.tsUs < lo) {

@@ -24,6 +24,7 @@ const H = vi.hoisted(() => {
     apDisabled: new Set<string>(),
     apCalls: [] as Array<{ id: string; fn: string; args: any[] }>,
     apBehavior: new Map<string, (fn: string, args: any[]) => any>(),
+    apBridgeOwned: new Set<string>(),
     spinFront: null as any,
     spinCalls: [] as Array<{ fn: string; args: any[] }>,
     spinBehavior: null as any,
@@ -116,10 +117,10 @@ vi.mock("../../src/services/airplay/control.js", () => ({
     volume: 40,
     muted: false,
   }),
-  // Phase 3 桥接路由:开关关死 → prepareBridgeRoute 直接跳过(纯 sendspin/dlna 原语义);
-  // fanOut 过滤无桥占用设备(恒 false → airplay 成员原样扇出)。
+  // Phase 3 桥接路由:开关关死 → prepareBridgeRoute 直接跳过(纯 sendspin/dlna 原语义)。
+  // isBridgeOwned 走 H.apBridgeOwned 事实表(默认空 → airplay 成员原样扇出)。
   isAirplayBridgeEnabled: () => false,
-  isBridgeOwned: () => false,
+  isBridgeOwned: (id: string) => H.apBridgeOwned.has(id),
   bridgePrepareDevice: async () => {
     throw new Error("bridgePrepareDevice 不应在桥接开关关闭时被调用");
   },
@@ -221,6 +222,7 @@ function reset() {
   H.apDisabled.clear();
   H.apCalls.length = 0;
   H.apBehavior.clear();
+  H.apBridgeOwned.clear();
   H.spinFront = null;
   H.spinCalls.length = 0;
   H.spinBehavior = null;
@@ -645,6 +647,33 @@ describe("airplay 成员:在线判定 / leader / 扇出 / 状态派生", () => {
     expect(H.apCalls.map((c) => c.fn)).toEqual(["stop", "pause", "seek", "setVolume"]);
     expect(H.apCalls.find((c) => c.fn === "setVolume")!.args).toEqual([11]);
     expect(H.apCalls.find((c) => c.fn === "seek")!.args).toEqual([3]);
+  });
+
+  it("fanOut:bridge-owned airplay 成员 —— setVolume 仍扇出,stop/seek 跳过(泵承担,防互踩)", async () => {
+    // 2026-10-27 真机:HiVi 组音量 slider 死 —— 旧实现把桥占用成员从**所有** op
+    // 过滤,而 setVolume 泵不承担、桥也无其他音量路径 → 音量变更被「无在线成员」吞掉。
+    mkGroup("g1", ["sendspin:c1", "airplay:a1", "airplay:a2"]);
+    H.apAvailable.add("a1");
+    H.apAvailable.add("a2");
+    H.apBridgeOwned.add("a1"); // a1 被桥会话占用(传输由组泵承担)
+    front([["c1", { ready: true }]]);
+    const p = createGroupProtocolPlayer("g1");
+
+    await p.setVolume(33);
+    expect(H.apCalls.find((c) => c.fn === "setVolume" && c.id === "a1")).toBeDefined(); // ★ 音量不过滤桥占用成员
+    expect(H.apCalls.find((c) => c.fn === "setVolume" && c.id === "a2")).toBeDefined();
+    expect(H.spinCalls.find((c) => c.fn === "setVolume")).toBeDefined(); // sendspin 独立路径(spinOp)不受影响
+    expect(H.volumeWrites).toEqual([["g1", 33]]); // 先落库语义不变
+
+    // 传输类 op 仍跳过桥占用成员(MAJ-06 防互踩语义不回退)
+    H.apCalls.length = 0;
+    await p.stop();
+    expect(H.apCalls.find((c) => c.fn === "stop" && c.id === "a1")).toBeUndefined();
+    expect(H.apCalls.find((c) => c.fn === "stop" && c.id === "a2")).toBeDefined();
+    H.apCalls.length = 0;
+    await p.seek(5);
+    expect(H.apCalls.find((c) => c.fn === "seek" && c.id === "a1")).toBeUndefined();
+    expect(H.apCalls.find((c) => c.fn === "seek" && c.id === "a2")).toBeDefined();
   });
 
   it("playMedia:airplay 成员逐设备 cast,item/baseUrl 原样透传", async () => {

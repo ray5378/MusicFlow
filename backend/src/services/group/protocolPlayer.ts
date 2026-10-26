@@ -206,10 +206,19 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
     op: (p: ProtocolPlayer) => Promise<unknown>,
   ): Promise<{ fulfilled: number; rejected: number }> {
     // dlna 与 airplay 成员一起逐设备扇出(airplay 用独立 cast,不进 sendspin pump)。
-    // Phase 3(MAJ-06):桥占用设备(owner=bridge)的传输由组泵承担 —— 逐成员扇出
-    // (stop/pause/resume/seek/setVolume)必须跳过它,否则会与桥会话互踩。
+    // Phase 3(MAJ-06):桥占用设备(owner=bridge)的**传输类** op(stop/pause/resume/
+    // seek)由组泵承担,逐成员扇出必须跳过,否则与桥会话互踩(守卫钉此语句形态)。
     const dlnaIds = getOnlineMemberIds(groupId);
     const apIds = getOnlineAirplayIds(groupId).filter((d) => !isBridgeOwned(d));
+    // ⚠️ setVolume 例外(2026-10-27 真机 HiVi 音量 slider 死):音量泵不承担、桥也无
+    // 其他音量路径(桥会话只在建立时收到一次 initial volume)→ 桥占用成员在 setVolume
+    // 时仍要扇出。setAirPlayVolume = 先落库再 RAOP SET_PARAMETER / DLNA RenderingControl
+    // 同 host 转发,纯控制链不触 RTP/时间线,与泵互不踩;过滤语句本体保持守卫钉定形态。
+    if (opName === "setVolume") {
+      for (const d of getOnlineAirplayIds(groupId)) {
+        if (isBridgeOwned(d) && !apIds.includes(d)) apIds.push(d);
+      }
+    }
     if (dlnaIds.length === 0 && apIds.length === 0) {
       log.debug(`[group][${opName}] ${groupId}: 无在线 DLNA/AirPlay 成员,跳过扇出`);
       return { fulfilled: 0, rejected: 0 };
