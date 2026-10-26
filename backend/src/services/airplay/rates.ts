@@ -90,8 +90,37 @@ export const BRIDGE_HEARTBEAT_INTERVAL_MS = 1_000;
 /** 接收端 stall 判定:2s 未收到任何帧(§4.2)。 */
 export const BRIDGE_STALL_NO_FRAME_MS = 2_000;
 
-/** RAOP 发送节拍安全余量(吸收 25ms 泵抖动与 socket 调度)。 */
+/** RAOP 发送节拍安全余量(吸收 25ms 泵抖动与 socket 调度)。
+ *
+ *  ⚠️ **只用于锚点可达性判据**(planBridgeAnchor)与 RAOP 的 sendAt 节拍。
+ *  AP2 realtime 的 sendAt **不得**再加它:AP2 的提前量已经由 latencyMin 声明给接收端,
+ *  再叠 50ms 会让 AP2 恒早 50ms 出声(与同组 RAOP 成员直接错位)。 */
 export const RAOP_SAFETY_MS = 50;
+
+// ---------------------------------------------------------------------------
+// AP2 realtime 播放链(Phase 6b · T03 双出口)
+// ---------------------------------------------------------------------------
+
+/** AP2 realtime SETUP 里声明给接收端的 latencyMin(样本数 @48k,缺省 11025 ≈ 229.7ms)。
+ *  接收端据此定抖动缓冲深度(bed: buffer = latencyMin·7/spf + 1)。 */
+export const AP2_DEFAULT_LATENCY_FRAMES = 11_025;
+
+/** AP2 发送侧**有效**提前量(帧):`sendAt_i = A + i·spf/rate − L_eff`。
+ *
+ *  初值 = 声明值(先让「声明什么就以什么提前量发」成立,避免一上来就偏)。
+ *  ⚠️ **真机需一次标定**:接收端从收包到扬声器的固定延迟(解码 + 抖动缓冲 + DAC)
+ *  无法在仓内测量,标定后只改这一个常量;残差由**按组** airplay_delay_ms
+ *  (anchorShiftUs,唯一补偿落点)吸收 —— 绝不在 sendAt 里再加别的偏移。 */
+export const AP2_EFFECTIVE_LATENCY_FRAMES = AP2_DEFAULT_LATENCY_FRAMES;
+
+/** AP2 迟到丢弃阈值(µs):sendAt 已过这么久的内容再发也会被接收端丢掉/挤坏
+ *  抖动缓冲 ⇒ 按 RAOP 的 skip 语义**丢该块并计数**(`ev=ap2-late-skip`),
+ *  不补静音、不前移时间线(内容位置照常推进,时间线仍只有那一条)。
+ *  ≈4 个 spf 包(352 帧 @48k = 7.33ms)⇒ 30ms。 */
+export const AP2_LATE_SKIP_US = 30_000;
+
+/** AP2 输出循环的等待切片(ms):暂停/中止判定的最大响应延迟(不泄漏定时器)。 */
+export const AP2_WAIT_SLICE_MS = 10;
 
 // ---------------------------------------------------------------------------
 // 暂停/恢复与 pacing 重锚(Phase 5,§5.4)

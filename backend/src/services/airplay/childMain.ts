@@ -25,6 +25,21 @@ import type {
 /** 子进程对主进程的发送通道(child.ts 注入 process.send 的安全包装;测试注入数组)。 */
 export type ChildSend = (msg: AirplayChildToParent) => void;
 
+/** 桥 prepare 失败的前缀化(Phase 6b · T03)。
+ *
+ *  AP2 建链失败(`Ap2StreamError` 的 `stage`:auth/setup/udp/payload/state…)⇒ 消息
+ *  变成 `ap2-<stage>: <原文>`,主进程据此**识别「协议侧不可用」**并按 MAJ-07 回落该设备
+ *  本流 solo cast(而不是当成普通桥失败静默)。RAOP 失败没有 stage ⇒ **原对象原样抛出**
+ *  (错误消息逐字节不变,既有日志/断言不受影响)。 */
+export function decorateBridgePrepareError(e: unknown): unknown {
+  const stage = typeof (e as { stage?: unknown })?.stage === "string" ? (e as { stage: string }).stage : "";
+  if (!stage) return e;
+  const msg = (e as Error)?.message ?? String(e);
+  const out = new Error(`ap2-${stage}: ${msg}`);
+  out.name = (e as Error)?.name ?? "BridgePrepareError";
+  return out;
+}
+
 export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, AirplaySnapshot> {
   readonly runtime: AirplaySessionRuntime;
 
@@ -150,7 +165,7 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
   // ------------------------- Phase 3:桥会话管理 -------------------------
 
   private async prepareBridge(args: BridgePrepareArgs): Promise<BridgePreparedResult> {
-    const { deviceId, socketPath, token, protocol, host, port, pk, et, anchorShiftUs } = args;
+    const { deviceId, socketPath, token, protocol, host, port, pk, et, anchorShiftUs, ap2 } = args;
     if (!deviceId || !socketPath || !token) {
       throw new Error("bridgePrepare: deviceId/socketPath/token 必填");
     }
@@ -158,18 +173,26 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
     if (this.runtime.has(deviceId)) await this.runtime.stop(deviceId);
     // MFAB_DUMP_PATH 仍生效于 dry/无 consumer 场景(BridgeSession 自带 onAudio,
     // 落盘由 dry 模式 + 无 RAOP 的 BridgeServer dumpPath 承担 —— 桥出声时落盘关闭)。
-    const prepared = await this.bridgeSessions.prepare({
-      deviceId,
-      token,
-      protocol,
-      socketPath,
-      host,
-      port,
-      pk,
-      et,
-      anchorShiftUs,
-      dry: !host,
-    });
+    let prepared: { listening: true; socketPath: string };
+    try {
+      prepared = await this.bridgeSessions.prepare({
+        deviceId,
+        token,
+        protocol,
+        socketPath,
+        host,
+        port,
+        pk,
+        et,
+        anchorShiftUs,
+        // AP2 realtime 建链载荷(仅 ap2-* 协议时非空;RAOP 传 undefined ⇒ 行为不变)。
+        ap2,
+        dry: !host,
+      });
+    } catch (e) {
+      // AP2 失败带 `ap2-<stage>: ` 前缀,主进程据此走 soloFallback;RAOP 原样抛。
+      throw decorateBridgePrepareError(e);
+    }
     this.requestSnapshot(true);
     return { listening: true, socketPath: prepared.socketPath };
   }

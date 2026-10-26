@@ -15,13 +15,24 @@
  *  对齐残差(对齐错才涨),late 是 lead 不足 —— 三者可区分。
  *
  *  硬约束:纯数据面 —— 本文件不做任何选歌/预取逻辑。
+ *
+ *  Phase 6b(T03)双出口:protocol 为 `ap2-realtime` 时,start() 建 Ap2StreamSession
+ *  (48k 直通,无重采样 ⇒ 无群延迟补偿),maybeBeginStream 在**同一个 plan.anchorUs**
+ *  上分流到 runAp2Output(节拍 = A + i·spf/rate − L_eff);RAOP 路径逐字节不变。
+ *  运行期链路断 ⇒ snapshot().degraded=true,主进程看门狗摘桥并让该设备本流回落 solo cast
+ *  (绝不在会话内切协议 = 绝不中途换锚点)。
  */
 
 import { BridgeServer, type BridgeAudioEvent, type BridgeServerHandlers } from "./bridgeServer.js";
 import { bridgeSocketPath } from "./bridgeChannel.js";
 import {
+  AP2_DEFAULT_LATENCY_FRAMES,
+  AP2_EFFECTIVE_LATENCY_FRAMES,
+  AP2_LATE_SKIP_US,
+  AP2_WAIT_SLICE_MS,
   BRIDGE_MAX_HELD_AUDIO_US,
   BRIDGE_PCM_BYTES_PER_SEC,
+  BRIDGE_RESUME_REBASE_US,
   BRIDGE_WARM_START_LEAD_US,
   PROTOCOL_CAPS,
   RAOP_SAFETY_MS,
@@ -30,11 +41,12 @@ import {
 } from "./rates.js";
 import { computeBridgeBackoffMs } from "./bridgeSource.js";
 import { PolyphaseResampler, floatToPcmS16, pcmS16ToFloat } from "./resampler.js";
-import { computeBridgeAnchors, driftCorrection, type BridgeAnchors } from "./bridgeMath.js";
+import { audibleAtUs, computeBridgeAnchors, driftCorrection, type BridgeAnchors } from "./bridgeMath.js";
 import { nowUs } from "../../utils/hostClock.js";
 import { RaopPlayer, CHUNK_LEN, type RaopSession } from "./raop.js";
 import { getAirPlayVolumeState, DEFAULT_AIRPLAY_VOLUME } from "./deviceState.js";
 import { degreesToDb } from "./decoder.js";
+import { AP2_SEND_ERROR_LIMIT, Ap2StreamSession, type Ap2StreamOptions, type Ap2StreamState } from "./ap2/ap2Stream.js";
 import { createLogger } from "../../utils/logger.js";
 
 /** Fix-1: 桥会话建立(RECORD 完成)后主动推一次初始音量。此前桥会话只在音量
@@ -229,6 +241,141 @@ export function planBridgeAnchor(opts: {
 }
 
 // ---------------------------------------------------------------------------
+// AP2 realtime 出口(Phase 6b · T03:与 RAOP 并列的第二出口)
+// ---------------------------------------------------------------------------
+
+/** AP2 realtime 会话的最小契约(`Ap2StreamSession` 结构化满足;测试可注入假实现)。
+ *  ⚠️ 刻意不把 `Ap2StreamSession` 的类型写进 BridgeSession 的公开签名 —— 桥只认
+ *  「开 / 推 / 关 + 状态」四件事,ALAC/RTP/HAP 细节全在 ap2/* 里。 */
+export interface Ap2SessionLike {
+  /** 建控制面(pair-verify → SETUP(session) → RECORD → SETUP(stream) → 排水通道)。 */
+  open(): Promise<unknown>;
+  /** 推一块 PCM(s16le 交织),返回实际发出的包数。 */
+  pump(pcm: Buffer): number;
+  /** TEARDOWN + 资源回收(幂等)。 */
+  close(): Promise<void>;
+  /** 会话状态(缺省按 open 处理;测试假件可省略)。 */
+  readonly currentState?: Ap2StreamState;
+  /** 累计统计(linkLoss 非空 = 链路已断,`ev=link-loss` 已在 AP2 侧记录)。 */
+  readonly stats?: { sent: number; errors: number; lastError: string | null; linkLoss: string | null };
+}
+
+/** AP2 会话工厂(生产 = `new Ap2StreamSession(opts)`;测试注入假件,不连设备)。 */
+export type Ap2SessionFactory = (opts: Ap2StreamOptions) => Ap2SessionLike;
+
+/** AP2 输出循环的注入依赖(纯逻辑可测:不碰真实时钟/socket)。 */
+export interface Ap2OutputDeps {
+  /** 拉一块 352 帧 s16le(`BridgeSession.pullOutChunk` 适配);null = 会话终止。 */
+  pull(): Promise<Buffer | null>;
+  /** 发一块(等价 RAOP 的 sendChunk)。`errors` 是**累计**错误数(驱动自行取增量)。 */
+  send(pcm: Buffer): { sent: number; errors: number; state: string };
+  nowUs(): bigint;
+  /** 等待(µs;实现须可被 shouldStop 提前打断,且不留悬挂定时器)。 */
+  sleepUs(us: number): Promise<void>;
+  /** 会话已停 / 代次中止 / 链路已断 ⇒ 立刻退出(不泄漏定时器与监听)。 */
+  shouldStop(): boolean;
+  /** 组泵暂停中:暂停期**不拉块、不发送、不写静音**(与 RAOP pause 同语义)。 */
+  isPaused(): boolean;
+  /** 唯一那次 `planBridgeAnchor` 的锚点(host µs)—— AP2 **不得**另起时间线。 */
+  anchorUs: bigint;
+  /** 输出速率(= agreedRate;ap2-realtime 恒 48000)。 */
+  rate: number;
+  /** 每块帧数(= CHUNK_LEN 352)。 */
+  spf: number;
+  /** 有效提前量(帧):sendAt_i = A + i·spf/rate − L_eff。 */
+  lEffFrames: number;
+  lateSkipUs?: number;
+  rebaseUs?: number;
+  sendErrorLimit?: number;
+  onLateSkip?: (total: number, lagUs: number) => void;
+  onRebase?: (lagUs: number) => void;
+  onSendError?: (consecutive: number, total: number) => void;
+}
+
+export interface Ap2OutputResult {
+  /** 实际发出块数(不含被 late-skip 丢掉的)。 */
+  chunks: number;
+  /** 因 sendAt 已过太久被丢弃的块数(`ev=ap2-late-skip` 计数)。 */
+  lateSkipped: number;
+  stopReason: "eof" | "aborted" | "link-loss";
+}
+
+/** AP2 realtime 发送节拍循环(纯驱动,零 IO)。
+ *
+ *  - 节拍:`sendAt_i = A + i·spf/rate − L_eff`(A 来自唯一那次 planBridgeAnchor)。
+ *    **不加 `RAOP_SAFETY_MS`** —— 那是 RAOP 的 socket 调度余量,AP2 的提前量已由
+ *    latencyMin 声明给接收端,再叠加会让 AP2 恒早 50ms 与同组 RAOP 成员错位。
+ *  - 迟到:lag ≤ LATE_SKIP 照发(等价 RAOP 追发);lag > LATE_SKIP 丢块并计数
+ *    (等价 RAOP 的 skip 语义:内容位置照常推进,时间线仍只有一条);
+ *    lag > REBASE(长时间饥饿/恢复)只前移**发送**参考、不动锚点(与 RAOP 一致)。
+ *  - 退出:供给 null(eof)/ shouldStop(aborted)/ 会话状态非 open 或连续发送错误
+ *    达上限(link-loss)。三种都必须离开循环(调用方不再有定时器/监听残留)。
+ */
+export async function runAp2OutputLoop(deps: Ap2OutputDeps): Promise<Ap2OutputResult> {
+  const lateSkipUs = deps.lateSkipUs ?? AP2_LATE_SKIP_US;
+  const rebaseUs = deps.rebaseUs ?? BRIDGE_RESUME_REBASE_US;
+  const errorLimit = deps.sendErrorLimit ?? AP2_SEND_ERROR_LIMIT;
+  // L_eff(帧) → µs 用同一份换算函数(audibleAtUs(0 锚点) = 纯帧→µs)。
+  const lEffUs = audibleAtUs(deps.lEffFrames, 0n, deps.rate);
+  let idx = 0;
+  let chunks = 0;
+  let lateSkipped = 0;
+  let pacingShiftUs = 0n;
+  let prevErrors = 0;
+  let consecutiveErrors = 0;
+  let stopReason: Ap2OutputResult["stopReason"] = "eof";
+  while (!deps.shouldStop()) {
+    if (deps.isPaused()) {
+      // 暂停期:不拉块(否则会把组泵内容提前从队列里抽走)、不发送、不写静音。
+      await deps.sleepUs(AP2_WAIT_SLICE_MS * 1000);
+      continue;
+    }
+    const pcm = await deps.pull();
+    if (pcm === null) {
+      stopReason = deps.shouldStop() ? "aborted" : "eof";
+      break;
+    }
+    const sendAt = audibleAtUs(idx * deps.spf, deps.anchorUs, deps.rate) - lEffUs + pacingShiftUs;
+    const now = deps.nowUs();
+    if (now < sendAt) {
+      await deps.sleepUs(Number(sendAt - now));
+      if (deps.shouldStop()) {
+        stopReason = "aborted";
+        break;
+      }
+    }
+    // 睡醒/到达后的迟到判定(暂停恢复与长饥饿都落在这里)。
+    const lagUs = Number(deps.nowUs() - sendAt);
+    if (lagUs > rebaseUs) {
+      // pacing 参考前移:锚点/RTP 映射不动(AP2 不另起时间线),恢复首块立即发出。
+      pacingShiftUs += BigInt(lagUs);
+      deps.onRebase?.(lagUs);
+    } else if (lagUs > lateSkipUs) {
+      lateSkipped++;
+      idx++;
+      deps.onLateSkip?.(lateSkipped, lagUs);
+      continue;
+    }
+    const r = deps.send(pcm);
+    chunks++;
+    idx++;
+    if (r.state !== "open") {
+      stopReason = "link-loss";
+      break;
+    }
+    const delta = r.errors - prevErrors;
+    prevErrors = r.errors;
+    consecutiveErrors = delta > 0 ? consecutiveErrors + delta : 0;
+    if (consecutiveErrors >= errorLimit) {
+      deps.onSendError?.(consecutiveErrors, r.errors);
+      stopReason = "link-loss";
+      break;
+    }
+  }
+  return { chunks, lateSkipped, stopReason };
+}
+
+// ---------------------------------------------------------------------------
 // BridgeSession
 // ---------------------------------------------------------------------------
 
@@ -238,11 +385,21 @@ export interface BridgeSessionOpts {
   protocol: BridgeProtocol;
   /** 会合 socket 路径(主进程按 bridgeSocketPath() 计算后下发)。 */
   socketPath: string;
-  /** RAOP 目标(四锚点驱动出声);dry 模式可缺省。 */
+  /** RAOP 目标(四锚点驱动出声);dry 模式可缺省。AP2 realtime 同样用 host/port 建 RTSP。 */
   host?: string;
   port?: number;
   pk?: string;
   et?: string;
+  /** AP2 realtime 建链载荷(仅 `protocol` 为 ap2-* 时使用;来自主进程 bridgePrepare)。
+   *  缺省 ⇒ AP2 路径快速失败(stage="payload")、RAOP 路径完全不受影响。 */
+  ap2?: {
+    controllerId: string;
+    credsHex?: { accessoryLTPK: string; controllerLTSK: string };
+    latencyMin?: number;
+  };
+  /** 测试接缝:注入 AP2 会话工厂(缺省 `new Ap2StreamSession(...)`)。
+   *  生产路径恒不传 ⇒ 与真设备建链;单测用它验双出口/节拍/降级而不连设备。 */
+  ap2SessionFactory?: Ap2SessionFactory;
   /** 测试/落盘干跑:不做 RTSP 握手,只起 listener 验证 48k→44.1k 生产管线。 */
   dry?: boolean;
   /** A/V 标定位移(微秒,正 = 桥延后;主进程按 settings 下发)。见 bridgeCalib.ts。 */
@@ -278,6 +435,12 @@ export class BridgeSession {
 
   private player: RaopPlayer | null = null;
   private raopSession: RaopSession | null = null;
+  /** AP2 realtime 会话(protocol 为 ap2-* 时非空;与 player/raopSession 互斥)。 */
+  private ap2Session: Ap2SessionLike | null = null;
+  /** AP2 链路断开原因(`ev=link-loss` 的 reason;非空 ⇒ degraded,主进程看门狗摘桥)。 */
+  private ap2LinkLoss: string | null = null;
+  /** 因 sendAt 过久被丢弃的 AP2 块数(诊断口径,与 RAOP 的 latePackets 并列)。 */
+  private ap2LateSkips = 0;
   private server: BridgeServer | null = null;
   private closed = false;
   private readonly waitDataMs: number;
@@ -355,6 +518,11 @@ export class BridgeSession {
     await server.listen(this.opts.socketPath);
     this.server = server;
     if (this.opts.dry) return;
+    // ---- AP2 realtime 分支(Phase 6b · T03):只加分支,下面 RAOP 语句一行不动 ----
+    if (this.isAp2) {
+      await this.startAp2(server);
+      return;
+    }
     const player = new RaopPlayer({
       host: this.opts.host ?? "",
       port: this.opts.port ?? 5000,
@@ -374,6 +542,83 @@ export class BridgeSession {
     pushInitialVolume(player, this.opts.deviceId);
     // 首帧可能早于 connect 完成 —— 连接就绪后立即补判起流。
     void this.maybeBeginStream();
+  }
+
+  /** 本会话是否走 AP2 realtime(`ap2-*` 两态都不实现 buffered,但选择器只产出
+   *  `ap2-realtime`;这里按前缀判定,便于未来扩展而不改调用点)。 */
+  private get isAp2(): boolean {
+    return this.opts.protocol.startsWith("ap2-");
+  }
+
+  /** AP2 建链:pair-verify(库内凭据)→ SETUP/RECORD → UDP 出口。
+   *  与 RAOP 路径完全并列:失败 ⇒ 关 listener 并抛(错误带 stage,主进程据此回落 solo cast)。
+   *  ⚠️ 出声节拍**不在这里** —— 由 runAp2Output 用唯一那次锚点驱动。 */
+  private async startAp2(server: BridgeServer): Promise<void> {
+    const ap2 = this.opts.ap2;
+    if (!ap2 || !ap2.controllerId) {
+      await server.close();
+      const err = new Error("桥 AP2 载荷缺失(controllerId/credsHex):主进程必须先完成配对") as Error & { stage?: string };
+      err.stage = "payload";
+      throw err;
+    }
+    const factory: Ap2SessionFactory = this.opts.ap2SessionFactory ?? ((o) => new Ap2StreamSession(o));
+    const session = factory({
+      host: this.opts.host ?? "",
+      port: this.opts.port ?? 5000,
+      controllerId: ap2.controllerId,
+      creds: ap2.credsHex,
+      // 组泵侧恒 48k;ap2-realtime 声明 48k ⇒ resampled=false ⇒ 不做群延迟补偿。
+      sourceRate: SENDSPIN_RATE,
+      preferredRate: PROTOCOL_CAPS["ap2-realtime"].rate,
+      spf: CHUNK_LEN,
+      latencyMin: ap2.latencyMin ?? AP2_DEFAULT_LATENCY_FRAMES,
+    });
+    try {
+      await session.open();
+    } catch (e) {
+      await server.close();
+      void session.close().catch(() => { /* 建链失败清理失败不掩盖原错误 */ });
+      throw e;
+    }
+    this.ap2Session = session;
+    this.connected = true;
+    log.info(`[airplay-bridge] ap2 realtime 就绪: device=${this.deviceId} rate=${this.outRate} spf=${CHUNK_LEN}`);
+    this.pushAp2Volume(this.ap2InitialVolumeDb());
+    // 首帧可能早于建链完成 —— 就绪后立即补判起流(与 RAOP 路径同语义)。
+    void this.maybeBeginStream();
+  }
+
+  /** AP2 声明给接收端的 latencyMin(样本数;进 planBridgeAnchor 的 L 与 SETUP 同源)。 */
+  private get ap2DeclaredLatencyFrames(): number {
+    return Math.max(1, this.opts.ap2?.latencyMin ?? AP2_DEFAULT_LATENCY_FRAMES);
+  }
+
+  /** AP2 初始音量(dB,0-100 标尺 → -30..0dB,静音 → -144):与 RAOP 同源(库值,失败回退 80)。 */
+  private ap2InitialVolumeDb(): number {
+    try {
+      const saved = getAirPlayVolumeState(this.deviceId);
+      const vol = saved?.volume ?? DEFAULT_AIRPLAY_VOLUME;
+      return saved?.muted || vol === 0 ? -144 : degreesToDb(vol);
+    } catch {
+      return degreesToDb(DEFAULT_AIRPLAY_VOLUME);
+    }
+  }
+
+  /** AP2 音量下发。`Ap2StreamSession` 本轮**未**暴露 setVolumeDb(其文件不在本轮改动
+   *  范围内)⇒ 鸭子类型探测:命中即下发,未命中只 warn —— **音量失败 ≠ 无声**,
+   *  绝不因音量路径缺失而拆掉一座能出声的桥。 */
+  private pushAp2Volume(db: number): void {
+    const s = this.ap2Session as unknown as { setVolumeDb?: (v: number) => void } | null;
+    if (!s || typeof s.setVolumeDb !== "function") {
+      log.warn(`[airplay-bridge] ap2 volume path unavailable: device=${this.deviceId} db=${db.toFixed(2)} (接收端沿用默认音量)`);
+      return;
+    }
+    try {
+      s.setVolumeDb(db);
+      log.info(`ap2 push initial volume: ${db.toFixed(2)}dB device=${this.deviceId}`);
+    } catch (e: any) {
+      log.warn(`[airplay-bridge] ap2 setVolumeDb failed: device=${this.deviceId} db=${db.toFixed(2)} err=${e?.message || e}`);
+    }
   }
 
   /** 48k s16le 原样入队(无时间线信息;兼容旧测试/落盘路径,tsUs 按 0 处理)。 */
@@ -498,10 +743,15 @@ export class BridgeSession {
     if (this.aligner !== null) return;
     const player = this.player;
     const session = this.raopSession;
-    if (!player || !session) return;
+    // AP2 realtime 没有 RAOP 会话对象(player/raopSession 恒 null)⇒ 判空必须放行 AP2;
+    // ap2 === null 时本式与原 `if (!player || !session) return;` 逐字节等价(RAOP 不变)。
+    if (this.ap2Session === null && (!player || !session)) return;
     const rate = this.outRate;
     // L = RECORD 协商的接收端缓冲深度(不得归零,§3.3);锚点公式与 SYNC 用同一值。
-    const latencyFrames = Math.max(1, player.negotiatedLatencyFrames);
+    const raopLatency = player ? Math.max(1, player.negotiatedLatencyFrames) : 1;
+    // AP2 realtime:L 的等价物 = 我方在 SETUP 里声明的 latencyMin(接收端抖动缓冲深度)。
+    // 两条出口各取自己的 L,但**共用同一个 planBridgeAnchor**(锚点只落一次)。
+    const latencyFrames = this.ap2Session !== null ? this.ap2DeclaredLatencyFrames : raopLatency;
     const plan = planBridgeAnchor({
       firstFrameTsUs: this.firstFrameTsUs,
       latencyFrames,
@@ -519,6 +769,17 @@ export class BridgeSession {
     this.aligner = new BridgeTimelineAligner(plan.anchorUs, rate);
     this.streamAborted = false;
     this.emitAnchorReport(plan, latencyFrames);
+    // ---- 双出口(Phase 6b · T03):同一个 plan.anchorUs,只是出口不同 ----
+    // AP2 ⇒ runAp2Output(节拍 = A + i·spf/rate − L_eff,不加 RAOP_SAFETY_MS);
+    // 否则落到下面的 RAOP streamBridge(语句一行不动)。
+    if (this.ap2Session !== null) {
+      this.streamPromise = this.runAp2Output(plan);
+      this.startStatsTick();
+      return;
+    }
+    // 类型收窄(不可达:上面已判空且 ap2 分支已 return)—— 只为让下面这条 RAOP 语句
+    // 保持**逐字节原样**(不带 `!`/强转)。
+    if (!player || !session) return;
     this.streamPromise = player
       .streamBridge(() => this.pullChunk(), session, {
         baseTs: plan.anchors.baseTs,
@@ -540,6 +801,95 @@ export class BridgeSession {
         if (!this.closed && this.connected && !this.streamAborted) this.scheduleRaopReconnect("stream error");
       });
     this.startStatsTick();
+  }
+
+  // -------------------------------------------------------------------------
+  // AP2 realtime 出口(T03):纯数据面,不做任何选歌/预取
+  // -------------------------------------------------------------------------
+
+  /** AP2 出声循环:拉块(`pullOutChunk`,与 RAOP 同一生产管线)→ 按 sendAt 发送。
+   *
+   *  硬约束:
+   *   - 节拍只用 `plan.anchorUs`(唯一那次 planBridgeAnchor 的产物),**绝不另起时间线**;
+   *   - `RAOP_SAFETY_MS` 不进 sendAt(见 rates.ts 注释:否则 AP2 恒早 50ms);
+   *   - 暂停期不拉块、不发送、不写静音(与 RAOP pause 同语义);
+   *   - `streamAborted` / `closed` / 链路断 ⇒ 循环立刻退出,不留悬挂定时器;
+   *   - 链路断 ⇒ 记 `ap2LinkLoss` 并由主进程看门狗摘桥 + 本流回落 solo cast
+   *     (**绝不在会话内切协议** —— 那等于中途换锚点)。 */
+  private async runAp2Output(plan: BridgeAnchorPlan): Promise<void> {
+    const session = this.ap2Session;
+    if (!session) return;
+    const rate = this.outRate;
+    const result = await runAp2OutputLoop({
+      // 中止后立即返回 null(不等 waitDataMs),让循环在下一个块边界就退出。
+      pull: () => (this.closed || this.streamAborted ? Promise.resolve(null) : this.pullOutChunk()),
+      send: (pcm) => this.ap2Send(pcm),
+      nowUs: () => nowUs(),
+      sleepUs: (us) => this.ap2SleepUs(us),
+      shouldStop: () => this.closed || this.streamAborted || this.ap2LinkLoss !== null,
+      isPaused: () => this.pausedState,
+      anchorUs: plan.anchorUs,
+      rate,
+      spf: CHUNK_LEN,
+      lEffFrames: AP2_EFFECTIVE_LATENCY_FRAMES,
+      onLateSkip: (total, lagUs) => {
+        this.ap2LateSkips = total;
+        log.warn(`[airplay-bridge] ${JSON.stringify({
+          ev: "ap2-late-skip", dev: this.deviceId, gen: this.generation,
+          total, lagUs, rate,
+        })}`);
+      },
+      onRebase: (lagUs) => {
+        log.info(`[airplay-bridge] ${JSON.stringify({
+          ev: "ap2-pacing-rebase", dev: this.deviceId, gen: this.generation, lagUs,
+        })}`);
+      },
+      onSendError: (consecutive, total) => {
+        log.warn(`[airplay-bridge] ${JSON.stringify({
+          ev: "ap2-send-error", dev: this.deviceId, gen: this.generation,
+          consecutive, total, limit: AP2_SEND_ERROR_LIMIT,
+        })}`);
+      },
+    });
+    // 链路断:记原因(诊断快照 degraded=true),主进程看门狗据此摘桥。
+    if (result.stopReason === "link-loss") {
+      this.ap2LinkLoss = session.stats?.linkLoss ?? "send-error";
+      log.warn(`[airplay-bridge] ${JSON.stringify({
+        ev: "ap2-degraded", dev: this.deviceId, gen: this.generation,
+        reason: this.ap2LinkLoss, chunks: result.chunks, lateSkipped: result.lateSkipped,
+        sent: session.stats?.sent ?? 0, errors: session.stats?.errors ?? 0,
+      })}`);
+      this.streamAborted = true;
+    }
+    log.info(`[airplay-bridge] ap2 stream done: device=${this.deviceId} chunks=${result.chunks} `
+      + `lateSkipped=${result.lateSkipped} stop=${result.stopReason}`);
+    // 会话侧资源回收(幂等;TEARDOWN best-effort)。不在此处改协议/重建会话。
+    try { await session.close(); } catch { /* 清理失败不掩盖中止原因 */ }
+  }
+
+  /** AP2 单块发送(错误只计数,不打断节拍;收敛判定在循环里统一做)。 */
+  private ap2Send(pcm: Buffer): { sent: number; errors: number; state: string } {
+    const session = this.ap2Session;
+    if (!session) return { sent: 0, errors: 0, state: "closed" };
+    try {
+      const sent = session.pump(pcm);
+      return { sent, errors: session.stats?.errors ?? 0, state: session.currentState ?? "open" };
+    } catch (e: any) {
+      // pump 抛错 = 会话状态机已非法(非 open)/出口不可用:交给循环按 link-loss 收敛。
+      log.warn(`[airplay-bridge] ap2 pump failed: device=${this.deviceId} err=${e?.message || e}`);
+      return { sent: 0, errors: (session.stats?.errors ?? 0) + 1, state: "error" };
+    }
+  }
+
+  /** AP2 可中止等待(µs):按 AP2_WAIT_SLICE_MS 切片轮询中止标志 ——
+   *  每个定时器都短且必然 resolve(不留悬挂句柄),中止最迟一个切片即返回。 */
+  private async ap2SleepUs(us: number): Promise<void> {
+    const until = nowUs() + BigInt(Math.max(0, Math.round(us)));
+    while (!this.closed && !this.streamAborted && this.ap2LinkLoss === null && nowUs() < until) {
+      const remainMs = Number(until - nowUs()) / 1000;
+      const slice = Math.min(AP2_WAIT_SLICE_MS, Math.max(1, Math.ceil(remainMs)));
+      await new Promise((r) => setTimeout(r, slice));
+    }
   }
 
   /** RAOP 会话级重连(§5.2「桥设备重连必须重建 RAOP 会话」):5s/30s ±20% 退避。
@@ -648,6 +998,8 @@ export class BridgeSession {
       queueMs,
       maxQueueMs: this.maxQueueMs,
       late: this.player?.bridgeLateCount ?? 0,
+      ap2LateSkips: this.ap2LateSkips,
+      ap2Degraded: this.ap2LinkLoss !== null,
       realigned: this.stats.realignments,
       driftUs: this.aligner?.lastDriftUs ?? 0,
       deltaUs,
@@ -764,6 +1116,12 @@ export class BridgeSession {
     if (player) {
       try { await player.stop(); } catch { /* ignore */ }
     }
+    // AP2 会话回收(幂等;TEARDOWN best-effort)。循环已因 streamAborted 退出。
+    const ap2 = this.ap2Session;
+    this.ap2Session = null;
+    if (ap2) {
+      try { await ap2.close(); } catch { /* ignore */ }
+    }
   }
 
   /** 运行期下发音量(dB)。**桥占用设备音量 RPC 的唯一落点**:
@@ -772,6 +1130,11 @@ export class BridgeSession {
    *  ⇒ 用可选链;失败只 warn,绝不打断推流(音量是旁路能力,不能因它拆桥会话)。 */
   setVolumeDb(db: number): void {
     try {
+      // AP2 桥的音量走 AP2 会话自己的路径(SET_PARAMETER volume);无该能力时只 warn。
+      if (this.ap2Session !== null) {
+        this.pushAp2Volume(db);
+        return;
+      }
       this.player?.setVolumeDb(db);
     } catch (e: any) {
       log.warn(`[airplay-bridge] setVolumeDb failed: device=${this.deviceId} db=${db} err=${e?.message || e}`);
@@ -795,6 +1158,12 @@ export class BridgeSession {
     paused: boolean;
     /** RAOP 重连退避进行中(设备离线 degraded)。 */
     reconnecting: boolean;
+    /** AP2 链路已断(主进程看门狗据此摘桥 + 本流回落 solo cast;RAOP 恒 false)。 */
+    degraded: boolean;
+    /** AP2 链路失败原因(`ev=link-loss` 的 reason;空 = 正常/非 AP2)。 */
+    linkLoss: string | null;
+    /** 因 sendAt 过久被丢弃的 AP2 块数(RAOP 恒 0)。 */
+    ap2LateSkips: number;
   } {
     return {
       deviceId: this.deviceId,
@@ -806,10 +1175,13 @@ export class BridgeSession {
       anchorUs: this.anchorUs !== null ? Number(this.anchorUs) : null,
       commandedLeadUs: this.commandedLeadUs !== null ? Number(this.commandedLeadUs) : null,
       generation: this.generation,
-      latencyFrames: this.player?.negotiatedLatencyFrames ?? null,
+      latencyFrames: this.player?.negotiatedLatencyFrames ?? (this.ap2Session ? this.ap2DeclaredLatencyFrames : null),
       latePackets: this.player?.bridgeLateCount ?? 0,
       paused: this.pausedState,
       reconnecting: this.raopReconnectTimer !== null,
+      degraded: this.ap2LinkLoss !== null || this.ap2Session?.currentState === "error",
+      linkLoss: this.ap2LinkLoss,
+      ap2LateSkips: this.ap2LateSkips,
     };
   }
 }

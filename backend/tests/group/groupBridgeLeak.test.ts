@@ -65,6 +65,8 @@ vi.mock("../../src/services/airplay/control.js", () => ({
   isAirPlayDeviceDisabled: () => false,
   isAirplayBridgeEnabled: () => true,
   isBridgeOwned: () => false,
+  // Phase 6b:桥协议逐成员选(本文件只关心桥生命周期,协议固定 raop = AP1 旧行为)。
+  selectAirPlayBridgeProtocol: () => "raop",
   bridgePrepareDevice: async (deviceId: string, token: string, protocol: string, groupId?: string) => {
     h.prepareCalls.push({ deviceId, token, protocol, groupId });
     return { listening: true, socketPath: `/tmp/b_${deviceId}_${token}.sock` };

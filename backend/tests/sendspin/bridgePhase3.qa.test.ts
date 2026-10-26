@@ -324,6 +324,8 @@ vi.mock("../../src/services/airplay/control.js", () => ({
   getAirPlayStatus: (id: string) => ({ available: true, name: `ap-${id}`, playbackState: "IDLE", position: 0, duration: 0, volume: 40, muted: false }),
   isAirplayBridgeEnabled: () => process.env.MUSICFLOW_AIRPLAY_BRIDGE !== "0",
   isBridgeOwned: () => false,
+  // Phase 6b:桥协议逐成员选(本 QA 只钉路由三态,协议固定 raop = AP1 旧行为)。
+  selectAirPlayBridgeProtocol: () => "raop",
   bridgePrepareDevice: async (deviceId: string, token: string) => {
     if (R.prepareBehavior.get(deviceId) === "fail") throw new Error(`prepare 失败(deviceId=${deviceId})`);
     R.prepared.push({ deviceId, token });

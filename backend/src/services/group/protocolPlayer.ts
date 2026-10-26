@@ -9,7 +9,7 @@
 import { getGroupManager, splitMemberId } from "./index.js";
 import { createDlnaProtocolPlayer, getDevice, getDeviceStatus, isDeviceAvailable } from "../dlna/control.js";
 import { createAirPlayProtocolPlayer } from "../airplay/protocolPlayer.js";
-import { getAirPlayStatus, isAirPlayDeviceDisabled, isAirplayBridgeEnabled, isBridgeOwned, bridgePrepareDevice, bridgeStopDevice } from "../airplay/control.js";
+import { getAirPlayStatus, isAirPlayDeviceDisabled, isAirplayBridgeEnabled, isBridgeOwned, bridgePrepareDevice, bridgeStopDevice, selectAirPlayBridgeProtocol } from "../airplay/control.js";
 import { bridgeSocketPath } from "../airplay/bridgeChannel.js";
 import type { BridgeSocketSpec } from "../sendspin/bridgeAttach.js";
 import { getSendspinFront } from "../sendspin/index.js";
@@ -41,8 +41,11 @@ export async function bridgeJoinMember(groupId: string, deviceId: string): Promi
   if (route.some((r) => r.deviceId === deviceId)) return true; // 已在路由内,幂等
   const token = newBridgeToken();
   bridgeSocketPath(deviceId, token); // <100B 断言(与 playMedia 路径同源)
-  await bridgePrepareDevice(deviceId, token, "raop", groupId);
-  const spec: BridgeSocketSpec = { deviceId, socketPath: bridgeSocketPath(deviceId, token), token, protocol: "raop" };
+  // 协议**逐成员**选(AP1 设备 raop / 已配对 AP2 设备 ap2-realtime),不是组级:
+  // 同一组里 AP1 与 AP2 成员各按自己的协议出声(选择点唯一 = control.ts)。
+  const protocol = selectAirPlayBridgeProtocol(deviceId);
+  await bridgePrepareDevice(deviceId, token, protocol, groupId);
+  const spec: BridgeSocketSpec = { deviceId, socketPath: bridgeSocketPath(deviceId, token), token, protocol };
   route.push(spec);
   const groupName = sendspinGroupName(groupId);
   const r = await import("../sendspin/index.js");
@@ -116,6 +119,97 @@ export async function rebuildBridgeRoutes(onlyGroupId?: string): Promise<number>
     log.info(`[group][bridge] ${onlyGroupId}: 延迟补偿变更 → 重建 ${ok} 座桥重锚定`);
   }
   return ok;
+}
+
+/** 运行期降级(Phase 6b · T04):某座 **AP2** 桥的链路断了(`ev=link-loss` /
+ *  连续发送错误达 `AP2_SEND_ERROR_LIMIT` / RTSP 被对端拆除)。
+ *
+ *  动作(顺序固定):
+ *   ① 定位登记该 token 的组(路由登记 = 主进程侧事实源);
+ *   ② `bridgeLeaveMember` 摘泵句柄 + `bridgeStopDevice` 拆会话 + **清 owner=bridge**
+ *     (确认不到时兜底直调 bridgeStopDevice,绝不让设备被桥永久占用);
+ *   ③ 该设备**本流**回落 solo cast(`createAirPlayProtocolPlayer.playMedia(当前曲)`)。
+ *
+ *  ⚠️ **绝不在会话内切协议**:中途换协议 = 中途换锚点(RTP 映射/对齐器全作废),
+ *  同组其它成员会当场错位。要换协议只能「摘桥 → 重建 → 新锚点」,即本函数做的事。
+ *  ⚠️ 幂等:token 已不在任何路由里 ⇒ 返回 false(重复上报无害)。
+ */
+export async function degradeBridgeMember(deviceId: string, token: string, reason: string): Promise<boolean> {
+  let groupId: string | null = null;
+  for (const [gid, route] of activeBridgeRoutes) {
+    if (route.some((r) => r.deviceId === deviceId && r.token === token)) {
+      groupId = gid;
+      break;
+    }
+  }
+  if (groupId === null) return false;
+  const left = await bridgeLeaveMember(groupId, deviceId).catch((e) => {
+    log.warn(`[group][bridge] ${groupId}: 降级摘桥异常(继续兜底) device=${deviceId}: ${(e as Error)?.message || e}`);
+    return false;
+  });
+  if (!left) {
+    // 摘桥未确认(泵侧未回执/同步抛错):直接拆会话清 owner,宁可让设备回可 cast 状态。
+    await bridgeStopDevice(token, deviceId).catch(() => { /* ignore */ });
+  }
+  log.warn(`[group][bridge] ${groupId}: AP2 链路断 → 降级 device=${deviceId} reason=${reason}(本流回落 solo cast)`);
+  // ③ 本流回落:取组队列当前项,逐设备 cast(AirPlay 无 in-place seek,重投即新会话)。
+  try {
+    const { getQueueController } = await import("../player/index.js");
+    const snap = getQueueController().snapshot(`group:${groupId}`);
+    const item = snap.items[snap.currentIndex];
+    if (!item) {
+      log.warn(`[group][bridge] ${groupId}: 降级时队列无当前项,device=${deviceId} 仅摘桥(下一首自然走 solo cast)`);
+      return true;
+    }
+    const { getEffectiveBaseUrl } = await import("../dlna/control.js");
+    await createAirPlayProtocolPlayer(deviceId).playMedia(item, getEffectiveBaseUrl());
+    log.info(`[group][bridge] ${groupId}: 降级回落 solo cast 成功 device=${deviceId} song=${item.songId}`);
+  } catch (e) {
+    // 回落失败只 warn:设备本流静音,但桥/owner 已清干净,不会卡住后续播放。
+    log.warn(`[group][bridge] ${groupId}: 降级回落 solo cast 失败 device=${deviceId}: ${(e as Error)?.message || e}`);
+  }
+  return true;
+}
+
+/** AP2 降级看门狗周期(ms):远小于 60s 对账周期 —— 链路断是**出声中断**,
+ *  等一个对账周期用户听到的就是「突然没了」。 */
+export const BRIDGE_DEGRADE_POLL_MS = 5_000;
+
+let bridgeDegradeTimer: NodeJS.Timeout | null = null;
+
+/** 幂等启动 AP2 降级看门狗(与桥路由对账同源:由 `startBridgeRouteReconciler` 一并拉起)。 */
+export function startBridgeDegradeWatchdog(intervalMs = BRIDGE_DEGRADE_POLL_MS): void {
+  if (bridgeDegradeTimer !== null) return;
+  bridgeDegradeTimer = setInterval(() => { void checkBridgeDegradedOnce(); }, intervalMs);
+  bridgeDegradeTimer.unref?.();
+}
+
+export function stopBridgeDegradeWatchdog(): void {
+  if (bridgeDegradeTimer !== null) {
+    clearInterval(bridgeDegradeTimer);
+    bridgeDegradeTimer = null;
+  }
+}
+
+/** 单轮降级检查:读 airplay 子进程的桥会话快照(`bridgeStatus`),把
+ *  `degraded=true` 的会话逐个降级。全程 best-effort(子进程没跑 ⇒ 无动作)。 */
+export async function checkBridgeDegradedOnce(): Promise<number> {
+  if (activeBridgeRoutes.size === 0) return 0;
+  const { airplaySupervisor } = await import("../airplay/supervisor.js");
+  if (!airplaySupervisor.isRunning()) return 0;
+  type Row = { deviceId: string; token: string; degraded?: boolean; linkLoss?: string | null };
+  let rows: Row[] = [];
+  try {
+    rows = await airplaySupervisor.rpc<Row[]>("bridgeStatus");
+  } catch {
+    return 0; // 子进程重启中:下一轮再看
+  }
+  let n = 0;
+  for (const r of rows) {
+    if (!r?.degraded) continue;
+    if (await degradeBridgeMember(r.deviceId, r.token, r.linkLoss ?? "ap2-link-loss")) n++;
+  }
+  return n;
 }
 
 /** 设备离线(mDNS byebye,§5.2):立刻从全部活跃桥路由摘除(不等重连),
@@ -297,8 +391,10 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
       try {
         // socketPath 在主进程按同一实现计算(bridgeSocketPath,<100B 断言在此抛)。
         bridgeSocketPath(d, token);
-        await bridgePrepareDevice(d, token, "raop", groupId);
-        sockets.push({ deviceId: d, socketPath: bridgeSocketPath(d, token), token, protocol: "raop" });
+        // 协议逐成员选(AP1 → raop;已配对 AP2 → ap2-realtime;未配对/不支持 → raop)。
+        const protocol = selectAirPlayBridgeProtocol(d);
+        await bridgePrepareDevice(d, token, protocol, groupId);
+        sockets.push({ deviceId: d, socketPath: bridgeSocketPath(d, token), token, protocol });
       } catch (e) {
         log.warn(`[group][bridge] ${groupId}: bridgePrepare 失败 device=${d} → 本流回落 solo cast: ${(e as Error)?.message || e}`);
         soloFallback.push(d);
@@ -513,14 +609,17 @@ const bridgeOrphanFirstSeen = new Map<string, number>();
 /** 宽限窗(ms):略小于一个对账周期,保证第二轮必过线。 */
 const BRIDGE_RECONCILE_GRACE_MS = 55_000;
 
-/** 幂等启动对账定时器(60s 周期)。 */
+/** 幂等启动对账定时器(60s 周期)。AP2 降级看门狗(5s)一并拉起 —— 两者共用
+ *  同一个启动点(index.ts 走这里),不新增启动顺序依赖。 */
 export function startBridgeRouteReconciler(intervalMs = 60_000): void {
+  startBridgeDegradeWatchdog();
   if (bridgeReconcilerTimer !== null) return;
   bridgeReconcilerTimer = setInterval(() => { void reconcileBridgeRoutesOnce(); }, intervalMs);
   bridgeReconcilerTimer.unref?.();
 }
 
 export function stopBridgeRouteReconciler(): void {
+  stopBridgeDegradeWatchdog();
   if (bridgeReconcilerTimer !== null) {
     clearInterval(bridgeReconcilerTimer);
     bridgeReconcilerTimer = null;

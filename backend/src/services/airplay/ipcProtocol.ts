@@ -37,6 +37,20 @@ export type AirplayChildEvent = { t: "sessionEnded"; deviceId: string } & Airpla
 
 // ------------------------- Phase 2:桥接 op 载荷(§6.2) -------------------------
 
+/** AP2 realtime 建链载荷(Phase 6b · T03;协议 = `ap2-realtime` 时必填)。
+ *
+ *  - `controllerId`:HAP 控制端 pairing id(主进程 settings 读;子进程**无 DB**);
+ *  - `credsHex`:库内已切分凭据(`getHapCredentials` 的输出原样透传;子进程不做
+ *    substring —— 切分口径只有 `ap2/hapCredentials.ts` 一处);
+ *  - `latencyMin`:声明给接收端的抖动缓冲深度(样本数,缺省 `AP2_DEFAULT_LATENCY_FRAMES`)。
+ *
+ *  ⚠️ 只随 AP2 协议下发:RAOP 的 bridgePrepare 载荷保持原样(不多字段、不改语义)。 */
+export interface BridgeAp2Payload {
+  controllerId: string;
+  credsHex?: { accessoryLTPK: string; controllerLTSK: string };
+  latencyMin?: number;
+}
+
 /** bridgePrepare 参数(§4.1):socketPath 由主进程按 bridgeSocketPath() 计算后下发
  *  (deviceId/token 只进 hash 与 CONFIG payload,不进文件名)。
  *  Phase 3:host/port/pk/et 供桥会话向设备做 RTSP 握手(旧墙钟出声);
@@ -53,6 +67,8 @@ export interface BridgePrepareArgs {
   /** 桥 A/V 标定位移(微秒,正 = 桥整体延后)。主进程从 settings 读好下发
    *  (子进程不碰 DB);进 planBridgeAnchor 平移「内容落点」,不改 latencyFrames。 */
   anchorShiftUs?: number;
+  /** AP2 realtime 建链载荷(仅 protocol 为 ap2-* 时出现)。 */
+  ap2?: BridgeAp2Payload;
 }
 
 /** bridgePrepare 返回。Phase 3:桥会话已对设备完成 RTSP 握手(或 dry 模式仅 listener);

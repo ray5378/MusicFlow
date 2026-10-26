@@ -323,6 +323,10 @@ export async function bridgePrepareDevice(
     // **正数 = 内容落点整体后移 = AirPlay 更晚出声;负数 = 更早**。
     // 有组上下文一律取按组值(用户可在播放器里逐组调);无组上下文回落全局旧值。
     anchorShiftUs: groupId ? airplayDelayUsOf(groupId) : getBridgeAvShiftUs(),
+    // AP2 realtime:建链载荷(controllerId + 已切分凭据)。**只在协议确为 AP2 时下发** ——
+    // RAOP 载荷逐字节不变(未配对导致 undefined 时桥侧按「AP2 载荷缺失」快速失败,
+    // 主进程按 MAJ-07 回落该设备本流 solo cast,不会静默无声)。
+    ap2: isAp2BridgeProtocol(protocol) ? buildAp2BridgePayload(deviceId) : undefined,
   });
   registerBridgeOwner(deviceId, token);
   return r;
@@ -900,6 +904,70 @@ export function isAirPlayMemberSelectable(deviceId: string): boolean {
   const ap2Capable = !!d.supportsAp2;
   // 只有 AP2 capable 才查凭据列:AP1-only 设备(绝大多数)不付出任何额外 DB 查询。
   return selectableOf(!!d.disabled, ap2Capable, ap2Capable && getHapCredentials(deviceId) !== null);
+}
+
+// ==================== 桥协议选择(唯一落点,Phase 6b · T01) ====================
+
+/** 桥协议总闸:只有**显式** `MUSICFLOW_AIRPLAY_AP2=0` 才关(默认开)。
+ *  关掉 = 全仓回到 AP1/RAOP 逐字节旧行为(排障/回滚开关)。 */
+const AP2_BRIDGE_FLAG_KEY = "MUSICFLOW_AIRPLAY_AP2";
+
+/** 该设备这次进桥该用哪个协议(`raop` / `ap2-realtime`)——**唯一选择点**。
+ *
+ *  判据(按序短路,只用有实测支撑的事实,**绝不**猜测设备能力):
+ *   ① 旗标 `MUSICFLOW_AIRPLAY_AP2=0` ⇒ raop;
+ *   ② 设备不存在 / `supportsAp2 !== true` ⇒ raop
+ *      (`supportsAp2` = 同时广播 `_airplay._tcp` 且 **`protovers ≥ 1.1`** —— 这是本仓
+ *       唯一有真机实测支撑的 AP2 能力判据);
+ *   ③ `getHapCredentials(deviceId) === null`(未配对)⇒ raop
+ *      (没有 pair-verify 凭据就建不了加密 RTSP,AP2 realtime 无从谈起);
+ *   ④ 否则 ⇒ `ap2-realtime`(48k 直通 + ChaCha,`PROTOCOL_CAPS` 同源)。
+ *
+ *  **为什么不看 features / et / 设备类型**:`features` 是位图,各家实现报得极不一致
+ *  (缺失位并不代表不支持,报了位也不代表这条路走得通),`et` 只说明 RAOP 是否
+ *  RSA 加密,`am`/model 是厂商字符串 —— 三者在本仓都没有任何实测样本支撑,
+ *  按它们分流等于拿用户设备试错。`protovers ≥ 1.1` 已被发现层与配对链路消化过一圈
+ *  (设备视图 ap2Capable / 未配对禁止入组),信噪比最高。
+ *
+ *  **为什么禁选 ap2-compat**:它(`PROTOCOL_CAPS`)与 `raop` 逐字段相同
+ *  (rate 44100 / ntp / none / streamType 96)⇒ 只会诱出两条一模一样的代码路径,
+ *  出问题时无法从日志区分走了哪条;要 AP1 就直说 `raop`。
+ *  **为什么禁选 ap2-buffered**:仓内**没有**它的实现(streamType 103 + PTP 时钟),
+ *  选中即无声。
+ *
+ *  契约:**纯查表、无副作用、绝不抛异常**(任何异常一律回落 `raop`);
+ *  调用点只有桥路由(`group/protocolPlayer.ts` 的 prepareBridgeRoute / bridgeJoinMember)
+ *  与 `bridgePrepareDevice` 的载荷组装 —— 设备逐成员选协议,不是组级。
+ */
+export function selectAirPlayBridgeProtocol(deviceId: string): BridgeProtocol {
+  try {
+    if (process.env[AP2_BRIDGE_FLAG_KEY] === "0") return "raop";
+    const dev = getAirPlayDevice(deviceId);
+    if (!dev || dev.supportsAp2 !== true) return "raop";
+    if (getHapCredentials(deviceId) === null) return "raop";
+    return "ap2-realtime";
+  } catch (e: any) {
+    // 选择器不能成为新的故障面:DB/发现层任何异常 ⇒ 退回原来的 AP1 行为。
+    log.warn(`[ap2] 协议选择失败,回落 raop(device=${deviceId}): ${e?.message || e}`);
+    return "raop";
+  }
+}
+
+/** 桥协议是否为 AP2 realtime(载荷/出口分支的唯一判据,避免各处 startsWith 散落)。 */
+export function isAp2BridgeProtocol(protocol: BridgeProtocol): boolean {
+  return protocol.startsWith("ap2-");
+}
+
+/** AP2 realtime 桥载荷(建链所需,子进程无 DB 故在此组装):
+ *  controllerId 取 settings 稳定值,credsHex 取已切分的库内凭据(未配对 ⇒ undefined)。
+ *  `latencyMin` 不下发 ⇒ 子进程按 `AP2_DEFAULT_LATENCY_FRAMES` 声明。 */
+function buildAp2BridgePayload(deviceId: string): {
+  controllerId: string;
+  credsHex?: { accessoryLTPK: string; controllerLTSK: string };
+} | undefined {
+  const creds = getHapCredentials(deviceId);
+  if (!creds) return undefined;
+  return { controllerId: getAirPlayControllerId(), credsHex: creds };
 }
 
 /** AP2 PIN 配对失败的分类码(路由层按它映射 HTTP 状态)。 */
