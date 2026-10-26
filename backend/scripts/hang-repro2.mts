@@ -2,8 +2,8 @@ import WebSocket from "ws";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
-import { setSendspinIdentityDir, startSendspinService, stopSendspinService, getSendspinServer } from "/workspace/MusicFlow/backend/src/services/sendspin/index.js";
-import { pumpFor, overridePumpSource } from "/workspace/MusicFlow/backend/src/services/sendspin/streamEngine.js";
+import { setSendspinIdentityDir, startSendspinService, stopSendspinService, getSendspinServer } from "../src/services/sendspin/index.js";
+import { pumpFor, overridePumpSource } from "../src/services/sendspin/streamEngine.js";
 
 const t = (m: string) => console.log(`[t=${Date.now() % 100000}] ${m}`);
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sendspin-hang2-"));
