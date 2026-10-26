@@ -26,6 +26,13 @@ import {
 import { BridgeSource, type BridgeLinkState, type BridgeSocketLike } from "../airplay/bridgeSource.js";
 import { BRIDGE_HEARTBEAT_INTERVAL_MS, SENDSPIN_RATE, type BridgeProtocol } from "../airplay/rates.js";
 
+/** 泵空闲判定阈值:距上次 pushAudio 超过该时长视为「泵未在跑」(内容尾/过渡期)。
+ *  播中桥投递最大间隔是 250ms 补投 tick,远低于该值;内容尾 teardown(rebase 等)
+ *  实测可达 ~3s,故取 5s。过渡期 closed(对端终态回收)不进 5s/30s 退避、立即
+ *  重连(修法②a)—— 此前切歌后最长要等 30s 退避才重连,45s 无声 worst path
+ *  的主要成分即在此。 */
+const BRIDGE_PUMP_IDLE_MS = 5000;
+
 export interface BridgeMemberStats {
   state: BridgeLinkState;
   generation: number;
@@ -47,6 +54,9 @@ export interface BridgeMemberOpts {
   heartbeatMs?: number;
   /** 重连退避注入(测试确定性);缺省 = 5s/30s ±20% 抖动。 */
   backoffDelayMs?: (attempt: number) => number;
+  /** 泵空闲判定阈值(测试注入;默认 5000ms,见 BRIDGE_PUMP_IDLE_MS):
+   *  距上次 pushAudio 超过该值(或组泵暂停中)视为泵未在跑,closed 即时重连。 */
+  pumpIdleMs?: number;
   /** 定时器注入(测试)。 */
   schedule?: (fn: () => void, ms: number) => () => void;
   highWaterMs?: number;
@@ -65,6 +75,9 @@ export class BridgeMember {
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private gen = 0;
   private everConnected = false;
+  /** 最近一次 pushAudio 时刻(Date.now 口径);泵空闲判定用。 */
+  private lastPushAtMs = 0;
+  private readonly pumpIdleMs: number;
   /** 组泵暂停指示(Phase 5 §5.4):经 HEARTBEAT flags bit1 下发,airplay 侧据此
    *  冻结推流(不写静音/不计 latePackets),区别于链路死亡 stalled。 */
   private pausedForBridge = false;
@@ -72,7 +85,12 @@ export class BridgeMember {
   constructor(opts: BridgeMemberOpts) {
     this.opts = opts;
     this.heartbeatMs = opts.heartbeatMs ?? BRIDGE_HEARTBEAT_INTERVAL_MS;
+    this.pumpIdleMs = opts.pumpIdleMs ?? BRIDGE_PUMP_IDLE_MS;
     this.source = new BridgeSource({
+      // 修法②a:泵未在跑(组泵暂停中 / 距上次 pushAudio 超阈值)的过渡期 closed
+      // 是终态回收而非故障 → 本次重连 0ms,不进 5s/30s 退避。
+      immediateReconnectOnClosed: () =>
+        this.pausedForBridge || Date.now() - this.lastPushAtMs > this.pumpIdleMs,
       connect: () => this.connectTcp(),
       onConnected: (sock) => this.onConnected(sock),
       onStateChange: opts.onStateChange,
@@ -114,6 +132,7 @@ export class BridgeMember {
 
   /** 组泵/测试入口:入队一帧 48k s16le/2ch PCM(立即返回,不阻塞泵)。 */
   pushAudio(pcm: Uint8Array, tsUs: bigint): void {
+    this.lastPushAtMs = Date.now();
     this.source.enqueue(encodeAudio(this.seq.generation, this.seq.take(), tsUs, pcm));
   }
 

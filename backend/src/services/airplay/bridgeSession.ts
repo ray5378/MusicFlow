@@ -73,6 +73,17 @@ export interface BridgeAlignAction {
   diff: number;
 }
 
+/** realigned 日志分级(降噪 rider):无动作(insert/drop/skip 全 0)的恒定漂移
+ *  是稳态噪声(实测 2.1 万行/20min,低功耗机白烧 CPU),降 DEBUG;有补/裁/跳
+ *  动作的对齐才是真事件,保持 WARN。 */
+export function realignedLogLevel(
+  act: Pick<BridgeAlignAction, "insertFrames" | "dropFrames" | "skipFrames">,
+): "debug" | "warn" {
+  return act.insertFrames === 0 && act.dropFrames === 0 && act.skipFrames === 0
+    ? "debug"
+    : "warn";
+}
+
 /** 内容时间线对齐器(§4.5)。
  *
  *  contentPos = 已追加输出流的内容前沿(帧,A 起算;= 上一帧输出之后的位置):
@@ -690,7 +701,10 @@ export class BridgeSession {
       }
       if (act.realigned) {
         this.stats.realignments++;
-        log.warn(`[airplay-bridge] realigned: device=${this.deviceId} drift=${act.diff} frames (${((act.diff / rate) * 1000).toFixed(1)}ms) insert=${act.insertFrames} drop=${act.dropFrames} skip=${act.skipFrames}`);
+        // 稳态无动作漂移 → DEBUG(刷屏降噪);动作型对齐 → WARN。
+        const msg = `[airplay-bridge] realigned: device=${this.deviceId} drift=${act.diff} frames (${((act.diff / rate) * 1000).toFixed(1)}ms) insert=${act.insertFrames} drop=${act.dropFrames} skip=${act.skipFrames}`;
+        if (realignedLogLevel(act) === "debug") log.debug(msg);
+        else log.warn(msg);
       }
     }
     // 48k s16le → Float32 →(147/160)→ 输出速率 Float32 → s16le 追加

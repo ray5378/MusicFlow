@@ -58,7 +58,12 @@ interface Pair {
 }
 
 /** 起一对真 net server + BridgeMember(bridgeSocketPath 真实路径,快速注入退避)。 */
-async function startPair(opts: { heartbeatMs?: number; stallAfterMs?: number } = {}): Promise<Pair> {
+async function startPair(opts: {
+  heartbeatMs?: number;
+  stallAfterMs?: number;
+  pumpIdleMs?: number;
+  schedule?: (fn: () => void, ms: number) => () => void;
+} = {}): Promise<Pair> {
   const n = Math.floor(Math.random() * 1e9);
   const deviceId = `dev-${n}`;
   const token = `tok-${n}`;
@@ -76,6 +81,8 @@ async function startPair(opts: { heartbeatMs?: number; stallAfterMs?: number } =
     socketPath: server.listeningOn!,
     heartbeatMs: opts.heartbeatMs ?? 0,
     backoffDelayMs: () => 20, // 测试注入:快速重连
+    pumpIdleMs: opts.pumpIdleMs,
+    schedule: opts.schedule,
   });
   members.push(member);
   return { server, member, recv };
@@ -271,4 +278,53 @@ describe("bridgeMember:吞吐与完整性(出口判据 ①:10 万随机帧往返
     expect(src.stats().reconnects).toBe(0);
     src.stop();
   }, 300_000);
+});
+
+describe("bridgeMember:泵未在跑的过渡期 closed 即时重连(修法②a)", () => {
+  /** 捕获重连延迟值,同时用真定时器照常执行。 */
+  function captureSchedule(): { delays: number[]; schedule: (fn: () => void, ms: number) => () => void } {
+    const delays: number[] = [];
+    const schedule = (fn: () => void, ms: number): (() => void) => {
+      delays.push(ms);
+      const t = setTimeout(fn, ms);
+      return () => clearTimeout(t);
+    };
+    return { delays, schedule };
+  }
+
+  it("内容尾(空闲超阈值)closed → 0ms 即时重连;对端重新监听后恢复收流", async () => {
+    const { delays, schedule } = captureSchedule();
+    const { server, member } = await startPair({ pumpIdleMs: 100, schedule });
+    const deviceId = member.deviceId;
+    const token = member["opts"]["token"] as string;
+    const socketPath = server.listeningOn!; // close 后 listeningOn 归 null,提前捕获
+    member.start();
+    await until(() => server.stats().sessionsAccepted === 1, "accepted#1");
+    member.pushAudio(Buffer.alloc(1920 * 4, 1), 1000n);
+    // 空闲超阈值(过渡期):>100ms 无 push
+    await new Promise((r) => setTimeout(r, 250));
+    await server.close();
+    // closed → 0ms 即时重连;此后 connect 失败(路径已清)照常 20ms 退避
+    await until(() => delays.length >= 2 && delays[0] === 0, "immediate-then-backoff");
+    expect(delays[1]).toBe(20);
+    // 对端重新监听同一 socket 路径 → 下一次退避到期即接上
+    const { recv: recv2, handlers: handlers2 } = recvHandlers();
+    const server2 = new BridgeServer({ deviceId, token, protocol: "raop" }, handlers2);
+    servers.push(server2);
+    await server2.listen(socketPath);
+    await until(() => server2.stats().sessionsAccepted === 1, "accepted#2");
+    await until(() => recv2.boundaries.some(([, reason]) => reason === "rehost"), "rehost");
+  }, 15000);
+
+  it("播中(空闲未超阈值)closed → 不即时重连,按注入退避 20ms", async () => {
+    const { delays, schedule } = captureSchedule();
+    const { server, member } = await startPair({ pumpIdleMs: 300, schedule });
+    member.start();
+    await until(() => server.stats().sessionsAccepted === 1, "accepted");
+    member.pushAudio(Buffer.alloc(1920 * 4, 1), 1000n); // 刚推过:泵在跑
+    await server.close();
+    await until(() => delays.length >= 1, "scheduled");
+    expect(delays[0]).toBe(20); // 非即时:退避路径
+    member.stop();
+  }, 15000);
 });

@@ -279,3 +279,49 @@ describe("bridgeSource:stop 与默认退避", () => {
     expect(computeBridgeBackoffMs(0, 0.5)).toBe(5000);    // attempt<1 归一为 1
   });
 });
+
+describe("bridgeSource:泵未在跑的过渡期 closed 即时重连(修法②a)", () => {
+  it("closed 时泵空闲 → 0ms 即时重连(不进退避);connect 失败照常退避;播中 closed 恢复退避", async () => {
+    const delays: number[] = [];
+    let fire: (() => void) | null = null;
+    let failNext = false;
+    let idle = true;
+    const sockets: StubSocket[] = [];
+    const src = new BridgeSource({
+      connect: async () => {
+        if (failNext) throw new Error("ECONNREFUSED");
+        const sock = new StubSocket();
+        sockets.push(sock);
+        return sock;
+      },
+      onConnected: () => undefined,
+      backoffDelayMs: () => 123,
+      immediateReconnectOnClosed: () => idle,
+      schedule: (fn, ms) => {
+        delays.push(ms);
+        fire = fn;
+        return () => { fire = null; };
+      },
+    });
+    src.start();
+    await until(() => src.state === "live", "live");
+    // ① 过渡期 closed(泵未在跑)→ 0ms 即时重连
+    failNext = true;
+    sockets[0]!.destroy();
+    await until(() => src.state === "stalled", "stalled#1");
+    expect(delays).toEqual([0]);
+    // ② 对端监听未就绪 → connect 失败照常退避(不热循环)
+    (fire as () => void)();
+    await until(() => src.state === "stalled", "stalled#2");
+    expect(delays).toEqual([0, 123]);
+    // ③ 重连成功 → 播中 closed(泵在跑)→ 正常退避
+    failNext = false;
+    (fire as () => void)();
+    await until(() => src.state === "live", "live#2");
+    idle = false;
+    sockets[1]!.destroy();
+    await until(() => src.state === "stalled", "stalled#3");
+    expect(delays).toEqual([0, 123, 123]);
+    src.stop();
+  });
+});

@@ -85,6 +85,11 @@ export interface BridgeSourceOpts {
   onHardCap?: (queuedMs: number) => void;
   /** 重连退避注入(测试确定性);缺省 = computeBridgeBackoffMs(attempt, random)。 */
   backoffDelayMs?: (attempt: number) => number;
+  /** 断连时的即时重连判定(修法②a):返回 true 则本次 closed 不进 5s/30s 退避,
+   *  立即重连(0ms)。语义:泵未在跑(内容尾/过渡期)的 closed 是对端终态回收
+   *  而非故障;仅作用于 closed 事件一次 —— 若对端监听尚未就绪,后续 connect
+   *  失败照常退避,不会热循环。 */
+  immediateReconnectOnClosed?: () => boolean;
   /** 定时器注入(测试);返回取消函数。 */
   schedule?: (fn: () => void, ms: number) => () => void;
   highWaterMs?: number;
@@ -293,16 +298,27 @@ export class BridgeSource {
     }
     this.reconnects++;
     this.setState("stalled", { reason });
-    this.scheduleReconnect();
+    // 修法②a:泵未在跑的过渡期 closed 不进退避,立即重连(对端未就绪则后续
+    // connect 失败照常退避,不会热循环)。
+    this.scheduleReconnect(
+      this.opts.immediateReconnectOnClosed?.() === true ? 0 : undefined,
+    );
   }
 
-  private scheduleReconnect(): void {
+  private scheduleReconnect(forcedDelayMs?: number): void {
     if (this.stopping || this.reconnectCancel) return;
     this.attempt++;
-    const delay = this.opts.backoffDelayMs
-      ? this.opts.backoffDelayMs(this.attempt)
-      : computeBridgeBackoffMs(this.attempt, Math.random());
-    this.opts.log?.(`bridge reconnect in ${delay}ms (attempt ${this.attempt})`);
+    let delay: number;
+    let tag = "";
+    if (forcedDelayMs !== undefined) {
+      delay = forcedDelayMs;
+      tag = " (immediate: pump idle)";
+    } else {
+      delay = this.opts.backoffDelayMs
+        ? this.opts.backoffDelayMs(this.attempt)
+        : computeBridgeBackoffMs(this.attempt, Math.random());
+    }
+    this.opts.log?.(`bridge reconnect in ${delay}ms (attempt ${this.attempt})${tag}`);
     this.reconnectCancel = this.scheduleFn(() => {
       this.reconnectCancel = null;
       this.connectLoop();
