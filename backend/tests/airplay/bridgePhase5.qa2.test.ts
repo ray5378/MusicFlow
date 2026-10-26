@@ -148,8 +148,9 @@ describe("QA① join→leave→join 循环 3 次:session 计数==设备数 + rin
     // 冻结墙钟让投递窗口/水位判定全确定(afterEach 统一 setNowUsOverride(null))。
     const NOW = 1_000_000_000n;
     setNowUsOverride(() => NOW);
+    const ahead = BigInt(g.commonSendAheadUs()); // ring ts 为协议域(含 send_ahead);窗口按 +ahead 平移
     for (let k = 0; k < 6; k++) {
-      const ts = NOW + BigInt(k * 500_000 - 500_000); // −0.5s … +2.0s
+      const ts = NOW + ahead + BigInt(k * 500_000 - 500_000); // 可听域 −0.5s … +2.0s(协议域 = +ahead)
       await g.pushFrame(ts, new Float32Array(1200));
     }
     const ring = (g as any).recentByGroup.get("pcm:100") as Array<{ tsUs: bigint; durUs: number; data: Uint8Array }>;
@@ -166,11 +167,11 @@ describe("QA① join→leave→join 循环 3 次:session 计数==设备数 + rin
       const handle = made[made.length - 1]!;
       // ★ 窗口化回填(§6.2):只投 [now+FLOOR 1.5s, now+HORIZON 2.5s] 内的当前代次帧,
       //    原序 + 贴组时间线:X = 组 ts(与真实设备可听时刻同值);floor 下/horizon 上/空包一律不投。
-      const win = ring.filter((e) => e.data.length > 0 && e.tsUs >= NOW + 1_500_000n && e.tsUs <= NOW + 2_500_000n);
+      const win = ring.filter((e) => e.data.length > 0 && e.tsUs >= NOW + ahead + 1_500_000n && e.tsUs <= NOW + ahead + 2_500_000n);
       expect(win.length).toBe(2); // +1.5s(恰在 floor 上沿)与 +2.0s 两帧
       expect(backfilled).toBe(win.length);
       const pushedTs = (handle.pushAudio as any).mock.calls.map((c: unknown[]) => c[1] as bigint);
-      expect(pushedTs).toEqual(win.map((e) => e.tsUs));
+      expect(pushedTs).toEqual(win.map((e) => e.tsUs - ahead)); // 可听域:ts − send_ahead
       for (let i = 1; i < pushedTs.length; i++) expect(pushedTs[i]! > pushedTs[i - 1]!).toBe(true);
       // leave
       await mgr.stop(token);

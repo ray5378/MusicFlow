@@ -146,19 +146,20 @@ describe("SendspinGroup.setBridgesPaused(§5.4)", () => {
     const h = mkFakeHandle("d1");
     (g.bridges as Map<string, unknown>).set("d1", h);
     const anyG = g as any;
+    const ahead = BigInt(g.commonSendAheadUs()); // ring ts 为协议域(含 send_ahead);窗口按 +ahead 平移
     const now = nowUs();
     anyG.recentByGroup.set(anyG.encoderKey("pcm", 100), [
-      { tsUs: now + 500_000n, durUs: 1000, data: new Uint8Array(10), ep: 0 }, // floor 下:不回填
-      { tsUs: now + 2_000_000n, durUs: 1000, data: new Uint8Array(10), ep: 0 }, // 窗口内
-      { tsUs: now + 2_400_000n, durUs: 1000, data: new Uint8Array(0), ep: 0 }, // 空包跳过(2026-09-17 ESPHome)
-      { tsUs: now + 2_300_000n, durUs: 1000, data: new Uint8Array(12), ep: 0 }, // 窗口内
-      { tsUs: now + 3_000_000n, durUs: 1000, data: new Uint8Array(10), ep: 0 }, // horizon 上:不回填
+      { tsUs: now + ahead + 500_000n, durUs: 1000, data: new Uint8Array(10), ep: 0 }, // floor 下:不回填
+      { tsUs: now + ahead + 2_000_000n, durUs: 1000, data: new Uint8Array(10), ep: 0 }, // 窗口内
+      { tsUs: now + ahead + 2_400_000n, durUs: 1000, data: new Uint8Array(0), ep: 0 }, // 空包跳过(2026-09-17 ESPHome)
+      { tsUs: now + ahead + 2_300_000n, durUs: 1000, data: new Uint8Array(12), ep: 0 }, // 窗口内
+      { tsUs: now + ahead + 3_000_000n, durUs: 1000, data: new Uint8Array(10), ep: 0 }, // horizon 上:不回填
     ]); // 生产 ring 帧恒由 pushFrame 打 ep 戳(S2:ep 缺失=未打戳=不可信,严格相等才投)
     expect(g.backfillBridge("d1")).toBe(2); // 空包不计、窗外两帧不回填
     expect(h.pushed.map((p) => p.tsUs)).toEqual([
       now + 2_000_000n,
       now + 2_300_000n,
-    ]); // 原序 + 贴组时间线:X = 组 ts(与真实设备可听时刻同值)
+    ]); // 原序 + 可听域:X = 组 ts − send_ahead(与真实设备出音时刻同值)
     expect(g.backfillBridge("missing")).toBe(0);
     g.stopBridgePushTimer(); // backfill 会起补投定时器,收尾停表
   });

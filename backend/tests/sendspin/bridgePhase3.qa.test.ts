@@ -144,7 +144,8 @@ describe("QA① BLK-01 组合反例:members=∅ + 2 桥 + flac 编码器在场",
     const b2 = bridgeStub("ap-2");
     g.bridges.set("ap-1", b1 as any);
     g.bridges.set("ap-2", b2 as any);
-    const ts0 = nowUs() + 2_000_000n; // 投递窗口 [now+FLOOR 1.5s, now+HORIZON 2.5s] 内
+    const ahead = BigInt(g.commonSendAheadUs()); // ring ts 是协议域(含 send_ahead);窗口按 +ahead 平移
+    const ts0 = nowUs() + ahead + 2_000_000n; // 可听域 [now+FLOOR 1.5s, now+HORIZON 2.5s] 内
 
     const got = await g.pushFrame(ts0, PCM());
     g.bridgePushTick(); // §6.2 窗口化:pushFrame 只入 ring,投递由补投 tick(单写者)完成
@@ -156,10 +157,10 @@ describe("QA① BLK-01 组合反例:members=∅ + 2 桥 + flac 编码器在场",
     expect(b2.pushed).toHaveLength(1);
     expect(Buffer.from(b1.pushed[0]!.data).equals(b2.pushed[0]!.data)).toBe(true);
     expect(b1.pushed[0]!.data[0]).toBe(0xcd); // 桥吃 PCM,不吃 flac(0xab)
-    expect(b1.pushed[0]!.ts).toBe(ts0); // 贴组时间线:X = 组 ts(与真实设备可听时刻同值)
+    expect(b1.pushed[0]!.ts).toBe(ts0 - ahead); // 可听域:桥收 ts−send_ahead(与设备出音同值)
     // 窗外帧不收:horizon 外(+5s)与 floor 下(+0.5s)均不投,且不污染水位
-    await g.pushFrame(nowUs() + 5_000_000n, PCM());
-    await g.pushFrame(nowUs() + 500_000n, PCM());
+    await g.pushFrame(nowUs() + ahead + 5_000_000n, PCM());
+    await g.pushFrame(nowUs() + ahead + 500_000n, PCM());
     g.bridgePushTick();
     expect(b1.pushed).toHaveLength(1);
     expect(b2.pushed).toHaveLength(1);
@@ -174,14 +175,15 @@ describe("QA① BLK-01 组合反例:members=∅ + 2 桥 + flac 编码器在场",
     g.bridges.set("ap-bad", bad as any);
     g.bridges.set("ap-good", good as any);
 
-    const got = await g.pushFrame(nowUs() + 2_000_000n, PCM());
+    const ahead = BigInt(g.commonSendAheadUs());
+    const got = await g.pushFrame(nowUs() + ahead + 2_000_000n, PCM());
     g.bridgePushTick();
 
     expect(got).toBe(1000);
     expect(bad.pushFailures).toBe(1); // 单桥失败不连累组泵与另一桥
     expect(good.pushed).toHaveLength(1);
     // 下一帧进窗 → tick 续投:好桥继续收,坏桥继续被隔离,组泵无感
-    await g.pushFrame(nowUs() + 2_100_000n, PCM());
+    await g.pushFrame(nowUs() + ahead + 2_100_000n, PCM());
     g.bridgePushTick();
     expect(good.pushed).toHaveLength(2);
     expect(bad.pushFailures).toBe(2);
