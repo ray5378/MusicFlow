@@ -620,7 +620,7 @@ export async function tryArmSendspinBorrow(
     if (!fromGroup || !toGroup) return miss; // 有一端不是 sendspin:没有可移交的流对象
     const r = await sendspinArmBorrow(toGroup, fromGroup, askPosition != null ? askPosition * 1000 : null);
     if (!r?.armed) {
-      if (r?.reason) seekLog.debug(`[transfer] 借流未武装(${r.reason}),走常规对齐`);
+      if (r?.reason) seekLog.info(`[transfer] 借流未武装(${r.reason}),走常规对齐`);
       return miss;
     }
     return {
@@ -629,7 +629,7 @@ export async function tryArmSendspinBorrow(
       songId: r.songId ?? null,
     };
   } catch (e: any) {
-    seekLog.debug(`[transfer] 借流武装异常: ${e?.message || e}`);
+    seekLog.info(`[transfer] 借流武装异常: ${e?.message || e}`);
     return miss;
   }
 }

@@ -422,7 +422,7 @@ export class QueueController extends EventEmitter {
     if (this.advancing.has(deviceId)) return;
     this.advancing.add(deviceId);
     try {
-      await this.playCurrent(deviceId, baseUrl);
+      await this.playCurrent(deviceId, baseUrl, undefined, "resume-active");
     } finally {
       this.advancing.delete(deviceId);
     }
@@ -481,8 +481,33 @@ export class QueueController extends EventEmitter {
           log.warn(`[QueueController][idle_early] ${playerId}: IDLE 误报已撤销(pos=${Math.round(st.position)}/${Math.round(st.duration)}),继续播放`);
           return;
         }
+        // Fix-2A:复查**第二状态源** —— 共享组泵在推流 ⇒ 结构性不可能真停,设备
+        // IDLE 必为假象(pollCore 视图失配/链路抖动),撤销切歌。这不是替代
+        // pollState,而是给「复查也探到非 PLAYING」加一条反证通道:泵明明在推,
+        // 就不许把这一拍解释成曲目结束。安全网:泵若真卡死,本分支不触发
+        // (pumpActive=false),由既有 frozen 重投(:578)/stalled 复查(:693)路径
+        // 兜底推进 —— 不会「既不振荡也不推进」死锁。0527697 同源思路:共享组泵
+        // 即真状态源。动态 import 防环(QC ← sendspin/index)。
+        if (st) {
+          try {
+            const { sendspinGroupPumpActive } = await import("../sendspin/index.js");
+            const { sendspinGroupName } = await import("../sendspin/playerCore.js");
+            if (await sendspinGroupPumpActive(sendspinGroupName(id))) {
+              this.ctrls.get(id)?.resetTracker(playerId);
+              log.info(`IDLE 误报已撤销: group=${id} pumpActive=true (复查第二状态源:共享组泵在推流)`);
+              return;
+            }
+          } catch { /* 泵判活不可用 → 落回下方原复查结论,不放大故障 */ }
+        }
       } catch (e: any) {
-        log.warn(`[QueueController][idle_early] ${playerId}: 复查失败,按真结束处理`, { err: e?.message || e });
+        // Fix-2B:不对称保护补齐 —— 与上方 unavailable 分支同口径。pollState
+        // 抛错(链路瞬断/子进程重启窗口)≠设备真停,异常不能被解释成曲目结束
+        // (位置归零/曲目乱跳)。登记链路丢失,等下轮复查/stalled 兜底;真停场景
+    // 多等一个 5s 周期,符合「宁可慢一拍不能误切」。
+        this.noteLinkLost(id, "idle_early 复查抛错");
+        this.ctrls.get(id)?.resetTracker(playerId);
+        log.warn(`[QueueController][idle_early] ${playerId}: 复查抛错 → 暂不放行(等下轮复查)`, { err: e?.message || e });
+        return;
       }
       // 暂停看门狗转停(对齐 MA `_watch_pause`,见 services/player/pauseStopSettle.ts):
       // 这条 IDLE 是看门狗「暂停满 30s 未恢复 → 自动 stop」拆流产生的,**不是曲目播完**;
@@ -507,7 +532,7 @@ export class QueueController extends EventEmitter {
         }
         q.currentIndex = nextIdx;
         q.ended = false;
-        await this.playCurrent(id, baseUrl);
+        await this.playCurrent(id, baseUrl, undefined, "auto-advance");
         this.persist(id);
         this.emit("queue_changed", id, this.snapshot(id));
         // 切歌后重算预探测窗口(滑动缓冲:头随播放消费,尾持续补探)。
@@ -575,7 +600,7 @@ export class QueueController extends EventEmitter {
           try {
             q.currentIndex = nextIdx;
             q.ended = false;
-            await this.playCurrent(id, baseUrl);
+            await this.playCurrent(id, baseUrl, undefined, "stall-frozen");
             this.persist(id);
             this.emit("queue_changed", id, this.snapshot(id));
             this.schedulePreProbe(id); this.schedulePrefetch(id);
@@ -677,7 +702,7 @@ export class QueueController extends EventEmitter {
             try {
               q.currentIndex = nextIdx;
               q.ended = false;
-              await this.playCurrent(id, baseUrl);
+              await this.playCurrent(id, baseUrl, undefined, "stall-skip");
               this.persist(id);
               this.emit("queue_changed", id, this.snapshot(id));
               this.schedulePreProbe(id); this.schedulePrefetch(id);
@@ -690,7 +715,7 @@ export class QueueController extends EventEmitter {
       }
       this.advancing.add(id);
       try {
-        await this.playCurrent(id, baseUrl);
+        await this.playCurrent(id, baseUrl, undefined, "stall-reinvest");
       } finally {
         this.advancing.delete(id);
       }
@@ -894,7 +919,7 @@ export class QueueController extends EventEmitter {
     const playerId = player.playerId;
     this.advancing.add(deviceId);
     try {
-      await this.playCurrent(deviceId, getEffectiveBaseUrl());
+      await this.playCurrent(deviceId, getEffectiveBaseUrl(), undefined, "recover-in-place");
       // 减 1s 抵消 cast 的启动开销(设备真正出声常晚于 Play 命令),避免定位略超前。
       const target = Math.max(0, pos - 1);
       if (target > 1) {
@@ -934,11 +959,12 @@ export class QueueController extends EventEmitter {
     throw new Error(`playMedia 超过 ${timeoutMs}ms 未返回(cast 挂死)`);
   }
 
-  private async playCurrent(deviceId: string, baseUrl: string, startPositionMs?: number): Promise<void> {
+  private async playCurrent(deviceId: string, baseUrl: string, startPositionMs?: number, source = "direct"): Promise<void> {
     const q = this.queues.get(deviceId);
     const player = this.players.get(deviceId);
     const ctrl = this.ctrls.get(deviceId);
     if (!q || !player || !ctrl) return;
+    log.info(`[QueueController][playCurrent] source=${source} dev=${deviceId} idx=${q.currentIndex} song=${q.items[q.currentIndex]?.songId ?? "-"}`);
 
     // ── 硬限制:**目标没有在线播放器,就不开始播放** ───────────────────────
     // 定稿 2026-09-25(用户):这是长久以来的既有行为,判据由 playTarget.checkPlayTarget

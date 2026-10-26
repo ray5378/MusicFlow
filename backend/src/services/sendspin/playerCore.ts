@@ -129,6 +129,7 @@ export function armBorrowCore(
   sourceGroup: string,
   overrideMs?: number | null,
 ): BorrowArmed {
+  log.info(`[borrow] arm target=${targetGroup} source=${sourceGroup}`);
   if (!srv) return { armed: false, reason: "no-server" };
   // ⚠️ 一律 groups.get 而**不**用 srv.group():后者会凭空建一个空组。
   const gTo = srv.groups.get(targetGroup);
@@ -564,7 +565,20 @@ const pauseWatchdogs = new Map<string, ReturnType<typeof setTimeout>>();
 function resolveLiveGroup(srv: SendspinServer, clientId: string): SendspinGroup {
   const conn = srv.clients.get(clientId) as (SendspinConnection & { group?: SendspinGroup }) | undefined;
   const live = conn?.group;
-  if (live && typeof live === "object") return live;
+  // Fix-2C:conn.group 必须仍在 srv.groups 注册表(身份相同)才算 live。
+  // 组关闭/回收会 groups.delete(name)(server.ts),此后 conn.group 是陈旧悬挂
+  // 引用,读它 = 读已死组的 current/paused(假 IDLE/假暂停视图来源之一)。
+  // 失配时先扫注册表找含此连接的 ug: 组(权威重建);找不到(如热重连中 conn
+  // 尚未 rejoin)回落单设备组,与旧行为一致 —— 热重连语义不受影响:rejoin 后
+  // conn.group 指回在册组,直通。仅视图层,不改组管理写路径。
+  if (live && typeof live === "object" && srv.groups.get(live.name) === live) return live;
+  if (conn) {
+    for (const [reGrpName, reGrp] of srv.groups) {
+      if (!reGrpName.startsWith("ug:")) continue;
+      const reMem = (reGrp as unknown as { members?: Set<unknown> }).members;
+      if (reMem && typeof reMem.has === "function" && reMem.has(conn)) return reGrp;
+    }
+  }
   return srv.group(clientId);
 }
 
@@ -578,6 +592,7 @@ function broadcastGroupState(srv: SendspinServer | null, clientId: string, g: Se
   }
   const bare = g.name ? srv?.clients.get(g.name) : undefined;
   if (bare && !done.has(bare)) {
+    log.info(`[conn-group-diag] broadcast bare-repoint g=${g.name} bareClientId=${clientId}`);
     try { bare.sendGroupUpdate(); } catch { /* ignore */ }
   }
 }
@@ -813,6 +828,22 @@ export function pollCore(srv: SendspinServer | null, clientId: string): { playin
   // srv.group(clientId) 是单设备组,其 paused/current 不反映真实播放态 ——
   // 只读它会导致暂停后仍报 playing(HA 卡片进度条不锁帧、暂停键常显"播放")。
   const g = srv ? resolveLiveGroup(srv, clientId) : (ephemeralGroup(clientId) as any);
+  // [conn-group-diag] 临时诊断(复现假 IDLE 自持循环用,复现完撤):conn.group 与
+  // 「真正含此连接的 ug: 组」失配时打一行 —— 失配 ⇒ playing 恒 false ⇒
+  // idle_early 复查(同 pollState 源)结构性确认已停放行切歌。
+  if (srv) {
+    const diagConn = srv.clients.get(clientId) as (SendspinConnection & { group?: { name?: string } }) | undefined;
+    let diagTrueUg = "-";
+    for (const [diagName, diagGrp] of srv.groups) {
+      if (!diagName.startsWith("ug:")) continue;
+      const diagMem = (diagGrp as unknown as { members?: Set<unknown> }).members;
+      if (diagMem && typeof diagMem.has === "function" && diagConn && diagMem.has(diagConn)) { diagTrueUg = diagName; break; }
+    }
+    const diagConnGrp = diagConn?.group?.name ?? "-";
+    if (diagTrueUg !== "-" && diagConnGrp !== diagTrueUg) {
+      log.info(`[conn-group-diag] pollCore client=${clientId} conn.group=${diagConnGrp} trueUg=${diagTrueUg} playing=${!!g.current} posMs=${g.positionMs}`);
+    }
+  }
   return {
     playing: !!g.current,
     paused: !!g.paused,

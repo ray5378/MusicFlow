@@ -707,6 +707,7 @@ export class SendspinGroup {
    *  把新流代次推给全部桥 —— 桥清旧代次队列并发 BOUNDARY。 */
   notifyBridgeGeneration(generation: number, reason: BridgeBoundaryReason): void {
     if (this.bridges.size === 0) return;
+    this.server.log("info", `bridge-generation group=${this.name} gen=${generation} reason=${reason} bridges=${this.bridges.size}`);
     for (const b of this.bridges.values()) {
       try { b.notifyGeneration(generation, reason); } catch { /* 单桥失败不连累 */ }
     }

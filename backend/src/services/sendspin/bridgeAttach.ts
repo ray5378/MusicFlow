@@ -83,6 +83,7 @@ export function syncGroupBridges(
     }
   }
   g.bridgeSpecs = nextSpecs;
+  log.info(`bridge-sync group=${g.name} before=${prevSpecs.size} after=${nextSpecs.length} devices=[${nextSpecs.map((s) => s.deviceId).join(",")}]`);
 }
 
 /** 摘除单座桥(bridgeDetach op)。返回是否确有摘除。 */

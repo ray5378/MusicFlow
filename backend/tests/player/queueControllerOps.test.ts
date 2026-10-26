@@ -531,12 +531,15 @@ describe("idle_early / frozen 的复查分支", () => {
     expect(H.log.filter((l) => l.startsWith("playMedia"))).toEqual([]);
   });
 
-  it("idle_early 复查抛错 → 按真结束处理(放行切歌)", async () => {
-    const { qc, player, any } = mkQC("d1");
+  it("idle_early 复查抛错 → 暂不放行(与 unavailable 同口径,等下轮复查)", async () => {
+    const { qc, player, any, ctrl } = mkQC("d1");
     player.pollState.mockRejectedValue(new Error("RPC 超时"));
     await qc.handleDecision("idle_early", "dlna:d1");
-    expect(any.queues.get("d1").currentIndex).toBe(1);
-    expect(H.log).toContain("playMedia:dlna:d1:s2");
+    // Fix-2B:pollState 抛错 ≠ 设备真停。异常被解释成曲目结束会造成位置归零/
+    // 曲目乱跳;与 unavailable 分支同口径:resetTracker + 暂不放行。
+    expect(any.queues.get("d1").currentIndex).toBe(0);
+    expect(ctrl.resetTracker).toHaveBeenCalledWith("dlna:d1");
+    expect(H.log.filter((l) => l.startsWith("playMedia"))).toEqual([]);
   });
 
   it("frozen 复查抛错 → 落到就地重投(恢复第 1 次)", async () => {

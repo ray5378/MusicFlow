@@ -711,6 +711,7 @@ export class GroupPump {
     // 流式无全长:total 仅整包路径用,窗口路径靠 EOF＋耗尽结束。
     const total = win ? Infinity : Math.ceil(pcm!.length / frameSamples);
     let contentEnded = false;
+    let endReason = "cursor-reached"; // 默认=播到元数据时长(1093 行分支)
     let linkDied = false; // 推帧中断(编码器/连接死亡):与自然结束同口径清组状态
     let firstFrame = true;
     // ---- 时间线锚点(第三次无声事故的修复核心)----
@@ -812,10 +813,10 @@ export class GroupPump {
           // EOF 耗尽(短片/空):与整包 `i >= total` 同义。
           if (seg.length === 0) {
             logSafe(this.server, "warn", `sendspin 流式窗口提前 EOF: lo=${lo} frame=${i} pid=${win.pid} eof=${win.eof} failed=${win.failedReason ?? "-"} decoded=${win.decoded} song=${this.songId}`);
-            contentEnded = true; break;
+            contentEnded = true; endReason = "stream-eof"; break;
           }
         } else {
-          if (i >= total) { contentEnded = true; break; } // 解码耗尽
+          if (i >= total) { contentEnded = true; endReason = "decode-exhausted"; break; } // 解码耗尽
           seg = pcm!.subarray(lo, Math.min(lo + frameSamples, pcm!.length));
         }
 
@@ -962,7 +963,7 @@ export class GroupPump {
             //   新曲新建编码器即恢复(encoding.ts 侧另有重建/模块重载自愈)。
             if (starvationUs >= maxSilentDegradeUs()) {
               logSafe(this.server, "error", `sendspin 编码器持续零产出超过 ${Math.round(maxSilentDegradeUs() / 1000)}ms,放弃本曲提前切歌 song=${this.songId}`);
-              contentEnded = true;
+              contentEnded = true; endReason = "encoder-dead";
               break;
             }
           }
@@ -1092,7 +1093,7 @@ export class GroupPump {
         // 乐观窗口/自然结束的时序判定,导致切歌变重播(见 queueModes 回归)。
         if (this.durationMs > 0 && this.playCursorMs >= this.durationMs) { contentEnded = true; break; }
       }
-      logSafe(this.server, "info", `sendspin pushLoop 退出: contentEnded=${contentEnded} running=${this.running} epochSame=${this.epoch === myEpoch} song=${this.songId}`);
+      logSafe(this.server, "info", `sendspin pushLoop 退出: contentEnded=${contentEnded} endReason=${endReason} running=${this.running} epochSame=${this.epoch === myEpoch} song=${this.songId}`);
       if (this.epoch === myEpoch) {
         // ★ 曲末排空(深缓冲):必须等设备把缓冲里的音频播完,再收流。
         // 协议规定 stream/end 会让客户端**清空缓冲** —— 不等就发,设备里还排着
