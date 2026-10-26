@@ -96,6 +96,7 @@ function makeGroup(overrides: Record<string, unknown> = {}) {
     members: new Set<any>(),
     bridgeSpecs: [],
     hasBridges: () => false,
+    hasDirectMembers: () => g.members.size > 0,
     notifyBridgeGeneration: (gen: number, reason: string) => {
       genCalls.push([gen, reason]);
     },
@@ -280,5 +281,64 @@ describe("③ 桥在场绕过 800ms 钳制(MAJ-01)", () => {
     expect(g.commonSendAheadUs()).toBe(800_000);
     releaseSlices(); // EOF 收尾
     await waitInactive(pump, 5000);
+  }, 30_000);
+});
+
+describe("③b 深锚仅纯桥组(E3 判决,2026-10-26)", () => {
+  it("纯桥组(hasDirectMembers()=false)挂桥 → 深锚保留:lead ≥ cold 4.5s", async () => {
+    H.rows = [{ id: "row-5", duration: 10 }];
+    const { g, genCalls } = makeGroup({ hasBridges: () => true, hasDirectMembers: () => false });
+    const pump = new GroupPump(server, g);
+    await pump.play("song-e");
+    await waitSlices(1);
+    releaseOne();
+    await waitGen(genCalls, 1);
+
+    const leadUs = Number(g.timelineBaseUs - nowUs());
+    expect(leadUs).toBeGreaterThan(3_500_000); // ≥4.5s(扣观测噪声),绝非 800ms
+    releaseSlices(); // EOF 收尾
+    await waitInactive(pump, 5000);
+  }, 30_000);
+
+  it("混合组(有直连成员)挂桥 → 退回 800ms 截断:lead <1.5s(不是桥 cold lead)", async () => {
+    H.rows = [{ id: "row-6", duration: 10 }];
+    const { g, genCalls } = makeGroup({ hasBridges: () => true, hasDirectMembers: () => true });
+    const pump = new GroupPump(server, g);
+    await pump.play("song-f");
+    await waitSlices(1);
+    releaseOne();
+    await waitGen(genCalls, 1);
+
+    const leadUs = Number(g.timelineBaseUs - nowUs());
+    expect(leadUs).toBeGreaterThan(500_000); // ≥800ms(扣观测时刻噪声)
+    expect(leadUs).toBeLessThan(1_500_000); // <1.5s:800ms 截断语义,不是 4.5s 深锚
+    releaseSlices(); // EOF 收尾
+    await waitInactive(pump, 5000);
+  }, 30_000);
+
+  it("混合组挂桥 vs 无桥组 → 直连成员首帧 anchor 一致(v4.6.76 语义回归)", async () => {
+    H.rows = [{ id: "row-7", duration: 10 }, { id: "row-8", duration: 10 }]; // 双行:两次 play 各 shift 一行
+    const mixed = makeGroup({ hasBridges: () => true, hasDirectMembers: () => true });
+    const pumpMixed = new GroupPump(server, mixed.g);
+    await pumpMixed.play("song-g");
+    await waitSlices(1);
+    releaseOne();
+    await waitGen(mixed.genCalls, 1);
+    const leadMixed = Number(mixed.g.timelineBaseUs - nowUs());
+    releaseSlices(); // EOF 收尾
+    await waitInactive(pumpMixed, 5000);
+
+    const plain = makeGroup();
+    const pumpPlain = new GroupPump(server, plain.g);
+    await pumpPlain.play("song-h");
+    await waitSlices(1);
+    releaseOne();
+    await waitGen(plain.genCalls, 1);
+    const leadPlain = Number(plain.g.timelineBaseUs - nowUs());
+    releaseSlices(); // EOF 收尾
+    await waitInactive(pumpPlain, 5000);
+
+    // 两者都 ≈800ms 截断;差值仅为两次观测的时刻噪声(远小于 4.5s−0.8s 的深锚差)
+    expect(Math.abs(leadMixed - leadPlain)).toBeLessThan(500_000);
   }, 30_000);
 });

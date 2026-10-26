@@ -722,6 +722,14 @@ export class SendspinGroup {
     return this.bridges.size > 0;
   }
 
+  /** 组内是否存在直连 sendspin 成员(WS 连接;桥句柄在 bridges 并行集合,不计入)。
+   *  锚点分支判据(2026-10-26 E3 真机判决):组时间线全员共享,混合组抬深锚点
+   *  会在每次重锚时对直连设备造成秒级时间戳跳变(硬同步 5ms 阈值不可消化,
+   *  可听卡顿);纯桥组无可听直连者,深锚无代价。见 streamEngine anchorLead。 */
+  hasDirectMembers(): boolean {
+    return this.members.size > 0;
+  }
+
   /** streamEngine 重锚钩子(§4.3 唯一落点,Phase 3 由 GroupPump 重锚分支调用):
    *  把新流代次推给全部桥 —— 桥清旧代次队列并发 BOUNDARY。 */
   notifyBridgeGeneration(generation: number, reason: BridgeBoundaryReason): void {

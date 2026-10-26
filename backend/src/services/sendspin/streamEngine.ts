@@ -862,8 +862,21 @@ export class GroupPump {
           //   9B 不含 send_ahead,并进去会让真实 ESP32 恒定 +3.7s 偏移(回归断言
           //   钉住 commonSendAheadUs 不被污染)。warm/cold Phase 3 一律按 cold 保守
           //   (R2:未收到 CONFIG 回执前不作 warm 假设)。
+          // ★ 深锚**仅纯桥组**(2026-10-26 E3 真机判决):组时间线是全员共享的,
+          //   混合组(有直连 sendspin 成员)抬深锚点后,每次重锚(起播/seek/换曲/
+          //   rehost)都对直连设备造成秒级时间戳跳变 —— esp32 硬同步阈值仅 5ms,
+          //   240 实测 lead 10.58s → 直连端「有声-卡顿」交替可听;而桥侧对同一
+          //   跳变按设计优雅消化 ⇒ 深锚收益只在纯桥组(无可听直连者)成立。
+          //   混合组回落链(800ms 截断,v4.6.76 语义):首帧 ts' = ts − sendAhead
+          //   ≈ wall+0.8s,低于桥投递窗口 FLOOR 1.5s → 该帧对桥跳过(水位推过),
+          //   桥首个实收帧 ≈ wall+1.5~2.5s,planBridgeAnchor 按其可达性立锚
+          //   (不可达 → warmLead 2.5s 自锚,bridgeSession.ts 设计内路径),
+          //   aligner 中和 behind-anchor 内容。**代价 = 桥入组/重锚时多一次自锚**
+          //   (对桥听感为一次设计内静默重锚),换直连成员时间线零跳变。
+          //   桩兼容:最小测试桩无 hasDirectMembers → 按 undefined !== true 视作
+          //   纯桥组(维持 2026-10-25 深锚语义,既有 ③ 用例不破)。
           //   非 bridge 路径行为零变化(三元分支原样保留)。
-          const anchorLead = this.group.hasBridges?.() === true
+          const anchorLead = this.group.hasBridges?.() === true && this.group.hasDirectMembers?.() !== true
             ? Math.max(aheadUs, bridgeStartLeadUs([{ warm: false }]))
             : prefillEnabled()
               ? Math.min(aheadUs, ANCHOR_SAFE_LEAD_US)
