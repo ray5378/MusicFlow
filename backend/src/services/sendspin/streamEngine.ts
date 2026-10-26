@@ -25,6 +25,7 @@ import { PcmWindow, WindowEvictedError, WINDOW_HIGH_SEC, type WindowSource } fro
 import { recordSendspinDebug, refreshSendspinDebugEnabled } from "./debugLog.js";
 import type { SendspinServer, SendspinGroup } from "./server.js";
 import { bridgeStartLeadUs } from "../airplay/bridgeMath.js";
+import { ANCHOR_SAFE_LEAD_US } from "../airplay/rates.js";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("Sendspin");
@@ -128,13 +129,6 @@ export function prefillEnabled(): boolean {
   const raw = process.env.SENDSPIN_PREFILL;
   return !(raw === "0" || raw === "false" || raw === "off");
 }
-
-/** 首帧锚点仍保留的浅水位(微秒)。
- *  ⚠️ 不能高于它:锚点 = 起播静默时长,抬到 10s 就要静默 10s。
- *  ⚠️ 也不能低于它:2026-09-17 真机事故 —— 锚点只提前 250ms,而设备按 800ms
- *  的余量判据调度 → delta = 250 − 800 = −550ms 恒为负 → 收首块即判「目标时刻
- *  已过」→ 立即吐字节 → underrun 无声。800ms 是实测可用的最低水位。 */
-export const ANCHOR_SAFE_LEAD_US = 800_000;
 
 /** 解析某首歌的可播字节(默认真实);测试可注入。 */
 /** 音源工厂契约。`startMs > 0` = 起播即定位(ffmpeg `-ss`),由 seek 重建与

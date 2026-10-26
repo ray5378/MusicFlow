@@ -252,15 +252,19 @@ console.log("===== ③ 常量唯一源 + 取值钉死(禁止散落硬编码) ===
   uniq("384 * 1024");
   uniq("1536 * 1024");
   uniq("0.3627");
-  // 800_000(ANCHOR_SAFE_LEAD_US)现状是两处独立声明:rates.ts(权威源)与
-  // streamEngine.ts(历史重复)。此处钉「两处必须同值且都不得被改散」——
-  // 待编码侧把 streamEngine 那行改成从 rates import 后,可收紧为 count==1。
+  // 800_000(ANCHOR_SAFE_LEAD_US)唯一源 = rates.ts,streamEngine 一律 import。
+  // ⚠️ 钉值与钉唯一必须在同一条 check(拆两条会让「改值」一次打红两条,违反
+  // 硬性要求 2「只红那一条」),且不得把 "800_000" 追加进 uniq() 列表(同因
+  // 第二条断言,同样连带变红)。
+  // ⚠️ 用 matchInSrc(/\b800_000\b/) 不用 countInSrc("800_000") 纯子串计数:
+  // split 无词边界,1_800_000 / 48_800_000 会被误计入;正则 \b 在 `_` 与数字
+  // 之间无边界,天然排除下划线连接的大数,避免无关字面量连带打红本条。
   const ratesLead = /export\s+const\s+ANCHOR_SAFE_LEAD_US\s*=\s*800_000\s*;/.test(rates);
-  const engineLead = /export\s+const\s+ANCHOR_SAFE_LEAD_US\s*=\s*800_000\s*;/.test(code(SPIN_ENGINE));
+  const leadOnce = matchInSrc(/\b800_000\b/).n === 1;
   check(
-    "ANCHOR_SAFE_LEAD_US 仅允许以 800_000 声明(rates.ts 权威源;streamEngine 若重复必须同值)",
-    ratesLead && (engineLead || countInSrc("800_000").n === 1),
-    `rates=${ratesLead} streamEngine 重复声明=${engineLead} 全仓 800_000 共 ${countInSrc("800_000").n} 次`,
+    "ANCHOR_SAFE_LEAD_US 全仓只在 rates.ts 以 800_000 声明一次(其余一律 import,禁止重复声明/内联)",
+    ratesLead && leadOnce,
+    `rates.ts 声明=${ratesLead} 全仓 \\b800_000\\b 命中 ${matchInSrc(/\b800_000\b/).n} 处`,
   );
   check(
     "重采样因子只有 rates.ts 的 RESAMPLE_L/RESAMPLE_M,resampler.ts 不得内联 147/160",

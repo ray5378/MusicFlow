@@ -38,7 +38,19 @@ export const BRIDGE_WARM_START_LEAD_US = 2_500_000;
 /** 桥成员持续缓冲下限(进 commonSendAheadUs 的唯一桥相关量)。 */
 export const BRIDGE_MIN_BUFFER_US = 1_000_000;
 
-/** 既有锚点安全提前量(纯 sendspin 组的钳制值;bridge 存在时必须绕过该截断)。 */
+/** 既有锚点安全提前量(纯 sendspin 组的钳制值;bridge 存在时必须绕过该截断 ——
+ *  桥成员 lead 只走 bridgeStartLeadUs 进 anchorLead,绝不并入 commonSendAheadUs,
+ *  MAJ-01/§3.4)。
+ *
+ *  ⚠️ 不能高于它:锚点 = 起播静默时长,抬到 10s 就要静默 10s。
+ *  ⚠️ 也不能低于它:2026-09-17 真机事故 —— 锚点只提前 250ms,而设备按 800ms
+ *  的余量判据调度 → delta = 250 − 800 = −550ms 恒为负 → 收首块即判「目标时刻
+ *  已过」→ 立即吐字节 → underrun 无声。800ms 是实测可用的最低水位。
+ *
+ *  消费点(sendspin/streamEngine.ts,一律 import 本值,禁止重复声明/内联):
+ *  ① 预填充锚点截断 min(aheadUs, ANCHOR_SAFE_LEAD_US);
+ *  ② 预填充 wantFill 门控 targetUs > ANCHOR_SAFE_LEAD_US;
+ *  ③ 曲末排空量 (cursorUs − nowUs() − ANCHOR_SAFE_LEAD_US)/1000。 */
 export const ANCHOR_SAFE_LEAD_US = 800_000;
 
 // ---------------------------------------------------------------------------
