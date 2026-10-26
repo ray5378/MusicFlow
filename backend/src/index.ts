@@ -469,7 +469,8 @@ getEventManager().on("device_list_changed", () => {
 // controller; the DLNA chain is untouched (we only read DLNA's exported
 // createCastSession for stream URLs).
 import { startAirPlayService, wireAirPlayPersistence, loadPersistedAirPlayDevices, isAirPlayDeviceDisabled, isAirPlayEnabled } from "./services/airplay/control.js";
-import { getAirPlayDevices, onAirPlayEvent } from "./services/airplay/discovery.js";
+import { getAirPlayDevices, getAirPlayDevice, onAirPlayEvent } from "./services/airplay/discovery.js";
+import { splitGroupMembers } from "./services/group/protocolPlayer.js";
 // AirPlay 渲染器插件默认关闭(插件管理页开关):开启才启动 mDNS 服务与设备注册,
 // 关闭时零常驻资源(无网络监听/定时器/会话/peer/player)。
 if (isAirPlayEnabled()) {
@@ -581,6 +582,46 @@ startOrphanPruner();
 // (先于 kill 联动失效的场景,如上游源卡住)。30s 一轮,幂等启动,不做启动对账。
 startFfmpegReconciler();
 
+/** 解析队列 key(裸设备 id 或裸组 id)所落物理接收端的 host(IP/主机名)。
+ *  仅供重启恢复的 per-host 互斥使用。
+ *
+ *  粒度论证(为何取 host 而非 device id):同一物理接收端可能以多个 profile 同时
+ *  暴露 —— 同一主机可双栈注册 AirPlay+DLNA(两个不同 deviceId),甚至同协议多
+ *  profile;按 device id 互斥时,两把僵尸队列可各占一个 profile id,继续争抢同一
+ *  台物理设备的音频输出管线(互抢正是本闸要断的病灶),互斥形同虚设。音频输出
+ *  的争用单元是物理 host,故互斥粒度取 host。
+ *
+ *  Fail-open 约定:无法稳定定位物理 host 一律返回 null(sendspin 前端无稳定
+ *  物理 host;发现/缓存表未命中),该队列不参与互斥、按原路径恢复 —— 宁可
+ *  漏拦,不可误杀唯一恢复路径。 */
+function receiverHostOf(deviceId: string): string | null {
+  try {
+    // 组队列:成员按 kind 拆分(三类全空 = 非组 id),取第一个可解析成员的 host
+    const gm = splitGroupMembers(deviceId);
+    if (gm.dlna.length || gm.airplay.length || gm.spin.length) {
+      for (const mid of gm.airplay) {
+        const ap = getAirPlayDevice(mid);
+        if (ap?.host) return ap.host;
+      }
+      for (const mid of gm.dlna) {
+        const dd = getCachedDevices().find((x) => x.id === mid);
+        if (dd?.location) {
+          try { return new URL(dd.location).hostname; } catch { /* 尝试下一成员 */ }
+        }
+      }
+      return null; // 纯 sendspin 组 / 成员 host 全不可解析 → fail-open
+    }
+  } catch { /* 组表不可用或 id 异常 → 按单设备路径继续尝试 */ }
+  // 单设备队列:AirPlay 优先(host 字段最直接),DLNA 取 description.xml 主机名
+  const ap = getAirPlayDevice(deviceId);
+  if (ap?.host) return ap.host;
+  const dd = getCachedDevices().find((x) => x.id === deviceId);
+  if (dd?.location) {
+    try { return new URL(dd.location).hostname; } catch { return null; }
+  }
+  return null;
+}
+
 server.listen(port, "0.0.0.0", () => {
   log.info(`MusicFlow backend listening on http://0.0.0.0:${port}`);
   setRuntimePort(port); // 回环取流(loopbackBase)按实际端口打
@@ -599,7 +640,26 @@ server.listen(port, "0.0.0.0", () => {
     const active = getQueueController().activeDevices();
     if (active.length === 0) return;
     log.info(`[queue] resuming ${active.length} active device queue(s) after restart`);
+    // per-host 恢复互斥:先统计各 host 的 active 队列总数(warn 行可见性不依赖
+    // 迭代顺序),再按序认领 —— 同一物理 host 只放行第一把队列,其余挂起。
+    // 这是重启后「僵尸队列互相抢占」病灶的入口闸:旧脏队列与当前合法队列同
+    // host 并存时,只放行一把继续恢复。挂起 ≠ 删除:用户显式恢复走正常路径。
+    const hostCount = new Map<string, number>();
     for (const { deviceId } of active) {
+      const rHost = receiverHostOf(deviceId);
+      if (rHost) hostCount.set(rHost, (hostCount.get(rHost) ?? 0) + 1);
+    }
+    const claimed = new Set<string>();
+    for (const { deviceId } of active) {
+      const rHost = receiverHostOf(deviceId);
+      if (rHost) {
+        if (claimed.has(rHost)) {
+          log.warn(`[queue] zombie queue suspended: host=${rHost} queue=${deviceId} activeQueuesOnHost=${hostCount.get(rHost)} (per-host resume mutex;显式恢复走正常路径)`);
+          continue;
+        }
+        claimed.add(rHost);
+      }
+      // host 不可解析(sendspin 前端/缓存未命中)→ fail-open,按原路径恢复
       getQueueController().resumeActive(deviceId, baseUrl).catch((e) => {
         console.warn(`[queue] resume failed for ${deviceId}:`, e?.message || e);
       });
