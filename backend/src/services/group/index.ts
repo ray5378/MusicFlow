@@ -15,6 +15,9 @@ import { db } from "../../db/index.js";
 import { playerGroups } from "../../db/schema.js";
 import { getCachedDevices } from "../dlna/control.js";
 import { getAirPlayStatus, hasAirPlayDevice, isAirPlayDeviceDisabled } from "../airplay/control.js";
+// 命名空间导入专供 AP2 准入判据的「替身兼容」读取(见 airplaySelectable 注释):
+// 命名绑定在 vi.mock 工厂缺该导出时会**抛错**,命名空间属性读取才是 undefined。
+import * as airplayControlNs from "../airplay/control.js";
 import { getServer as getSendspinServer } from "../sendspin/runtime.js";
 import { sendspinSupervisor } from "../sendspin/supervisor.js";
 import { getSendspinDeviceVolume } from "../sendspin/peerVolume.js";
@@ -50,6 +53,30 @@ export function splitMemberId(m: string): { kind: GroupMemberKind; id: string } 
 }
 
 const log = createLogger("group");
+
+/** 「可选」判据的兼容封装。
+ *
+ *  **判据本身只有一处**:`airplay/control.ts::selectableOf`(经
+ *  `isAirPlayMemberSelectable` 导出)。群组准入必须调它,不得另写一套
+ *  (否则「前端过滤了、API 直调仍能塞进去」,或者两处判据漂移)。
+ *
+ *  这里只兜「该导出在替身里不存在」这一种情况:仓库里多条既有用例对
+ *  `airplay/control.js` 用 `vi.mock` 工厂只返回少数几个导出,而 Vite 的模块替身
+ *  对**未定义的导出做属性读取会直接抛错**(不是 undefined) —— 若不管,这些用例会
+ *  在 import 阶段集体炸掉。生产路径永远是真实实现,永远走上面的真函数。 */
+function resolveAirPlaySelectableGate(): (deviceId: string) => boolean {
+  try {
+    const fn = (airplayControlNs as { isAirPlayMemberSelectable?: unknown }).isAirPlayMemberSelectable;
+    return typeof fn === "function" ? (fn as (deviceId: string) => boolean) : () => true;
+  } catch {
+    return () => true;
+  }
+}
+
+const airplaySelectable: (deviceId: string) => boolean = resolveAirPlaySelectableGate();
+
+/** 未配对 AP2 的准入文案(与 control.ts::getAirPlayCastGateError 同源语义)。 */
+const AP2_PAIR_HINT = "需要先在播放器页完成 AirPlay 2 配对";
 
 /** 新建组默认音量(用户定稿 2026-09-23):未手动改过前保持 20。 */
 export const DEFAULT_GROUP_VOLUME = 20;
@@ -377,6 +404,14 @@ export class GroupManager extends EventEmitter {
         // airplay 成员校验设备档案存在且未禁用(可用性动态解析,离线仍可建组)。
         if (!hasAirPlayDevice(split.id)) throw new Error(`设备 ${m} 不是已知的 AirPlay 设备`);
         if (isAirPlayDeviceDisabled(split.id)) throw new Error(`AirPlay 设备 ${m} 已被禁用`);
+        // 未配对的 AP2 设备**严格禁止「新加入」**(用户规则 1)。
+        // 只作用于新加入的差集:两个入口(setMembers 的 newOnes / applyMemberDelta 的 added)
+        // 传进来的本来就只有差集,已在组内的成员凭据失效时不会走到这里 —— 那种情况
+        // 按用户规则 2 处理:不摘组,播放回落 AP1,设备视图标「需重新配对」。
+        // AP1-only 设备(supportsAp2=false)恒可用,不受此门影响(规则 3)。
+        if (!airplaySelectable(split.id)) {
+          throw new Error(`设备 ${m} ${AP2_PAIR_HINT}后才能加入群组`);
+        }
         continue;
       }
       // dlna(含历史裸 id 写法):DLNA 设备自拉流、组内无共享时间线,2026-10-24 起禁止入组。

@@ -27,6 +27,10 @@ import { withinPauseStopSettle, clearPauseStop } from "./pauseStopSettle.js";
 
 const log = createLogger("QueueController");
 
+/** 「成功播放」的判定线（毫秒）：播够这么久 ⇒ 这首是好歌（见 clearRepeatDeadIfHealthy）。
+ *  取 30s 与事故里的「30s 截断」正好同量级，故清零时**必须**叠加「当前没被判死」这个条件。 */
+const REPEAT_ONE_HEALTHY_PLAY_MS = 30_000;
+
 /** PlayerController 用 "dlna:<deviceId>" / "group:<groupId>" 作 playerId;
  *  QueueController 内部用裸 id。此函数在 handleDecision 入口剥前缀,
  *  保持 QueueController 全程用裸 id 作 key(设备队列存 device_queues,组队列存 group_queues)。 */
@@ -122,6 +126,21 @@ export class QueueController extends EventEmitter {
   /** 同一首连续卡死计数(key=裸 id):stalled 重投只兜一次 transient,
    *  同一首连续卡死第 2 次即放行切歌,而不是 2-3 秒无限重播(见 handleDecision)。 */
   private stallCounters = new Map<string, { songId: string | undefined; count: number }>();
+  /**
+   * 单曲循环防死循环（2026-10-27 240 生产事故）：同一 songId **连续被判死**的次数。
+   *
+   * 事故形态：插件源只给 30s 截断音频，播放侧把「提前 EOF」当自然播完 → auto-advance，
+   * 而 `playMode="one"` 的 `pickNext` 返回 `currentIndex` ⇒ **又从头播同一首**，30s 一轮
+   * 无限循环（用户听到的是「歌每 30 秒重播一次」）。
+   *
+   * 现在：同一首连续第 2 次被判死 ⇒ 单曲循环下不再重播它，直接换下一首（无下一首则停）。
+   * 计数在「成功播放 ≥30s 且当前没有被判死」后清零（见 clearRepeatDeadIfHealthy）——
+   * 偶发一次失败的好歌不该被永久放逐。
+   *
+   * key = songId（不是 deviceId）：同一首在哪个设备上都一样是坏源，且本表的唯一用途
+   * 是「别无限重播它」，跨设备共享没有副作用。
+   */
+  private repeatDeadStrikes = new Map<string, number>();
   /** 跨曲连续「卡死→放行切歌」计数(key=裸 id)。
    *  stallCounters 按「同一首」计数、切歌即归 1 —— 整队都是慢源/死源时挡不住它
    *  一首接一首往下走。2026-10-21 240 真机:主卧连续跳过 20+ 首,每首都要
@@ -525,7 +544,24 @@ export class QueueController extends EventEmitter {
       if (this.advancing.has(id)) return;
       this.advancing.add(id);
       try {
-        const nextIdx = this.pickNext(q, decision === "track_changed");
+        const endedSongId: string | undefined =
+          q.currentIndex >= 0 ? q.items[q.currentIndex]?.songId : undefined;
+        let nextIdx = this.pickNext(q, decision === "track_changed");
+        // 单曲循环防死循环：`pickNext` 在 "one" 模式下永远返回 currentIndex，
+        // 若这首刚被判死（30s 截断 / 无源），重播它就是用户听到的「每 30 秒重播一次」。
+        // 连续第 2 次判死 ⇒ 换下一首（无下一首则停 + warn）。其它 playMode 行为不变。
+        if (q.playMode === "one" && this.repeatOneGuard(id, endedSongId)) {
+          const alt = this.nextDistinctIndex(q);
+          if (alt === -1) {
+            log.warn(
+              `[QueueController][repeat-one] ${id}: ${endedSongId ?? "-"} 连续判死但队列无下一首，停止推进`,
+            );
+            this.reportAllUnplayable(id);
+            return;
+          }
+          nextIdx = alt;
+          log.info(`[QueueController][repeat-one] ${id}: ${endedSongId} 连续判死，改播 idx=${alt}(不再重播)`);
+        }
         if (nextIdx === -1) {
           if (!this.shouldSuppressGroupEnd(id)) this.markEnded(id);
           return;
@@ -768,6 +804,53 @@ export class QueueController extends EventEmitter {
   private shouldSuppressGroupEnd(id: string): boolean {
     if (!getGroupManager().get(id)) return false;
     return !hasOnlineMember(id);
+  }
+
+  /** 单曲循环「判死即原地重播」的护栏（2026-10-27，见 repeatDeadStrikes 注释）。
+   *
+   *  @returns 本次是否必须**换一首**（true = 不许再重播当前曲）。 */
+  private repeatOneGuard(playerId: string, songId: string | undefined): boolean {
+    if (!songId) return false;
+    this.clearRepeatDeadIfHealthy(playerId, songId);
+    if (!this.isSongUnplayable(songId)) return false; // 没被判死 ⇒ 正常重播，不动计数
+    const n = this.bumpRepeatDeadStrike(songId);
+    if (n < 2) return false; // 第 1 次：给一次重播机会（上游偶发截断会自愈）
+    log.warn(
+      `[QueueController][repeat-one] repeat-one-dead ev=repeat-one-dead song=${songId} consecutive=${n}`,
+    );
+    return true;
+  }
+
+  /** 被判死计数 +1 并回传累计值（playCurrent 的判跳路径与 repeatOneGuard 共用一个表）。 */
+  private bumpRepeatDeadStrike(songId: string): number {
+    const n = (this.repeatDeadStrikes.get(songId) ?? 0) + 1;
+    this.repeatDeadStrikes.set(songId, n);
+    return n;
+  }
+
+  private isSongUnplayable(songId: string): boolean {
+    return getCachedPlayability(songId) === "unplayable";
+  }
+
+  /** 「成功播放 ≥30s」⇒ 这首其实是好歌，清掉连判死计数（避免偶发失败被累积成放逐）。
+   *
+   *  ⚠️ 附加条件「当前没被判死」不能省：30s 截断的坏歌**恰好也能播到 30s**
+   *  （240 事故就是 30.0s），只按时长清零等于刚建好的防护当场自毁。 */
+  private clearRepeatDeadIfHealthy(playerId: string, songId: string | undefined): void {
+    if (!songId) return;
+    if ((this.lastPos.get(playerId) ?? 0) < REPEAT_ONE_HEALTHY_PLAY_MS) return;
+    if (this.isSongUnplayable(songId)) return;
+    this.repeatDeadStrikes.delete(songId);
+  }
+
+  /** 单曲循环下「换掉当前这首」的落点：顺序取下一首（绕回队首）；
+   *  单曲队列（length<=1）⇒ -1 = 无可跳。 */
+  private nextDistinctIndex(q: QueueData): number {
+    const n = q.items.length;
+    if (n <= 1) return -1;
+    const cur = q.currentIndex;
+    if (cur < 0) return 0;
+    return (cur + 1) % n;
   }
 
   private pickNext(q: QueueData, nativeGapless: boolean): number {
@@ -1025,7 +1108,29 @@ export class QueueController extends EventEmitter {
         this.reportAllUnplayable(deviceId);
         return;
       }
-      const nextIdx = this.pickNext(q, false);
+      let nextIdx = this.pickNext(q, false);
+      // 单曲循环 + 判跳 = 死循环（2026-10-27）：`pickNext("one")` 恒等于 currentIndex，
+      // 于是「判死 → 跳 → 又判死」原地打转。同一首连续第 2 次被判死 ⇒ 换下一首。
+      if (nextIdx === q.currentIndex && q.playMode === "one") {
+        const n = this.bumpRepeatDeadStrike(item.songId);
+        if (n >= 2) {
+          const alt = this.nextDistinctIndex(q);
+          if (alt !== -1) {
+            log.warn(
+              `[QueueController][repeat-one] repeat-one-dead ev=repeat-one-dead song=${item.songId} consecutive=${n}` +
+                ` ⇒ 单曲循环下不再重播，改播 idx=${alt}`,
+            );
+            nextIdx = alt;
+          } else {
+            log.warn(
+              `[QueueController][repeat-one] repeat-one-dead ev=repeat-one-dead song=${item.songId} consecutive=${n}` +
+                ` ⇒ 队列无下一首，停止推进`,
+            );
+            this.reportAllUnplayable(deviceId);
+            return;
+          }
+        }
+      }
       if (nextIdx === -1 || nextIdx === q.currentIndex) {
         // order 播到末尾 / one 模式:无处可跳 → 停止推进。
         log.warn(`[QueueController][playCurrent] ${deviceId}: 无可跳位置(数列末尾/单曲循环),停止推进`);

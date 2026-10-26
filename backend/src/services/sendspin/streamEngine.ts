@@ -27,6 +27,7 @@ import type { SendspinServer, SendspinGroup } from "./server.js";
 import { bridgeStartLeadUs } from "../airplay/bridgeMath.js";
 import { ANCHOR_SAFE_LEAD_US } from "../airplay/rates.js";
 import { createLogger } from "../../utils/logger.js";
+import { ap2TruncateMissingSec } from "../source/prefetchConfig.js";
 
 const log = createLogger("Sendspin");
 
@@ -707,6 +708,13 @@ export class GroupPump {
     let contentEnded = false;
     let endReason = "cursor-reached"; // 默认=播到元数据时长(1093 行分支)
     let linkDied = false; // 推帧中断(编码器/连接死亡):与自然结束同口径清组状态
+    /**
+     * 流式窗口「提前 EOF」且**交付时长明显短于声明时长** = 源被截断(2026-10-27 240 事故)。
+     * 与 `contentEnded` 分开记:`contentEnded` 的语义是「本循环该收尾了」(它的消费者还有
+     * 曲末排空/过渡复位/调试事件多处),本标记只回答「这次算不算自然播完」
+     * —— 见退出块末尾 `endedNaturally = contentEnded && !truncated`。
+     */
+    let truncated = false;
     let firstFrame = true;
     // ---- 时间线锚点(第三次无声事故的修复核心)----
     // `timelineBaseUs` 此前是**死字段**(全仓无赋值点,恒 0),时间戳退化成
@@ -1111,6 +1119,53 @@ export class GroupPump {
       }
       logSafe(this.server, "info", `sendspin pushLoop 退出: contentEnded=${contentEnded} endReason=${endReason} running=${this.running} epochSame=${this.epoch === myEpoch} song=${this.songId}`);
       if (this.epoch === myEpoch) {
+        // ==================== 提前 EOF 判据（2026-10-27 240 生产事故） ====================
+        //
+        // 事故：插件源（web/汽水音乐）声明 276s，实际只吐出 ~30s 的音频就 EOF。流式窗口
+        // 路径**从不比较「已交付时长 vs 声明时长」**（完整性判官只在「整曲字节到手」的
+        // membuf 路径跑，流式窗口走不到），于是 `contentEnded=true / endReason="stream-eof"`
+        // 被当成**自然播完** → 置空 current → auto-advance → 单曲循环下回到同一首 → 每 30s
+        // 重播一次。这里补的就是这条判据：**交付不足 = 源坏，不是播完**。
+        //
+        // 已交付时长的口径（优先顺序，都是播放侧实测，不用 metadata）：
+        //   ① 已解码样本数 `win.decoded`：窗口累计解出的**交错样本**（48k × 2ch），
+        //      故除 `SAMPLE_RATE * CHANNELS` —— 只除 SAMPLE_RATE 会大 2 倍，把截断漏掉。
+        //   ② `lastPushedMs`：本循环最后一次**推送**到的媒体位置（整包/窗口都维护），
+        //      等价于「已按实测码率交付了多少秒」。
+        //   ③ 两者都拿不到（0）⇒ **不判**：没有交付证据就不许判死（同「不把不知道当成死的」）。
+        // 判据：`声明 − 已交付 > ap2TruncateMissingSec()`（默认 80s，理由见 prefetchConfig）。
+        // 差 ≤ 80s（正常曲目的末端抖动 + 设备缓冲）⇒ 一个字不改，走原自然播完路径。
+        if (contentEnded && endReason === "stream-eof") {
+          const deliveredSec =
+            win && win.decoded > 0
+              ? win.decoded / (SAMPLE_RATE * CHANNELS)
+              : lastPushedMs > 0
+                ? lastPushedMs / 1000
+                : 0;
+          const expectedSec = this.durationMs > 0 ? this.durationMs / 1000 : 0;
+          const missingSec = expectedSec - deliveredSec;
+          if (expectedSec > 0 && deliveredSec > 0 && missingSec > ap2TruncateMissingSec()) {
+            truncated = true;
+            // 结构化 warn（字段固定，便于 grep / 守卫钉住）：ev + song + 三个秒数 + endReason。
+            logSafe(
+              this.server,
+              "warn",
+              `sendspin stream-truncated ev=stream-truncated song=${this.songId} ` +
+                `expectedSec=${Math.round(expectedSec)} deliveredSec=${Math.round(deliveredSec)} ` +
+                `missingSec=${Math.round(missingSec)} endReason=${endReason}`,
+            );
+            // 负缓存：出流侧（换源/探测）与队列 judgePlayable 都读这一份。
+            // 动态 import 防环（sendspin ← source/online 的 registry/plugins 依赖链）。
+            // 唯一一处 await：只在判死这一拍发生，每首歌最多一次。
+            try {
+              const { markUnplayable } = await import("../source/online/streamFallback.js");
+              markUnplayable(this.songId);
+            } catch (e: any) {
+              logSafe(this.server, "warn", `sendspin stream-truncated: 记负缓存失败(已忽略): ${String(e?.message || e).slice(0, 120)}`);
+            }
+          }
+        }
+
         // ★ 曲末排空(深缓冲):必须等设备把缓冲里的音频播完,再收流。
         // 协议规定 stream/end 会让客户端**清空缓冲** —— 不等就发,设备里还排着
         // 若干毫秒没播的音频会被直接砍掉。旧行为(800ms)砍掉 800ms 无人察觉,
@@ -1147,7 +1202,13 @@ export class GroupPump {
           }
         }
         this.running = false;
-        this.endedNaturally = contentEnded;
+        // 语义：**自然播完**才置 true。提前 EOF 且交付严重不足（truncated）= 源坏，
+        // 不是播完 —— 置 false 让「上报边播边测」等消费者别再把它当好曲
+        // （见下方 finally 里的 `natural && win`）。
+        // ⚠️ 注意 `contentEnded` 本身**不动**：它回答的是「本循环该收尾了吗」，
+        // 曲末排空 / 过渡复位 / 调试事件都依赖它（改成 false 会让设备缓冲被砍、
+        // 甚至让 poll 永远报 PLAYING —— 见下面过渡复位那段的判据）。
+        this.endedNaturally = contentEnded && !truncated;
         recordSendspinDebug(
           linkDied ? "play.link_died" : contentEnded ? "play.finished" : "play.stopped",
           linkDied
@@ -1166,7 +1227,11 @@ export class GroupPump {
           //   自动切歌是「取消+续流」:过渡期只由起播侧发一条 stream/clear。
           //   终态收尾(队列放完 / 用户 stop)统一由 stopCore → finishPlayback 发
           //   stream/end + group/update(stopped),与 MA group.stop() 唯一产地一致。
-          if (this.endedNaturally || linkDied) {
+          // ⚠️ 判据用 `contentEnded` 而**不是** `endedNaturally`：后者在「提前 EOF 截断」
+          //   时被置 false（不是自然播完），但过渡复位**照做不可**省略 —— 不置空 current
+          //   ⇒ pollCore 恒报 playing ⇒ 队列既不切歌也不重投，整组卡死在「PLAYING pos=60s」。
+          //   语义分工：contentEnded 管「收尾+切歌」，endedNaturally 管「算不算好曲」。
+          if (contentEnded || linkDied) {
             // MA `metadata_role.freeze_progress()` 等价(MA playback.py 的
             // `_stop_push_stream(snapshot_progress=...)`):清 current 前先把该曲时长
             // 冻结到组上 —— pollCore 的 durationMs 兜底读它,让曲终的 UI 停在

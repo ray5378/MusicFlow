@@ -269,11 +269,19 @@ describe("AirPlay 渲染器插件 manifest(默认开启:零配置;仍可手动�
     expect(airplayRendererPlugin.manifest).toBe(airplayRendererManifest);
   });
 
-  it("插件侧 i18n 只补 en,且 en.documentation 说明不支持 AirPlay 2", () => {
+  // 2026-10-27:文档不再声称「不支持 AirPlay 2」——AP2 realtime 已实现,未配对设备
+  // 自动回落 AP1。这里改为钉「文档确实说明了 AP2 与配对前提」,并反向钉住那句
+  // 过时声明不得回归(否则插件页会继续误导用户「本系统不支持 AP2」)。
+  it("插件侧 i18n 只补 en,且文档说明 AP2 支持与配对前提(旧的「不支持 AP2」不得回归)", () => {
     expect(Object.keys(airplayRendererManifest.i18n || {})).toEqual(["en"]);
     const en = (airplayRendererManifest.i18n as any).en;
     expect(en.name).toBe("AirPlay Renderer");
-    expect(airplayRendererManifest.documentation).toContain("不支持 AirPlay 2");
+    // 英文文档(:en,给 x-mf-lang=en 的插件页用)有独立的 AP2 章节。
+    expect(en.documentation).toContain("### AirPlay 2 support");
+    // 中文模板文档同章节 + 明确写出「未配对不可选 / 4 位 PIN」这两个用户可照做的前提。
+    expect(airplayRendererManifest.documentation).toContain("### AirPlay 2 支持情况");
+    expect(airplayRendererManifest.documentation).toContain("4 位 PIN");
+    expect(airplayRendererManifest.documentation).not.toContain("不支持 AirPlay 2");
   });
 });
 

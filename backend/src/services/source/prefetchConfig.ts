@@ -20,6 +20,30 @@ import { getSetting, setSetting } from "../settings.js";
 /** settings 表键。 */
 export const PREFETCH_SETTINGS_KEY = "prefetch.settings";
 
+// ---------------- 流式窗口「提前 EOF」判据（2026-10-27） ----------------
+
+/**
+ * 流式窗口提前 EOF 的**判死线（秒）**：`声明时长 − 已交付时长 > 本值` ⇒ 判「源被截断」。
+ *
+ * 为什么是 80 而不是 15（与 metadata 真值路径同一个问题）：
+ *   - 这里的「已交付时长」是**播放侧实测**（已解码样本数 / 已推送位置），不是 metadata 真值；
+ *     起播时窗口可能还在边解边推、seek/重锚会让秒数有 ±1 帧的抖动，再叠上设备侧缓冲
+ *     排空的那几秒 —— 口径本来就不精确。
+ *   - 240 实测（2026-10-27）：插件源声明 276s，实际只给 30s（5,762,400B ÷ 192,000B/s）。
+ *     这种「差几百秒」的截断用 80s 的线绰绰有余；而正常曲目末端的时长差通常 < 1s。
+ *   - 与 `PREFETCH_INTEGRITY_DELTA_SEC_BITRATE`（码率推算路径同样是近似值）取同一个数，
+ *     运维看日志时两条判据是同一把尺子。**宁可漏杀不可误杀**。
+ *
+ * env `AP2_TRUNCATE_MISSING_SEC` 可覆盖（排障/灰度用，不改库不动 UI）。
+ */
+export const AP2_TRUNCATE_MISSING_SEC = 80;
+
+/** 取生效的提前 EOF 判死线（env 覆盖 > 模块默认）。 */
+export function ap2TruncateMissingSec(): number {
+  const n = Number(process.env.AP2_TRUNCATE_MISSING_SEC);
+  return Number.isFinite(n) && n > 0 ? n : AP2_TRUNCATE_MISSING_SEC;
+}
+
 export interface PrefetchSettings {
   /** 向前预取几首(队列下一首起)。 */
   lookahead: number;

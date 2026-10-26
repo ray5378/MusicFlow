@@ -11,6 +11,11 @@ export const AIRPLAY1_RATE = 44100;
 /** AP2 SETUP 协商允许的速率(以实际协商为准,不假定 48k)。 */
 export const AP2_RATES: readonly number[] = [48000, 44100];
 
+/** AP2 PIN 配对(播放器页「配对」按钮)单次 RTSP 请求超时上限:设备在配对态下
+ *  的 pair-setup/SRP 计算实测 < 2s,10s 足够覆盖慢设备;超过即判「设备没进配对态」。
+ *  消费点:control.ts::pairAirPlayDevice 传给 ap2Session.pairNewDevice 的 timeoutMs。 */
+export const AP2_PAIR_TIMEOUT_MS = 10_000;
+
 // ---------------------------------------------------------------------------
 // 147/160 多相 FIR 重采样(48k → 44.1k)
 // ---------------------------------------------------------------------------

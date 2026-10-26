@@ -243,8 +243,8 @@ const CASES = [
     guard: "group",
     why: "延迟字段被塞进 PlayerGroup 实体(被 persist 用旧值覆盖)",
     file: GI,
-    from: "  memberIds: string[]; // dlna deviceIds",
-    to: "  memberIds: string[]; // dlna deviceIds\n  airplayDelayMs: number;",
+    from: "  memberIds: string[]; // 命名空间 id:airplay:<deviceId> / sendspin:<clientId>(裸 id 仅历史数据)",
+    to: "  memberIds: string[]; // 命名空间 id:airplay:<deviceId> / sendspin:<clientId>(裸 id 仅历史数据)\n  airplayDelayMs: number;",
     expect: "PlayerGroup 实体接口不得含",
   },
   {

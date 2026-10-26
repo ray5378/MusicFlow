@@ -148,9 +148,12 @@ export interface PrefetchVerdict {
  * 对预取到的完整 Buffer 做完整性判定（纯判定，不碰任何缓存/索引，便于测试）。
  *
  * 规则（保守优先 —— 宁可放过一个片段，不可误杀一首冷门格式的好歌）：
- *   1. `buf.length < PREFETCH_MIN_AUDIO_BYTES` → dead: too-small；
- *   2. `sniffMagic(buf)` 判非音频 → dead: not-audio（HTML/JSON 错误页假成功）；
+ *   1. `sniffMagic(buf)` 判非音频 → dead: not-audio（HTML/JSON 错误页假成功）；
  *      240 实测：平台试听文件是 **M4A/mp4**（fLaC 之外的各种容器 sniffMagic 都认）；
+ *      ★ 2026-10-27 起**先判 magic、后判体积**（顺序理由见下方 judgePrefetchedBuffer
+ *      函数体注释）：几 KB 的 JSON/HTML 错误页是**硬结论**，不是「弱信号 too-small」。
+ *   2. `buf.length < PREFETCH_MIN_AUDIO_BYTES` → dead: too-small（**弱信号**，
+ *      2026-10-21 策略：只重试一次、不写负缓存，见下方 tooSmallRetry 注释）；
  *   3. 基准 <= 0（曲库无 duration）→ 放过（没有参考答案，只靠绝对阈值会误杀真短歌）；
  *   4. `parseBuffer` 解析失败 → 放过（magic 已认它是音频容器；冷门容器/怪 metadata 不杀）；
  *   5. 能解析出时长且 `expected - actual > deltaSec` → dead: preview；
@@ -165,12 +168,32 @@ export interface PrefetchVerdict {
  */
 export async function judgePrefetchedBuffer(buf: Buffer, expectedSec: number): Promise<PrefetchVerdict> {
   const base: PrefetchVerdict = dead0(expectedSec);
-  if (buf.length < prefetchMinAudioBytes()) {
-    return { ...base, dead: true, reason: "too-small" };
-  }
+  // ==================== 判据顺序（2026-10-27 240 生产缺陷修复）====================
+  //
+  // **magic 必须先于 too-small**。原顺序是 too-small 在前，于是插件源（web/汽水音乐）
+  // 回的那几 KB JSON/HTML 错误页先撞上 `<64KB`，被归类成「弱信号 too-small」——
+  // 按 2026-10-21 的策略（见下方 tooSmallRetry）**只重试一次、不写负缓存**，等于放行；
+  // 播放侧随后照播这段假成功内容，整首歌的「无源」结论永远建立不起来。
+  //
+  // 两个判据的**证据强度不同**，所以不能合并、也不能颠倒：
+  //   · `sniffMagic` 判非音频 = **硬结论**。文件头既不是任何已知音频容器（flac/ogg/
+  //     mp3/ape/wav/aiff/mp4），也不是裸帧同步字，而是 `<` / `{` / `[` 开头的文本
+  //     （或彻底认不出的字节）—— 这份字节**不可能是音频**，与「字节少」无关：
+  //     哪怕上游给了 10MB 的 HTML 错误页，它照样不是音频。故直接 `not-audio` →
+  //     调用方 `markUnplayable()` 记负缓存 → 出流侧换源 / 队列判跳。
+  //   · `<64KB` 只是**弱信号**。「这次拿到的字节太少」既可能是错误页，也可能是
+  //     上游一次截断（240 实测同一首预取两次 <64KB，几分钟后播放路径整曲缓冲
+  //     1.93MB 成功）。所以它必须留在 magic **之后**：真错误页已被上一档摘走，
+  //     能走到这里的「音频头 + 字节少」才配得上「重试一次、不记负缓存」的宽待。
+  //
+  // 这也是 2026-10-21 那条策略（重试一次 / 不记负缓存）的**前提**：它的适用面被
+  // magic 收窄到「确实是音频、只是这次拿少了」，而不是「任何小响应」。
   const sniff = sniffMagic(buf);
   if (!sniff.audio) {
     return { ...base, dead: true, reason: "not-audio" };
+  }
+  if (buf.length < prefetchMinAudioBytes()) {
+    return { ...base, dead: true, reason: "too-small" };
   }
   if (!(expectedSec > 0)) return base;
   let actualSec: number | undefined;

@@ -19,7 +19,16 @@
         <el-button size="small" :loading="loadingClients" @click="loadLocalPlayers()"><MfIcon name="RefreshCw" />{{ t('groups.scan') }}</el-button>
       </div>
       <div class="section-note">{{ t('groups.clientPlayersNote') }}</div>
-      <div class="devices-box" v-loading="loadingClients">
+      <!-- 遮罩只罩「首次还没有任何行」的那一次:刷新时保留旧行、让标题行按钮转圈即可。
+           整块遮罩(loadingClients 恒罩)会让设备分区看着像整页卡死 ——
+           即使数据 2ms 就回来了,用户眼里仍是「页面在转,什么都没有」。 -->
+      <div class="devices-box" v-loading="loadingClients && clientPlayers.length === 0">
+        <!-- 失败**行内**说清楚 + 就地重试:失败与「没有设备」必须一眼可分。 -->
+        <div v-if="clientsError" class="section-error">
+          <MfIcon name="TriangleAlert" class="section-error-icon" />
+          <span class="section-error-text">{{ clientsError }}</span>
+          <el-button size="small" text @click="loadLocalPlayers()"><MfIcon name="RefreshCw" />{{ t('groups.retry') }}</el-button>
+        </div>
         <div v-for="p in clientPlayers" :key="p.peerId" class="device-row">
           <MfIcon :name="localPeerIcon(p)" class="device-row-icon" :class="{ offline: p.available === false }" />
           <div class="device-row-info">
@@ -53,7 +62,12 @@
         <h3>{{ t('groups.dlnaDevices') }}</h3>
         <el-button v-if="canUse" size="small" :loading="scanning" @click="scanDevices"><MfIcon name="RefreshCw" />{{ t('groups.scan') }}</el-button>
       </div>
-      <div class="devices-box" v-loading="loadingDevices">
+      <div class="devices-box" v-loading="loadingDevices && dlnaDevices.length === 0">
+        <div v-if="dlnaError" class="section-error">
+          <MfIcon name="TriangleAlert" class="section-error-icon" />
+          <span class="section-error-text">{{ dlnaError }}</span>
+          <el-button size="small" text @click="loadDlnaDevices()"><MfIcon name="RefreshCw" />{{ t('groups.retry') }}</el-button>
+        </div>
         <div v-for="dev in dlnaDevices" :key="dev.id" class="device-row" :class="{ 'is-disabled': dev.disabled }">
           <MfIcon name="Monitor" class="device-row-icon" :class="{ offline: !dev.available }" />
           <div class="device-row-info">
@@ -129,13 +143,29 @@
         <el-button v-if="canUse" size="small" :loading="scanningAirPlay" @click="scanAirPlayDevices"><MfIcon name="RefreshCw" />{{ t('groups.scan') }}</el-button>
       </div>
       <div class="section-note">{{ t('groups.airplayNote') }}</div>
-      <div class="devices-box" v-loading="loadingAirPlay">
+      <div class="devices-box" v-loading="loadingAirPlay && airplayDevices.length === 0">
+        <div v-if="airplayError" class="section-error">
+          <MfIcon name="TriangleAlert" class="section-error-icon" />
+          <span class="section-error-text">{{ airplayError }}</span>
+          <el-button size="small" text @click="loadAirPlayDevices()"><MfIcon name="RefreshCw" />{{ t('groups.retry') }}</el-button>
+        </div>
         <div v-for="dev in airplayDevices" :key="dev.id" class="device-row" :class="{ 'is-disabled': dev.disabled }">
           <MfIcon name="Airplay" class="device-row-icon" :class="{ offline: !dev.available }"  />
           <div class="device-row-info">
             <div class="device-row-name">
               {{ deviceDisplayName(dev, `airplay:${dev.id}`) }}
               <el-tag v-if="isDeviceRenamed(dev, `airplay:${dev.id}`)" size="small" type="warning" style="margin-left: 6px">{{ t('groups.renamed') }}</el-tag>
+              <!-- AirPlay 2 能力 / 配对态两个标签必须分开看:
+                   「AP2」说的是**这台设备支持 AP2**;「已配对 / 未配对」说的是**现在能不能走 AP2**。
+                   未配对的 AP2 设备照样能走 AP1 播放,但不会出现在可选播放器与群组候选里
+                   (见 deviceSelectable),所以这两个标签就是「它为什么不在组队列表里」的唯一线索。 -->
+              <el-tag v-if="dev.ap2Capable" size="small" type="primary" effect="plain" style="margin-left: 6px">AP2</el-tag>
+              <el-tag
+                v-if="dev.ap2Capable"
+                size="small"
+                :type="dev.ap2Paired ? 'success' : 'info'"
+                style="margin-left: 6px"
+              >{{ dev.ap2Paired ? t('groups.airplayPaired') : t('groups.airplayUnpaired') }}</el-tag>
               <!-- 链路状态:与 Sendspin 行同款「连接态胶囊」(绿点=已连接)。判据 =
                    mDNS 发现侧的实际可用性(dev.available;90s 未刷新即判离线),不是
                    「扫到过就算连上」。可用时图标转橙(= DLNA 行同款在线高亮)+ 这里
@@ -155,6 +185,15 @@
             </div>
           </div>
           <div class="device-row-actions">
+            <!-- 配对入口:**只对支持 AP2 的设备显示** —— 纯 AP1 设备没有 AP2 配对流程,
+                 摆一个点了必然失败的按钮只会误导。已配对后按钮变「重新配对」:
+                 设备被重置 / 换了钥匙串之后需要重新走一次。 -->
+            <el-button
+              v-if="canUse && dev.ap2Capable"
+              size="small"
+              :loading="airplayPairing && airplayPairTarget?.id === dev.id"
+              @click="openAirPlayPair(dev)"
+            ><MfIcon name="KeyRound" />{{ dev.ap2Paired ? t('groups.airplayRepair') : t('groups.airplayPair') }}</el-button>
             <div class="device-hide-toggle" :title="t('groups.hideToggleTitle')">
               <el-switch
                 :model-value="isHidden(`airplay:${dev.id}`)"
@@ -214,7 +253,12 @@
         <el-button size="small" :loading="loadingSendspin" @click="loadSendspinClients()"><MfIcon name="RefreshCw" />{{ t('groups.scan') }}</el-button>
       </div>
       <div class="section-note">{{ t('groups.sendspinNote', { url: sendspinUrl }) }}</div>
-      <div class="devices-box" v-loading="loadingSendspin">
+      <div class="devices-box" v-loading="loadingSendspin && sendspinRows.length === 0">
+        <div v-if="sendspinError" class="section-error">
+          <MfIcon name="TriangleAlert" class="section-error-icon" />
+          <span class="section-error-text">{{ sendspinError }}</span>
+          <el-button size="small" text @click="loadSendspinClients()"><MfIcon name="RefreshCw" />{{ t('groups.retry') }}</el-button>
+        </div>
         <div
           v-for="dev in sendspinRows"
           :key="dev.rowKey"
@@ -436,10 +480,20 @@
       {{ t('groups.tip3') }}
     </div>
 
+    <!-- 群组列表加载失败的横幅:放在 grid **外面**(不占一格),失败与「没有群组」
+         必须一眼可分 —— 原来 catch 里把 groups 置空,「接口挂了」和「一个组都没有」
+         长得一模一样,用户只会以为自己把组删光了。 -->
+    <div v-if="groupsError" class="load-error">
+      <MfIcon name="TriangleAlert" class="load-error-icon" />
+      <span class="load-error-text">{{ groupsError }}</span>
+      <el-button size="small" @click="loadGroups()"><MfIcon name="RefreshCw" />{{ t('groups.retry') }}</el-button>
+    </div>
+
     <div class="group-list" v-loading="loading && groups.length > 0">
-      <!-- 首载骨架屏(T11):仅当「正在加载且尚无数据」时显示,避免首帧空白闪烁;
-           已有数据时的刷新仍走 v-loading 遮罩,末尾 el-empty 保持不变。 -->
-      <el-skeleton v-if="loading && groups.length === 0" :rows="4" animated />
+      <!-- 首载骨架屏(T11):仅当「正在加载、尚无数据、且没出错」时显示,避免首帧空白闪烁;
+           已有数据时的刷新仍走 v-loading 遮罩,末尾 el-empty 保持不变。
+           出错时不显示骨架 —— 骨架是「再等一下就好」的暗示,失败时它是错的暗示。 -->
+      <el-skeleton v-if="loading && groups.length === 0 && !groupsError" :rows="4" animated />
       <template v-else>
       <div v-for="g in groups" :key="g.id" class="group-card">
         <div class="group-card-head">
@@ -512,7 +566,7 @@
           </el-popconfirm>
         </div>
       </div>
-      <el-empty v-if="!loading && groups.length === 0" :description="t('groups.noGroups')">
+      <el-empty v-if="!loading && groups.length === 0 && !groupsError" :description="t('groups.noGroups')">
         <el-button v-if="canUse" type="primary" @click="openCreate"><MfIcon name="Plus" />{{ t('groups.create') }}</el-button>
       </el-empty>
       </template>
@@ -591,6 +645,38 @@
       <template #footer>
         <el-button @click="showRenameDeviceDialog = false">{{ t('common.cancel') }}</el-button>
         <el-button type="primary" :loading="saving" @click="saveRenameDevice">{{ t('common.save') }}</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- AirPlay 2 配对:设备屏幕上会显示 4 位验证码,输一次即可。
+         凭证落在服务端设备档案里,之后每次投屏都免 PIN。 -->
+    <el-dialog
+      v-model="showAirPlayPair"
+      :title="t('groups.airplayPairTitle')"
+      width="420px"
+      :append-to-body="true"
+      @closed="resetAirPlayPair"
+    >
+      <div class="form-tip">{{ t('groups.airplayPairTip', { name: airplayPairName }) }}</div>
+      <el-input
+        v-model="airplayPairPin"
+        class="airplay-pair-input"
+        :placeholder="t('groups.airplayPairPh')"
+        maxlength="4"
+        inputmode="numeric"
+        clearable
+        @input="onAirPlayPinInput"
+        @keyup.enter="submitAirPlayPair"
+      />
+      <div class="form-tip">{{ t('groups.airplayPairPinHint') }}</div>
+      <template #footer>
+        <el-button @click="showAirPlayPair = false">{{ t('common.cancel') }}</el-button>
+        <el-button
+          type="primary"
+          :loading="airplayPairing"
+          :disabled="airplayPairPin.length !== 4"
+          @click="submitAirPlayPair"
+        >{{ t('groups.airplayPairSubmit') }}</el-button>
       </template>
     </el-dialog>
 
@@ -803,8 +889,14 @@ function copyPeer(peerId: string, name: string) {
 const playerStore = usePlayerStore();
 
 const groups = ref<any[]>([]);
+/** 群组列表「加载失败」的文案(空串 = 没有错误)。
+ *  与「没有群组」必须是两个状态:失败时**不清空** groups、也不显示 el-empty ——
+ *  否则一次网络抖动就会让用户以为自己把组全删了(原 catch 置空正是这个病)。 */
+const groupsError = ref("");
 const dlnaDevices = ref<any[]>([]);
 const airplayDevices = ref<any[]>([]);
+/** AirPlay 分区最近一次拉取失败的原因(空串 = 正常)。 */
+const airplayError = ref("");
 const loadingAirPlay = ref(true); // 懒加载分区:进视口前保持加载态,避免首帧闪一下空文案
 /** 「扫描」进行中(后端正在重发 mDNS 查询,约 2.5s) —— 与 loadingAirPlay(拉列表)分开。 */
 const scanningAirPlay = ref(false);
@@ -822,6 +914,8 @@ const renameName = ref("");
 
 // DLNA 设备管理(在线 + 离线)
 const loadingDevices = ref(true); // 懒加载分区(见上)
+/** DLNA 分区最近一次拉取失败的原因(空串 = 正常)。 */
+const dlnaError = ref("");
 const scanning = ref(false);
 const showRenameDeviceDialog = ref(false);
 const renameDeviceTarget = ref<any>(null);
@@ -871,6 +965,8 @@ function isDeviceRenamed(dev: any, peerId: string): boolean {
 // 兜底」,所以同一个实例在客户端上显示机型名、在网页上显示「浏览器 · 系统」。
 const playerInstances = ref<any[]>([]);
 const loadingClients = ref(true); // 懒加载分区(见上)
+/** 本机实例分区最近一次拉取失败的原因(空串 = 正常)。 */
+const clientsError = ref("");
 
 /** 本机实例的**偏好键**(隐藏 / 改名都按它存):一律按「实例」而非「账号」。
  *  自己那条的对外 peerId 是账号级的 local:<uid>,拿它当偏好键会串味 ——
@@ -880,13 +976,19 @@ function localPeerPrefKey(p: any): string {
   return p?.instancePeerId || p?.peerId || "";
 }
 
-async function loadLocalPlayers(): Promise<void> {
+/** 拉本机实例列表(@returns 是否成功,供懒加载分区决定是否注销自动拉取)。
+ *  失败**不清空**已有列表:保留上一次的真实快照,错误在行内提示 + 就地重试。 */
+async function loadLocalPlayers(): Promise<boolean> {
   loadingClients.value = true;
   try {
     const res = await api.get("/rest/api/v1/peers?includeHidden=1");
     playerInstances.value = (res.data?.peers || []).filter((p: any) => p.kind === "local");
-  } catch { playerInstances.value = []; }
-  finally { loadingClients.value = false; }
+    clientsError.value = "";
+    return true;
+  } catch (e: unknown) {
+    clientsError.value = apiErrorText(e, t("groups.loadFailed"));
+    return false;
+  } finally { loadingClients.value = false; }
 }
 
 // 本机实例只列「客户端」(windows/macos/linux/android 等);web 平台不在此展示
@@ -948,9 +1050,25 @@ interface GroupCandidate {
   model?: string;
 }
 
+/** 设备可否进入「可选播放器」(组队候选 / 播放器切换器)。
+ *
+ *  规则:**未配对的 AirPlay 2 设备不可选**。它还能走 AP1 播放,但 AP2 链路(48k 直通、
+ *  多房间同步)必须先配对;让它以「半可用」状态进组,只会在投屏那一刻才报错。
+ *  设备管理区**照常显示**未配对设备 —— 否则就没有地方点「配对」了。
+ *
+ *  后端**总是**下发 `selectable`(唯一判据源在 backend 的 `control.ts::isAirPlayMemberSelectable`)。
+ *  下面是 **fail-closed 兼容垫片**:拿不到 `selectable`(旧后端)时,仍按 `ap2Capable && ap2Paired`
+ *  保守判断 —— 绝不因为「字段缺失」把未配对 AP2 放进来。它不是第二套判据:
+ *  规则只有一处,这里只是字段缺失时的安全默认值。纯 AP1 设备(不广播 AP2)始终可选。 */
+function deviceSelectable(d: any): boolean {
+  if (typeof d?.selectable === "boolean") return d.selectable;
+  if (d?.ap2Capable) return !!d?.ap2Paired;
+  return true;
+}
+
 const selectableDevices = computed<GroupCandidate[]>(() => {
   const airplay: GroupCandidate[] = (airplayDevices.value || [])
-    .filter((d: any) => !d.disabled)
+    .filter((d: any) => !d.disabled && deviceSelectable(d))
     .map((d: any) => ({
       id: `airplay:${d.id}`,
       name: d.alias || d.name || d.id,
@@ -984,13 +1102,24 @@ function otherGroupsOf(deviceId: string): string[] {
   return out;
 }
 
-async function loadGroups(): Promise<void> {
+/** 拉群组列表。
+ *
+ *  @returns 是否成功(懒加载分区用它决定「要不要注销自己的自动拉取」)。
+ *
+ *  ⚠️ 失败时**不清空** groups:一次网络抖动不该把已渲染的卡片抹掉,更不该让
+ *  「加载失败」和「一个组都没有」看起来一样(原 catch 里的 `groups = []` 正是病根)。
+ */
+async function loadGroups(): Promise<boolean> {
   loading.value = true;
   try {
     const res = await api.get("/rest/api/v1/groups");
     groups.value = res.data?.groups || [];
-  } catch { groups.value = []; }
-  finally { loading.value = false; }
+    groupsError.value = "";
+    return true;
+  } catch (e: unknown) {
+    groupsError.value = apiErrorText(e, t("groups.loadFailed"));
+    return false;
+  } finally { loading.value = false; }
 }
 
 // ---- 音频输出（采样率 + 位深，batch49）----
@@ -1106,13 +1235,18 @@ function groupMemberPeerIds(g: any): string[] {
   return (g?.members || []).map((m: any) => memberPeerId(m)).filter((x: string) => !!x);
 }
 
-async function loadDlnaDevices(): Promise<void> {
+/** 拉 DLNA 设备列表(@returns 是否成功)。失败保留上次快照 + 行内错误/重试。 */
+async function loadDlnaDevices(): Promise<boolean> {
   loadingDevices.value = true;
   try {
     const res = await api.get("/rest/api/v1/dlna/devices");
     dlnaDevices.value = res.data?.devices || [];
-  } catch { dlnaDevices.value = []; }
-  finally { loadingDevices.value = false; }
+    dlnaError.value = "";
+    return true;
+  } catch (e: unknown) {
+    dlnaError.value = apiErrorText(e, t("groups.loadFailed"));
+    return false;
+  } finally { loadingDevices.value = false; }
 }
 
 async function scanDevices(): Promise<void> {
@@ -1189,13 +1323,18 @@ async function toggleDisabled(dev: any, disabled: boolean) {
   }
 }
 
-async function loadAirPlayDevices(): Promise<void> {
+/** 拉 AirPlay 设备列表(@returns 是否成功)。失败保留上次快照 + 行内错误/重试。 */
+async function loadAirPlayDevices(): Promise<boolean> {
   loadingAirPlay.value = true;
   try {
     const res = await api.get("/rest/api/v1/airplay/devices");
     airplayDevices.value = res.data?.devices || [];
-  } catch { airplayDevices.value = []; }
-  finally { loadingAirPlay.value = false; }
+    airplayError.value = "";
+    return true;
+  } catch (e: unknown) {
+    airplayError.value = apiErrorText(e, t("groups.loadFailed"));
+    return false;
+  } finally { loadingAirPlay.value = false; }
 }
 
 /** 「扫描」= 让后端**立刻重发一次 mDNS 查询**(与 DLNA 的扫描同义,不是只重拉列表):
@@ -1222,6 +1361,8 @@ function openRenameAirPlayDevice(dev: any) {
 // ---- Sendspin 设备管理(在线客户端;拨入为主,也可手动拨号添加) ----
 const sendspinClients = ref<any[]>([]);
 const loadingSendspin = ref(true); // 懒加载分区(见上)
+/** Sendspin 分区最近一次拉取失败的原因(空串 = 正常)。 */
+const sendspinError = ref("");
 const sendspinPort = ref(38927);
 const dialTargets = ref<any[]>([]);
 const showDialDialog = ref(false);
@@ -1282,18 +1423,32 @@ function shortClientId(id: string) {
  *  @param silent 后台轮询用:① 不打 loading 遮罩(否则每 20s 整块列表闪一次);
  *                ② **失败不清空**已有列表 —— 一次网络抖动不该把整列设备抹掉,
  *                宁可显示上一次的真实快照(下一轮 poll 会自愈)。 */
-async function loadSendspinClients(silent = false): Promise<void> {
+async function loadSendspinClients(silent = false): Promise<boolean> {
   if (!silent) loadingSendspin.value = true;
+  let ok = true;
+  let firstError: unknown = null;
   try {
     const res = await api.get("/rest/api/v1/sendspin/clients");
     sendspinClients.value = res.data?.clients || [];
     if (Number.isInteger(res.data?.port)) sendspinPort.value = res.data.port;
-  } catch { if (!silent) sendspinClients.value = []; }
+  } catch (e: unknown) {
+    ok = false;
+    firstError = e;
+  }
   try {
     const res = await api.get("/rest/api/v1/sendspin/dial-targets");
     dialTargets.value = res.data?.targets || [];
-  } catch { if (!silent) dialTargets.value = []; }
-  finally { if (!silent) loadingSendspin.value = false; }
+  } catch (e: unknown) {
+    ok = false;
+    if (!firstError) firstError = e;
+  }
+  if (!silent) {
+    // 失败**不清空**已有列表(与上面的 silent 语义一致):保留上一次的真实快照,
+    // 错误交给行内提示 + 就地重试,下一轮拉取会自愈。
+    sendspinError.value = ok ? "" : apiErrorText(firstError, t("groups.loadFailed"));
+    loadingSendspin.value = false;
+  }
+  return ok;
 }
 
 /** 设备 API(6053)的连接状态是**服务端后台**在维护的:设备重启、ESPHome 侧没开 API、
@@ -1764,6 +1919,92 @@ function openPairDialog(dev: any): void {
   showPairDialog.value = true;
 }
 
+// ---- AirPlay 2 配对(4 位 PIN) ----
+// 为什么必须有这一步:AP2 的 realtime 链路是加密的(密钥由 HAP 配对派生),协议规定
+// 第一次必须由用户在**设备屏幕上读出 4 位验证码**并回填 —— 没有免 PIN 的旁路。
+// 配对结果落在服务端设备档案里,之后每次投屏都免 PIN;未配对的 AP2 设备仍可走 AP1,
+// 但不会出现在可选播放器/群组候选里(见 deviceSelectable)。
+const showAirPlayPair = ref(false);
+const airplayPairTarget = ref<any>(null);
+const airplayPairPin = ref("");
+const airplayPairing = ref(false);
+
+const airplayPairName = computed<string>(() => {
+  const d = airplayPairTarget.value;
+  if (!d) return "";
+  return deviceDisplayName(d, `airplay:${d.id}`);
+});
+
+/** 只收数字、最多 4 位:粘进来带空格/短横的验证码也能用。 */
+function onAirPlayPinInput(v: string): void {
+  airplayPairPin.value = String(v || "").replace(/\D/g, "").slice(0, 4);
+}
+
+function openAirPlayPair(dev: any): void {
+  airplayPairTarget.value = dev;
+  airplayPairPin.value = "";
+  showAirPlayPair.value = true;
+}
+
+function resetAirPlayPair(): void {
+  airplayPairTarget.value = null;
+  airplayPairPin.value = "";
+  airplayPairing.value = false;
+}
+
+/** 后端配对失败码 → 可行动文案(后端只回机器可读 code,语言在前端)。
+ *
+ *  后端实际回两种 code,这里都要认:
+ *  ① 精确的 AP2 失败码:`ap2-pin`(验证码不对)/ `ap2-timeout`(设备没应答)/
+ *     `ap2-persist`(凭证落盘失败)/ `ap2-unsupported`(设备不支持 realtime)/
+ *     `ap2-fail`(其它握手失败)—— 优先用,文案最贴切;
+ *  ② 统一错误体的 BusinessErrorCode(INVALID_PARAM / UNAVAILABLE / INTERNAL /
+ *     UPSTREAM_ERROR)—— 粒度粗,`INVALID_PARAM` 同时覆盖「PIN 错」与「不支持 AP2」,
+ *     所以只给一句**不会说谎**的合并文案,不硬猜是哪一种。
+ *  两者都没有时返回空串,由调用方回落到后端 message / 通用失败文案。 */
+function airplayPairFailText(rawCode: string): string {
+  switch (rawCode) {
+    case "ap2-pin": return t("groups.airplayPairErrPin");
+    case "ap2-timeout": return t("groups.airplayPairErrTimeout");
+    case "ap2-persist": return t("groups.airplayPairErrPersist");
+    case "ap2-unsupported": return t("groups.airplayPairErrUnsupported");
+    case "ap2-fail": return t("groups.airplayPairErrFail");
+    case "INVALID_PARAM": return t("groups.airplayPairErrInvalid");
+    case "UNAVAILABLE": return t("groups.airplayPairErrTimeout");
+    case "INTERNAL": return t("groups.airplayPairErrPersist");
+    case "UPSTREAM_ERROR": return t("groups.airplayPairErrFail");
+    default: return "";
+  }
+}
+
+async function submitAirPlayPair(): Promise<void> {
+  const dev = airplayPairTarget.value;
+  if (!dev || airplayPairing.value) return; // 提交中直接吞掉重复点击
+  const pin = airplayPairPin.value.trim();
+  if (!/^\d{4}$/.test(pin)) {
+    ElMessage.warning(t("groups.airplayPairPinInvalid"));
+    return;
+  }
+  airplayPairing.value = true;
+  const name = airplayPairName.value;
+  try {
+    await api.post(`/rest/api/v1/airplay/devices/${encodeURIComponent(dev.id)}/pair`, { pin });
+    ElMessage.success(t("groups.airplayPairOk", { name }));
+    showAirPlayPair.value = false;
+    // 配对态变了 ⇒ 设备行标签、可选播放器、组队候选都要跟着变。
+    await loadAirPlayDevices();
+  } catch (e: unknown) {
+    const body = (e as any)?.response?.data || {};
+    // ap2Code = 后端下发的**精确失败码**(ap2-pin / ap2-unsupported / ap2-timeout / ap2-persist / ap2-fail):
+    // `code` 只有 INVALID_PARAM 一档,分不清「验证码错」与「设备不支持 AP2」,故精确码优先;
+    // `code` 仅在旧后端(不下发 ap2Code)时兜底。
+    const rawCode = String(body.ap2Code || body.code || "");
+    ElMessage.error(airplayPairFailText(rawCode) || apiErrorText(e, t("groups.airplayPairErrFail")));
+  } finally {
+    airplayPairing.value = false;
+  }
+}
+
 async function removeAirPlayDevice(dev: any) {
   try {
     await api.delete(`/rest/api/v1/airplay/devices/${dev.id}`);
@@ -1912,21 +2153,28 @@ onMounted(() => {
 // 分区滚动到视口附近(提前 200px)时才发它自己那一份请求,每个分区只自动拉一次;
 // 位置靠上的分区在挂载时就已进入视口 → 与改动前行为一致。
 const pageEl = ref<HTMLElement | null>(null);
-const lazySectionLoaders: Record<string, () => void> = {
-  local: () => { void loadLocalPlayers(); },
-  dlna: () => { void loadDlnaDevices(); },
-  airplay: () => { void loadAirPlayDevices(); },
-  sendspin: () => { void loadSendspinClients(); },
+/** 分区加载器:返回「是否成功」。成功才注销自己(见 bindLazySections)。 */
+const lazySectionLoaders: Record<string, () => Promise<boolean>> = {
+  local: () => loadLocalPlayers(),
+  dlna: () => loadDlnaDevices(),
+  airplay: () => loadAirPlayDevices(),
+  sendspin: () => loadSendspinClients(),
 };
 
 function bindLazySections(): void {
   const root = pageEl.value;
   if (!root) return;
-  const load = (key?: string) => {
-    const fn = key ? lazySectionLoaders[key] : undefined;
+  const load = (key?: string): void => {
+    if (!key) return;
+    const fn = lazySectionLoaders[key];
     if (!fn) return;
-    delete lazySectionLoaders[key as string]; // 每个分区只自动拉一次
-    fn();
+    // ⚠️ 注册信息必须**在成功之后**才注销。原先先 delete 再发请求:
+    //  一次失败(反代掐连接 / 设备正在重启)→ 这个分区在整个页面生命周期内
+    //  再也不会自动拉,表现为「必须手点『扫描』才出设备」。
+    //  失败时保留登记 + 分区页内就地重试按钮;用户滚出再滚回也会重新尝试。
+    void fn().then((ok) => {
+      if (ok) delete lazySectionLoaders[key];
+    });
   };
   // 兜底:无 IntersectionObserver 时按原行为一次性全拉,功能不回退。
   if (typeof IntersectionObserver === "undefined") {
@@ -1989,6 +2237,37 @@ onBeforeUnmount(() => { stopSendspinPolling(); });
 .group-actions .device-hide-toggle { margin-right: 2px; }
 .group-actions .el-button { margin-left: 0; }
 .device-empty { text-align: center; color: var(--fnos-text-tertiary); font-size: 12px; padding: 22px 0; }
+/* 分区内的「加载失败」行:与「没有设备」的空白必须一眼可分 —— 有错就要有字、有按钮。
+   不用整块遮罩:失败不该把已渲染的行也盖住(遮罩会让整页看着像卡死)。 */
+.section-error {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px 12px; margin: 2px 2px 6px;
+  font-size: 12px; border-radius: 8px;
+  color: var(--fnos-red);
+  background: var(--fnos-red-soft);
+  border: 1px solid rgba(245, 108, 108, 0.32);
+  .section-error-icon { font-size: 14px; flex: none; }
+  .section-error-text { flex: 1; min-width: 0; line-height: 1.5; }
+}
+/* 群组列表加载失败横幅:放在 grid 外面,占满整行,不与卡片同列。 */
+.load-error {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 16px; padding: 10px 14px; border-radius: 8px;
+  font-size: 13px; color: var(--fnos-red);
+  background: var(--fnos-red-soft);
+  border: 1px solid rgba(245, 108, 108, 0.32);
+  border-left: 3px solid var(--fnos-red);
+  .load-error-icon { font-size: 16px; flex: none; }
+  .load-error-text { flex: 1; min-width: 0; line-height: 1.5; }
+}
+/* 4 位验证码输入:数字放大 + 字距拉开,一眼看清是「4 个数字」而不是普通文本框。 */
+.airplay-pair-input {
+  margin-top: 10px;
+  :deep(.el-input__inner) {
+    letter-spacing: 8px; text-align: center;
+    font-size: 20px; font-variant-numeric: tabular-nums;
+  }
+}
 .form-tip { font-size: 12px; color: var(--fnos-text-tertiary); margin-top: 6px; }
 .groups-tip {
   font-size: 12px; color: var(--fnos-text-tertiary); background: rgba(255,255,255,0.04);

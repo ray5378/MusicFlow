@@ -27,6 +27,30 @@ import {
   setAirPlayDisabled,
   stopAirPlaySession,
 } from "./shared.js";
+// AP2 PIN 配对:直接引服务模块(shared.ts 只做转发,新出口不必再绕一层)。
+import {
+  isValidAirPlayPin,
+  pairAirPlayDevice,
+  type AirPlayPairErrorCode,
+} from "../../services/airplay/control.js";
+
+/** 配对失败码 → HTTP 状态(用户可读懂的分类:入参/超时/落库/上游)。 */
+const AP2_PAIR_HTTP_STATUS: Record<AirPlayPairErrorCode, 400 | 500 | 502 | 504> = {
+  "ap2-unsupported": 400, // 设备不支持 AP2(或设备不存在):重试无用,属入参/前置条件错误
+  "ap2-pin": 400,         // PIN 错:让用户重新输入
+  "ap2-timeout": 504,     // 设备没进配对态 / 不响应:超时
+  "ap2-persist": 500,     // 配对通过但凭据写库失败:服务端存储问题
+  "ap2-fail": 502,        // 协议/网络失败(上游设备)
+};
+
+/** 配对失败码 → 统一错误体里的业务码。 */
+const AP2_PAIR_BODY_CODE: Record<AirPlayPairErrorCode, BusinessErrorCode> = {
+  "ap2-unsupported": BusinessErrorCode.INVALID_PARAM,
+  "ap2-pin": BusinessErrorCode.INVALID_PARAM,
+  "ap2-timeout": BusinessErrorCode.UNAVAILABLE,
+  "ap2-persist": BusinessErrorCode.INTERNAL,
+  "ap2-fail": BusinessErrorCode.UPSTREAM_ERROR,
+};
 
 export function registerAirplay(app: Hono): void {
 app.use("/v1/airplay/devices/:deviceId/*", rendererGrantParamMiddleware("airplay"));
@@ -46,6 +70,10 @@ app.use("/v1/airplay/*", async (c, next) => {
 app.get("/v1/airplay/devices", (c) => {
   const user = c.get("user");
   // 与 DLNA 一致:管理员返回全部;普通用户只见自己授权可控的设备(airplay:<id>)。
+  // **刻意不拆端点**:未配对的 AP2 设备也出现在同一份列表里(带 ap2Capable=false /
+  // ap2Paired=false),否则用户在播放器页看不到设备、也就无从发起配对。
+  // ⚠️ 前端「可选择播放器」下拉与群组成员候选**必须**过滤 `selectable === true`
+  // (未配对的 AP2 设备可显示但不可选);判据唯一出处 = control.ts::selectableOf。
   let devices = listAirPlayDevices();
   if (user && !user.isAdmin) {
     devices = devices.filter((d) => !d.disabled && canUseRenderer(user.id, false, `airplay:${d.id}`));
@@ -123,6 +151,43 @@ app.put("/v1/airplay/devices/:deviceId/disabled", permMiddleware(PERM.RENDERER_M
   // 4. 广播设备列表变化(WS → 卡片/Web 刷新)。
   getEventManager().emitDeviceListChanged(listAirPlayDevices().length);
   return c.json({ success: true, disabled, device: { id: dev.id, disabled: !!dev.disabled } });
+});
+
+// AP2 PIN 配对(播放器页「配对」按钮的唯一后端入口)。
+//
+// 为什么需要它:未配对的 AP2 设备**不得进组、不得出现在可选择播放器**(用户规则 1),
+// 但设备本身仍留在设备列表里(带 ap2Paired=false),用户在这里输入设备屏幕上显示的
+// 4 位码完成 HAP pair-setup,凭据落库后该设备才变 selectable。
+//
+// 权限:与重命名/禁用/删除一致 —— 管理播放器能力 renderer.manage(配对属设备管理动作)。
+// body: { pin: "1234" } —— 非 4 位数字直接 400,不进入配对流程。
+// 失败映射:ap2-unsupported/ap2-pin → 400、ap2-timeout → 504、ap2-persist → 500、
+//           ap2-fail → 502;文案可直接展示(见 AP2_PAIR_MESSAGES)。
+// 失败体额外带 `ap2Code: <AirPlayPairErrorCode>`(见下方 return 处注释)。
+// 成功:200 { ok:true, ap2Paired:true } —— **不自动起播**。
+
+app.post("/v1/airplay/devices/:deviceId/pair", permMiddleware(PERM.RENDERER_MANAGE), async (c) => {
+  const deviceId = c.req.param("deviceId")!;
+  const body = await c.req.json().catch(() => ({} as any));
+  const rawPin = (body as any)?.pin;
+  // 兼容前端直接传数字(1234):统一成字符串再校验,避免「能看见但填不进去」。
+  const pin = typeof rawPin === "string" ? rawPin.trim() : typeof rawPin === "number" ? String(rawPin) : "";
+  if (!isValidAirPlayPin(pin)) {
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "PIN 必须是设备屏幕上显示的 4 位数字"), 400);
+  }
+  const result = await pairAirPlayDevice(deviceId, pin);
+  if (result.ok) {
+    return c.json({ ok: true, ap2Paired: true }, 200);
+  }
+  // `ap2Code` 是**纯增量**字段(不改 HTTP 状态映射、不改 error 文案):
+  //   - `code` 只有 INVALID_PARAM 一档同时覆盖 ap2-pin 与 ap2-unsupported,前端
+  //     光看它分不清「验证码填错(可重试)」和「这台设备根本不支持 AP2(重试无用)」;
+  //   - `error` 文案由 apiError 按请求语言(x-mf-lang)本地化,前端不能拿它做分支。
+  // 前端读 `body.ap2Code` 决定交互(重新输入 PIN / 隐藏配对入口 / 提示稍后重试)。
+  return c.json(
+    { ...apiError(AP2_PAIR_BODY_CODE[result.code], result.message), ap2Code: result.code },
+    AP2_PAIR_HTTP_STATUS[result.code],
+  );
 });
 
 app.get("/v1/airplay/active", (c) => {

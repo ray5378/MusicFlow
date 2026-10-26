@@ -10,6 +10,7 @@
 // already pull from — and feed it to ffmpeg. Nothing in services/dlna/* is
 // modified.
 import { type ChildProcessWithoutNullStreams } from "child_process";
+import { randomBytes } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { PlaybackState } from "../player/types.js";
 import { RaopPlayer, type RaopSession, type RaopRealtimeStats } from "./raop.js";
@@ -28,6 +29,11 @@ import { createLogger } from "../../utils/logger.js";
 import { getAirPlayVolumeState, saveAirPlayVolumeState, deleteAirPlayVolumeState, DEFAULT_AIRPLAY_VOLUME } from "./deviceState.js";
 import { bridgeSocketPath } from "./bridgeChannel.js";
 import type { BridgeProtocol } from "./rates.js";
+import { AP2_PAIR_TIMEOUT_MS } from "./rates.js";
+import { getSetting, setSetting } from "../settings.js";
+import { getHapCredentials } from "./ap2/hapCredentials.js";
+import { recordPairSetupSuccess } from "./ap2/pairingContract.js";
+import { pairNewDevice, type HapCredsHex } from "./ap2/ap2Session.js";
 
 // 解码/缓冲层(ffmpeg spawn + 有界 PCM 队列 + 音量 dB 换算)已抽到 ./decoder.ts ——
 // airplay 子进程要复用同一份实现,但不能经由本模块(会拖进 DB/DLNA/peer 等主进程态)。
@@ -795,6 +801,269 @@ export function isAirPlayDeviceDisabled(deviceId: string): boolean {
   return !!row?.disabled;
 }
 
+// ==================== AP2 配对链路(controller id / PIN 配对 / 可选判据)====================
+//
+// 用户规则(2026-10-27 拍板,不得更改):
+//   1. **未配对的 AP2 设备:不得加入群组、不得出现在「可选择播放器」**;
+//   2. **凭据失效不摘出已有的组**:播放回落 AP1 并标「需重新配对」;只有「新加入」严格禁止;
+//   3. AP1-only 设备(`supportsAp2=false`,例如 HiVi)**完全不受影响**;
+//   4. 群组允许 airplay(AP1) + airplay(AP2) + sendspin 混合 —— 协议**逐成员**选,不是组级;
+//   5. 不新增 `ap2:` 命名空间(成员 id 仍是 `airplay:<deviceId>`)。
+//
+// 本段的三个出口:
+//   - getAirPlayControllerId:HAP 控制端 pairing id(写 settings,首次生成后稳定);
+//   - pairAirPlayDevice:播放器页「配对」按钮的唯一实现(PIN = 设备屏幕 4 位码);
+//   - isAirPlayMemberSelectable:「可选」判据的**唯一出口**(选择器候选 / 群组准入 / cast 准入)。
+
+/** settings 键:AP2 controller pairing id(HAP 控制端标识)。 */
+export const AP2_CONTROLLER_ID_SETTING_KEY = "airplay.controllerId";
+
+/** 合法形态:16 位**大写** hex(HAP deviceid 口径)。 */
+const AP2_CONTROLLER_ID_RE = /^[0-9A-F]{16}$/;
+
+/** PIN 位数:设备屏幕上显示的 4 位码。 */
+export const AP2_PAIR_PIN_LENGTH = 4;
+
+/** 严格 4 位数字(PIN 只认这个形态,不做宽松解析)。 */
+const AP2_PIN_RE = new RegExp(`^\\d{${AP2_PAIR_PIN_LENGTH}}$`);
+
+/** controller pairing id 的进程内缓存(settings 读失败时的兜底,也是热路径快照)。 */
+let cachedControllerId: string | null = null;
+
+/** 生成一个新的 16 位大写 hex pairing id。 */
+function generateControllerId(): string {
+  return randomBytes(8).toString("hex").toUpperCase();
+}
+
+/**
+ * 取 AP2 controller pairing id(16 位大写 hex);首次调用生成并写库。
+ *
+ * ⚠️ **pairing id 一变,库里 hap_credentials 全失效** —— HAP 长期密钥是
+ * (controller pairing id, accessory) 绑定的:换 id 等同于换了一个控制端,
+ * 所有已配对设备都必须重新走 PIN 配对。所以这个值一旦生成就必须稳定持久,
+ * **不得**随进程重启 / 设备重扫重新生成;非法值(被手改坏/长度不对)才重新生成。
+ *
+ * 失败策略(**绝不向上抛**):settings 读抛异常 ⇒ 用进程内临时 id 并 warn。
+ * 宁可本进程这轮配对在重启后重来,也不能因为一个设置项读失败就让设备列表/配对按钮 500。
+ */
+export function getAirPlayControllerId(): string {
+  if (cachedControllerId) return cachedControllerId;
+  let stored = "";
+  try {
+    stored = getSetting(AP2_CONTROLLER_ID_SETTING_KEY, "");
+  } catch (e: any) {
+    // getSetting 自身已吞数据库错误,这里兜的是更外层的意外(例如实现变更)。
+    log.warn(`[ap2] 读 ${AP2_CONTROLLER_ID_SETTING_KEY} 失败,本轮用进程内临时 id: ${e?.message || e}`);
+    cachedControllerId = generateControllerId();
+    return cachedControllerId;
+  }
+  const normalized = (stored || "").trim().toUpperCase();
+  if (AP2_CONTROLLER_ID_RE.test(normalized)) {
+    cachedControllerId = normalized;
+    return cachedControllerId;
+  }
+  if (normalized) {
+    // 不打印原值(可能是被误写到该键的别的配置),只报长度便于排障。
+    log.warn(`[ap2] ${AP2_CONTROLLER_ID_SETTING_KEY} 格式非法(长度 ${normalized.length},应为 16 位 hex),重新生成`);
+  }
+  const next = generateControllerId();
+  try {
+    setSetting(AP2_CONTROLLER_ID_SETTING_KEY, next);
+  } catch (e: any) {
+    log.warn(`[ap2] 写 ${AP2_CONTROLLER_ID_SETTING_KEY} 失败(本次仅进程内生效): ${e?.message || e}`);
+  }
+  cachedControllerId = next;
+  return cachedControllerId;
+}
+
+/** Test-only:清 pairing id 进程内缓存(用例间隔离,避免顺序耦合)。 */
+export function _resetAirPlayControllerIdCacheForTest(): void {
+  cachedControllerId = null;
+}
+
+/** 「可选」判据的**唯一定义处**(全仓只此一份,禁止另写一套):
+ *  - 禁用设备永远不可选(与既有 disabled 语义一致);
+ *  - AP2 capable 设备**必须已完成配对**(库里有 hap_credentials)才可选;
+ *  - AP1-only 设备(`supportsAp2=false`)不受影响 —— 这就是「AP1 设备完全不改行为」的落点。
+ *
+ *  消费方:`listAirPlayDevices`(设备视图的 `selectable` 字段)、`isAirPlayMemberSelectable`
+ *  (群组准入 / cast 准入 / 前端选择器过滤的唯一后端判据)。 */
+function selectableOf(disabled: boolean, ap2Capable: boolean, ap2Paired: boolean): boolean {
+  return !disabled && (!ap2Capable || ap2Paired);
+}
+
+/** 该 AirPlay 设备当前是否「可选」(能进组、能出现在「可选择播放器」里)。
+ *  未配对 AP2 ⇒ false;AP1-only 或已配对 AP2 ⇒ 取决于 disabled。 */
+export function isAirPlayMemberSelectable(deviceId: string): boolean {
+  const d = getAirPlayDevice(deviceId);
+  if (!d) return false;
+  const ap2Capable = !!d.supportsAp2;
+  // 只有 AP2 capable 才查凭据列:AP1-only 设备(绝大多数)不付出任何额外 DB 查询。
+  return selectableOf(!!d.disabled, ap2Capable, ap2Capable && getHapCredentials(deviceId) !== null);
+}
+
+/** AP2 PIN 配对失败的分类码(路由层按它映射 HTTP 状态)。 */
+export type AirPlayPairErrorCode =
+  | "ap2-unsupported"
+  | "ap2-pin"
+  | "ap2-timeout"
+  | "ap2-persist"
+  | "ap2-fail";
+
+/** 配对结果:**成功不自动起播**(配对是设备管理动作,不是播放动作)。 */
+export type AirPlayPairResult = { ok: true } | { ok: false; code: AirPlayPairErrorCode; message: string };
+
+/** 面向用户的配对文案(可直接展示;路由层原样回传,无需新增 i18n key)。 */
+export const AP2_PAIR_MESSAGES = {
+  /** 设备不存在(可能已被删除 / 还没被 mDNS 发现)。 */
+  unknownDevice: "设备不存在或已被移除,请刷新设备列表后重试",
+  /** 不支持 AP2(AP1-only 设备无需配对)。 */
+  unsupported: "该设备不支持 AirPlay 2(未广播 _airplay._tcp),无需配对",
+  /** PIN 形态非法(不是 4 位数字)。 */
+  pinInvalid: "PIN 必须是设备屏幕上显示的 4 位数字",
+  /** PIN 错误(M4 server proof / M6 签名校验失败)。 */
+  pinWrong: "PIN 不正确,请重新输入设备屏幕上显示的 4 位码",
+  /** 超时(设备不响应 / 没进配对态)。 */
+  timeout: "设备配对超时,请确认设备屏幕上正显示 4 位码(重新进入配对状态)后重试",
+  /** 配对通过但凭据写库失败 —— 不得宣称成功。 */
+  persist: "配对已通过但凭据写入失败,该设备仍需重新配对,请检查存储空间后重试",
+  /** 其他失败(协议异常 / 网络不可达 / 设备拒绝)。 */
+  fail: "AirPlay 2 配对失败,请重试或重启设备",
+} as const;
+
+/** PIN 是否为合法 4 位数字(路由层入参校验与配对主流程共用同一判据)。 */
+export function isValidAirPlayPin(pin: unknown): pin is string {
+  return typeof pin === "string" && AP2_PIN_RE.test(pin.trim());
+}
+
+/** 把底层异常分类成对用户有意义的配对错误码。
+ *  - `HapPairingError.kind === "auth"`:M4 server proof / M6 签名校验失败 ⇒ PIN 错;
+ *  - 超时(`RtspError` 的「超时」文案 / Node `ETIMEDOUT`) ⇒ ap2-timeout;
+ *  - 其余(协议异常 / ECONNREFUSED / 设备拒绝) ⇒ ap2-fail。
+ *  ⚠️ 只做分类,不把异常原文透给用户(可能含内部细节),原文只进日志。 */
+function classifyPairError(e: unknown): AirPlayPairErrorCode {
+  const err = e as { message?: unknown; name?: unknown; kind?: unknown; code?: unknown } | null;
+  const message = typeof err?.message === "string" ? err.message : String(e ?? "");
+  const name = typeof err?.name === "string" ? err.name : "";
+  const code = typeof err?.code === "string" ? err.code : "";
+  if (err?.kind === "auth") return "ap2-pin";
+  if (code === "ETIMEDOUT" || name === "TimeoutError" || /超时|timeout|timed out/i.test(message)) {
+    return "ap2-timeout";
+  }
+  return "ap2-fail";
+}
+
+/** 错误码 → 用户文案。 */
+function pairMessageOf(code: AirPlayPairErrorCode): string {
+  switch (code) {
+    case "ap2-unsupported":
+      return AP2_PAIR_MESSAGES.unsupported;
+    case "ap2-pin":
+      return AP2_PAIR_MESSAGES.pinWrong;
+    case "ap2-timeout":
+      return AP2_PAIR_MESSAGES.timeout;
+    case "ap2-persist":
+      return AP2_PAIR_MESSAGES.persist;
+    default:
+      return AP2_PAIR_MESSAGES.fail;
+  }
+}
+
+/**
+ * 走 PIN 配对窗把一台 AP2 设备配上(`/pair-pin-start` → pair-setup M1-M6)。
+ *
+ * 流程与契约:
+ *   1. 前置:设备存在、`supportsAp2=true`、host/port 已发现;PIN 必须是 4 位数字;
+ *   2. 调 `pairNewDevice`(6b 会话编排),seed 回调里登记「本次新生成了 controller seed」;
+ *   3. 成功返回后立刻经 `recordPairSetupSuccess` 走**唯一写入口**落库
+ *      (写库失败 ⇒ `ap2-persist`,**绝不**向调用方宣称成功);
+ *   4. 成功**不自动起播** —— 起播由用户/队列另行发起。
+ *
+ * ⚠️ PIN 只在本次调用内存在:**不落库、不进日志**(日志只记失败分类与设备 id)。
+ * ⚠️ seed 回调只携带 controllerSeed(32B),而落库需要 accessoryLTPK + controllerLTSK
+ *    这组完整凭据(M4 之后才齐),所以写库紧跟在 `pairNewDevice` 返回之后、同一个
+ *    调用栈内完成 —— 语义仍是「seed 新生成 ⇒ 必须持久化,失败即配对失败」。
+ */
+export async function pairAirPlayDevice(deviceId: string, pin: string): Promise<AirPlayPairResult> {
+  const dev = getAirPlayDevice(deviceId);
+  if (!dev) {
+    return { ok: false, code: "ap2-unsupported", message: AP2_PAIR_MESSAGES.unknownDevice };
+  }
+  if (!dev.supportsAp2) {
+    return { ok: false, code: "ap2-unsupported", message: AP2_PAIR_MESSAGES.unsupported };
+  }
+  const pinText = typeof pin === "string" ? pin.trim() : "";
+  if (!isValidAirPlayPin(pinText)) {
+    return { ok: false, code: "ap2-pin", message: AP2_PAIR_MESSAGES.pinInvalid };
+  }
+  if (!dev.host || !dev.port) {
+    return { ok: false, code: "ap2-fail", message: "设备地址未知(等 mDNS 发现完成后再试)" };
+  }
+  // seed 回调:登记「本次确实新生成 controller seed」(配对成功必须以它为前提)。
+  let seedSeen = false;
+  let creds: HapCredsHex;
+  try {
+    creds = await pairNewDevice({
+      host: dev.host,
+      port: dev.port,
+      controllerId: getAirPlayControllerId(),
+      pin: pinText,
+      timeoutMs: AP2_PAIR_TIMEOUT_MS,
+      onNewControllerSeed: () => {
+        seedSeen = true;
+      },
+    });
+  } catch (e: any) {
+    const code = classifyPairError(e);
+    log.warn(`[ap2-pair] 设备 ${deviceId} 配对失败(${code}): ${e?.message || e}`);
+    return { ok: false, code, message: pairMessageOf(code) };
+  }
+  if (!seedSeen) {
+    // 理论上不会发生(无新 seed 就没有 6a 凭据);保守按失败处理,避免写入半截凭据。
+    log.error(`[ap2-pair] 设备 ${deviceId} 配对未产生 controller seed,视为失败`);
+    return { ok: false, code: "ap2-fail", message: AP2_PAIR_MESSAGES.fail };
+  }
+  // 唯一写入口:写库失败 ⇒ 配对失败(6a 契约:不得向对端/用户宣称成功)。
+  const persisted = recordPairSetupSuccess(deviceId, creds.accessoryLTPK, creds.controllerLTSK);
+  if (!persisted) {
+    log.error(`[ap2-pair] 设备 ${deviceId} 凭据写库失败,配对未生效`);
+    return { ok: false, code: "ap2-persist", message: AP2_PAIR_MESSAGES.persist };
+  }
+  log.info(`[ap2-pair] 设备 ${deviceId} 配对成功,凭据已入库(重启免 PIN)`);
+  return { ok: true };
+}
+
+/**
+ * cast 准入判定(**导出供单测**):返回需要提示的文案,null = 放行。
+ *
+ * 规则:
+ *   - 未配对 AP2(`supportsAp2 && 无凭据`)且**不是既有群组成员** ⇒ 拒绝,文案要求先配对
+ *     (**不静默回落 AP1** —— 否则用户以为在放 AP2);
+ *   - 已经在该设备所属群组里播放的成员**放行**(用户规则 2:凭据失效不摘组,播放回落 AP1,
+ *     由设备视图 `ap2Paired=false` 标「需重新配对」);
+ *   - AP1-only / 已配对 / 未知设备 ⇒ 放行(未知设备交给后续「设备不存在」错误,不误伤)。
+ */
+export async function getAirPlayCastGateError(deviceId: string): Promise<string | null> {
+  const dev = getAirPlayDevice(deviceId);
+  if (!dev || !dev.supportsAp2) return null;
+  if (getHapCredentials(deviceId)) return null;
+  if (await isAirPlayGroupMember(deviceId)) return null;
+  const name = (dev.alias || dev.name || deviceId).trim();
+  return `AirPlay 设备 ${name} 需要先在播放器页完成 AirPlay 2 配对后才能播放`;
+}
+
+/** 该设备当前是否是某个群组的成员(cast 准入用:既有成员允许 AP1 回落)。
+ *  动态 import 避免群组服务 ↔ airplay control 的静态循环依赖;查询失败按「非成员」处理。 */
+async function isAirPlayGroupMember(deviceId: string): Promise<boolean> {
+  try {
+    const { getGroupManager } = await import("../group/index.js");
+    return getGroupManager().groupsOfDevice(deviceId).length > 0;
+  } catch (e: any) {
+    log.warn(`[ap2] 查询设备 ${deviceId} 的群组归属失败(按非成员处理): ${e?.message || e}`);
+    return false;
+  }
+}
+
 // ==================== Public API ====================
 
 export function listAirPlayDevices(): {
@@ -803,19 +1072,35 @@ export function listAirPlayDevices(): {
   /** AP2 能力标记(E2):仅当设备同时广播 `_airplay._tcp` 且 protovers ≥ 1.1。
    *  **不改变投屏路径** —— E3~E5 落地前仍一律走 AP1。 */
   supportsAp2: boolean;
+  /** AP2 能力标记的显式别名(选择器/群组候选读它,语义比 supportsAp2 更直白)。 */
+  ap2Capable: boolean;
+  /** AP2 凭据是否已入库(未配对 ⇒ false;AP1-only 设备恒 false,无意义)。 */
+  ap2Paired: boolean;
+  /** 能否被选进「可选择播放器」/ 群组成员候选 —— 判据唯一出处是 selectableOf。
+   *  **选择器与群组候选必须过滤 `selectable === true`**;未配对的 AP2 设备
+   *  仍然出现在列表里(带 ap2Paired=false),以便用户在播放器页发起配对。 */
+  selectable: boolean;
   /** AP2 TXT 原始能力(features/srcvers/protovers/gid/flags),供 E3 握手/加密读取。 */
   ap2?: { features?: string; srcvers?: string; protovers?: string; gid?: string; flags?: string; model?: string };
 }[] {
-  return getAirPlayDevices().map((d) => ({
-    id: d.id, name: d.name, alias: d.alias || "",
-    displayName: (d.alias || d.name).trim(),
-    available: d.available, disabled: !!d.disabled,
-    supportsRsa: d.supportsRsa, am: d.am, host: d.host, port: d.port,
-    supportsAp2: !!d.supportsAp2,
-    ap2: d.ap2
-      ? { features: d.ap2.features, srcvers: d.ap2.srcvers, protovers: d.ap2.protovers, gid: d.ap2.gid, flags: d.ap2.flags, model: d.ap2.model }
-      : undefined,
-  }));
+  return getAirPlayDevices().map((d) => {
+    const ap2Capable = !!d.supportsAp2;
+    // 只有 AP2 capable 才查凭据列:纯 AP1 部署(绝大多数)零额外查询。
+    const ap2Paired = ap2Capable && getHapCredentials(d.id) !== null;
+    return {
+      id: d.id, name: d.name, alias: d.alias || "",
+      displayName: (d.alias || d.name).trim(),
+      available: d.available, disabled: !!d.disabled,
+      supportsRsa: d.supportsRsa, am: d.am, host: d.host, port: d.port,
+      supportsAp2: !!d.supportsAp2, // 与 ap2Capable 同值(守卫钉住这一行,勿改表达式形态)
+      ap2Capable,
+      ap2Paired,
+      selectable: selectableOf(!!d.disabled, ap2Capable, ap2Paired),
+      ap2: d.ap2
+        ? { features: d.ap2.features, srcvers: d.ap2.srcvers, protovers: d.ap2.protovers, gid: d.ap2.gid, flags: d.ap2.flags, model: d.ap2.model }
+        : undefined,
+    };
+  });
 }
 
 export function hasAirPlayDevice(deviceId: string): boolean {
@@ -832,6 +1117,13 @@ export async function castToAirPlayDevice(opts: AirPlayCastOptions): Promise<{ m
 async function castUnlocked(opts: AirPlayCastOptions): Promise<{ mediaUri: string }> {
   if (isAirPlayDeviceDisabled(opts.deviceId)) {
     throw new Error("该 AirPlay 设备已被禁用");
+  }
+  // AP2 未配对准入(用户规则 1/2):直接投屏到未配对的 AP2 设备一律**报错并要求先配对**,
+  // 不静默回落 AP1(**否则用户以为在放 AP2**)。已经是某个群组成员时放行 —— 既有组内的
+  // 成员凭据失效只让播放回落 AP1(不摘组、不阻断群组播放),由设备视图标「需重新配对」。
+  const ap2Gate = await getAirPlayCastGateError(opts.deviceId);
+  if (ap2Gate) {
+    throw new Error(ap2Gate);
   }
   // Phase 3 互斥(owner=bridge):桥会话占用期间拒绝 native cast(与 §5.5 owner token 一致)。
   if (isBridgeOwned(opts.deviceId)) {
