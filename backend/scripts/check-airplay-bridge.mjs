@@ -431,7 +431,7 @@ console.log("===== ⑨ pushFrame 必须含 pcm:100 虚拟组补偿(BLK-01) =====
 // ---------------------------------------------------------------------------
 // ⑩ playGroupCore 不得清桥
 // ---------------------------------------------------------------------------
-console.log("===== ⑩ playGroupCore / 组关闭路径不得清 bridges(BLK-02) =====");
+console.log("===== ⑩ playGroupCore 不得清桥;clearGroupBridges 只许两处终态(stopGroupCore/空组回收) =====");
 {
   const pc = code(PLAYER_CORE);
   const idxPlay = pc.indexOf("export function playGroupCore(");
@@ -447,10 +447,31 @@ console.log("===== ⑩ playGroupCore / 组关闭路径不得清 bridges(BLK-02) 
       !/clearGroupBridges|\bbridges\.clear\(\)|bridgeSpecs\s*=\s*\[\s*\]/.test(playRegion),
     "playGroupCore 体内出现清桥操作",
   );
+  // 终态白名单两处(BLK-02 语义:只有**终态**可清桥;playGroupCore 的 seek 重建
+  // 热复用路径一律不清):① stopGroupCore(显式组停);② server.ts onConnectionClosed
+  // 空组回收(组对象即将丢弃,不清则活 BridgeMember 永不可触达 —— 洞 B)。
   check(
-    "clearGroupBridges(g) 只允许出现在 stopGroupCore(终态停止),不得前移到起播/重建路径",
-    countInSrc("clearGroupBridges(g)").n === 1 && pc.indexOf("clearGroupBridges(g)") > idxStop,
-    `全仓调用 ${countInSrc("clearGroupBridges(g)").n} 次;playerCore 内位置=${pc.indexOf("clearGroupBridges(g)")} vs stopGroupCore=${idxStop}`,
+    "clearGroupBridges(g) 全仓恰好两处(终态白名单:stopGroupCore + 空组回收)",
+    countInSrc("clearGroupBridges(g)").n === 2,
+    `全仓调用 ${countInSrc("clearGroupBridges(g)").n} 次(白名单 2)`,
+  );
+  // 区间断言①:playerCore 内恰 1 处,且落在 stopGroupCore 体(到下一个顶层 export 前)。
+  const stopNext = idxStop === -1 ? -1 : pc.indexOf("\nexport function ", idxStop + 10);
+  const stopRegion = idxStop === -1 ? "" : pc.slice(idxStop, stopNext === -1 ? undefined : stopNext);
+  check(
+    "playerCore.ts 的 clearGroupBridges(g) 必须在 stopGroupCore 体内(且仅 1 处)",
+    (pc.split("clearGroupBridges(g)").length - 1) === 1 && stopRegion.includes("clearGroupBridges(g)"),
+    `playerCore 内 ${pc.split("clearGroupBridges(g)").length - 1} 处;stopGroupCore 体含=${stopRegion.includes("clearGroupBridges(g)")}`,
+  );
+  // 区间断言②:server.ts 内恰 1 处,且落在 onConnectionClosed 的 g.empty 终态分支。
+  const srvTs = code(SPIN_SERVER);
+  const idxClosed = srvTs.indexOf("onConnectionClosed(conn: SendspinConnection): void {");
+  const idxGroupFn = idxClosed === -1 ? -1 : srvTs.indexOf("  group(name: string)", idxClosed);
+  const closedRegion = (idxClosed === -1 || idxGroupFn === -1) ? "" : srvTs.slice(idxClosed, idxGroupFn);
+  check(
+    "server.ts 的 clearGroupBridges(g) 必须在 onConnectionClosed 空组回收分支内(且仅 1 处)",
+    (srvTs.split("clearGroupBridges(g)").length - 1) === 1 && closedRegion.includes("clearGroupBridges(g)") && closedRegion.includes("if (g.empty)"),
+    `server.ts 内 ${srvTs.split("clearGroupBridges(g)").length - 1} 处;onConnectionClosed 区间含清桥=${closedRegion.includes("clearGroupBridges(g)")}`,
   );
   check(
     "clearGroupBridges 定义只在 bridgeAttach.ts(单一实现)",

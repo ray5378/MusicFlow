@@ -13,6 +13,7 @@
 import WebSocket, { WebSocketServer } from "ws";
 import { randomBytes } from "node:crypto";
 import { loadOrCreateIdentity, type Identity } from "./identity.js";
+import { clearGroupBridges } from "./bridgeAttach.js";
 import { getDeviceVolumeState, DEFAULT_SENDSPIN_VOLUME } from "./deviceState.js";
 import { asInitiator, handshakePayload1, type NoiseSession, type NoiseSuite } from "./handshake.js";
 import { packJsonBody, unpackJsonBody, packAudioChunk, type JsonMessage } from "./framing.js";
@@ -408,6 +409,12 @@ export class SendspinServer {
         // 组空即停 pump(放掉整首 PCM)+ 关编码器(杀 ffmpeg),队列不动(重连恢复)。
         // 不做:无听众还继续解完整队歌,是标准的内存/CPU 双泄漏。
         stopGroupPump(g);
+        // 改法2(洞 B):终态回收必须补清桥 —— 组对象即将被丢弃,组上的活
+        // BridgeMember(handle.stop 是唯一退出入口)若不清,退避重连循环从此
+        // 不可触达(单侧孤儿)。与 BLK-02 不冲突:BLK-02 保护的是 playGroupCore
+        // 的 seek 重建热复用路径;空组回收是终态,语义等同 stopGroupCore
+        // (守卫 ⑩ 终态白名单两处之二)。
+        clearGroupBridges(g);
         const n = g.close();
         this.groups.delete(g.name);
         if (n > 0) this.log("info", `group ${g.name} 空了,关 ${n} 个编码器`);
