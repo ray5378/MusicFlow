@@ -69,6 +69,7 @@ export function syncGroupBridges(
     if (old) {
       try { old.stop(); } catch { /* 单桥停止失败不连累 */ }
       bridges.delete(spec.deviceId);
+      g.onBridgeHandleRemoved?.(spec.deviceId); // 窗口投递水位/定时器清理(§6.2)
     }
     const handle = factory(spec);
     handle.start?.();
@@ -80,9 +81,11 @@ export function syncGroupBridges(
     if (!seen.has(deviceId)) {
       try { handle.stop(); } catch { /* ignore */ }
       bridges.delete(deviceId);
+      g.onBridgeHandleRemoved?.(deviceId); // 窗口投递水位/定时器清理(§6.2)
     }
   }
   g.bridgeSpecs = nextSpecs;
+  if (nextSpecs.length > 0) g.ensureBridgePushTimer?.(); // 桥在跑 → 保证补投定时器在跑(§6.2)
   log.info(`bridge-sync group=${g.name} before=${prevSpecs.size} after=${nextSpecs.length} devices=[${nextSpecs.map((s) => s.deviceId).join(",")}]`);
 }
 
@@ -94,6 +97,7 @@ export function detachGroupBridge(g: SendspinGroup, deviceId: string): boolean {
   if (!handle) return false;
   try { handle.stop(); } catch { /* ignore */ }
   bridges.delete(deviceId);
+  g.onBridgeHandleRemoved?.(deviceId); // 窗口投递水位/定时器清理(§6.2)
   g.bridgeSpecs = (g.bridgeSpecs ?? []).filter((s) => s.deviceId !== deviceId);
   return true;
 }
@@ -106,5 +110,6 @@ export function clearGroupBridges(g: SendspinGroup): void {
     try { handle.stop(); } catch { /* ignore */ }
   }
   bridges.clear();
+  g.onBridgesCleared?.(); // 窗口投递状态整体作废:清水位 + 停补投定时器(§6.2)
   g.bridgeSpecs = [];
 }

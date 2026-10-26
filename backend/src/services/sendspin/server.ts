@@ -32,6 +32,10 @@ import {
   LATE_JOIN_MARGIN_US,
   LATE_JOIN_KEEP_PAST_US,
   LATE_JOIN_RING_MAX_US,
+  BRIDGE_PUSH_TICK_MS,
+  BRIDGE_PUSH_HORIZON_US,
+  BRIDGE_PUSH_FLOOR_US,
+  BRIDGE_BACKFILL_MAX_US,
 } from "./constants.js";
 import { nowUs } from "./clock.js";
 import { MessageRouter } from "./messages.js";
@@ -705,6 +709,14 @@ export class SendspinGroup {
   readonly bridges = new Map<string, SendspinBridgeHandle>();
   /** 当前生效的桥规格(bridgeAttach 同步时记录;seekCore 重建路径据此透传)。 */
   bridgeSpecs: BridgeSocketSpec[] = [];
+  /** 每桥投递水位(原 ts 域):≤ 水位的帧已投递/已丢弃;缺失或 0n = 当前代次尚未投递。 */
+  readonly bridgeWatermarks = new Map<string, bigint>();
+  /** 桥内容代次:notifyBridgeGeneration 递增;ring 帧经 pushFrame 打上 ep 戳,
+   *  投递时只投当前代次 —— 旧代次帧即使 ts 落在新窗口内也不可信(中途 seek/
+   *  rehost 时旧 cursor 可达 now+10s,仅重置水位挡不住)。 */
+  private bridgeContentEpoch = 0;
+  /** 桥补投定时器(250ms;timer-only 单写者,unref 不阻进程退出)。 */
+  private bridgePushTimer: NodeJS.Timeout | undefined;
 
   hasBridges(): boolean {
     return this.bridges.size > 0;
@@ -718,6 +730,15 @@ export class SendspinGroup {
     for (const b of this.bridges.values()) {
       try { b.notifyGeneration(generation, reason); } catch { /* 单桥失败不连累 */ }
     }
+    // 桥投递状态随内容代次整体作废(§6.2 可听域窗口化):
+    //  - epoch++:ring 里旧代次帧在投递时被过滤。仅重置水位不够 —— 中途
+    //    seek/rehost 重锚时旧 cursor 可在 now+10s 量级(预填充中途重锚,
+    //    streamEngine 重锚分支 reason="seek"/"rehost" 都会走到这里),高于
+    //    任何新水位,单靠水位会把旧内容误投给桥 → 桥以旧时间线立锚。
+    //  - 水位清零(缺失/0n 哨兵 = 本代次尚未投递):下一 tick 从当前窗口重算。
+    this.bridgeContentEpoch++;
+    this.bridgeWatermarks.clear();
+    this.ensureBridgePushTimer();
   }
 
   /** 组泵暂停/恢复指示(Phase 5 §5.4,pauseCore/resumePumpCore 调用):
@@ -736,24 +757,133 @@ export class SendspinGroup {
   }
 
   /** 播中回填一座新桥(§5.2「加入 AirPlay:从当前/未来 ring 回填」):
-   *  把 pcm:100 组 late-join ring 里**未来还没播**的 chunk 按原 tsUs 原序推给该桥
-   *  (桥侧对齐器以首帧 tsUs 立锚;过于陈旧的内容由可达性重锚/drift 出清)。
+   *  可听域窗口化版本 —— 只把 ring 中落在投递窗口
+   *  `[now + BRIDGE_PUSH_FLOOR_US, now + BRIDGE_PUSH_HORIZON_US]`(原 ts 域)、
+   *  且属于**当前内容代次**的帧推给该桥;投递时做 `ts' = ts − commonSendAheadUs`
+   *  (桥对齐器 send_ahead=0 语义,可听时刻与真实设备对齐);回填总量按
+   *  BRIDGE_BACKFILL_MAX_US 封顶(防御,常态窗口宽 1s 远达不到)。回填后登记
+   *  该桥水位,250ms 补投定时器(bridgePushTick)从水位处按窗口继续补投 ——
+   *  不再把整个 ring(可达 10s+)一次性灌进桥队列(旧实现 8s 硬上限重连根因)。
    *  @returns 回填帧数(诊断)。 */
   backfillBridge(deviceId: string): number {
     const b = this.bridges.get(deviceId);
     if (!b) return 0;
     const ring = this.recentByGroup.get(this.encoderKey("pcm", 100));
     if (!ring || ring.length === 0) return 0;
+    const now = nowUs();
+    const sendAheadUs = this.commonSendAheadUs();
+    const lo = now + BigInt(BRIDGE_PUSH_FLOOR_US);
+    const hi = now + BigInt(BRIDGE_PUSH_HORIZON_US);
+    const epoch = this.bridgeContentEpoch;
+    const capUs = BigInt(BRIDGE_BACKFILL_MAX_US);
+    const ahead = BigInt(Math.round(sendAheadUs));
+    let totalUs = 0n;
+    let n = 0;
+    let last = 0n;
+    for (const e of ring) {
+      if (e.ep !== undefined && e.ep !== epoch) continue; // 旧内容代次:不可信,跳过
+      if (e.tsUs < lo) continue; // 已入可听域之下:桥来不及排程,不回填
+      if (e.tsUs > hi) break; // 窗口外(未来):交给补投定时器
+      if (totalUs + BigInt(e.durUs) > capUs) continue; // 回填总量上限(防御;跳过异常大帧继续扫)
+      try {
+        b.pushAudio(e.data, e.tsUs - ahead);
+      } catch { /* 单桥失败不连累 */ break; }
+      n++;
+      totalUs += BigInt(e.durUs);
+      last = e.tsUs;
+    }
+    if (last !== 0n) this.bridgeWatermarks.set(deviceId, last);
+    this.ensureBridgePushTimer();
+    if (n > 0) {
+      this.server.log("info", `bridge-backfill group=${this.name} device=${deviceId} frames=${n} durUs=${totalUs}`);
+    }
+    return n;
+  }
+
+  // ---- 桥投递可听域窗口化(§6.2):补投定时器是唯一投递写者(timer-only
+  //      单写者);pushFrame 只写 ring 并保证定时器在跑。 ----
+
+  /** 确保桥补投定时器在跑(250ms 周期,unref 不阻进程退出)。幂等。 */
+  ensureBridgePushTimer(): void {
+    if (this.bridgePushTimer || this.bridges.size === 0) return;
+    const t: NodeJS.Timeout = setInterval(() => this.bridgePushTick(), BRIDGE_PUSH_TICK_MS);
+    t.unref?.();
+    this.bridgePushTimer = t;
+  }
+
+  /** 停止补投定时器(摘桥/清桥/组关闭时;下批音频进 pushFrame 会按需重启)。 */
+  stopBridgePushTimer(): void {
+    if (!this.bridgePushTimer) return;
+    clearInterval(this.bridgePushTimer);
+    this.bridgePushTimer = undefined;
+  }
+
+  /** 补投 tick:把每座桥水位之后、落在可听域窗口内的当前代次帧推给桥。
+   *  public 仅供单测确定性驱动(绕开真实定时器);生产由 ensureBridgePushTimer 调。 */
+  bridgePushTick(): void {
+    if (this.bridges.size === 0) {
+      this.stopBridgePushTimer();
+      return;
+    }
+    const ring = this.recentByGroup.get(this.encoderKey("pcm", 100));
+    if (!ring || ring.length === 0) return;
+    const now = nowUs();
+    const sendAheadUs = this.commonSendAheadUs();
+    const lo = now + BigInt(BRIDGE_PUSH_FLOOR_US);
+    const hi = now + BigInt(BRIDGE_PUSH_HORIZON_US);
+    for (const [deviceId, b] of this.bridges) {
+      try {
+        this.deliverBridgeWindow(b, deviceId, ring, sendAheadUs, lo, hi);
+      } catch { /* 单桥失败不连累组泵 */ }
+    }
+  }
+
+  /** 单桥窗口投递:从水位(缺失/0n 哨兵 = 当前代次尚未投递)向后扫描 ring:
+   *  - 旧内容代次帧:跳过(见 notifyBridgeGeneration 的 epoch 注释);
+   *  - ts < lo(已入可听域之下):丢弃(桥来不及排程),水位推过不再重扫;
+   *  - ts ∈ [lo, hi]:以 ts' = ts − sendAheadUs 投递,水位推过;
+   *  - ts > hi:break(顺延到下一 tick,不投不推)。
+   *  @returns 本轮实际投递帧数。 */
+  private deliverBridgeWindow(
+    b: SendspinBridgeHandle,
+    deviceId: string,
+    ring: Array<{ tsUs: bigint; durUs: number; data: Uint8Array; ep?: number }>,
+    sendAheadUs: number,
+    lo: bigint,
+    hi: bigint,
+  ): number {
+    const epoch = this.bridgeContentEpoch;
+    const ahead = BigInt(Math.round(sendAheadUs));
+    let last = this.bridgeWatermarks.get(deviceId) ?? 0n;
     let n = 0;
     for (const e of ring) {
-      if (!e.data || e.data.length === 0) continue;
+      if (e.ep !== undefined && e.ep !== epoch) continue;
+      if (last !== 0n && e.tsUs <= last) continue;
+      if (e.tsUs < lo) {
+        last = e.tsUs; // 丢弃,但水位推过(不再重扫)
+        continue;
+      }
+      if (e.tsUs > hi) break; // 顺延
       try {
-        b.pushAudio(e.data, e.tsUs);
-        n++;
-      } catch { /* 单桥失败不连累 */ }
+        b.pushAudio(e.data, e.tsUs - ahead);
+      } catch { /* 单桥失败不连累 */ break; }
+      n++;
+      last = e.tsUs;
     }
-    if (n > 0) this.server.log("info", `bridge-backfill group=${this.name} device=${deviceId} frames=${n}`);
+    this.bridgeWatermarks.set(deviceId, last);
     return n;
+  }
+
+  /** 单座桥从组里摘除后的投递状态清理(bridgeAttach 同步/摘除路径调用)。 */
+  onBridgeHandleRemoved(deviceId: string): void {
+    this.bridgeWatermarks.delete(deviceId);
+    if (this.bridges.size === 0) this.stopBridgePushTimer();
+  }
+
+  /** 组内全部桥清空后的投递状态清理(bridgeAttach clearGroupBridges 调用)。 */
+  onBridgesCleared(): void {
+    this.bridgeWatermarks.clear();
+    this.stopBridgePushTimer();
   }
 
   constructor(name: string, server: SendspinServer) {
@@ -939,7 +1069,7 @@ export class SendspinGroup {
    *  `ts + duration <= now - KEEP_PAST` 的条目,即只留「未来还没播的」加 1s 尾巴。 */
   private recentByGroup = new Map<
     string,
-    Array<{ tsUs: bigint; durUs: number; data: Uint8Array }>
+    Array<{ tsUs: bigint; durUs: number; data: Uint8Array; ep?: number }>
   >();
 
   /** 起播/重建流时清零计量窗口(上一首的码率、上一段流的交付累积对新流都无参考价值)。 */
@@ -1298,15 +1428,17 @@ export class SendspinGroup {
           bytes += data.length;
           // 同一份字节分发给组内全部成员 —— 字节与时间戳序列完全一致。
           for (const c of g.members) c.sendAudio(ts, data);
-          if (n > 0) ring.push({ tsUs: ts, durUs: Math.round((n * 1_000_000) / SAMPLE_RATE), data });
+          if (n > 0) ring.push({ tsUs: ts, durUs: Math.round((n * 1_000_000) / SAMPLE_RATE), data, ep: this.bridgeContentEpoch });
           // 桥投递(§6.2):挂在 pcm:100 组的 chunk 循环体里 —— 桥按
           // s16le/48k/2ch 消费(与 PCM 编码器字面输出一致,即 MFAB AUDIO payload)。
           // 逐 chunk 用真实起点 ts(与成员下发同源),绝不复用组起始 ts。
-          if (this.bridges.size > 0 && g.codec === "pcm" && g.gain === 100) {
-            for (const b of this.bridges.values()) {
-              try { b.pushAudio(data, ts); } catch { /* 单桥失败不连累组泵 */ }
-            }
-          }
+          // 桥投递(§6.2,可听域窗口化):pushFrame **不再**逐 chunk 实时推桥。
+          // 旧实现把 raw cursor 域 ts 直接推给桥 → commandedLead ≈ 预填充深度
+          // (2026-10-23 实测恒 10.584s),桥队列被一次性灌到 8s 硬上限 → 重连风暴。
+          // 现改为:帧已带内容代次戳入 ring(上一行),这里只保证每组 250ms 补投
+          // 定时器在跑;真正投递由 bridgePushTick 按窗口 [now+FLOOR, now+HORIZON]
+          // 统一完成,ts 转换 ts' = ts − commonSendAheadUs(桥 send_ahead=0 语义)。
+          if (this.bridges.size > 0 && g.codec === "pcm" && g.gain === 100) this.ensureBridgePushTimer();
         }
         // 时间戳一律以**实测样本数**推进,见 EncodedChunk.frameSamples。
         //
@@ -1339,7 +1471,7 @@ export class SendspinGroup {
   }
 
   /** 取(必要时创建)某编码组的 late-join 缓存。 */
-  private ringFor(key: string): Array<{ tsUs: bigint; durUs: number; data: Uint8Array }> {
+  private ringFor(key: string): Array<{ tsUs: bigint; durUs: number; data: Uint8Array; ep?: number }> {
     let r = this.recentByGroup.get(key);
     if (!r) {
       r = [];
@@ -1514,6 +1646,11 @@ export class SendspinGroup {
     }
     this.encoders.clear();
     this.recentByGroup.clear();
+    // 桥投递定时器随 ring 清空失去数据源;桥句柄本身保留(BLK-02 热复用),
+    // 下批音频进 pushFrame 或重锚 notifyBridgeGeneration 会按需重启定时器。
+    // 水位一并作废(ring 已清,旧水位对应的帧不存在了)。
+    this.stopBridgePushTimer();
+    this.bridgeWatermarks.clear();
     return n;
   }
 }

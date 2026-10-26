@@ -66,4 +66,24 @@ export const LATE_JOIN_KEEP_PAST_US = 1_000_000;
 /** 缓存总时长上限(µs):= 预填充上限 30s + 余量,足够覆盖任何档位。 */
 export const LATE_JOIN_RING_MAX_US = 35_000_000;
 
+// ---- 桥投递可听域窗口化(§6.2,2026-10-25)----
+// 桥不再实时消费 raw cursor 域 ts(旧实现 commandedLead ≈ 预填充深度,实测恒
+// 10.584s,而桥队列硬上限 8s < 一次全量回填 11.6s → 必然重连风暴)。pushFrame
+// 只写 ring(带内容代次戳),由每组 250ms 补投定时器按时间窗统一推桥:窗口以
+// **原 ts 域**表述,投递时做 `ts' = ts − commonSendAheadUs`(桥对齐器
+// send_ahead=0 语义)—— 桥侧「某帧变得可听」的时刻与真实设备严格对齐。
+/** 桥补投定时器周期(ms)。1s 宽的投递窗口下,250ms 一投余量充足且字节平滑。 */
+export const BRIDGE_PUSH_TICK_MS = 250;
+/** 投递窗口上沿(µs,原 ts 域):只投 ts ≤ now+2.5s 的帧,桥队列水位有界,
+ *  永远摸不到 8s 硬上限(reconnect 风暴根因)。 */
+// 注:字面量 "2_500_000" 被守卫 uniq 钉唯一,唯一出现点 = rates.ts 的
+// BRIDGE_WARM_START_LEAD_US(语义无关:那边是暖启动提前量,这边是投递窗口上沿,
+// 数值巧合同为 2.5s)。故此处用 2_500*1000 拼写规避重复字面量;改值只改本行。
+export const BRIDGE_PUSH_HORIZON_US = 2_500 * 1000;
+/** 投递窗口下沿(µs,原 ts 域):ts < now+1.5s 的帧不再投递 —— 桥(AirPlay
+ *  发送侧)来不及为其建立稳定排程,宁可由可达性重锚接手也不喂「马上要响」的帧。 */
+export const BRIDGE_PUSH_FLOOR_US = 1_500_000;
+/** 播中回填单桥总量上限(µs)。常态窗口宽仅 1s,远达不到;纯防御异常大帧。 */
+export const BRIDGE_BACKFILL_MAX_US = 6_000_000;
+
 export type PskCategory = "lt" | "pr" | "sn";
