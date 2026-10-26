@@ -41,7 +41,7 @@ export async function bridgeJoinMember(groupId: string, deviceId: string): Promi
   if (route.some((r) => r.deviceId === deviceId)) return true; // 已在路由内,幂等
   const token = newBridgeToken();
   bridgeSocketPath(deviceId, token); // <100B 断言(与 playMedia 路径同源)
-  await bridgePrepareDevice(deviceId, token, "raop");
+  await bridgePrepareDevice(deviceId, token, "raop", groupId);
   const spec: BridgeSocketSpec = { deviceId, socketPath: bridgeSocketPath(deviceId, token), token, protocol: "raop" };
   route.push(spec);
   const groupName = sendspinGroupName(groupId);
@@ -78,20 +78,24 @@ export async function bridgeLeaveMember(groupId: string, deviceId: string): Prom
 /** airplay 子进程重启后的桥路由重建(§5.2「airplay 子进程崩溃」行):
  *  逐设备用**原 token** 重发 bridgePrepare(同 socketPath ⇒ 泵侧 BridgeMember
  *  退避重连即接上,BOUNDARY{rehost} 新 generation 自动产生)。幂等、全 best-effort。 */
-export async function rebuildBridgeRoutes(): Promise<number> {
+export async function rebuildBridgeRoutes(onlyGroupId?: string): Promise<number> {
   let ok = 0;
   for (const [groupId, route] of activeBridgeRoutes) {
+    // 只重建指定组:改「按组延迟补偿」时用,避免顺带把别的组的桥也断一下。
+    if (onlyGroupId && groupId !== onlyGroupId) continue;
     for (const spec of route) {
       try {
-        await bridgePrepareDevice(spec.deviceId, spec.token, spec.protocol);
+        await bridgePrepareDevice(spec.deviceId, spec.token, spec.protocol, groupId);
         ok++;
       } catch (e) {
         log.warn(`[group][bridge] ${groupId}: 子进程重启重建失败 device=${spec.deviceId}: ${(e as Error)?.message || e}`);
       }
     }
   }
-  if (activeBridgeRoutes.size > 0) {
+  if (activeBridgeRoutes.size > 0 && !onlyGroupId) {
     log.info(`[group][bridge] 子进程重启重建: ${ok}/${[...activeBridgeRoutes.values()].reduce((n, r) => n + r.length, 0)} 座桥已重锚定`);
+  } else if (onlyGroupId) {
+    log.info(`[group][bridge] ${onlyGroupId}: 延迟补偿变更 → 重建 ${ok} 座桥重锚定`);
   }
   return ok;
 }
@@ -275,7 +279,7 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
       try {
         // socketPath 在主进程按同一实现计算(bridgeSocketPath,<100B 断言在此抛)。
         bridgeSocketPath(d, token);
-        await bridgePrepareDevice(d, token, "raop");
+        await bridgePrepareDevice(d, token, "raop", groupId);
         sockets.push({ deviceId: d, socketPath: bridgeSocketPath(d, token), token, protocol: "raop" });
       } catch (e) {
         log.warn(`[group][bridge] ${groupId}: bridgePrepare 失败 device=${d} → 本流回落 solo cast: ${(e as Error)?.message || e}`);

@@ -19,6 +19,7 @@ import { getServer as getSendspinServer } from "../sendspin/runtime.js";
 import { sendspinSupervisor } from "../sendspin/supervisor.js";
 import { getSendspinDeviceVolume } from "../sendspin/peerVolume.js";
 import { createLogger } from "../../utils/logger.js";
+import { getGroupDelays } from "./delayCalib.js";
 
 /** 成员 kind:airplay / sendspin / dlna(仅历史数据可解析,**新提交一律拒收**,
  *  2026-10-24 起 DLNA 禁止入组 —— 设备自拉流无共享时间线)。 */
@@ -72,6 +73,16 @@ export interface GroupMemberInfo {
 
 export interface PlayerGroupWithMembers extends PlayerGroup {
   members: GroupMemberInfo[];
+  /** 延迟补偿回显(ms):**正数 = 该侧更晚出声,负数 = 该侧更早出声**。
+   *  只在「读视图」里带出(不写进 PlayerGroup/persist),避免与落库路径耦合。 */
+  airplayDelayMs: number;
+  sendspinDelayMs: number;
+}
+
+/** 读视图附加的延迟补偿字段(供前端回显;不存在即 0)。 */
+function delayView(id: string): { airplayDelayMs: number; sendspinDelayMs: number } {
+  const d = getGroupDelays(id);
+  return { airplayDelayMs: d.airplayMs, sendspinDelayMs: d.sendspinMs };
 }
 
 const GROUP_NAME_MAX = 50;
@@ -130,16 +141,20 @@ export class GroupManager extends EventEmitter {
 
   getWithMembers(id: string): PlayerGroupWithMembers | undefined {
     const g = this.groups.get(id);
-    return g ? { ...g, members: this.resolveMembers(g.memberIds) } : undefined;
+    return g ? { ...g, members: this.resolveMembers(g.memberIds), ...delayView(g.id) } : undefined;
   }
 
   listWithMembers(): PlayerGroupWithMembers[] {
-    return this.list().map(g => ({ ...g, members: this.resolveMembers(g.memberIds) }));
+    return this.list().map(g => ({ ...g, members: this.resolveMembers(g.memberIds), ...delayView(g.id) }));
   }
 
   /** 某用户自己的组(含成员详情)。管理员传入空串返回全量。 */
   listWithMembersForOwner(ownerUserId: string): PlayerGroupWithMembers[] {
-    return this.listForOwner(ownerUserId).map(g => ({ ...g, members: this.resolveMembers(g.memberIds) }));
+    return this.listForOwner(ownerUserId).map(g => ({
+      ...g,
+      members: this.resolveMembers(g.memberIds),
+      ...delayView(g.id),
+    }));
   }
 
   createGroup(name: string, memberIds: string[] = [], ownerUserId = ""): PlayerGroup {

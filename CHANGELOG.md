@@ -2,6 +2,19 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.6.77] - 2026-10-26
+
+### Feature / 群组延迟补偿(按组 A/V 标定):AirPlay 与 Sendspin 各自可调 ±30s,正数更晚 / 负数更早
+
+- 入口:播放器群组页每个群组卡片的「延迟补偿」按钮 → 弹窗(两个 el-input-number,步进 10ms,范围 ±30s);保存即生效,卡片上直接回显非 0 的值。
+- 语义:两侧各自独立存(`player_groups.airplay_delay_ms` / `sendspin_delay_ms`),**正数 = 该侧更晚出声,负数 = 该侧更早出声**;只有差值影响 A/V 同步,分开存是为了纯 AirPlay 组 / 纯 Sendspin 组也能各自微调。
+- AirPlay 侧:接进 `bridgePrepareDevice` 的 `anchorShiftUs`(取代原全局 `bridge.avShiftMs`;升级时把旧全局值一次性搬迁到既有组,免得既有补偿凭空归零)。锚点在桥会话建立时算死 ⇒ PUT 后只重建**该组**的桥(`rebuildBridgeRoutes(groupId)`),代价是该组 AirPlay 成员约 1~2 秒静音,Sendspin 成员不受影响。
+- Sendspin 侧:`SendspinGroup.pushFrame` 的下发戳偏移(帧级,**真·实时**,约 0.5~1 秒后听到);`seedLateJoin` 回填用同一偏移,否则新成员进场会比老成员早/晚一个偏移、听出跳变。
+- 铁律:偏移**只作用于成员下发戳**,ring 里的 `tsUs` 一律不动 —— 它是桥投递窗口 / 水位 / late-join 回填的唯一时间基准,改了会把 AirPlay 侧一起带偏。
+- 接口:`GET/PUT /rest/api/v1/groups/:id/delays`(renderer.use + 组 owner/管理员;组不存在 404;越界钳制不报错;GET 回带 min/max/step 供前端渲染)。群组读视图(`listWithMembers*` / `getWithMembers`)附带两侧当前值供回显。
+- 持久化:两列落在 `player_groups`(幂等 `ALTER TABLE ADD COLUMN`),弹窗打开时走 GET 回显,重启不丢。
+- 验证:新增 `tests/group/delayCalib.test.ts`(钳制 / 落库回读 / 只改一侧 / 单位换算 / `ug:` 解析)+ `tests/routes/apiGroupDelays.test.ts`(默认 0 / 写入回读 / 越界钳制 / 单侧更新 / 组不存在 404);`tests/group|sendspin|airplay` 105 文件 1447 用例全绿;前端浮层守卫通过。
+
 ## [4.6.76] - 2026-10-25
 
 ### Fix / 客户端丢失配对记录后无法重连(哨兵回退验签恒失败)

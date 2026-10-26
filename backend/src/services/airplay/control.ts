@@ -19,6 +19,7 @@ import { airplaySupervisor } from "./supervisor.js";
 import { rpcFireAndForget } from "../rendererHost/front.js";
 import { getAirPlayDevice, getAirPlayDevices, onAirPlayEvent, startAirPlayDiscovery, stopAirPlayDiscovery, setAirPlayPersist, removeAirPlayDevice, type AirPlayDevice } from "./discovery.js";
 import { getBridgeAvShiftUs } from "./bridgeCalib.js";
+import { airplayDelayUsOf } from "../group/delayCalib.js";
 import { getEffectiveBaseUrl, getCachedDevices, setDeviceVolume, setDeviceMute, stopDevicePlayback, loopbackBase } from "../dlna/control.js";
 import { sqlite } from "../../db/index.js";
 import { createAirPlaySession } from "./session.js";
@@ -296,6 +297,9 @@ export async function bridgePrepareDevice(
   deviceId: string,
   token: string,
   protocol: BridgeProtocol,
+  /** 所属用户组 id:用于取**按组**的 A/V 延迟补偿(正数=AirPlay更晚出声)。
+   *  缺省(null/undefined)= 无组上下文,回落到旧的全局 bridge.avShiftMs。 */
+  groupId?: string | null,
 ): Promise<{ listening: true; socketPath: string }> {
   const dev = getAirPlayDevice(deviceId);
   if (!dev) throw new Error(`AirPlay 设备不存在: ${deviceId}`);
@@ -310,7 +314,9 @@ export async function bridgePrepareDevice(
     pk: (dev as { pk?: string }).pk,
     et: (dev as { et?: string }).et,
     // A/V 标定位移:HiVi 不回报 Audio-Latency ⇒ L_true 不可知,靠该值补齐常量差。
-    anchorShiftUs: getBridgeAvShiftUs(),
+    // **正数 = 内容落点整体后移 = AirPlay 更晚出声;负数 = 更早**。
+    // 有组上下文一律取按组值(用户可在播放器里逐组调);无组上下文回落全局旧值。
+    anchorShiftUs: groupId ? airplayDelayUsOf(groupId) : getBridgeAvShiftUs(),
   });
   registerBridgeOwner(deviceId, token);
   return r;

@@ -370,6 +370,12 @@ export const playerGroups = sqliteTable("player_groups", {
   memberIds: text("member_ids").notNull().default("[]"), // dlna deviceId[] serialized
   // 组级音量:独立于成员设备音量,空组/全离线也持久。新建未改过=20(用户定稿)。
   volume: integer("volume").notNull().default(20),
+  // 群组 A/V 延迟补偿(ms)。语义两侧一致:**正数 = 该侧更晚出声,负数 = 更早出声**。
+  // 只有两侧差值影响 A/V 同步;分开存是为了纯 AirPlay 组 / 纯 Sendspin 组也能各自微调。
+  //   airplay_delay_ms  → bridgePrepare 的 anchorShiftUs(桥内容落点整体平移)
+  //   sendspin_delay_ms → pushFrame 下发戳偏移(帧级,真·实时)
+  airplayDelayMs: integer("airplay_delay_ms").notNull().default(0),
+  sendspinDelayMs: integer("sendspin_delay_ms").notNull().default(0),
   createdAt: text("created_at").default(""),
   updatedAt: text("updated_at").default(""),
 });

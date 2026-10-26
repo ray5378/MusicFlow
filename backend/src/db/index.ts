@@ -779,6 +779,37 @@ export function initDatabase() {
     log.warn(`sendspin_device_state 补列失败: ${e instanceof Error ? e.message : e}`);
   }
 
+  // 结构升级(2026-10-26):player_groups 新增按组 A/V 延迟补偿两列(ms)。
+  // 语义:**正数 = 该侧更晚出声,负数 = 更早出声**。
+  // 旧实现只有一条全局 bridge.avShiftMs;升级时把它**一次性落到既有组**,
+  // 否则用户此前调好的补偿会凭空归零(且全局接口此后只作 groupId 缺失时的兜底)。
+  try {
+    const cols = (sqlite.prepare("PRAGMA table_info(player_groups)").all() as { name?: unknown }[]).map((c) =>
+      String(c?.name ?? ""),
+    );
+    if (!cols.includes("airplay_delay_ms")) {
+      sqlite.exec("ALTER TABLE player_groups ADD COLUMN airplay_delay_ms INTEGER NOT NULL DEFAULT 0");
+      let carried = 0;
+      try {
+        const row = sqlite.prepare("SELECT value FROM settings WHERE key = ?").get("bridge.avShiftMs") as
+          | { value?: unknown }
+          | undefined;
+        const v = Math.round(Number(row?.value));
+        if (Number.isFinite(v) && v !== 0) {
+          sqlite.prepare("UPDATE player_groups SET airplay_delay_ms = ?").run(v);
+          carried = v;
+        }
+      } catch { /* settings 表不存在/无该键 → 保持 0 */ }
+      log.info(`player_groups 新增 airplay_delay_ms 列(继承旧全局值 ${carried}ms)`);
+    }
+    if (!cols.includes("sendspin_delay_ms")) {
+      sqlite.exec("ALTER TABLE player_groups ADD COLUMN sendspin_delay_ms INTEGER NOT NULL DEFAULT 0");
+      log.info("player_groups 新增 sendspin_delay_ms 列");
+    }
+  } catch (e) {
+    log.warn(`player_groups 补列失败: ${e instanceof Error ? e.message : e}`);
+  }
+
   // Plugins (built-in and external drop-ins) are seeded from the unified catalog
   // at boot via registerBuiltinPlugins() — see plugins/registry.ts.
   // No hardcoded plugin names live here.

@@ -10,6 +10,15 @@ import {
   permMiddleware,
   resolveContentSongs,
 } from "./shared.js";
+import {
+  GROUP_DELAY_MAX_MS,
+  GROUP_DELAY_MIN_MS,
+  GROUP_DELAY_STEP_MS,
+  getGroupDelays,
+  invalidateGroupDelays,
+  setGroupDelays,
+} from "../../services/group/delayCalib.js";
+import { isBridgeRouteActive, rebuildBridgeRoutes } from "../../services/group/protocolPlayer.js";
 
 export function registerGroups(app: Hono): void {
 app.get("/v1/groups", (c) => {
@@ -91,6 +100,59 @@ app.post("/v1/groups/:id/members", permMiddleware(PERM.RENDERER_USE), async (c) 
   }
 });
 
+// 群组 A/V 延迟补偿(ms)。**语义:正数 = 该侧更晚出声,负数 = 该侧更早出声**。
+// 两侧各自独立存,但只有「差值」影响 A/V 同步 —— 分开是为了纯 AirPlay 组 /
+// 纯 Sendspin 组也能各自微调。范围 ±30s(用户定稿),步进 10ms。
+
+app.get("/v1/groups/:id/delays", permMiddleware(PERM.RENDERER_USE), (c) => {
+  const user = c.get("user")!;
+  const id = c.req.param("id")!;
+  // 管理员 isOwnedBy 恒真 ⇒ 必须先确认组真的存在,否则不存在的 id 会拿到 200/0。
+  if (!gm.get(id) || !gm.isOwnedBy(id, user?.id ?? "", !!user?.isAdmin)) {
+    return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.group.notFoundOrNoPerm"), 404);
+  }
+  const d = getGroupDelays(id);
+  return c.json({
+    airplayMs: d.airplayMs,
+    sendspinMs: d.sendspinMs,
+    minMs: GROUP_DELAY_MIN_MS,
+    maxMs: GROUP_DELAY_MAX_MS,
+    stepMs: GROUP_DELAY_STEP_MS,
+  });
+});
+
+app.put("/v1/groups/:id/delays", permMiddleware(PERM.RENDERER_USE), async (c) => {
+  const user = c.get("user")!;
+  const id = c.req.param("id")!;
+  if (!gm.isOwnedBy(id, user?.id ?? "", !!user?.isAdmin)) {
+    return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.group.notFoundOrNoPerm"), 404);
+  }
+  const body = await c.req.json().catch(() => ({} as any));
+  const before = getGroupDelays(id);
+  if (!gm.get(id)) {
+    return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.group.notFound"), 404);
+  }
+  // 内存值先更新(落库在后):Sendspin 侧下一次 pushFrame 立刻按新值打戳 = 真·实时。
+  const next = setGroupDelays(id, { airplayMs: body.airplayMs, sendspinMs: body.sendspinMs });
+  // AirPlay 侧的锚点(startNtp)在桥会话建立时就算死了,中途改 anchorShiftUs 不生效。
+  // 因此只有「AirPlay 值真的变了且该组桥在跑」时,才重建该组桥换立即生效
+  // (代价:该组 AirPlay 成员约 1~2s 静音;Sendspin 成员不受影响)。
+  let rebuilt = 0;
+  if (next.airplayMs !== before.airplayMs && isBridgeRouteActive(id)) {
+    try {
+      rebuilt = await rebuildBridgeRoutes(id);
+    } catch { /* 重建失败不影响保存结果:下次会话按新值建立 */ }
+  }
+  return c.json({
+    airplayMs: next.airplayMs,
+    sendspinMs: next.sendspinMs,
+    minMs: GROUP_DELAY_MIN_MS,
+    maxMs: GROUP_DELAY_MAX_MS,
+    stepMs: GROUP_DELAY_STEP_MS,
+    rebuilt,
+  });
+});
+
 // 删除组(组队列随之删除,成员设备恢复单独控制)。仅组 owner(或管理员)。需要 renderer.use。
 
 app.delete("/v1/groups/:id", permMiddleware(PERM.RENDERER_USE), (c) => {
@@ -101,6 +163,7 @@ app.delete("/v1/groups/:id", permMiddleware(PERM.RENDERER_USE), (c) => {
   }
   const ok = gm.deleteGroup(id);
   if (!ok) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.group.notFound"), 404);
+  invalidateGroupDelays(id); // 组没了:清掉延迟缓存,避免 id 复用时读到陈旧值
   return c.json({ success: true });
 });
 

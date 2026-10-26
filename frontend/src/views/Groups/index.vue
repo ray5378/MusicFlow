@@ -451,6 +451,11 @@
             <span>{{ t('groups.deviceCount', { count: g.members.length }) }}</span>
             <span class="meta-dot">·</span>
             <span :class="{ 'online': onlineCount(g) > 0 }">{{ t('groups.onlineCount', { count: onlineCount(g) }) }}</span>
+            <!-- 延迟补偿回显:非 0 才占位,避免正常组卡片多一行噪音。 -->
+            <template v-if="delayBadge(g)">
+              <span class="meta-dot">·</span>
+              <span style="color: var(--el-color-primary);">{{ delayBadge(g) }}</span>
+            </template>
           </div>
         </div>
         <div class="group-id-row">
@@ -481,6 +486,8 @@
             :disabled="groupMemberPeerIds(g).length === 0"
             @click="openOutputConfig(groupMemberPeerIds(g), g.name)"
           ><MfIcon name="SlidersHorizontal" />{{ t('groups.outputConfig') }}</el-button>
+          <!-- 群组延迟补偿(A/V 标定,按组):正数 = 该侧更晚出声,负数 = 该侧更早出声。 -->
+          <el-button v-if="canUse" size="small" @click="openDelay(g)"><MfIcon name="Clock" />{{ t('groups.delayConfig') }}</el-button>
           <div class="device-hide-toggle" :title="t('groups.hideToggleGroupTitle')">
             <el-switch
               :model-value="isHidden(`group:${g.id}`)"
@@ -702,6 +709,64 @@
       <div v-if="esphomeResult" class="test-result" :class="{ ok: esphomeResult.success }">{{ esphomeResult.message }}</div>
       <div v-else-if="esphomePskConfigured" class="device-esphome-status">{{ t('groups.sendspinEsphomeConfigured') }}</div>
       <div v-if="!canManage" class="form-tip">{{ t('groups.sendspinEsphomeAdminOnly') }}</div>
+    </el-dialog>
+
+    <!-- 群组延迟补偿(A/V 标定,按组)。
+         语义两侧一致:**正数 = 该侧更晚出声,负数 = 该侧更早出声**。
+         AirPlay 侧:锚点在桥会话建立时算死 ⇒ 保存后自动重建该组桥(约 1~2s 静音);
+         Sendspin 侧:帧级下发戳偏移 ⇒ 真·实时,约 0.5~1s 后听到。 -->
+    <el-dialog
+      v-model="showDelay"
+      :title="t('groups.delayTitle')"
+      width="468px"
+      :append-to-body="true"
+      destroy-on-close
+    >
+      <div style="font-size:12px;color:var(--el-text-color-secondary);margin:-8px 0 14px;">
+        {{ delayGroup?.name || '' }}<span v-if="delayGroup"> · {{ t('groups.deviceCount', { count: delayGroup.members.length }) }}</span>
+      </div>
+
+      <div style="display:flex;align-items:center;gap:12px;">
+        <div style="width:96px;font-size:13px;">AirPlay</div>
+        <el-input-number
+          v-model="delayAirplay"
+          :min="delayMin" :max="delayMax" :step="delayStep" :step-strictly="true"
+          controls-position="right" style="width:150px"
+        />
+        <span style="font-size:12px;color:var(--el-text-color-secondary);">ms</span>
+      </div>
+      <div style="font-size:12px;color:var(--el-text-color-secondary);line-height:1.5;margin:6px 0 0 108px;">
+        {{ t('groups.delayAirplayHint') }}
+      </div>
+
+      <div style="display:flex;align-items:center;gap:12px;margin-top:16px;">
+        <div style="width:96px;font-size:13px;">Sendspin</div>
+        <el-input-number
+          v-model="delaySendspin"
+          :min="delayMin" :max="delayMax" :step="delayStep" :step-strictly="true"
+          controls-position="right" style="width:150px"
+        />
+        <span style="font-size:12px;color:var(--el-text-color-secondary);">ms</span>
+      </div>
+      <div style="font-size:12px;color:var(--el-text-color-secondary);line-height:1.5;margin:6px 0 0 108px;">
+        {{ t('groups.delaySendspinHint') }}
+      </div>
+
+      <div style="margin-top:16px;padding:9px 12px;background:var(--el-fill-color-light);border-radius:6px;font-size:12px;line-height:1.6;">
+        {{ delayDiffText }}
+      </div>
+      <div style="font-size:12px;color:var(--el-text-color-secondary);line-height:1.6;margin-top:10px;">
+        {{ delayRangeText }}
+      </div>
+
+      <template #footer>
+        <div style="display:flex;align-items:center;">
+          <el-button size="small" @click="resetDelay">{{ t('groups.delayReset') }}</el-button>
+          <div style="flex:1"></div>
+          <el-button size="small" @click="showDelay = false">{{ t('common.cancel') }}</el-button>
+          <el-button size="small" type="primary" :loading="delaySaving" @click="saveDelay">{{ t('groups.delayApply') }}</el-button>
+        </div>
+      </template>
     </el-dialog>
   </div>
 </template>
@@ -943,6 +1008,97 @@ function openOutputConfig(peerIds: string[], name: string): void {
   outputPeerIds.value = ids;
   outputTitle.value = name ? `${name} · ${t("groups.outputConfig")}` : t("groups.outputConfig");
   showOutput.value = true;
+}
+
+
+// ---- 群组延迟补偿(A/V 标定,按组)----
+// 语义两侧一致:**正数 = 该侧更晚出声,负数 = 该侧更早出声**。
+//   AirPlay 侧 → 桥锚点 anchorShiftUs;锚点在桥会话建立时算死,故保存后自动重建该组桥
+//                (该组 AirPlay 成员约 1~2 秒静音,Sendspin 成员不受影响)。
+//   Sendspin 侧 → pushFrame 下发戳偏移(帧级,真·实时,约 0.5~1 秒后听到)。
+// 只有两侧「差值」影响 A/V 同步,分开设是为了纯 AirPlay 组 / 纯 Sendspin 组也能各自微调。
+const showDelay = ref(false);
+const delayGroup = ref<any>(null);
+const delayAirplay = ref(0);
+const delaySendspin = ref(0);
+const delayMin = ref(-30000);
+const delayMax = ref(30000);
+const delayStep = ref(10);
+const delaySaving = ref(false);
+
+/** 差值 = AirPlay − Sendspin:>0 表示 AirPlay 更晚,<0 表示 AirPlay 更早。 */
+const delayDiffMs = computed(() => (delayAirplay.value || 0) - (delaySendspin.value || 0));
+
+const delayDiffText = computed(() => {
+  const d = delayDiffMs.value;
+  if (!d) return t("groups.delayDiffSame");
+  const head = d > 0
+    ? t("groups.delayDiffLater", { ms: Math.abs(d) })
+    : t("groups.delayDiffEarlier", { ms: Math.abs(d) });
+  const tip = d > 0 ? t("groups.delayDiffTipLater") : t("groups.delayDiffTipEarlier");
+  return `${head} ${tip}`;
+});
+
+const delayRangeText = computed(() =>
+  t("groups.delayRange", {
+    sec: Math.round(Math.max(Math.abs(delayMin.value), Math.abs(delayMax.value)) / 1000),
+    step: delayStep.value,
+  }),
+);
+
+
+/** 卡片上的延迟补偿回显(ms):正数=更晚、负数=更早;两侧都 0 → 空串(不占位)。 */
+function delayBadge(g: any): string {
+  const a = Number(g?.airplayDelayMs || 0);
+  const b = Number(g?.sendspinDelayMs || 0);
+  if (!a && !b) return "";
+  const fmt = (v: number) => (v > 0 ? `+${v}` : `${v}`);
+  const parts: string[] = [];
+  if (a) parts.push(`AirPlay ${fmt(a)}ms`);
+  if (b) parts.push(`Sendspin ${fmt(b)}ms`);
+  return t("groups.delayBadge", { text: parts.join(" / ") });
+}
+
+async function openDelay(g: any): Promise<void> {
+  delayGroup.value = g;
+  try {
+    const r = await api.get(`/rest/api/v1/groups/${g.id}/delays`);
+    const d = r.data || {};
+    delayAirplay.value = Number(d.airplayMs ?? 0);
+    delaySendspin.value = Number(d.sendspinMs ?? 0);
+    if (typeof d.minMs === "number") delayMin.value = d.minMs;
+    if (typeof d.maxMs === "number") delayMax.value = d.maxMs;
+    if (typeof d.stepMs === "number" && d.stepMs > 0) delayStep.value = d.stepMs;
+  } catch (e) {
+    ElMessage.error(apiErrorText(e, t("groups.delayLoadFailed")));
+    return;
+  }
+  showDelay.value = true;
+}
+
+/** 一侧都不补偿(两侧归零)。 */
+function resetDelay(): void {
+  delayAirplay.value = 0;
+  delaySendspin.value = 0;
+}
+
+async function saveDelay(): Promise<void> {
+  const g = delayGroup.value;
+  if (!g) return;
+  delaySaving.value = true;
+  try {
+    const r = await api.put(`/rest/api/v1/groups/${g.id}/delays`, {
+      airplayMs: delayAirplay.value,
+      sendspinMs: delaySendspin.value,
+    });
+    showDelay.value = false;
+    if (Number(r.data?.rebuilt) > 0) ElMessage.success(t("groups.delaySavedReconnect"));
+    else ElMessage.success(t("groups.delaySaved"));
+  } catch (e) {
+    ElMessage.error(apiErrorText(e, t("groups.delaySaveFailed")));
+  } finally {
+    delaySaving.value = false;
+  }
 }
 
 /** 群组成员 → peerId 列表（`sendspin:<id>` / `airplay:<id>`）。 */
