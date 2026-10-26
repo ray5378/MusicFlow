@@ -17,6 +17,7 @@
 //   ② 返回值 = `max(各组累计交付样本)` 的**增量**,而不是「每批取 max」。
 import { describe, it, expect } from "vitest";
 import { SendspinGroup } from "../../src/services/sendspin/server.js";
+import { setNowUsOverride } from "../../src/utils/hostClock.js";
 
 /** 可控块编码器桩:按 plan 逐次产出样本数(0 = 本批仍在攒帧,不吐)。 */
 class PhaseEncoder {
@@ -193,5 +194,59 @@ describe("② 时间线 = max(累计) 的增量:相位错开不再多算", () =>
 
     g.resetPushMeter();
     expect(g.hasMeasuredRate()).toBe(false);
+  });
+});
+
+describe("③ 组内打戳 = 本组自身累计交付(桥在场多粒度回归,2026-10-26)", () => {
+  it("★ 桥在场(pcm:100 虚拟组)下 flac 帧间距 == 内容时长 85333µs(不被 25ms 批距拉偏)", async () => {
+    const g = groupWith({
+      "flac:100": new PhaseEncoder([0, 0, 0, 4096, 0, 0, 4096, 0, 0, 0, 4096]),
+      "pcm:100": new PhaseEncoder(Array(16).fill(1200)),
+    });
+    const flac = conn("dev-flac", "flac");
+    g.members.add(flac);
+    (g as any).bridges.set("bridge-1", { stop() {}, pushAudio() {} }); // 触发 BLK-01 虚拟组
+    setNowUsOverride(() => 0n); // 冻结墙钟:防 pruneRecent 按真实墙钟清掉测试戳的 ring
+    let tsUs = 0n;
+    const returns: number[] = [];
+    for (let i = 0; i < 11; i++) {
+      const r = await g.pushFrame(tsUs, PCM(1200));
+      returns.push(r);
+      tsUs += BigInt(Math.round((r / 48000) * 1_000_000));
+    }
+    // 游标语义不变:pcm:100 每 batch 交付 1200 → 峰值增量恒 1200(flac 吐帧也
+    // 不会放大 —— max(4096n, 1200k) 被 pcm 的连续累计盖住)
+    expect(returns).toEqual(Array(11).fill(1200));
+    // flac 帧戳 = 内容真实起点,间距 == 4096 样本时长 85333.33µs(容差 2µs:
+    // 批内逐帧累加/游标累加两条取整链有 ≤1µs 截差,远低于任何同步阈值)
+    const fts = flac.sent.map((s) => Number(s.ts));
+    expect(fts[0]).toBe(0);
+    for (let i = 1; i < fts.length; i++) {
+      expect(Math.abs(fts[i]! - fts[i - 1]! - 85333.33)).toBeLessThanOrEqual(2);
+    }
+    // pcm 虚拟组 ring 戳 = 自身累计(0,25000,...) —— 桥投递窗/水位依据,不回退
+    const ring = (g as any).recentByGroup.get("pcm:100") as Array<{ tsUs: bigint }>;
+    expect(ring.length).toBe(11);
+    expect(ring[0]!.tsUs).toBe(0n);
+    expect(ring[1]!.tsUs).toBe(25000n);
+    expect(ring[10]!.tsUs).toBe(250000n);
+    setNowUsOverride(null);
+    g.onBridgesCleared?.();
+  });
+
+  it("无桥对照组:flac 帧戳与有桥时完全一致(v4.6.76 语义等价,零回归)", async () => {
+    const g = groupWith({ "flac:100": new PhaseEncoder([0, 0, 0, 4096, 0, 0, 4096, 0, 0, 0, 4096]) });
+    const flac = conn("dev-flac", "flac");
+    g.members.add(flac);
+    let tsUs = 0n;
+    for (let i = 0; i < 11; i++) {
+      const r = await g.pushFrame(tsUs, PCM(1200));
+      tsUs += BigInt(Math.round((r / 48000) * 1_000_000));
+    }
+    const fts2 = flac.sent.map((s) => Number(s.ts));
+    expect(fts2[0]).toBe(0);
+    for (let i = 1; i < fts2.length; i++) {
+      expect(Math.abs(fts2[i]! - fts2[i - 1]! - 85333.33)).toBeLessThanOrEqual(2);
+    }
   });
 });

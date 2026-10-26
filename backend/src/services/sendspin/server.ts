@@ -1399,6 +1399,11 @@ export class SendspinGroup {
       const pcmKey = this.encoderKey("pcm", 100);
       if (!groups.has(pcmKey)) groups.set(pcmKey, { codec: "pcm", gain: 100, members: [] });
     }
+    // 组键消失(成员离场/编解码切换)即清其累计交付 —— 键重现时按当前峰值重登记
+    // (峰值基线语义),防止拿陈旧累计把时间戳打回过去。
+    for (const k of this.deliveredByGroup.keys()) {
+      if (!groups.has(k)) this.deliveredByGroup.delete(k);
+    }
 
     const before = this.deliveredPeak;
     let peak = before;
@@ -1427,7 +1432,20 @@ export class SendspinGroup {
 
       let sum = 0;
       let bytes = 0;
-      let ts = tsUs;
+      // 组内时间戳基线 = 本组自身累计交付的内容位置 + 本批游标相对批前峰值的跳变
+      // (常态 0;重锚批 = 锚点前跳量)。不能用共享游标 tsUs 直接打戳:游标 =
+      // max(各组累计交付),桥在场时 BLK-01 的 pcm:100 虚拟组每 batch(25ms)交付、
+      // flac 每 4096 样本(85.33ms)才交付,游标被 pcm 拉成连续步进 —— flac 帧若用
+      // 它打戳,ts 间距在 75/100ms 间振荡(内容恒 85.33ms),设备每块跨 5ms 硬同步
+      // 阈值,插静音/丢前缀 ≈7 次/秒(2026-10-26 真机:双机同步 Lost sync
+      // 14.68/64.7/89.7ms 三元组风暴,桥在场即现、移出即愈)。各按自身交付位置
+      // 打戳后 flac 间距恢复 == 内容时长(v4.6.76 语义),pcm 戳不变(本就等于
+      // 自身累计 = 内容真实起点,桥投递窗/水位依据不受影响)。
+      const peakBaseUs = BigInt(Math.round((before * 1_000_000) / SAMPLE_RATE));
+      const jumpUs = tsUs - peakBaseUs;
+      let ts =
+        BigInt(Math.round(((this.deliveredByGroup.get(key) ?? before) * 1_000_000) / SAMPLE_RATE)) +
+        jumpUs;
       // late-join 回填缓存:逐帧记下**本组真正发出去的 chunk** 及其真实起点时间戳。
       // 只有这里(唯一的下发点)能拿到「未来还没播的音频」,新成员加入时靠它补齐。
       const ring = this.ringFor(key);
