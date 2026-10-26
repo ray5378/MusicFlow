@@ -118,7 +118,10 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
       }
       case "setVolumeDb": {
         // dB 由主进程算好(DLNA 转发失败时的回落通道)。
-        this.runtime.setVolumeDb(String(p.deviceId), Number(p.db) || -144);
+        // 注意必须用 Number.isFinite 而非 ||:db=0(最大音量)是合法值,
+        // 曾被 || 短路成 -144(静音)。
+        const dbNum = Number(p.db);
+        this.runtime.setVolumeDb(String(p.deviceId), Number.isFinite(dbNum) ? dbNum : -144);
         return null;
       }
       case "bridgePrepare": {

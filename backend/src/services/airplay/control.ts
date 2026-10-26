@@ -522,6 +522,24 @@ async function startSession(opts: AirPlayCastOptions, seekSec?: number): Promise
     { deviceId: opts.deviceId },
   );
 
+  // Fix-1: 会话建立(RECORD 完成)后主动推一次初始音量 —— 此前只在音量**变更**
+  // 事件时才发 SET_PARAMETER(applyVolumeDb),起播会话从不推,接收端只能落在
+  // 自己的默认初始音量上(shairport-sync 为 -18dB,软件衰减后 loopback 实测
+  // -50.8dB 峰值,近乎无声)。音量取 volumeState 现值(0-100 标尺 → -30..0dB)。
+  // 与 M54 守卫同口径:Linkplay 等 DLNA 同 host 设备的音量走 RenderingControl
+  // 通道,SET_PARAMETER 被接收端忽略 —— 有 DLNA 同伴时绝不顺手再写一条
+  // (controlOrchestration 两条守卫用例钉的就是这个不变量)。
+  const st0 = volumeStateOf(opts.deviceId, false);
+  const initialDb = st0.muted || st0.volume === 0 ? -144 : degreesToDb(st0.volume);
+  if (dlnaPeerOfAirPlay(opts.deviceId)) {
+    log.info(`initial volume via DLNA peer, skip SET_PARAMETER push (vol=${st0.volume}%)`,
+      { deviceId: opts.deviceId });
+  } else {
+    player.setVolumeDb(initialDb);
+    log.info(`push initial volume: ${initialDb.toFixed(2)}dB (vol=${st0.volume}%)`,
+      { deviceId: opts.deviceId });
+  }
+
   // 重播输入同样走回环管道(同上:raw 直通会假 EOF/从头重连);回环地址幂等直通。
   // seek 走**完整重建**时,新会话的 RTP 时间线要按目标秒重锚(否则上报位置从 0 起算)。
   if (seekSec !== undefined && Number.isFinite(seekSec) && seekSec > 0) {

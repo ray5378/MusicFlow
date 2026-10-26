@@ -989,6 +989,7 @@ export class RaopPlayer {
       const gap = nowSend - this.stats.lastSendMs;
       if (gap > this.stats.maxGapMs) this.stats.maxGapMs = gap;
       this.stats.lastSendMs = nowSend;
+      if (idx === 1) log.info(`bridge first packet: deviationUs=${Number(nowUs() - sendAt)} (>=0 means not earlier than sendAt)`);
     }
     this.streaming = false;
     const s = this.stats;

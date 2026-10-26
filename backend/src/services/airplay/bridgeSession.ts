@@ -33,7 +33,26 @@ import { PolyphaseResampler, floatToPcmS16, pcmS16ToFloat } from "./resampler.js
 import { computeBridgeAnchors, driftCorrection, type BridgeAnchors } from "./bridgeMath.js";
 import { nowUs } from "../../utils/hostClock.js";
 import { RaopPlayer, CHUNK_LEN, type RaopSession } from "./raop.js";
+import { getAirPlayVolumeState, DEFAULT_AIRPLAY_VOLUME } from "./deviceState.js";
+import { degreesToDb } from "./decoder.js";
 import { createLogger } from "../../utils/logger.js";
+
+/** Fix-1: 桥会话建立(RECORD 完成)后主动推一次初始音量。此前桥会话只在音量
+ *  **变更**事件时才有 SET_PARAMETER(cast 路径 control.applyVolumeDb 不覆盖桥),
+ *  起播/重连会话从不推,接收端落默认初始音量(shairport-sync -18dB ⇒ loopback
+ *  实测 -50.8dB 峰值,近乎无声)。音量以 airplay_device_state 落库值为准
+ *  (读失败回退 80),0-100 标尺映射 -30..0dB;失败只记日志,不阻断起流。 */
+function pushInitialVolume(player: RaopPlayer, deviceId: string): void {
+  try {
+    const saved = getAirPlayVolumeState(deviceId);
+    const vol = saved?.volume ?? DEFAULT_AIRPLAY_VOLUME;
+    const db = saved?.muted || vol === 0 ? -144 : degreesToDb(vol);
+    player.setVolumeDb(db);
+    log.info(`push initial volume: ${db.toFixed(2)}dB (vol=${vol}%) device=${deviceId}`);
+  } catch (e: any) {
+    log.warn(`push initial volume failed: device=${deviceId} err=${e?.message || e}`);
+  }
+}
 
 const log = createLogger("AirPlay");
 
@@ -329,6 +348,7 @@ export class BridgeSession {
     this.raopSession = session;
     this.player = player;
     this.connected = true;
+    pushInitialVolume(player, this.opts.deviceId);
     // 首帧可能早于 connect 完成 —— 连接就绪后立即补判起流。
     void this.maybeBeginStream();
   }
@@ -385,6 +405,7 @@ export class BridgeSession {
     this.inBytes = 0;
     this.outBuf = Buffer.alloc(0);
     if (stale > 0) this.stats.staleFramesDropped += stale;
+    if (stale > 0) log.info(`[airplay-bridge] ${JSON.stringify({ ev: "stale", dev: this.deviceId, gen: generation >>> 0, reason, staleFrames: stale, totalStaleFrames: this.stats.staleFramesDropped })}`);
     this.generation = generation >>> 0;
     this.firstFrameTsUs = null;
     this.aligner = null;
@@ -538,6 +559,7 @@ export class BridgeSession {
       this.player = player;
       this.raopReconnectAttempt = 0;
       log.info(`[airplay-bridge] raop reconnected: device=${this.deviceId}(新 RECORD,等待新代次首帧重锚)`);
+      pushInitialVolume(player, this.deviceId);
       try { oldPlayer?.forceClose(); } catch { /* ignore */ }
     } catch (e) {
       try { player.forceClose(); } catch { /* ignore */ }
@@ -777,6 +799,7 @@ export class BridgeSessionManager {
     const session = new BridgeSession(opts);
     await session.start();
     this.sessions.set(opts.token, session);
+    log.info(`[airplay-bridge] sessions: prepare deviceId=${opts.deviceId} token=${opts.token} sessions=${this.sessions.size}`);
     return { listening: true, socketPath: session.listeningOn ?? opts.socketPath };
   }
 
@@ -784,6 +807,7 @@ export class BridgeSessionManager {
     const s = this.sessions.get(token);
     if (!s) return;
     this.sessions.delete(token);
+    log.info(`[airplay-bridge] sessions: stop token=${token} sessions=${this.sessions.size}`);
     await s.stop().catch(() => {});
   }
 

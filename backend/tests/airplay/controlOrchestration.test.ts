@@ -1205,6 +1205,9 @@ describe("音量 / 静音(含 DLNA 同 host 转发)", () => {
   it("音量:DLNA 转发成功 → 绝不顺手再写一次 SET_PARAMETER", async () => {
     // 顺序要紧:seedSession 会覆盖整个设备表,DLNA peer 必须在会话建好之后才挂得上。
     const player = await seedSession({ host: "192.168.1.30" });
+    // Fix-1:起播会话(RECORD 后)的初始音量推送是合法的 setVolumeDb 调用,
+    // 不属于本用例守护的「DLNA 转发成功后不得再写」窗口,清出窗外。
+    player.setVolumeDb.mockClear();
     S.getCachedDevices.mockReturnValue([{ id: "dlna-v", location: "http://192.168.1.30/x", renderingControlUrl: "rc" }]);
     await C.setAirPlayVolume(devId(), 42);
     expect(S.setDeviceVolume).toHaveBeenCalledTimes(1);
@@ -1251,6 +1254,8 @@ describe("音量 / 静音(含 DLNA 同 host 转发)", () => {
 
   it("静音:DLNA 转发成功 → 也不再顺手写 SET_PARAMETER", async () => {
     const player = await seedSession({ host: "192.168.1.30" });
+    // Fix-1:起播初始音量推送清出窗外(理由同上条用例)。
+    player.setVolumeDb.mockClear();
     S.getCachedDevices.mockReturnValue([{ id: "dlna-m", location: "http://192.168.1.30/x", renderingControlUrl: "rc" }]);
     await C.setAirPlayMuted(devId(), true);
     expect(S.setDeviceMute).toHaveBeenCalledTimes(1);
