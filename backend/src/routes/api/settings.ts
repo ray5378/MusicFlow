@@ -1,5 +1,6 @@
 // 自动生成 —— 由 index.ts 物理拆分而来（settings 域，19 条路由）。零逻辑改动。
 import type { Hono } from "hono";
+import { BRIDGE_AV_SHIFT_KEY, BRIDGE_AV_SHIFT_MAX_MS, BRIDGE_AV_SHIFT_MIN_MS, getBridgeAvShiftMs, parseBridgeAvShiftMs } from "../../services/airplay/bridgeCalib.js";
 import {
   BusinessErrorCode,
   PLAY_PREFERENCE_PLUGIN_ID,
@@ -206,6 +207,31 @@ app.put("/v1/playback-sources/settings", adminMiddleware, async (c) => {
   // 用的是同文件的 evictStreamFallbackCache;这里改的是全局顺序,故清全部而非单曲)。
   clearStreamFallbackCache();
   return c.json({ success: true, priority });
+});
+
+// ==================== AirPlay 桥 A/V 标定位移(接收端 hold depth 未知时的人工校准) ====================
+// 桥可听时刻 = startNtp + L_true,而 startNtp = A − L_assumed(RECORD 的 Audio-Latency,
+// 缺省 1s)。HiVi(MUZO 固件)不回 Audio-Latency ⇒ L_true 不可知 ⇒ 桥整体早/晚一个常量
+// (现场:切歌后 AirPlay 比 sendspin 快)。本键**只平移内容落点**,不动 latencyFrames
+// (那同时是设备保持深度与 SYNC 广告值,调小会 underrun)。正 = 桥延后,负 = 桥提前。
+// 生效时机:下一次桥会话建立(切歌/组重建/桥重连);anchor 事件的 anchorShiftUs 即生效值。
+app.get("/v1/bridge/av-shift", adminMiddleware, (c) => c.json({
+  success: true,
+  ms: getBridgeAvShiftMs(),
+  minMs: BRIDGE_AV_SHIFT_MIN_MS,
+  maxMs: BRIDGE_AV_SHIFT_MAX_MS,
+}));
+
+app.put("/v1/bridge/av-shift", adminMiddleware, async (c) => {
+  const body = await c.req.json().catch(() => ({} as any));
+  const raw = body?.ms;
+  if (typeof raw !== "number" || !Number.isFinite(raw)) {
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "ms 必须是数字(毫秒,负=提前)"), 400);
+  }
+  const ms = parseBridgeAvShiftMs(String(raw));
+  setSetting(BRIDGE_AV_SHIFT_KEY, String(ms));
+  createLogger("ADMIN").info(`[bridge] A/V 标定位移已更新 ms=${ms}(下一次桥会话建立生效)`);
+  return c.json({ success: true, ms });
 });
 
 // ==================== 预取与判官参数(内存预取 + 完整性判官) ====================

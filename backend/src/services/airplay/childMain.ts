@@ -146,7 +146,7 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
   // ------------------------- Phase 3:桥会话管理 -------------------------
 
   private async prepareBridge(args: BridgePrepareArgs): Promise<BridgePreparedResult> {
-    const { deviceId, socketPath, token, protocol, host, port, pk, et } = args;
+    const { deviceId, socketPath, token, protocol, host, port, pk, et, anchorShiftUs } = args;
     if (!deviceId || !socketPath || !token) {
       throw new Error("bridgePrepare: deviceId/socketPath/token 必填");
     }
@@ -163,6 +163,7 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
       port,
       pk,
       et,
+      anchorShiftUs,
       dry: !host,
     });
     this.requestSnapshot(true);

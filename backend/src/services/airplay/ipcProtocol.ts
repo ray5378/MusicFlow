@@ -50,6 +50,9 @@ export interface BridgePrepareArgs {
   port?: number;
   pk?: string;
   et?: string;
+  /** 桥 A/V 标定位移(微秒,正 = 桥整体延后)。主进程从 settings 读好下发
+   *  (子进程不碰 DB);进 planBridgeAnchor 平移「内容落点」,不改 latencyFrames。 */
+  anchorShiftUs?: number;
 }
 
 /** bridgePrepare 返回。Phase 3:桥会话已对设备完成 RTSP 握手(或 dry 模式仅 listener);

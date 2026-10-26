@@ -203,8 +203,10 @@ export function planBridgeAnchor(opts: {
   resampled: boolean;
   nowUs: bigint;
   warmLeadUs?: number;
+  /** A/V 标定位移(µs,正 = 内容落点整体后移 = 桥延后)。缺省 0(历史行为)。 */
+  anchorShiftUs?: number;
 }): BridgeAnchorPlan {
-  let anchorUs = opts.firstFrameTsUs;
+  let anchorUs = opts.firstFrameTsUs + BigInt(opts.anchorShiftUs ?? 0);
   const warmUs = BigInt(opts.warmLeadUs ?? BRIDGE_WARM_START_LEAD_US);
   const lUs = BigInt(Math.round((opts.latencyFrames / opts.rate) * 1e6));
   const safetyUs = BigInt(RAOP_SAFETY_MS * 1000);
@@ -243,6 +245,8 @@ export interface BridgeSessionOpts {
   et?: string;
   /** 测试/落盘干跑:不做 RTSP 握手,只起 listener 验证 48k→44.1k 生产管线。 */
   dry?: boolean;
+  /** A/V 标定位移(微秒,正 = 桥延后;主进程按 settings 下发)。见 bridgeCalib.ts。 */
+  anchorShiftUs?: number;
   /** producer 等料超时(ms),超时补静音块。默认 1000。 */
   waitDataMs?: number;
   /** stats tick 周期(ms,§10.5 每设备一行 JSON)。默认 2000;≤0 关闭。 */
@@ -504,6 +508,7 @@ export class BridgeSession {
       rate,
       resampled: this.resampler !== null,
       nowUs: nowUs(),
+      anchorShiftUs: this.opts.anchorShiftUs ?? 0,
     });
     if (plan.reAnchored) {
       log.warn(`[airplay-bridge] anchor unreachable: device=${this.deviceId} commanded=${this.firstFrameTsUs} now=${nowUs()} → re-anchor ${plan.anchorUs}(丢弃更早内容)`);

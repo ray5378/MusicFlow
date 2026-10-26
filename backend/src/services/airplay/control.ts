@@ -18,6 +18,7 @@ import { isAirPlayForkMode } from "./mode.js";
 import { airplaySupervisor } from "./supervisor.js";
 import { rpcFireAndForget } from "../rendererHost/front.js";
 import { getAirPlayDevice, getAirPlayDevices, onAirPlayEvent, startAirPlayDiscovery, stopAirPlayDiscovery, setAirPlayPersist, removeAirPlayDevice, type AirPlayDevice } from "./discovery.js";
+import { getBridgeAvShiftUs } from "./bridgeCalib.js";
 import { getEffectiveBaseUrl, getCachedDevices, setDeviceVolume, setDeviceMute, stopDevicePlayback, loopbackBase } from "../dlna/control.js";
 import { sqlite } from "../../db/index.js";
 import { createAirPlaySession } from "./session.js";
@@ -308,6 +309,8 @@ export async function bridgePrepareDevice(
     port: dev.port,
     pk: (dev as { pk?: string }).pk,
     et: (dev as { et?: string }).et,
+    // A/V 标定位移:HiVi 不回报 Audio-Latency ⇒ L_true 不可知,靠该值补齐常量差。
+    anchorShiftUs: getBridgeAvShiftUs(),
   });
   registerBridgeOwner(deviceId, token);
   return r;
