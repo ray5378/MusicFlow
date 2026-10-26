@@ -25,7 +25,9 @@ import { getGroupDelays } from "./delayCalib.js";
  *  2026-10-24 起 DLNA 禁止入组 —— 设备自拉流无共享时间线)。 */
 export type GroupMemberKind = "airplay" | "dlna" | "sendspin";
 
-/** 拆成员 id 为 kind＋裸 id。`group:`/`local:` 前缀返回 null(组不能套组/含本机)。 */
+/** 拆成员 id 为 kind＋裸 id。`group:`/`local:` 前缀返回 null(组不能套组/含本机);
+ *  含冒号但没命中任何已知前缀的**未知命名空间**同样返回 null —— 不得落进裸 id 兜底,
+ *  否则会被当成 DLNA 拒收、排障时误导成「用户在加 DLNA 设备」(2026-10-26)。 */
 export function splitMemberId(m: string): { kind: GroupMemberKind; id: string } | null {
   if (typeof m !== "string" || !m) return null;
   if (m.startsWith("group:") || m.startsWith("local:")) return null;
@@ -41,6 +43,9 @@ export function splitMemberId(m: string): { kind: GroupMemberKind; id: string } 
     const id = m.slice("dlna:".length);
     return id ? { kind: "dlna", id } : null;
   }
+  // 含冒号但没命中任何已知前缀 ⇒ **未知命名空间**,不是历史裸 id(裸 id 不含冒号)。
+  // 必须在兜底之前返回 null:否则它会被当作 DLNA,错报文变成「DLNA 设备不支持加入群组」。
+  if (m.includes(":")) return null;
   return { kind: "dlna", id: m }; // 裸 id = 历史数据,视为 DLNA(仅旧组可解析,新提交在 assertMembersAvailable 拒收)
 }
 
@@ -53,7 +58,7 @@ export interface PlayerGroup {
   id: string;
   ownerUserId: string; // 创建者;管理员可为空串(历史数据)或管理员 id
   name: string;
-  memberIds: string[]; // dlna deviceIds
+  memberIds: string[]; // 命名空间 id:airplay:<deviceId> / sendspin:<clientId>(裸 id 仅历史数据)
   /** 组级音量 0-100:与成员设备音量独立,空组/全离线也持久(重启恢复)。 */
   volume: number;
   createdAt: string;
@@ -201,11 +206,26 @@ export class GroupManager extends EventEmitter {
     return g;
   }
 
-  /** 全量替换成员(前端勾选框提交完整列表)。设备可同时属于多个组,这里只改本组归属。 */
+  /** 全量替换成员(前端勾选框提交完整列表)。设备可同时属于多个组,这里只改本组归属。
+   *
+   *  **只校验本次「相对现有成员新出现」的部分**(2026-10-26 修正):组里只要还剩一个历史
+   *  DLNA 成员,校验全量列表就会让「加减任何成员」都 400,而有 2 个以上时逐个删也清不干净
+   *  ⇒ 组被永久锁死、用户无法自救。历史成员是既有事实,不该拖累本次提交。
+   *  结构与重复校验因此**显式**做在提交列表上 —— 改成只校验差集后,这两条原本由
+   *  assertMembersAvailable 顺带完成的检查会漏(尤其是「已在组内的成员被重复提交」)。 */
   setMembers(id: string, memberIds: string[]): PlayerGroup | undefined {
     const g = this.groups.get(id);
     if (!g) return undefined;
-    this.assertMembersAvailable(memberIds);
+    // 非数组入参(null / "abc"):不改成员、正常返回 —— 不得把字符串拆成字符塞进成员。
+    if (!Array.isArray(memberIds)) return g;
+    const seen = new Set<string>();
+    for (const m of memberIds) {
+      if (typeof m !== "string") throw new Error("成员必须是字符串 id");
+      if (seen.has(m)) throw new Error("成员列表不能重复");
+      seen.add(m);
+    }
+    const newOnes = memberIds.filter(m => !g.memberIds.includes(m));
+    this.assertMembersAvailable(newOnes);
     g.memberIds = [...memberIds];
     g.updatedAt = new Date().toISOString();
     this.persist(g);
@@ -235,7 +255,9 @@ export class GroupManager extends EventEmitter {
       kept.push(m);
       added.push(m);
     }
-    this.assertMembersAvailable(kept);
+    // 只校验本次真正新加入的差集(added 已排除非法入参与重复项):组内历史 DLNA 成员
+    // 不再让「删掉任意成员」被 400 —— 否则有 ≥2 个历史 DLNA 成员时逐个删也清不干净。
+    this.assertMembersAvailable(added);
     g.memberIds = kept;
     g.updatedAt = new Date().toISOString();
     this.persist(g);
@@ -344,8 +366,9 @@ export class GroupManager extends EventEmitter {
       if (seen.has(m)) throw new Error("成员列表不能重复");
       seen.add(m);
       const split = splitMemberId(m);
-      // 组不能套组/含本机(旧报错口径保留)。
-      if (!split) throw new Error(`成员 ${m} 不是 DLNA 设备`);
+      // split === null 的来源有三种:组套组/含本机(`group:`/`local:`)、未知命名空间(`foo:xxx`)、
+      // 前缀后为空(`xxx:`)。文案必须中性:旧文案「不是 DLNA 设备」会把未知前缀误报成 DLNA。
+      if (!split) throw new Error(`成员 ${m} 不是合法的群组成员(需 airplay:<id> 或 sendspin:<id>)`);
       if (split.kind === "sendspin") {
         // sendspin 成员只校验格式(在线状态动态解析):组可持久化,设备离线仍可建组。
         continue;

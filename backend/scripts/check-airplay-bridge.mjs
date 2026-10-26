@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-// ==================== AirPlay/Sendspin 桥接静态守卫(Phase 8 · 14 条不变量) ====================
+// ==================== AirPlay/Sendspin 桥接静态守卫(Phase 8 · 17 条不变量) ====================
 //
 // 背景:AirPlay 1/2 与 Sendspin 桥接是一条「全静默」链路 —— 时序锚点用错时钟源、缓冲深度被
 // 归零、组公共 send_ahead 被桥 lead 污染、桥集合被并进 WS 成员集合、播放结束误清桥……
-// 这些缺陷**都不报错**,只表现为「声音慢 3.7 秒」「偶发 underrun」「切歌后整组无声」,
-// 靠真机 A/B 才能定位,成本极高。本守卫把 14 条已踩过的坑固化成静态不变量,CI 里直接失败。
+// 这些缺陷**都不报错**,只表现为「声音慢 3.7 秒」「偶发 underrun」「切歌后整组无声」「延迟调了没反应」,
+// 靠真机 A/B 才能定位,成本极高。本守卫把 17 条已踩过的坑固化成静态不变量,CI 里直接失败。
 //
 // 🔴 硬性要求 1(项目里踩过的坑):**只认非注释行**。
 //   源码里大量「⚠️ 不得出现 XXX」的文档性注释,若直接对原文做正则,守卫会被自己的注释查红。
@@ -15,7 +15,7 @@
 // 🔴 硬性要求 2:每条断言都必须**能真的失败**,且失败时**只红那一条**。
 //   实现时一条断言 = 一个 check(),互不共享判定中间量;每条都做过最小违规反证。
 //
-// 14 条:
+// 17 条:
 //   ① 锚点链不得用墙钟:tsUs / RAOP NTP 必须同源于 host 单调时钟;
 //   ② latencyFrames 不得归零(接收端播放保持深度),不得 Math.min(...,0) 钳零;
 //   ③ 常量唯一源 + 取值钉死(147/160、4.5M/2.5M、384K/1.5M、0.3627…);
@@ -29,7 +29,10 @@
 //   ⑪ generation 必须取二元组 epoch * 1_000_003 + timelineReseed;rehost 不得动 epoch;
 //   ⑫ RAOP RECORD 后四个锚点必须同域:baseTs 在赋值列表里、先 >>> 0 再 % CHUNK_LEN、禁用 & 0xFFFFFFFF;
 //   ⑬ 不得伪造 acked(设备播放确认);上报字段名必须是 scheduledAnchorUs;
-//   ⑭ 桥 socket 路径必须是 mfab/<短 hash>(deviceId/token 只进 hash,不进文件名)。
+//   ⑭ 桥 socket 路径必须是 mfab/<短 hash>(deviceId/token 只进 hash,不进文件名);
+//   ⑮ 锚点一次性:aligner 非空必须早退(改群组延迟只能重建桥,热改=整组飘音);
+//   ⑯ 群延迟补偿只有一个落点(firstFrameTsUs + anchorShiftUs),不得两头各加一次;
+//   ⑰ RAOP 重连退避必须双层封顶(指数项 + 抖动项,否则重连风暴/永不重连)。
 //
 // 零依赖 node 脚本,挂 ci.yml 的 AirPlay 守卫 job(与既有 check-airplay-*.mjs 同构)。
 import { readFileSync, readdirSync } from "node:fs";
@@ -625,9 +628,79 @@ console.log("===== ⑭ 桥 socket 路径必须是 mfab/<短 hash>(deviceId/token
 }
 
 // ---------------------------------------------------------------------------
+// ⑮ 锚点一次性(aligner 非空即不再起流)
+// ---------------------------------------------------------------------------
+// 2026-10-26 补:这是「改群组延迟必须重建桥」的**根因**。锚点在 RECORD 后一次算死,
+// 若有人把早退改成「可以热改锚点」却忘了把旧 aligner 清掉,表现是:延迟调了没反应,
+// 或者新旧锚点同时在用 → 整组缓慢飘音。两种都不报错,只有真机/示波器能看出来。
+console.log("===== ⑮ 锚点一次性:aligner 非空必须早退(改延迟只能重建桥) =====");
+{
+  const bs = code(BRIDGE_SESSION);
+  check(
+    "maybeBeginStream 保留锚点一次性守卫:if (this.aligner !== null) return;",
+    count(bs, "if (this.aligner !== null) return;") === 1,
+    `命中 ${count(bs, "if (this.aligner !== null) return;")} 次(应恰好 1)`,
+  );
+  const ctor = countInSrc("new BridgeTimelineAligner(");
+  check(
+    "BridgeTimelineAligner 全仓只在一处被创建(锚点只落一次,不存在第二套对齐器)",
+    ctor.n === 1,
+    `创建点 ${ctor.n} 处:${ctor.where}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ⑯ 群延迟补偿只有一个落点
+// ---------------------------------------------------------------------------
+// 2026-10-26 补:按组 A/V 延迟补偿落地后,这个偏移**只能**加在锚点算术里(:209)。
+// 若同时在 sendspin 侧也加 anchorShift(或 airplay 侧也加 dspDelay),同一偏移会被
+// 两头各加一次 = 双倍补偿,表现是「调 100ms 实际偏 200ms」,用户只会觉得"这功能不准"。
+console.log("===== ⑯ 群延迟补偿只有一个落点(firstFrameTsUs + anchorShiftUs) =====");
+{
+  const bs = code(BRIDGE_SESSION);
+  check(
+    "planBridgeAnchor 内锚点 = opts.firstFrameTsUs + BigInt(opts.anchorShiftUs ?? 0)",
+    /let\s+anchorUs\s*=\s*opts\.firstFrameTsUs\s*\+\s*BigInt\(\s*opts\.anchorShiftUs\s*\?\?\s*0\s*\)/.test(bs),
+    "未找到 `let anchorUs = opts.firstFrameTsUs + BigInt(opts.anchorShiftUs ?? 0)` —— 补偿落点被改/被删",
+  );
+  const inSpin = matchInSrc(/anchorShift/i, (p) => p.startsWith(`${SRC}/services/sendspin/`));
+  const inAirplay = matchInSrc(/dspDelay/i, (p) => p.startsWith(`${SRC}/services/airplay/`));
+  check(
+    "同一偏移不得两头各加一次(sendspin/** 无 anchorShift,airplay/** 无 dspDelay)",
+    inSpin.n === 0 && inAirplay.n === 0,
+    `sendspin 侧 anchorShift=${inSpin.n} 处(${inSpin.where});airplay 侧 dspDelay=${inAirplay.n} 处(${inAirplay.where})`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ⑰ RAOP 重连退避必须双层封顶
+// ---------------------------------------------------------------------------
+// 2026-10-26 补:退避公式少一层 clamp 都不会报错 —— 指数项不封顶 = 设备离线久了重连间隔
+// 指数爆炸(等于永不重连,用户看到的是"设备回来也不自动恢复");抖动项不封顶 = 实际间隔
+// 超上限 ±20%(2026-10-23 桥队列被打满 → 重连风暴的直接成因之一)。
+console.log("===== ⑰ RAOP 重连退避必须双层封顶(指数项与抖动项都 clamp) =====");
+{
+  const bsSrc = code(`${SRC}/services/airplay/bridgeSource.ts`);
+  check(
+    "退避 = min(maxMs, base·2^(n-1)) 再 min(maxMs, exp·jitter)(两层都封顶)",
+    /Math\.min\(\s*maxMs\s*,\s*baseMs\s*\*\s*2\s*\*\*\s*\(\s*n\s*-\s*1\s*\)\s*\)/.test(bsSrc) &&
+      /Math\.min\(\s*maxMs\s*,\s*exp\s*\*\s*jitter\s*\)/.test(bsSrc),
+    "退避封顶缺失:base·2^(n-1) 无上限 ⇒ 重连间隔指数爆炸(等于永不重连)",
+  );
+  const rates = code(RATES);
+  const decl = countInSrc("BRIDGE_BACKOFF_MAX_MS =");
+  const pinned = /export\s+const\s+BRIDGE_BACKOFF_MAX_MS\s*=\s*30_000\s*;/.test(rates);
+  check(
+    "BRIDGE_BACKOFF_MAX_MS = 30_000 且全仓只声明一次",
+    pinned && decl.n === 1,
+    `rates.ts 声明=${pinned} 全仓声明 ${decl.n} 处(${decl.where})`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 if (failures.length) {
   console.error(`\n[AirPlay 桥接守卫] FAIL:${failures.length} 项`);
   for (const f of failures) console.error("  · " + f);
   process.exit(1);
 }
-console.log("\n[AirPlay 桥接守卫] 14 条全部通过");
+console.log("\n[AirPlay 桥接守卫] 17 条全部通过");

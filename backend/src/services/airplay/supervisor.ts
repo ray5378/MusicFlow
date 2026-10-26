@@ -11,7 +11,7 @@
 // 宿主的通用部分(fork / 握手 / 看门狗 / 退避重启 / 优雅 stop / rpc / 镜像 / 事件分发)
 // 在 `../rendererHost`;本文件只声明 AirPlay 的业务接线。
 //
-// 开关见 mode.ts:默认 in-proc(MUSICFLOW_AIRPLAY_FORK=1 才启用 fork)。
+// 开关见 mode.ts:20 `defaultFork: true`(默认 fork;MUSICFLOW_AIRPLAY_INPROC=1 才回落 in-proc)。
 import { RendererHostSupervisor, resolveChildEntry } from "../rendererHost/index.js";
 import type {
   AirplaySnapshot,

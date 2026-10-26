@@ -90,8 +90,8 @@ describe("GroupManager", () => {
   });
 
   it("创建组:非设备前缀的成员抛错(组不能套组)", () => {
-    expect(() => gm.createGroup("组", ["group:g1"])).toThrow("不是 DLNA 设备");
-    expect(() => gm.createGroup("组", ["local:u1"])).toThrow("不是 DLNA 设备");
+    expect(() => gm.createGroup("组", ["group:g1"])).toThrow("不是合法的群组成员");
+    expect(() => gm.createGroup("组", ["local:u1"])).toThrow("不是合法的群组成员");
   });
 
   it("多组约束:一台设备可同时加入多个组,且可独立从任一组移除", () => {

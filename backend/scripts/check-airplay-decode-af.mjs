@@ -98,6 +98,25 @@ check(
   "sessionRuntime.ts 未从 decoder.js 引入 spawnDecoder",
 );
 
+console.log("===== R6 重采样器不得再归一(它是解码侧的另一半,同样会二次压缩) =====");
+// 2026-10-26 补:R1–R3 只钉了 decoder.ts,但解码侧的**另一半**是 48k→44.1k 的重采样器。
+// 若有人在这里补一段 loudnorm/limiter(理由是「重采样后要重新压一下」),同一段音频会被
+// 归一两次,且仍绕开「唯一发生地=出流侧」的契约 —— 不报错,只是听感变差,手测极难发现。
+{
+  const resCode = stripComments(read("backend/src/services/airplay/resampler.ts"));
+  const trio = ["loudnorm", "alimiter", "volume="].map((k) => [k, count(resCode, k)]);
+  check(
+    "resampler.ts 剥注释后无 loudnorm / alimiter / volume= 增益段",
+    trio.every(([, n]) => n === 0),
+    trio.filter(([, n]) => n > 0).map(([k, n]) => `${k}×${n}`).join(", "),
+  );
+  check(
+    "resampler.ts 不引用归一/DSP 符号(resolveLoudnessAf / playerDspFilters)",
+    count(resCode, "resolveLoudnessAf") === 0 && count(resCode, "playerDspFilters") === 0,
+    `resolveLoudnessAf×${count(resCode, "resolveLoudnessAf")} playerDspFilters×${count(resCode, "playerDspFilters")}`,
+  );
+}
+
 console.log("");
 if (failures.length) {
   console.log(`✗ AirPlay 解码 af 守卫失败 ${failures.length} 项:`);

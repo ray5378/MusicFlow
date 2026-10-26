@@ -92,7 +92,7 @@ name: ci
 #      必须是「有 `_airplay` 记录 && protovers ≥ 1.1」;`_airplay` down 必须撤能力而设备
 #      可用性仍归 `_raop`;AP1 投屏入口(castToAirPlayDevice)不得提前分流。破坏全静默:
 #      多出一批投不了的设备 / 所有设备都被判成 AP2 / 关掉 AP2 仍长期显示支持。
-#  25. AirPlay ↔ Sendspin 桥接守卫(scripts/check-airplay-bridge.mjs)——Phase 8 的 14 条不变量:
+#  25. AirPlay ↔ Sendspin 桥接守卫(scripts/check-airplay-bridge.mjs)——Phase 8 的 17 条不变量:
 #      ① 锚点链只许 host µs(hrtime.bigint)不得混 Date.now/performance.now/Unix ms;② latencyFrames
 #      不得下沉归零;③ 时序常量唯一源且取值钉死(48000/44100、147/160、冷启动 lead 4500/2500ms、
 #      桥缓冲上下限 384K/1536K、ANCHOR_SAFE_LEAD_US、0.3627);④ PCM 不得走 JSON/base64 IPC;
@@ -104,6 +104,20 @@ name: ci
 #      ⑬ 不得伪造 acked、上报字段名必须 scheduledAnchorUs;⑭ 桥 socket 路径必须 mfab/<短 hash>,
 #      deviceId/token 只进 sha1 输入不进文件名。破坏全是静默的:先晚 3.7 秒才出声、起播把桥会话
 #      清掉只剩一路、锚点被墙钟回拨带歪后整组飘音、桥音频被组增益二次处理。
+#      2026-10-26 追加 ⑮⑯⑰:锚点一次性(aligner 非空必须早退 —— 改群组延迟只能重建桥)、
+#      群延迟补偿只有一个落点(firstFrameTsUs + anchorShiftUs,不得两头各加一次 = 双倍补偿)、
+#      RAOP 重连退避双层封顶(指数项不封顶 ⇒ 永不重连;抖动项不封顶 ⇒ 重连风暴)。
+#  26. 群组不变量守卫(scripts/check-group-invariants.mjs)——G1–G12:成员命名空间原样透传
+#      (剥 dlna: 前缀 ⇒ 服务端按裸 id 比对、成员删不掉)、DLNA 禁入组(设备自拉流、组内没有
+#      共享时间线)、起播即落位(AirPlay 新成员起点必须编进本次 cast,先起播再 seek 会让
+#      单会话设备永久等待)、成员位置取 leader 真实落点(不得用墙钟/会话时长推算)、出流单泵
+#      (pushFrame 唯一入口 + 桥侧不得自建选歌/判死分支)、组内换源上限 3 与判死负缓存 5 分钟、
+#      延迟补偿只加在成员下发戳(污染 ring 的 tsUs ⇒ 桥投递窗口/水位/late-join 一起偏 = 整组飘音)、
+#      watchdog 悬挂恢复必须走 resumeActive→playCurrent、内容同步 tick 判据字段仍在、
+#      延迟参数域 ±30s/步进 10ms 单一源 + 写入必经 clamp + AirPlay 变更必须重建组桥、
+#      延迟只在读视图不进 PlayerGroup 实体/persist、重复成员两种语义(全量 throw / 增量 no-op)。
+#      破坏全是静默的:成员删不掉、两台机器各放各的、延迟调了没反应或偏一倍、整组飘音、
+#      一首坏源让整组循环不收敛。断言只锚唯一表达式前缀、不锚参数个数,实现改签名不会假红。
 # 镜像发布仍由 build.yml(v* tag)负责,与本 CI 互不影响。
 
 on:
@@ -335,6 +349,17 @@ jobs:
       - uses: actions/checkout@v4
       - name: 校验 workflow 与守卫脚本引用的仓库内路径均存在
         run: node backend/scripts/check-workflow-paths.mjs
+
+  # 群组维度(2026-10-26 新增):G1–G12 全部是**静默失效**类契约 —— 断了不报错,只表现为
+  # 「成员删不掉」「两台机器各放各的」「延迟调了没反应 / 偏一倍」「整组飘音」「一首坏源整组循环」。
+  # 与 airplay-*-guard 同构:零依赖 node 脚本,只读源码文本(先剥注释),不启动服务、不连设备。
+  group-invariants-guard:
+    name: "群组不变量守卫(G1–G12:成员前缀/DLNA 禁入/起播即落位/单泵/延迟补偿口径)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 校验群组 12 条不变量(成员命名空间/位置基准/出流单泵/延迟补偿/持久化口径)
+        run: node backend/scripts/check-group-invariants.mjs
 
   # batch48/batch49 的输出格式链路(采样率 + 位深)。这批契约的共同点是**静默失效**:
   # 断了不报错、不会让任何既有测试变红,只让听感/体积悄悄变差,或让老库升级后

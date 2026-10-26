@@ -121,7 +121,11 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
         // 注意必须用 Number.isFinite 而非 ||:db=0(最大音量)是合法值,
         // 曾被 || 短路成 -144(静音)。
         const dbNum = Number(p.db);
-        this.runtime.setVolumeDb(String(p.deviceId), Number.isFinite(dbNum) ? dbNum : -144);
+        const db = Number.isFinite(dbNum) ? dbNum : -144;
+        // 桥占用设备的会话不在 runtime.sessions 里(桥会话表是本类的
+        // bridgeSessions),native 未命中时必须回落给桥,否则桥设备音量恒落空。
+        const ok = this.runtime.setVolumeDb(String(p.deviceId), db);
+        if (!ok) this.bridgeSessions.setVolumeDb(String(p.deviceId), db);
         return null;
       }
       case "bridgePrepare": {

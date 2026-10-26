@@ -766,6 +766,18 @@ export class BridgeSession {
     }
   }
 
+  /** 运行期下发音量(dB)。**桥占用设备音量 RPC 的唯一落点**:
+   *  主进程 `applyVolumeDb` → 子进程 `setVolumeDb` op → native 会话未命中时回落到这里。
+   *  player 在 RECORD 完成前为 null(`:279` 声明、`:372` 赋值),停止/重连期间同样可能为 null
+   *  ⇒ 用可选链;失败只 warn,绝不打断推流(音量是旁路能力,不能因它拆桥会话)。 */
+  setVolumeDb(db: number): void {
+    try {
+      this.player?.setVolumeDb(db);
+    } catch (e: any) {
+      log.warn(`[airplay-bridge] setVolumeDb failed: device=${this.deviceId} db=${db} err=${e?.message || e}`);
+    }
+  }
+
   /** 诊断快照(bridgeStatus op 用)。 */
   snapshot(): {
     deviceId: string;
@@ -812,6 +824,19 @@ export class BridgeSessionManager {
 
   has(deviceId: string): boolean {
     for (const s of this.sessions.values()) if (s.deviceId === deviceId) return true;
+    return false;
+  }
+
+  /** 按 deviceId 下发音量到桥会话(桥占用设备的 volume RPC 落点)。
+   *  命中即下发并返回 true;未命中返回 false,调用方据此判定「桥上也没人接」。
+   *  同一 deviceId 只可能有一座桥(`prepare` 会先拆同 deviceId 旧会话)。 */
+  setVolumeDb(deviceId: string, db: number): boolean {
+    for (const s of this.sessions.values()) {
+      if (s.deviceId === deviceId) {
+        s.setVolumeDb(db);
+        return true;
+      }
+    }
     return false;
   }
 

@@ -1,5 +1,62 @@
 # MusicFlow AirPlay 1/2 × Sendspin 桥接：最终实施方案（开发执行版）
 
+## 文档关系（先读这一块）
+
+> **本文件的角色**：**历史方案（Phase 计划），不是事实来源**。它记录的是「为什么这样设计 + 分阶段怎么实施」，以及六轮复核 / 两轮 red-team 终审推翻与修正的索引。**落地与否一律以文首「落地状态总表」和三份权威文档为准**；本文的 Phase 条目、行号、字段名可能已过期。
+
+**5 份相关文档（都在 `docs/`，链接可直接点开）**
+
+| 文档 | 角色 | 一句话用途 |
+|---|---|---|
+| [airplay-权威方案文档.md](./airplay-权威方案文档.md) | 权威现状 | AirPlay/RAOP 协议正确做法、airplay 子进程、桥接环（帧格式/锚点/stats）与 AirPlay 侧守卫 |
+| [sendspin-权威方案文档.md](./sendspin-权威方案文档.md) | 权威现状 | Sendspin 协议链路、FLAC 链路、ESPHome 设备端配置、多房间组与组泵 |
+| [group-权威方案文档.md](./group-权威方案文档.md) | 权威现状 | 群组数据模型与生命周期、选歌硬约束、出流双路、组成员、延迟补偿 |
+| [AirPlay1-2与Sendspin桥接-最终实施方案.md](./AirPlay1-2与Sendspin桥接-最终实施方案.md) | **历史方案（Phase 计划）** | 桥接的开发执行版：Phase 0~8 分阶段实施、接口、守卫矩阵、逐轮审计修正索引 |
+| [AirPlay1-2与Sendspin桥接落地方案.md](./AirPlay1-2与Sendspin桥接落地方案.md) | **历史方案** | 桥接的调研与落地方案：MA 精要、MusicFlow 现状盘点、Phase 拆解、230 模拟验收 |
+
+**硬口径**：**历史方案文档不再作为事实来源；任何冲突以三份权威文档为准。** 历史方案文档只保留「为什么这样设计」与「当时踩了什么坑 / 推翻了什么」两类价值 —— 其中的 Phase 条目、行号、字段名一律可能过期。
+
+**三份权威文档的分工边界（排障时先按这张表定位文档）**
+
+| 问题域 | 归属文档 |
+|---|---|
+| 协议（RTSP / RAOP / AP2 报文、Sendspin 帧与握手配对）、airplay 子进程模型、桥接环（28B 帧 / 锚点公式 / `stats` 判据） | [airplay-权威方案文档.md](./airplay-权威方案文档.md) |
+| 设备协议（Sendspin 连接 / 编码协商 / 预填充水位 / pacing / 音量）与组泵（`SendspinGroup.pushFrame`、`pcm:100` 编码组、晚加入回填） | [sendspin-权威方案文档.md](./sendspin-权威方案文档.md) |
+| 组成员与命名空间、生命周期状态机、选歌推进硬约束、出流双路（组泵 / AirPlay 桥）、延迟补偿、组验收判据与失败速查 | [group-权威方案文档.md](./group-权威方案文档.md) |
+
+---
+
+## 落地状态总表（群组 / 组播 / 混合组 / 组成员 / 延迟补偿）
+
+> 判定时间 **2026-10-26**，基线 `a9f900f`（含 v4.6.77 = `0ed0892`）。三态口径：`✅ 已落地`（有代码或提交可指）／`⏳ 待排期`（缺口明确、尚未实现）／`⊘ 已裁定例外`（原文前提不成立，或已明确决定不做）。判定方式：能看代码就看代码，不看记忆；权威现状见 [group-权威方案文档.md](./group-权威方案文档.md)。
+
+| 条目 | 状态 | 证据 |
+|---|---|---|
+| 路由快照：`bridge` / `legacy-cast` 二选一，流内不切 | ✅ 已落地 | `group/protocolPlayer.ts:313-343`（`playMedia` 内快照 + `activeBridgeRoutes.set`） |
+| 混合组（在线 sendspin>0 且在线 AirPlay>0）走桥；纯 AirPlay 走逐设备 cast | ✅ 已落地 | `group/protocolPlayer.ts:324`（`spinOnline.length > 0 ? prepareBridgeRoute(apOnline) : null`）+ `:339-343` |
+| 桥 `prepare` 单设备失败 ⇒ 该设备本流回落 solo cast（`soloFallback`） | ✅ 已落地 | `group/protocolPlayer.ts:296-308`（逐设备 try/catch → `soloFallback.push`） |
+| 全成员 cast 失败 ⇒ **先拆桥路由再抛**（原「孤儿桥/设备被占只能重启」缺陷） | ✅ 已修复（本批） | `group/protocolPlayer.ts:346-361`（洞 D1：`:354` 先 `teardownBridgeRoute()`、回收失败只 warn，`:360` 再抛原始错误） |
+| 流内成员变化：加入 `bridgeJoinMember`（泵侧 sync 失败回滚半挂 route）/ 摘除 `bridgeLeaveMember` | ✅ 已落地 | `group/protocolPlayer.ts:38`（泵侧 sync 失败回滚 `:56-67`）、`:74 bridgeLeaveMember`；`activeBridgeRoutes` 为单一事实源 |
+| 组成员准入校验（拒 `dlna:`+裸 id+`group:`+`local:`+重复+非字符串） | ✅ 已落地 | `group/index.ts:361-385` `assertMembersAvailable`（`:366` 重复判定、`:382-383` dlna 抛错），`setMembers` 与 `applyMemberDelta` 两入口都调用。**准入只作用于「相对现有成员新加入」的部分**（`setMembers` 校验 `newOnes` `:227-228`、`applyMemberDelta` 校验 `added` `:251-260`；`createGroup` 仍全量 `:167`）——**历史成员不拖累本次提交**，否则组里剩 ≥1 个历史 DLNA 成员时加减任何成员都 400、≥2 个时逐个删也清不干净 ⇒ 组被永久锁死；提交列表本身的结构/重复校验改由入口显式做（`setMembers:221-226`） |
+| 「`setMembers` 不校验 kind / allowlist 尚未加」 | ⊘ 已裁定例外（**前提不成立**） | 同上一行：两入口都在准入前先做差集（`newOnes`/`added`），校验确实生效，不需要额外 allowlist；差集是本意（见上一行的「否则组被锁死」） |
+| 摘组不留孤儿桥成员（`detachFromActiveGroups` 补 airplay 分支） | ✅ 已落地 | `routes/api/shared.ts:651-665`（`:654` 已允许 `airplay`） |
+| 桥占用设备与 native cast 互斥（owner=bridge）、`stopAirPlaySessionsForHost` 不误杀桥 | ✅ 已落地 | `airplay/control.ts:274-290`（`bridgeOwners`）、`:373-381`、`:836-839` |
+| 状态派生：桥路由下位置/时长/播放态一律从泵派生（leader 是 AirPlay 也不读 solo 会话） | ✅ 已落地 | `group/protocolPlayer.ts:397+` `pollState` |
+| 虚拟 `pcm:100` 组：只有桥、没有真实 pcm 成员时仍产出并推进 `deliveredPeak` | ✅ 已落地 | `sendspin/server.ts:1452-1467`（组内时间戳基线注释 + `deliveredByGroup` 打戳） |
+| 组内单泵、无第二条选歌路径 | ✅ 已落地 | 见 [group-权威方案文档.md](./group-权威方案文档.md) §3.5 |
+| 混合组起播 lead 从 500ms 抬到 1.75s（否则每首歌丢开头 ~1s） | ✅ 已落地 | commit `1b2a57b`；契约反转见 [group-权威方案文档.md](./group-权威方案文档.md) §7.1 |
+| 组 A/V 延迟补偿：两值 `airplay_delay_ms` / `sendspin_delay_ms`，±30000ms、步进 10ms、正数=该侧更晚出声 | ✅ 已落地（v4.6.77） | commit `0ed0892`；常量 `services/group/delayCalib.ts:20-23`；接口 `GET/PUT /v1/groups/:id/delays`（`routes/api/groups.ts:107-160`）；AirPlay 侧改值必须重建该组桥（~1–2s 静音），Sendspin 侧帧级实时。详见 [group-权威方案文档.md](./group-权威方案文档.md) §6 |
+| 延迟补偿范围口径「±2000ms」 | ⊘ 已裁定例外（**该数值是 `bridgeCalib` 全局位移的范围**，不是按组补偿） | 按组：`GROUP_DELAY_MIN_MS/MAX_MS = ∓30000`（`delayCalib.ts:20-21`；文件头 `:3` 与 `clampGroupDelayMs` docstring `:41` 现均写 ±30000，历史「±2000」过期注释已于 2026-10-26 随 O2 修复清除）；全局兜底 `bridge.avShiftMs` 才是 ±2000（`airplay/bridgeCalib.ts:21-22`） |
+| 桥会话音量路由（桥占用设备的 `setVolumeDb` 落空） | ✅ 已修复（本批） | `airplay/childMain.ts:119-130`：native `runtime.setVolumeDb` 未命中 ⇒ 回落 `bridgeSessions.setVolumeDb` ⇒ `bridgeSession.ts:773-778` |
+| 每首歌无条件拆建桥路由（同流内重复付建桥成本） | ⏳ 待排期 | `group/protocolPlayer.ts:320-324`（`playMedia` 开头无条件 `teardownBridgeRoute()` 再 `prepareBridgeRoute`） |
+| `/rest/airplay/stream/:token` 无首字节上界 | ⏳ 待排期 | 取流 handler 未设「首字节超时」（token 签发 `services/airplay/session.ts`，消费端 `serveCastStream`） |
+| `sessionRuntime.seek` 无 deadline | ⏳ 待排期 | `services/airplay/sessionRuntime.ts:339-360`（`prepareSeek` + 等旧循环，无超时上限） |
+| 成员前缀常量散落 ≥8 处未收敛 | ⏳ 待排期 | `sendspin/peer.ts:664`、`QueueController.ts:34-37`、`playTarget.ts:74` 各自独立解析 `airplay:` / `sendspin:` |
+| 「组播（multicast）」作为出流方式 | ⊘ 已裁定例外 | 本仓**没有**组播出流：组内 = sendspin 组泵逐成员 WS 下发 + AirPlay 桥逐设备 RAOP，不存在「一包多收」路径 |
+| 群组不变量静态守卫 `check-group-invariants.mjs`（G1~G12 + G12b，35 条断言 + 4 项 TODO 缺口登记） | ✅ 已落地**并已挂 CI** | `backend/scripts/check-group-invariants.mjs`；`.github/workflows/ci.yml` job `group-invariants-guard`（第 26 个 job，`ci.yml:356`；step `ci.yml:362` 直接 `node backend/scripts/check-group-invariants.mjs`，位于 `workflow-paths-guard` 之后、`audio-output-format-guard` 之前）。**不需要**往 `backend/package.json` 加 npm script |
+
+---
+
 > 基线：MusicFlow `8d7a0ff`（2026-10-24；文档定稿 2026-10-25）；MA master `7dfa5d8`（230 `/workspace/MA`）。
 > 本文是第六轮逐行复核 + **第七轮 red-team 终审**后的**唯一开发口径**。旧版中的 `anchorUnixMs`、`latencyFrames` 归零、`scalePcm` 音量、单一 `GroupSink` 替换 `Set<SendspinConnection>` 等设计已证伪，全部作废。
 > 第七轮终审记录见《审查报告-AirPlay桥接终审-2026-10-25.md》；本文已按该报告修入 4 条 Blocker 与 10 条 Major。
@@ -250,7 +307,7 @@ startNtp = ntpFromHostUs(A - L);    // 关键：映射时刻比可听时刻早�
 >
 > 这三个都会把 `startTs` 重锚成 `baseTs + seekSec*rate` 而 `startNtp` 不动（`:846`、`:869` 的 `seekStartTs(baseTs, …)`），映射当场崩掉 —— 这正是 2026-10-21 那次「拖动进度后彻底无声」的成因，`raop.ts:274-283` 的注释里写着原始日志（`31.08 seconds ahead` / `crazy time interval of -30.08 seconds`）。
 >
-> **与现有路径不冲突**：bridge 会话由 `bridgePrepare` 建，不走 cast 链；组 seek 走 `fanOut("seek")`（`group/protocolPlayer.ts:181`），§5.4 的 fanOut 跳过已覆盖。
+> **与现有路径不冲突**：bridge 会话由 `bridgePrepare` 建，不走 cast 链；组 seek 走 `fanOut("seek")`（`group/protocolPlayer.ts:226 fanOut`，seek 分支 `:383`），§5.4 的 fanOut 跳过已覆盖。
 
 为什么是 `A - L`：
 
@@ -580,7 +637,11 @@ BridgeMember:
 
 ## 5. 群组生命周期与分派
 
+> **落地状态：✅ 已落地**（5.1~5.5 全部在生产代码里）。唯一实现偏差：§5.5 的 owner **没有**落在 `sessionRuntime.ActiveSession.owner` 字段上，而是主进程 `airplay/control.ts:274-290` 的 `bridgeOwners: Map<deviceId, token>` 表 —— 语义等价（`isBridgeOwned` 一处判定，cast/stop/同 host 全停三处复用）。逐条证据见文首「落地状态总表」；权威现状见 [group-权威方案文档.md](./group-权威方案文档.md) §2。
+
 ### 5.1 路由快照
+
+> **落地状态：✅ 已落地** —— `group/protocolPlayer.ts:313-343`（`playMedia` 内快照 `spinOnline/apOnline`、`activeBridgeRoutes.set`）。权威口径见 [group-权威方案文档.md](./group-权威方案文档.md) §2.2。
 
 每个“播放流”开始时（`playMedia` 或自然切歌）计算：
 
@@ -596,6 +657,8 @@ const route = bridgeEnabled && spinOnline.length > 0 && apOnline.length > 0 ? "b
 - “含 Sendspin”指**当前在线**成员，不是配置里曾经加入过的成员。
 
 ### 5.2 流内成员变化
+
+> **落地状态：✅ 已落地** —— `detachFromActiveGroups` 的 airplay 分支已补（`routes/api/shared.ts:651-665`，`:654` 允许 `airplay`）；加入走 `bridgeJoinMember`（`group/protocolPlayer.ts:38`，泵侧 sync 失败回滚半挂 route）、摘除走 `bridgeLeaveMember`（同文件 `:74`）。权威口径见 [group-权威方案文档.md](./group-权威方案文档.md) §2.5 / §2.6。
 
 | 事件 | bridge 路由下行为 | legacy 路由下行为 |
 |---|---|---|
@@ -620,8 +683,11 @@ const route = bridgeEnabled && spinOnline.length > 0 && apOnline.length > 0 ? "b
 > if (parsed.kind !== "dlna" && parsed.kind !== "sendspin") return;   // ← airplay 直接 return
 > ```
 > 不改这一行，AirPlay 成员"摘组"就是个 no-op，桥上留孤儿成员。补法：允许 `airplay`，并按 §5.5 追加 `bridgeStop` + `stopAirPlay`。
+> **✅ 已修复（2026-10-26 核实）**：`routes/api/shared.ts:654` 已改为 `!== "dlna" && !== "sendspin" && !== "airplay"` 才 return，摘组链路经 `alignGroupMembers` 按桥/legacy 路由分别处置。
 
 ### 5.3 状态与 leader
+
+> **落地状态：✅ 已落地** —— `group/protocolPlayer.ts:397+` `pollState` 在桥路由下从泵派生，不读 solo 会话；全部成员离线时报非 IDLE（避免被判「曲目自然结束」）。
 
 当前 `getGroupLeader()` 按成员顺序可能返回 AirPlay；`pollState`/`getGroupStatus` 在 leader 是 AirPlay 时读 solo 会话。桥接路由下这是错的：
 
@@ -631,6 +697,8 @@ const route = bridgeEnabled && spinOnline.length > 0 && apOnline.length > 0 ? "b
 - 禁止在桥接路由下同时存在该设备的 solo cast 会话。
 
 ### 5.4 传输命令
+
+> **落地状态：✅ 已落地** —— `group/protocolPlayer.ts:369-396`（`stop` 先扇出/组停再 `teardownBridgeRoute`；`setVolume` 先落库再 `fanOut` + `spinOp`）。**v4.6.77 增补**：AirPlay 侧新增按组延迟补偿（改值要重建该组桥），见 [group-权威方案文档.md](./group-权威方案文档.md) §6.3。
 
 `fanOut` 当前把 DLNA + AirPlay 一起逐设备调用。桥接路由下：
 
@@ -658,6 +726,8 @@ const route = bridgeEnabled && spinOnline.length > 0 && apOnline.length > 0 ? "b
 - **已知副作用（接受并记录）**：RAOP 接收端自身有约 `L`（默认 1s）的缓冲，暂停后可能还响 ≤1s。这是接收端行为，不是我们能通过协议消除的；不要为了"立刻静音"去发 FLUSH（FLUSH 会重建会话，代价远大于 1s 余音）。
 
 ### 5.5 会话所有权
+
+> **落地状态：✅ 已落地（实现落点与本节设计不同）** —— 真正的 owner 表是主进程 `airplay/control.ts:274-290` 的 `bridgeOwners: Map<deviceId, token>`，判定入口 `isBridgeOwned(deviceId)`；它被 `stopAirPlaySessionsForHost`（`:373-381`）、`stopAirPlaySession`（`:403-406`）、native `cast`（`:836-839`）三处复用。**本节第 3 条「`owner` 目前不存在 / 需给 `sessionRuntime.ActiveSession` 加字段」已过期**：最终没有改 `sessionRuntime`，owner 收敛在 control 层，`sessionRuntime` 只按 deviceId 管 native 会话。
 
 `sessionRuntime` 增加：
 
@@ -944,6 +1014,8 @@ ffmpeg -f lavfi -i "sine=frequency=23000:duration=30:sample_rate=48000" -ac 2 /r
 
 ### Phase 3 · 组泵出声（1.5~2 天）
 
+> **落地状态：✅ 已落地** —— 虚拟 `pcm:100` 组已进代码（`sendspin/server.ts:1452-1467` 的组内时间戳基线 + `deliveredByGroup` 打戳）；路由快照与桥投递见 `group/protocolPlayer.ts:313-343`。混合组起播 lead 的契约在落地时**反转过一次**（500ms → 1.75s，commit `1b2a57b`），以 [group-权威方案文档.md](./group-权威方案文档.md) §7.1 为准。
+
 - `SendspinGroup.bridges`；**`pushFrame` 入口补虚拟 `pcm:100` 组（§2.1 BLK-01）**；`pcm:100` 组循环体内投递 bridge。
 - **`commonSendAheadUs()` 不动**；启动 lead 只进 `streamEngine.anchorLead`（§3.4 MAJ-01）。
 - `playGroupCore`/`childMain` 接通 bridge 参数；主进程 `prepare` 顺序。
@@ -961,6 +1033,8 @@ ffmpeg -f lavfi -i "sine=frequency=23000:duration=30:sample_rate=48000" -ac 2 /r
 
 ### Phase 4 · 时间线映射 + 对齐 + 无 ack 语义（2~3 天）
 
+> **落地状态：✅ 已落地** —— 锚点 = `firstFrameTsUs + anchorShiftUs`（`airplay/bridgeSession.ts:209`，`firstFrameTsUs` 采集在 `:301-302`、`:402-403`）；对齐/drift/realigned/late 的判据字段在每 2s 的 `ev:"tick"` 行（`:642-658`）。字段全表见 [airplay-权威方案文档.md](./airplay-权威方案文档.md) 第十部分 —— 注意**没有** `w=`/`m=`/`delta=` 三个旧名字。
+
 - RAOP bridge 驱动路径：RTP↔NTP 映射、发送节拍、`latencyFrames` 补偿（四锚点，§3.3）。
 - `bridgeMath` 全量、补静音/裁头、漂移日志。
 - `scheduledAnchorUs` 报告，不伪造 ack。
@@ -973,6 +1047,8 @@ ffmpeg -f lavfi -i "sine=frequency=23000:duration=30:sample_rate=48000" -ac 2 /r
   - AP1 落盘基频 1kHz ±0.5%（用 1kHz 正弦，不用宽带源）。
 
 ### Phase 5 · 生命周期 / 背压 / 热复用（1.5~2 天）
+
+> **落地状态：✅ 已落地（热复用只到"热启动 lead"这一层）** —— 背压/`hardCap` 在 `airplay/bridgeSource.ts:163-180`（`bridge hardCap … 断连重连`）；会话切换的 warm lead 在 `airplay/rates.ts:36`。**⏳ 待排期**：同一流内每首歌仍无条件 `teardownBridgeRoute()` + `prepareBridgeRoute()`（`group/protocolPlayer.ts:320-324`），即"跨曲复用桥"没做出来。
 
 - 代次源 = `epoch`（§4.3）；seek/track/rehost **不重建 bridges**，只切 generation。
 - 队列高/低水位、hardCap 断连、5s/30s 退避（带 ±20% 抖动）。
@@ -1109,6 +1185,9 @@ ffmpeg -f lavfi -i "sine=frequency=23000:duration=30:sample_rate=48000" -ac 2 /r
 
 ### Phase 8 · 守卫与收尾（1 天）
 
+> **落地状态：✅ 已落地** —— `backend/scripts/check-airplay-bridge.mjs` 已在 CI；但**条目数已从本节写的 14 条长到 17 组（①~⑰）**，运行时 69 条断言（8 条 `uniq()` 动态展开）。冻结口径见 [airplay-权威方案文档.md](./airplay-权威方案文档.md) §7.7。
+> **⏳ 待排期**：群组语义守卫仍为 0（G1~G9 只是清单），见 [group-权威方案文档.md](./group-权威方案文档.md) §10。
+
 - `check-airplay-bridge.mjs` 注册 CI。
 - CHANGELOG、灰度说明、回滚开关。
 
@@ -1125,7 +1204,7 @@ ffmpeg -f lavfi -i "sine=frequency=23000:duration=30:sample_rate=48000" -ac 2 /r
 | `check-airplay-rtsp-line.mjs` | RTSP 请求行不变 |
 | `check-airplay-stream-auth.mjs` | `/rest` 鉴权豁免不变 |
 | `check-airplay-ap2-discovery.mjs` | Phase 6 不改发现规则；Phase 7 才允许改 |
-| **`check-airplay-bridge.mjs`（新）** | 见下，14 条 |
+| **`check-airplay-bridge.mjs`（已落地）** | 实际 **①~⑰ 17 组 / 运行时 69 条断言**；本节下方清单是落地前的 14 条草案，**以 [airplay-权威方案文档.md](./airplay-权威方案文档.md) §7.7 为准** |
 
 `check-airplay-bridge.mjs` 的断言清单（每条都钉**唯一表达式**，同一字符串出现在两处会让守卫失效）：
 

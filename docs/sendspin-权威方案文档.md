@@ -1,5 +1,31 @@
 # Sendspin 权威方案文档
 
+## 文档关系（先读这一块）
+
+> **本文件的角色**：**权威现状**。Sendspin 协议与组泵（`SendspinGroup`）的**唯一事实来源** —— 连接/编码协商、预填充水位、pacing、音量通道、`pcm:100` 编码分组与晚加入回填全在这里。
+
+**5 份相关文档（都在 `docs/`，链接可直接点开）**
+
+| 文档 | 角色 | 一句话用途 |
+|---|---|---|
+| [airplay-权威方案文档.md](./airplay-权威方案文档.md) | 权威现状 | AirPlay/RAOP 协议正确做法、airplay 子进程、桥接环（帧格式/锚点/stats）与 AirPlay 侧守卫 |
+| [sendspin-权威方案文档.md](./sendspin-权威方案文档.md) | 权威现状 | Sendspin 协议链路、FLAC 链路、ESPHome 设备端配置、多房间组与组泵 |
+| [group-权威方案文档.md](./group-权威方案文档.md) | 权威现状 | 群组数据模型与生命周期、选歌硬约束、出流双路、组成员、延迟补偿 |
+| [AirPlay1-2与Sendspin桥接-最终实施方案.md](./AirPlay1-2与Sendspin桥接-最终实施方案.md) | **历史方案（Phase 计划）** | 桥接的开发执行版：Phase 0~8 分阶段实施、接口、守卫矩阵、逐轮审计修正索引 |
+| [AirPlay1-2与Sendspin桥接落地方案.md](./AirPlay1-2与Sendspin桥接落地方案.md) | **历史方案** | 桥接的调研与落地方案：MA 精要、MusicFlow 现状盘点、Phase 拆解、230 模拟验收 |
+
+**硬口径**：**历史方案文档不再作为事实来源；任何冲突以三份权威文档为准。** 历史方案文档只保留「为什么这样设计」与「当时踩了什么坑 / 推翻了什么」两类价值 —— 其中的 Phase 条目、行号、字段名一律可能过期。
+
+**三份权威文档的分工边界（排障时先按这张表定位文档）**
+
+| 问题域 | 归属文档 |
+|---|---|
+| 协议（RTSP / RAOP / AP2 报文、Sendspin 帧与握手配对）、airplay 子进程模型、桥接环（28B 帧 / 锚点公式 / `stats` 判据） | [airplay-权威方案文档.md](./airplay-权威方案文档.md) |
+| 设备协议（Sendspin 连接 / 编码协商 / 预填充水位 / pacing / 音量）与组泵（`SendspinGroup.pushFrame`、`pcm:100` 编码组、晚加入回填） | [sendspin-权威方案文档.md](./sendspin-权威方案文档.md) |
+| 组成员与命名空间、生命周期状态机、选歌推进硬约束、出流双路（组泵 / AirPlay 桥）、延迟补偿、组验收判据与失败速查 | [group-权威方案文档.md](./group-权威方案文档.md) |
+
+---
+
 > **基线**：MusicFlow **v4.0.19** · ESPHome **2026.9.0** · ESP32-S3-DevKitC-1（Octal PSRAM 80MHz）· 对标 Music Assistant（`aiosendspin==9.1.1`）+ [Sendspin 官方协议规范](https://github.com/Sendspin/spec)
 > **文档来历**：合并了仓库里此前 10 份分散的 Sendspin 文档（协议设计 / 实施计划 / 任务交接 / 真机排障 / 踩坑录 / FLAC 专项 / MA 对齐审计 / 多房流式方案 / 联调手册 / 模拟器说明），并以 v4.0.17 → v4.0.18 → v4.0.**19** 三轮真机实测的最新结论为准重写。原文档已归档到 [`docs/archive/sendspin/`](./archive/sendspin/)。
 > **怎么读**：**第一～五部分是正确做法，照做即可**；**第六部分是踩过的坑（含被推翻的旧结论），务必别重蹈**；其后是验证方法、MA 对齐、环境与附录。

@@ -1,0 +1,740 @@
+#!/usr/bin/env node
+// ==================== 群组(Groups)不变量静态守卫(G1–G12) ====================
+//
+// 背景:群组是「多台设备共用同一条内容时间线」的唯一载体,它踩过的坑**全是静默的** ——
+// 不报错、不崩溃、既有用例也全绿,只表现为「听着不对 / 点了没反应」:
+//   · 成员 id 被剥掉 `dlna:` 前缀落库 → 服务端按裸 id 比对,前端再删就 no-op(成员删不掉);
+//   · DLNA 设备混进组 → 设备自拉流、组内没有共享时间线,听着就是「两台机器各放各的」;
+//   · 组播中加入新成员「先起播再 seek」→ AirPlay 单会话设备永久等待(2026-10-21 真机);
+//   · 成员位置用「会话已过时长/墙钟」推 → 一次卡顿就永久偏移,越放越不同步;
+//   · 桥(或任何第二条泵)自己选歌推进 → 双泵抢队列,表现是随机跳曲/整组卡住;
+//   · 组内无限换源 → 一首放不出来就整组循环重试,永不收敛;
+//   · 延迟补偿写进 ring 的 tsUs → 桥投递窗口/水位/late-join 回填一起被带偏(整组飘音);
+//   · watchdog 绕过统一起播路径 → 起点丢失 / 重复 cast;
+//   · 内容同步埋点被删 → 回到「只能靠耳朵调参数」的盲调时代;
+//   · 延迟参数域散落硬编码 → 前端标 ±30s、后端偷偷 ±2000,用户看到的值≠生效值;
+//   · 延迟写进 PlayerGroup 实体会被 persist 的整行 upsert 冲回 0(改名/调音量即丢)。
+// 本守卫把上面 11 条固化成 G1–G11 静态不变量,CI 里直接失败。
+//
+// 🔴 硬性要求 1:**只认非注释行**。源码里大量「⚠️ 不得出现 XXX」的说明性注释,直接对原文
+//    做正则会被自己的注释查红,故一律先过 `lib/strip-comments.mjs` 的 stripComments()
+//    (字符串感知:跳过 ' " ` 三种字面量与反斜杠转义,再剥 // 与 /* */)。
+//
+// 🔴 硬性要求 2:断言只锚「唯一的表达式前缀」,**绝不锚参数个数/闭括号**。
+//    2026-10-26 教训:check-airplay-playback-chain.mjs 把 `playCurrent(deviceId, baseUrl)`
+//    连闭括号一起钉死,实现改成 4 个参数后守卫假红、main ci 连挂两轮。本脚本因此不写任何
+//    含参数表的签名:一律「函数名 + 圆括号配平跳过参数表 + 花括号配平取体」,参数怎么改都不假红。
+//
+// 🔴 硬性要求 3:与现实冲突的不变量**不改代码**,登记为 TODO 缺口 —— 输出可见、不阻断 CI,
+//    免得「守卫红了但没人敢改」;缺口清单在末尾汇总,便于一次性排期。
+//
+// G1–G12:
+//   G1 成员命名空间原样透传(setMembers 不得改写成员 id;splitMemberId 仍认 dlna:/裸 id,
+//      但「含冒号的未知前缀」必须返回 null,不得落进裸 id 兜底 —— 否则报错误导成 DLNA)
+//   G2 DLNA 不得入组(后端 kind allowlist 必须存在 + 前端候选只拼 airplay:/sendspin:)
+//   G3 起播即落位(AirPlay 新成员起点编进本次 cast 的 startMs,绝不事后校准 seek;
+//      DLNA 路径的「cast 后校准 seek」= 2026-10-26 已裁定例外,不要当 bug 去"修")
+//   G4 成员位置基准取真实内容时间线(getGroupStatus),不得用墙钟/会话时长推算
+//   G5 单泵(pushFrame 唯一出流入口;桥侧不得自建选歌/判死分支)
+//   G6 组内换源上限 3 + markUnplayable 负缓存 TTL 5 分钟
+//   G7 ring 的 tsUs 不得被延迟补偿污染(偏移只加在成员下发戳)
+//   G8 watchdog 悬挂→恢复必须走统一起播路径(resumeActive → playCurrent)
+//   G9 内容同步 tick 的权威判据字段仍在(删了就回盲调)
+//   G10 延迟补偿参数域单一定义 + 写入必经 clamp + AirPlay 变更必须重建组桥
+//   G11 延迟只在读视图,不得进 PlayerGroup 实体 / persist
+//   G12 重复成员语义刻意分叉:全量口 throw / 增量口 no-op(别被「统一」掉)
+//
+// 零依赖 node 脚本,挂 ci.yml 的守卫 job(与既有 check-*.mjs 同构)。
+import { readFileSync, readdirSync } from "node:fs";
+import { join, resolve, dirname, relative } from "node:path";
+import { fileURLToPath } from "node:url";
+import { stripComments } from "./lib/strip-comments.mjs";
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+const SRC = "backend/src";
+
+const read = (rel) => readFileSync(join(ROOT, rel), "utf8");
+/** 读源码并**剥注释**(剥离后才允许匹配 —— 见文件头硬性要求 1)。 */
+const code = (rel) => stripComments(read(rel));
+const count = (hay, needle) => hay.split(needle).length - 1;
+
+/** 递归收集 backend/src 下的 .ts。 */
+function walkTs(dirAbs, out = []) {
+  for (const e of readdirSync(dirAbs, { withFileTypes: true })) {
+    const p = join(dirAbs, e.name);
+    if (e.isDirectory()) walkTs(p, out);
+    else if (e.isFile() && e.name.endsWith(".ts")) out.push(p);
+  }
+  return out;
+}
+const rel = (p) => relative(ROOT, p);
+/** 预先剥离全部源码注释(全仓扫描用;只算一次)。 */
+const SRC_STRIPPED = walkTs(join(ROOT, SRC))
+  .filter((p) => !p.endsWith(".test.ts"))
+  .map((p) => ({ path: rel(p), code: stripComments(read(rel(p))) }));
+
+/** 全仓计数(仅 backend/src,排除 *.test.ts)。返回命中详情。 */
+function countInSrc(needle) {
+  let n = 0;
+  const where = [];
+  for (const f of SRC_STRIPPED) {
+    const c = f.code.split(needle).length - 1;
+    if (c > 0) {
+      n += c;
+      where.push(`${f.path}×${c}`);
+    }
+  }
+  return { n, where: where.join(", ") };
+}
+
+// ---------------------------------------------------------------------------
+// 「取函数体」工具 —— 刻意不看参数表(硬性要求 2)
+// ---------------------------------------------------------------------------
+
+/** 从 text[start] 的开括号起,按花括号配平截到其闭合 `}`(字符串感知)。 */
+function sliceBraces(text, start) {
+  let depth = 0;
+  let quote = "";
+  for (let i = start; i < text.length; i += 1) {
+    const c = text[i];
+    if (quote) {
+      if (c === "\\") i += 1;
+      else if (c === quote) quote = "";
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") {
+      quote = c;
+      continue;
+    }
+    if (c === "{") depth += 1;
+    else if (c === "}") {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
+/**
+ * 按「名字 + `(`」定位一个函数/方法体。
+ * ① 圆括号配平**跳过整个参数表**;② 跳过返回类型注解(形如 `: Promise<void>`,或
+ * `: { a: string } | undefined` —— 后者里的 `{` 前一非空白字符是 `:` ⇒ 判为类型字面量整体跳过);
+ * ③ 花括号配平取体。
+ * 参数个数/类型怎么变都不会假红(硬性要求 2 的落地方式)。
+ */
+function bodyByName(text, nameRe) {
+  const m = nameRe.exec(text);
+  if (!m) return null;
+  let i = m.index + m[0].length; // 指向 `(` 之后
+  let pdepth = 1;
+  let quote = "";
+  for (; i < text.length; i += 1) {
+    const c = text[i];
+    if (quote) {
+      if (c === "\\") i += 1;
+      else if (c === quote) quote = "";
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") {
+      quote = c;
+      continue;
+    }
+    if (c === "(") pdepth += 1;
+    else if (c === ")") {
+      pdepth -= 1;
+      if (pdepth === 0) {
+        i += 1;
+        break;
+      }
+    }
+  }
+  if (pdepth !== 0) return null;
+  while (i < text.length) {
+    const c = text[i];
+    if (c === '"' || c === "'" || c === "`") {
+      const q = c;
+      i += 1;
+      while (i < text.length) {
+        if (text[i] === "\\") {
+          i += 2;
+          continue;
+        }
+        if (text[i] === q) {
+          i += 1;
+          break;
+        }
+        i += 1;
+      }
+      continue;
+    }
+    if (c === "{") {
+      let j = i - 1;
+      while (j >= 0 && /\s/.test(text[j])) j -= 1;
+      if (text[j] === ":") {
+        const skip = sliceBraces(text, i); // 返回类型里的对象字面量类型
+        if (!skip) return null;
+        i += skip.length;
+        continue;
+      }
+      return sliceBraces(text, i);
+    }
+    if (c === ";" || c === "=") return null; // 命中的是调用点/赋值,不是定义
+    i += 1;
+  }
+  return null;
+}
+
+/** 按「声明头部」定位一个 `{}` 块体(interface / 计算属性用;不含参数表)。 */
+function bodyByHead(text, headRe) {
+  const m = headRe.exec(text);
+  if (!m) return null;
+  const open = text.indexOf("{", m.index + m[0].length);
+  if (open === -1) return null;
+  return sliceBraces(text, open);
+}
+
+/** 从 marker 起截到第一个 endMarker(取「一段路由定义」用;不依赖括号形态)。 */
+function sliceBetween(text, startMarker, endMarker) {
+  const i = text.indexOf(startMarker);
+  if (i === -1) return null;
+  const j = text.indexOf(endMarker, i + startMarker.length);
+  return text.slice(i, j === -1 ? text.length : j);
+}
+
+/** 方法/导出函数的名字锚:要求名字是行首首个标识符(允许前置修饰符),避免命中 `xx.foo(` 调用点。 */
+const atLineStart = (name) =>
+  new RegExp(`(?:^|\\n)[ \\t]*(?:(?:private|public|protected|static|async|export|function)\\s+)*${name}\\s*\\(`);
+
+const failures = [];
+const todos = [];
+const exceptions = [];
+let passed = 0;
+function check(name, ok, detail) {
+  if (ok) {
+    passed += 1;
+    console.log("  ✓ " + name);
+  } else {
+    failures.push(name + (detail ? " —— " + detail : ""));
+    console.log("  ✗ " + name + (detail ? " —— " + detail : ""));
+  }
+}
+/** 登记「不变量与现状冲突」:不改代码、不阻断 CI,但必须在 CI 日志里可见。 */
+function todo(id, name, why) {
+  todos.push(`${id} ${name}`);
+  console.log(`  ⚠ TODO 缺口 ${id} ${name}`);
+  console.log(`      现状:${why}`);
+}
+/**
+ * 登记「已裁定例外」:与不变量口径有差异,但**已由产品/架构裁定保留现状**。
+ * 与 todo() 的区别:todo 是"待修的真缺口",exception 是"明确不要修" ——
+ * 单独打 ⊘ 标记,避免后人看到不变量与代码不符就当 bug 去改,把能用的路径改坏。
+ */
+function exception(id, name, ruling) {
+  exceptions.push(`${id} ${name}`);
+  console.log(`  ⊘ 已裁定例外 ${id} ${name}`);
+  console.log(`      裁定(2026-10-26):${ruling}`);
+}
+const miss = (label) => `未找到 ${label}(实现改名/迁移?请同步本条断言)`;
+
+const GROUP_INDEX = "backend/src/services/group/index.ts";
+const DELAY_CALIB = "backend/src/services/group/delayCalib.ts";
+const API_GROUPS = "backend/src/routes/api/groups.ts";
+const GROUP_WATCHDOG = "backend/src/services/group/watchdog.ts";
+const QUEUE_CTL = "backend/src/services/player/QueueController.ts";
+const SPIN_SERVER = "backend/src/services/sendspin/server.ts";
+const SPIN_CORE = "backend/src/services/sendspin/playerCore.ts";
+const BRIDGE_SESSION = "backend/src/services/airplay/bridgeSession.ts";
+const PREFETCH = "backend/src/services/source/prefetchCache.ts";
+const FALLBACK = "backend/src/services/source/online/streamFallback.ts";
+const GROUPS_VUE = "frontend/src/views/Groups/index.vue";
+
+// ===========================================================================
+// G1 成员命名空间原样透传
+// ===========================================================================
+console.log("===== G1 成员命名空间原样透传(前缀不得被吞掉) =====");
+{
+  const gi = code(GROUP_INDEX);
+  const setB = bodyByName(gi, atLineStart("setMembers"));
+  check(
+    "setMembers 把成员 id 原样写回(不做 strip/slice/replace 改写)",
+    setB !== null &&
+      /g\.memberIds\s*=\s*\[\s*\.\.\.memberIds\s*\]/.test(setB) &&
+      count(setB, ".slice(") === 0 &&
+      count(setB, ".replace(") === 0 &&
+      count(setB, 'startsWith("dlna:")') === 0,
+    setB === null
+      ? miss("setMembers")
+      : `改写痕迹:slice=${count(setB, ".slice(")} replace=${count(setB, ".replace(")} 剥dlna前缀=${count(setB, 'startsWith("dlna:")')}`,
+  );
+  const deltaB = bodyByName(gi, atLineStart("applyMemberDelta"));
+  check(
+    "applyMemberDelta 同样原样透传成员 id(增量口与全量口口径一致)",
+    deltaB !== null && count(deltaB, ".slice(") === 0 && count(deltaB, ".replace(") === 0,
+    deltaB === null
+      ? miss("applyMemberDelta")
+      : `改写痕迹:slice=${count(deltaB, ".slice(")} replace=${count(deltaB, ".replace(")}`,
+  );
+  const splitB = bodyByName(gi, atLineStart("splitMemberId"));
+  check(
+    'splitMemberId 仍解析 `dlna:` 前缀,并保留「裸 id ≡ DLNA」的历史口径',
+    splitB !== null &&
+      splitB.includes('startsWith("dlna:")') &&
+      /return\s*\{\s*kind:\s*"dlna",\s*id:\s*m\s*\}/.test(splitB),
+    splitB === null ? miss("splitMemberId") : "老成员(裸 id / dlna: 写法)会解析成 null ⇒ 组恒显示全员离线",
+  );
+  // 2026-10-27 新增(工程师 B 落地 splitMemberId 未知命名空间判定后):
+  // 历史口径只豁免**裸 id**(不含冒号)。含冒号但没命中已知前缀的 `foo:xxx` 属于「未知命名空间」,
+  // 必须返回 null —— 若落进裸 id 兜底会被当成 DLNA,用户看到的报错是「DLNA 设备不支持加入群组」,
+  // 排障会一路往 DLNA 方向查(实际是前缀写错/新协议没注册)。这条守的是**报错理由的可诊断性**。
+  // 判据不锚变量名与 includes/indexOf 写法:取「dlna 分支之后、裸 id 兜底之前」的那一段,
+  // 段内必须既有「冒号判定」又有 `return null` —— 顺序错了(兜底在前)则该段为空,同样会红。
+  {
+    const dlnaAt = splitB === null ? -1 : splitB.indexOf('startsWith("dlna:")');
+    const fallbackAt = splitB === null ? -1 : splitB.indexOf('return { kind: "dlna", id: m }');
+    const between = dlnaAt !== -1 && fallbackAt > dlnaAt ? splitB.slice(dlnaAt, fallbackAt) : "";
+    const hasColonProbe = /includes\(\s*":"\s*\)|indexOf\(\s*":"\s*\)/.test(between);
+    const returnsNull = /return\s+null\s*;/.test(between);
+    check(
+      "含冒号的未知前缀(如 foo:xxx)返回 null,不得落进裸 id 兜底(否则报错误导成「DLNA 设备不支持入组」)",
+      splitB !== null && hasColonProbe && returnsNull,
+      splitB === null
+        ? miss("splitMemberId")
+        : `dlna 分支与裸 id 兜底之间:冒号判定=${hasColonProbe} return null=${returnsNull}` +
+          (hasColonProbe || returnsNull ? "" : " —— 未知命名空间被当 DLNA,排障方向被带偏"),
+    );
+  }
+  todo(
+    "G1",
+    "「airplay:/sendspin:/dlna: 前缀常量只有一处定义」",
+    '仓库里没有前缀常量:`"airplay:"` / `"sendspin:"` / `"dlna:"` 字面量散落在 peer.ts(parse)、' +
+      "QueueController.stripPlayerPrefix、playTarget.ts、playerRate.ts、group/index.ts(splitMemberId) 等 ≥8 处。" +
+      "真实风险=改前缀要改 8 处且无任何编译错误;属重构(抽 peerId.ts),不在本轮守卫范围 —— " +
+      "本轮只钉「不做破坏性改写」这一可观测行为。",
+  );
+}
+
+// ===========================================================================
+// G2 DLNA 不得入组
+// ===========================================================================
+console.log("===== G2 DLNA 不得入组(后端 kind allowlist 必须存在 + 前端候选过滤) =====");
+{
+  // ⚠️ 本条按**目标状态**写:服务端侧 kind allowlist 正在由另一路工程师落到 setMembers/校验函数上。
+  // 断言刻意钉在「校验处必须按 kind 放行 sendspin/airplay、其余一律 throw」——只钉前端过滤是不够的
+  // (API 直调能绕过前端),所以前端那条是**附加**而不是替代。
+  const gi = code(GROUP_INDEX);
+  const assertB =
+    bodyByName(gi, atLineStart("assertMembersAvailable")) ||
+    bodyByName(gi, atLineStart("assertMembersAllowed"));
+  check(
+    "服务端成员校验有 kind allowlist:sendspin/airplay 放行,DLNA(含历史裸 id)与未知前缀一律拒收",
+    assertB !== null &&
+      assertB.includes('split.kind === "sendspin"') &&
+      assertB.includes('split.kind === "airplay"') &&
+      /throw\s+new\s+Error\(/.test(assertB),
+    assertB === null
+      ? miss("assertMembersAvailable / assertMembersAllowed")
+      : "缺 kind allowlist ⇒ DLNA(自拉流、无共享时间线)可被 API 直调写进组,表现是「两台机器各放各的」",
+  );
+  // G2a:DLNA 分支必须**抛错拒收**。改成 return / continue / 只 log 都不会让任何用例变红,
+  // 但 API 直调立刻能把 DLNA 塞进组 —— 这类「防线降级成告警」是最典型的静默回归。
+  // ⚠️ 不能只搜「body 里有提到 DLNA 的 throw」:本函数里 `成员 ${m} 不是 DLNA 设备` 那条
+  //    也是 throw,会把这里查绿。判据改成「airplay 分支之后(即真正落到 DLNA 兜底的位置)
+  //    仍必须是一条 throw」——与错误文案措辞无关。
+  const afterAirplay = assertB === null ? "" : assertB.slice(assertB.lastIndexOf("continue;"));
+  const dlnaThrow = /throw\s+new\s+Error\(/.test(afterAirplay);
+  const dlnaPassThrough =
+    /kind\s*===\s*"dlna"\s*\)\s*\{?\s*(return|continue)/.test(assertB || "") || /^\s*return;/m.test(afterAirplay);
+  check(
+    "DLNA 分支是 throw 拒收(不得降级成 return/continue/只打日志放行)",
+    assertB !== null && dlnaThrow && !dlnaPassThrough,
+    assertB === null
+      ? miss("assertMembersAvailable")
+      : `airplay 分支之后仍有 throw=${dlnaThrow} 放行分支=${dlnaPassThrough}`,
+  );
+  // G2b:两个写入口都必须过同一个校验。少一个就是后门:
+  //   POST /v1/groups/:id/members {add:["dlna:x"]} 走 applyMemberDelta,PATCH 全量走 setMembers。
+  const setB2 = bodyByName(gi, atLineStart("setMembers"));
+  const deltaB2 = bodyByName(gi, atLineStart("applyMemberDelta"));
+  const setGuard = setB2 !== null && count(setB2, "assertMembersAvailable(") >= 1;
+  const deltaGuard = deltaB2 !== null && count(deltaB2, "assertMembersAvailable(") >= 1;
+  check(
+    "两个写入口(setMembers 全量 / applyMemberDelta 增量)都必须调成员校验",
+    setGuard && deltaGuard,
+    `setMembers=${setGuard} applyMemberDelta=${deltaGuard} —— 缺任一个即可用另一个口把 DLNA 塞进组`,
+  );
+  const vue = stripComments(read(GROUPS_VUE));
+  const candSeg = sliceBetween(vue, "const selectableDevices", "\n});");
+  check(
+    "前端候选只由 airplay:/sendspin: 两个数据源拼装(不并入 DLNA 设备)",
+    candSeg !== null &&
+      candSeg.includes("`airplay:${") &&
+      candSeg.includes("`sendspin:${") &&
+      count(candSeg, "dlna:") === 0,
+    candSeg === null
+      ? miss("selectableDevices 计算属性")
+      : `候选里出现 dlna: 前缀 ${count(candSeg, "dlna:")} 处 ⇒ 用户能把 DLNA 勾进组`,
+  );
+}
+
+// ===========================================================================
+// G3 起播即落位
+// ===========================================================================
+console.log("===== G3 起播即落位(AirPlay 侧禁止先起播再 seek;DLNA 校准 seek 属已裁定例外) =====");
+{
+  const qc = code(QUEUE_CTL);
+  const apB = bodyByName(qc, atLineStart("rejoinMembersAirplay"));
+  check(
+    "组播中新增 AirPlay 成员:起点经 startMs 一次性编进本次 cast",
+    apB !== null && /playMedia\(\s*fullItem,\s*baseUrl,\s*startMs/.test(apB),
+    apB === null ? miss("rejoinMembersAirplay") : "未见 playMedia(fullItem, baseUrl, startMs)",
+  );
+  check(
+    "同一路径不得事后校准 seek(否则 AirPlay 单会话设备永久等待)",
+    apB !== null && count(apB, "alignDeviceToPosition") === 0 && count(apB, ".seek(") === 0,
+    apB === null
+      ? miss("rejoinMembersAirplay")
+      : `事后 seek 痕迹:alignDeviceToPosition=${count(apB, "alignDeviceToPosition")} .seek(=${count(apB, ".seek(")}`,
+  );
+  check(
+    "startMs 由 leader 当前落点换算(而不是从 0 起播后慢慢追)",
+    apB !== null && /Math\.round\(\s*position\s*\*\s*1000\s*\)/.test(apB),
+    apB === null ? miss("rejoinMembersAirplay") : "未见 Math.round(position * 1000)",
+  );
+  todo(
+    "G3",
+    "「castLanding.applied 语义」的命名",
+    "全仓没有 castLanding 这个符号(0 命中)。本条不变量的现等价物 = rejoinMembers…() 里的 " +
+      "`startMs` / `landed`:「起点真编进这次 cast」由上面的 startMs 断言钉住,「cast 成功」由 " +
+      "try/catch 内 playMedia 抛错即整成员跳过 + 逐成员日志体现。",
+  );
+  exception(
+    "G3",
+    "DLNA 路径「先起播再校准 seek」(AirPlay 路径仍必须 startMs 一次编入)",
+    "DLNA 渲染器在 cast 后**立刻** seek 会静默失效(实测 HiVi/多台 DLNA),所以 rejoinMembers(DLNA) 与 " +
+      "group/watchdog 的恢复走「playMedia 不带 startMs → 等稳定 PLAYING → alignDeviceToPosition 按实时位置收敛」。\n" +
+      "      裁定:保留为**显式例外**,不得为了「统一」而把 DLNA 改成 startMs(会把能用的路径改坏)。\n" +
+      "      边界:AirPlay 侧不受此例外豁免 —— 见上面两条(AirPlay 必须 startMs 一次编入、且不得事后 seek)。",
+  );
+}
+
+// ===========================================================================
+// G4 成员位置基准
+// ===========================================================================
+console.log("===== G4 成员位置基准取真实内容时间线(不得用墙钟/会话时长推算) =====");
+{
+  const qc = code(QUEUE_CTL);
+  const bodies = [
+    ["rejoinMembersAirplay", bodyByName(qc, atLineStart("rejoinMembersAirplay"))],
+    ["rejoinMembers", bodyByName(qc, atLineStart("rejoinMembers"))],
+  ];
+  let bad = "";
+  for (const [n, b] of bodies) {
+    if (b === null) bad += `${n}:未找到; `;
+    else if (count(b, "getGroupStatus(") === 0) bad += `${n}:未取 getGroupStatus; `;
+    else if (count(b, "Date.now()") > 0 || count(b, "performance.now()") > 0) bad += `${n}:用了墙钟; `;
+  }
+  check(
+    "两条「新增成员对齐」路径的位置都取自 getGroupStatus(leader 真实落点),且体内无墙钟",
+    bad === "",
+    bad,
+  );
+  todo(
+    "G4",
+    "「位置基准必须取 contentClock」",
+    "全仓没有 contentClock 这个抽象(0 命中)。现实基准 = leader 的 getGroupStatus().position" +
+      "(组状态派生自 leader 的实时位置)。断言按其**意旨**落成「不得用 Date.now()/会话时长推算」;" +
+      "若将来引入 contentClock,应把本条断言改指向它。",
+  );
+}
+
+// ===========================================================================
+// G5 单泵
+// ===========================================================================
+console.log("===== G5 单泵(pushFrame 唯一出流入口;桥侧不得自建选歌路径) =====");
+{
+  const defs = countInSrc("async pushFrame(");
+  check("pushFrame 全仓只有一处定义(第二条出流泵 = 双泵抢队列)", defs.n === 1, `实际 ${defs.n} 处:${defs.where}`);
+  const calls = countInSrc("g.pushFrame(");
+  const core = code(SPIN_CORE);
+  check(
+    "pushFrame 的唯一调用点是 playerCore 的 g.pushFrame(cursor…",
+    calls.n === 1 && /g\.pushFrame\(\s*cursor/.test(core),
+    `调用点 ${calls.n} 处(${calls.where});playerCore 内未见 g.pushFrame(cursor`,
+  );
+  const BRIDGE_FILES = [
+    "backend/src/services/airplay/bridgeCalib.ts",
+    "backend/src/services/airplay/bridgeChannel.ts",
+    "backend/src/services/airplay/bridgeMath.ts",
+    "backend/src/services/airplay/bridgeServer.ts",
+    "backend/src/services/airplay/bridgeSession.ts",
+    "backend/src/services/airplay/bridgeSource.ts",
+    "backend/src/services/sendspin/bridgeAttach.ts",
+    "backend/src/services/sendspin/bridgeMember.ts",
+  ];
+  const banned = ["resolvePreferredSong", "judgePrefetchedBuffer", "markUnplayable"];
+  const hits = [];
+  for (const f of BRIDGE_FILES) {
+    const c = code(f);
+    for (const b of banned) if (count(c, b) > 0) hits.push(`${f}:${b}`);
+  }
+  check(
+    "桥侧不得自建第二条选歌/判死路径(resolvePreferredSong / judgePrefetchedBuffer / markUnplayable 均 0 处)",
+    hits.length === 0,
+    `命中:${hits.join(", ")}`,
+  );
+}
+
+// ===========================================================================
+// G6 组内换源上限 + 判死负缓存
+// ===========================================================================
+console.log("===== G6 组内换源上限 3 + markUnplayable TTL 5 分钟 =====");
+{
+  const pf = code(PREFETCH);
+  const declN = countInSrc("PREFETCH_MAX_ALT_SOURCES =");
+  const prefOk = /export\s+const\s+PREFETCH_MAX_ALT_SOURCES\s*=\s*3\s*;/.test(pf);
+  check(
+    "PREFETCH_MAX_ALT_SOURCES = 3 且全仓只声明一次(上限一旦放开=整组在坏源上无限换)",
+    prefOk && declN.n === 1,
+    `prefetchCache 声明=${prefOk} 全仓声明 ${declN.n} 处(${declN.where})`,
+  );
+  const fb = code(FALLBACK);
+  const ttlN = countInSrc("MARK_UNPLAYABLE_TTL_MS =");
+  const ttlOk = /const\s+MARK_UNPLAYABLE_TTL_MS\s*=\s*5\s*\*\s*60\s*\*\s*1000\s*;/.test(fb);
+  check(
+    "MARK_UNPLAYABLE_TTL_MS = 5 * 60 * 1000 且只声明一次(负缓存失效=同一坏源反复重试)",
+    ttlOk && ttlN.n === 1,
+    `streamFallback 声明=${ttlOk} 全仓声明 ${ttlN.n} 处(${ttlN.where})`,
+  );
+}
+
+// ===========================================================================
+// G7 ring 的 tsUs 不得被延迟补偿污染
+// ===========================================================================
+console.log("===== G7 延迟补偿只作用于成员下发戳(ring 时间基准不动) =====");
+{
+  const sv = code(SPIN_SERVER);
+  const pushB = bodyByName(sv, atLineStart("pushFrame"));
+  const ringLines = pushB === null ? [] : pushB.split("\n").filter((l) => l.includes("ring.push("));
+  const dirty = ringLines.filter((l) => /dspDelay|DelayUs/.test(l));
+  check(
+    "ring 写入行(ring.push({ tsUs: … }))内不得出现 dspDelay/DelayUs",
+    pushB !== null && ringLines.length > 0 && dirty.length === 0,
+    pushB === null
+      ? miss("pushFrame")
+      : ringLines.length === 0
+        ? "pushFrame 内未见 ring.push( —— 回填缓存被删/搬家?"
+        : `污染行:${dirty.join(" | ").slice(0, 160)}`,
+  );
+  check(
+    "成员下发戳是唯一加偏移的地方:sendAudio(ts + dspDelayUs",
+    pushB !== null && /sendAudio\(\s*ts\s*\+\s*dspDelayUs/.test(pushB),
+    pushB === null ? miss("pushFrame") : "未见 sendAudio(ts + dspDelayUs —— 偏移没生效或动了 ring 基准",
+  );
+  const lateLine = sv.split("\n").filter((l) => l.includes("sendAudio(it.tsUs"));
+  check(
+    "late-join 回填同口径:sendAudio(it.tsUs + dspDelayUs",
+    /sendAudio\(\s*it\.tsUs\s*\+\s*dspDelayUs/.test(sv) && lateLine.every((l) => l.includes("dspDelayUs")),
+    lateLine.length === 0
+      ? "未见 sendAudio(it.tsUs …) —— late-join 回填被删/改名"
+      : "回填未加偏移 ⇒ 新入组成员比老成员早/晚 dspDelayUs,恒不同步",
+  );
+}
+
+// ===========================================================================
+// G8 watchdog 走统一起播路径
+// ===========================================================================
+console.log("===== G8 watchdog 悬挂→恢复必须走统一起播路径(resumeActive → playCurrent) =====");
+{
+  const wd = code(GROUP_WATCHDOG);
+  check(
+    "组 watchdog 的恢复入口是 qc.resumeActive(统一入口)",
+    /qc\.resumeActive\(/.test(wd),
+    "未见 qc.resumeActive( —— 看门狗自己起播会丢起点/重复 cast",
+  );
+  const qc = code(QUEUE_CTL);
+  const rB = bodyByName(qc, atLineStart("resumeActive"));
+  check(
+    "resumeActive 的起播路径是 this.playCurrent(deviceId, baseUrl…",
+    rB !== null && /this\.playCurrent\(\s*deviceId,\s*baseUrl/.test(rB),
+    rB === null ? miss("resumeActive") : "未走 playCurrent ⇒ 恢复不经过取源/桥挂载/优化窗口",
+  );
+  check(
+    "watchdog 不得绕过统一入口直接 playCurrent",
+    count(wd, "playCurrent") === 0,
+    `watchdog 内出现 playCurrent ${count(wd, "playCurrent")} 处`,
+  );
+}
+
+// ===========================================================================
+// G9 内容同步 tick 埋点
+// ===========================================================================
+console.log("===== G9 内容同步 tick 埋点仍在(删了就回盲调) =====");
+{
+  const bs = code(BRIDGE_SESSION);
+  const tickB = bodyByName(bs, atLineStart("emitStatsTick"));
+  check(
+    'tick 事件仍在(ev:"tick"),且 clock 恒 local-rtp-ntp(同源 host 单调钟)',
+    tickB !== null && /ev:\s*"tick"/.test(tickB) && /clock:\s*"local-rtp-ntp"/.test(tickB),
+    tickB === null ? miss("emitStatsTick") : "未见 ev:tick 或 clock:local-rtp-ntp",
+  );
+  const need = [
+    ["deltaUs(锚点偏移 ≈ L+队列+在途)", /\bdeltaUs[,:]\s/],
+    ["deltaP95Us(偏移 P95)", /\bdeltaP95Us[,:]\s/],
+    ["driftUs(对齐残差)", /\bdriftUs[,:]\s/],
+    ["late(lead 不足计数)", /\blate[,:]\s/],
+    ["queueMs(桥缓冲深度)", /\bqueueMs[,:]\s/],
+    ["state(桥状态机 live/paused/connected/listening)", /\bstate[,:]\s/],
+    ["gen(内容代次)", /\bgen[,:]\s/],
+  ];
+  const missing = tickB === null ? need.map(([n]) => n) : need.filter(([, re]) => !re.test(tickB)).map(([n]) => n);
+  check(
+    "tick 仍带全部内容同步判据(deltaUs/deltaP95Us/driftUs/late/queueMs/state/gen)",
+    tickB !== null && missing.length === 0,
+    tickB === null ? miss("emitStatsTick") : `缺字段:${missing.join("、")}`,
+  );
+  todo(
+    "G9",
+    "「`[airplay-bridge] stats` 的 w/m/clock/delta 四字段」",
+    "该口径与现状不符:`[airplay-bridge] stats` 这个 tag **不存在**(0 命中),也没有 w/m 字段。" +
+      '现在的等价物是每 2s 一条 `ev:"tick"` JSON:clock(时钟源)/deltaUs(偏移)/deltaP95Us/driftUs/' +
+      "late/queueMs(maxQueueMs)/state/gen。本守卫改为钉这一组真实字段;若确实需要 w(written frontier)/" +
+      "m(max queue) 这类简写,应由产品侧确认后新增埋点,不由守卫凭空造。",
+  );
+}
+
+// ===========================================================================
+// G10 延迟补偿参数域
+// ===========================================================================
+console.log("===== G10 延迟补偿参数域(±30s / 步进 10ms 单一源 + 写入必经 clamp) =====");
+{
+  const dc = code(DELAY_CALIB);
+  const pin = (name, lit) => {
+    const decl = `${name} =`;
+    const n = countInSrc(decl);
+    const declared = new RegExp(`export\\s+const\\s+${name}\\s*=\\s*${lit}\\s*;`).test(dc);
+    check(
+      `${name} = ${lit} 且全仓只声明一次`,
+      declared && n.n === 1,
+      `delayCalib 声明=${declared} 全仓声明 ${n.n} 处(${n.where})`,
+    );
+  };
+  pin("GROUP_DELAY_MIN_MS", "-30000");
+  pin("GROUP_DELAY_MAX_MS", "30000");
+  pin("GROUP_DELAY_STEP_MS", "10");
+  const setB = bodyByName(dc, atLineStart("setGroupDelays"));
+  check(
+    "setGroupDelays 两侧取值都过 clampGroupDelayMs(绕过即把越界值写进内存+DB)",
+    setB !== null &&
+      count(setB, "clampGroupDelayMs(") >= 2,
+    setB === null ? miss("setGroupDelays") : `clamp 调用 ${setB === null ? 0 : count(setB, "clampGroupDelayMs(")} 处(应 ≥2:airplay + sendspin)`,
+  );
+  const api = code(API_GROUPS);
+  const putSeg = sliceBetween(api, 'app.put("/v1/groups/:id/delays"', 'app.delete("/v1/groups/:id"');
+  check(
+    "PUT /v1/groups/:id/delays 经 setGroupDelays,且 AirPlay 值变化时重建该组桥(锚点建时算死,不重建=调了没反应)",
+    putSeg !== null && putSeg.includes("setGroupDelays(") && putSeg.includes("rebuildBridgeRoutes("),
+    putSeg === null
+      ? miss('app.put("/v1/groups/:id/delays")')
+      : `setGroupDelays=${putSeg.includes("setGroupDelays(")} rebuildBridgeRoutes=${putSeg.includes("rebuildBridgeRoutes(")}`,
+  );
+}
+
+// ===========================================================================
+// G11 延迟只在读视图
+// ===========================================================================
+console.log("===== G11 延迟只在读视图,不得进 PlayerGroup 实体 / persist =====");
+{
+  const gi = code(GROUP_INDEX);
+  const entB = bodyByHead(gi, /(?:^|\n)export\s+interface\s+PlayerGroup\b/);
+  check(
+    "PlayerGroup 实体接口不得含 airplayDelayMs / sendspinDelayMs",
+    entB !== null && count(entB, "airplayDelayMs") === 0 && count(entB, "sendspinDelayMs") === 0,
+    entB === null
+      ? miss("interface PlayerGroup")
+      : "实体带上延迟字段 ⇒ 任何 persist/emit 都会拿内存里的旧值覆盖 DB 值",
+  );
+  const viewB = bodyByHead(gi, /(?:^|\n)export\s+interface\s+PlayerGroupWithMembers\b/);
+  check(
+    "读视图 PlayerGroupWithMembers 必须带两个延迟字段(前端回显不能丢)",
+    viewB !== null && viewB.includes("airplayDelayMs") && viewB.includes("sendspinDelayMs"),
+    viewB === null ? miss("interface PlayerGroupWithMembers") : "读视图缺延迟字段 ⇒ 弹窗回显恒 0,用户以为没保存",
+  );
+  const perB = bodyByName(gi, atLineStart("persist"));
+  check(
+    "persist 不得写延迟字段(否则改名/调音量会把 DB 里的延迟冲掉)",
+    perB !== null && count(perB, "airplayDelayMs") === 0 && count(perB, "sendspinDelayMs") === 0,
+    perB === null ? miss("persist") : "persist 写了延迟字段 ⇒ 组改名/调音量后延迟被整行 upsert 冲回默认值",
+  );
+}
+
+// ===========================================================================
+// G12 重复成员的两种语义(刻意不同,别被「统一」掉)
+// ===========================================================================
+console.log("===== G12 重复成员:全量口 throw / 增量口 no-op(语义刻意分叉) =====");
+{
+  const gi = code(GROUP_INDEX);
+  const assertB = bodyByName(gi, atLineStart("assertMembersAvailable"));
+  const deltaB = bodyByName(gi, atLineStart("applyMemberDelta"));
+  const fullThrows = assertB !== null && /seen\.has\(\s*m\s*\)\s*\)\s*throw/.test(assertB);
+  const deltaSkips = deltaB !== null && /has\(\s*m\s*\)\s*\)\s*continue/.test(deltaB);
+  check(
+    "重复成员:全量口(setMembers→校验)必须 throw,增量口(applyMemberDelta)必须 no-op 跳过",
+    fullThrows && deltaSkips,
+    `全量口 throw=${fullThrows} 增量口 continue=${deltaSkips}` +
+      (fullThrows || deltaSkips
+        ? ""
+        : " —— 两端都被「统一」成同一套语义:全量口静默吞重复=用户勾了没保存也不报错;增量口抛错=移动端「已在组里」的重复 add 直接 500"),
+  );
+}
+
+// G12b(O1 2026-10-26 修正引入的**第二处**重复判定):setMembers 改成「只校验 newOnes 差集」
+//   之后,「提交列表自身含重复」不再由 assertMembersAvailable 顺带发现 —— 组内已有 [a] 时
+//   提交 [a,a],newOnes 会把两个 a 一起滤掉 ⇒ assertMembersAvailable([]) 放行 ⇒ 重复被静默
+//   持久化(刷新后成员里真有两份 a)。所以 setMembers 必须**自己**判重复,且必须判在差集过滤
+//   **之前**:顺序反了等于没判(filter 已经把重复项摘走了)。
+// 判据只锚结构、不锚变量名与错误文案措辞:
+//   · 重复判定 = Set.has(<x>)) 之后紧跟 throw;
+//   · 差集过滤 = 以 newOnes 接收集合 .filter( 的赋值;
+//   · 顺序     = 前者在函数体内出现得更早。
+{
+  const gi = code(GROUP_INDEX);
+  const setB3 = bodyByName(gi, atLineStart("setMembers"));
+  const dupThrowRe = /has\(\s*\w+\s*\)\s*\)\s*\{?\s*throw/;
+  const newOnesRe = /newOnes\s*=\s*[\w.]+\.filter\(/;
+  const dupAt = setB3 === null ? -1 : setB3.search(dupThrowRe);
+  const newOnesAt = setB3 === null ? -1 : setB3.search(newOnesRe);
+  check(
+    "setMembers 自带重复判定,且重复判定必须在 newOnes 差集过滤之前(只校验差集后不再被顺带完成)",
+    setB3 !== null && dupAt !== -1 && newOnesAt !== -1 && dupAt < newOnesAt,
+    setB3 === null
+      ? miss("setMembers")
+      : `重复判定@${dupAt} 差集过滤@${newOnesAt}` +
+        (dupAt === -1
+          ? " —— 缺重复判定:组内已有 a 时提交 [a,a] 会被差集全部滤掉后静默持久化"
+          : "") +
+        (newOnesAt === -1 ? " —— 未找到 newOnes 差集过滤(实现改名?请同步本条断言)" : "") +
+        (dupAt !== -1 && dupAt >= newOnesAt
+          ? " —— 顺序颠倒:过滤先跑完,重复项已被摘走,判定失效"
+          : ""),
+  );
+}
+
+// ---------------------------------------------------------------------------
+if (failures.length) {
+  console.error(`\n[群组不变量守卫] FAIL:${failures.length} 项(通过 ${passed} 项)`);
+  for (const f of failures) console.error("  · " + f);
+  if (todos.length) {
+    console.error(`  另有 ${todos.length} 项 TODO 缺口(不阻断,见上方逐条说明):`);
+    for (const t of todos) console.error("  ⚠ " + t);
+  }
+  if (exceptions.length) {
+    console.error(`  另有 ${exceptions.length} 项已裁定例外(2026-10-26,勿当 bug 修):`);
+    for (const t of exceptions) console.error("  ⊘ " + t);
+  }
+  process.exit(1);
+}
+console.log(
+  `\n[群组不变量守卫] ${passed} 条断言全部通过` +
+    (todos.length ? `;${todos.length} 项 TODO 缺口已登记(不阻断 CI,见上)` : ";无 TODO 缺口") +
+    (exceptions.length ? `;${exceptions.length} 项已裁定例外(2026-10-26 裁定,勿当 bug 修)` : ""),
+);

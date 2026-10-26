@@ -359,8 +359,8 @@ export const localQueues = sqliteTable("local_queues", {
   updatedAt: text("updated_at").default(""),
 });
 
-// 播放器群组(SyncGroup,仿 MA Sync Group):一个组聚合多台 DLNA 设备。
-// 成员只能是 DLNA 设备(裸 deviceId);一台设备最多属于一个组;组不能套组。
+// 播放器群组:一个组聚合多台 AirPlay / Sendspin 成员(2026-10-24 起 DLNA 禁入 —— 自拉流无共享时间线)。
+// 成员用命名空间 id(airplay:<deviceId> / sendspin:<clientId>);裸 id 仅历史数据可读;一台设备可属多组。
 // 组持有自己的持久化队列(group_queues),播放时并发向成员 cast 同一首歌。
 // 群组按用户划分:ownerUserId 记录创建者,普通用户仅见/管自己的组,管理员见全部。
 export const playerGroups = sqliteTable("player_groups", {

@@ -94,6 +94,46 @@ describe("getGroupDelays / setGroupDelays", () => {
   });
 });
 
+// ==================== O2 回归:返回的补偿值不得是共享可变对象 ====================
+// 修前:`getGroupDelays` 把模块级常量 ZERO 直接返回并塞进 cache ⇒ 任一调用方改写返回值
+// 就同时污染「全局默认」与「所有无行组」的读值(别处莫名多出补偿,刷新也不一致)。
+describe("返回值不共享可变对象(O2)", () => {
+  it("①两次 getGroupDelays 不是同一对象引用(有行组 / 无行组 / 缺 groupId 三路都要新对象)", () => {
+    const hitA = getGroupDelays(GID);
+    const hitB = getGroupDelays(GID);
+    expect(hitA).not.toBe(hitB);
+    expect(hitA).toEqual(hitB);
+
+    const unknownA = getGroupDelays("no-such-group");
+    const unknownB = getGroupDelays("no-such-group");
+    expect(unknownA).not.toBe(unknownB);
+
+    const noneA = getGroupDelays(undefined);
+    const noneB = getGroupDelays(null);
+    expect(noneA).not.toBe(noneB);
+    expect(noneA).not.toBe(getGroupDelays(undefined));
+  });
+
+  it("②改写第一次返回值不影响第二次读取(不污染缓存,也不污染全局默认)", () => {
+    setGroupDelays(GID, { airplayMs: 120, sendspinMs: -80 });
+
+    const first = getGroupDelays(GID);
+    first.airplayMs = 9999;
+    first.sendspinMs = -9999;
+    // 缓存未被改写:再读仍是落库值。
+    expect(getGroupDelays(GID)).toEqual({ airplayMs: 120, sendspinMs: -80 });
+    invalidateGroupDelays(GID);
+    expect(getGroupDelays(GID)).toEqual({ airplayMs: 120, sendspinMs: -80 });
+
+    // 全局默认同理:改一个「缺 groupId」的返回值,不得让后续读到非 0。
+    const zero = getGroupDelays(undefined);
+    zero.airplayMs = 500;
+    expect(getGroupDelays(undefined)).toEqual({ airplayMs: 0, sendspinMs: 0 });
+    expect(getGroupDelays(null)).toEqual({ airplayMs: 0, sendspinMs: 0 });
+    expect(getGroupDelays("no-such-group")).toEqual({ airplayMs: 0, sendspinMs: 0 });
+  });
+});
+
 describe("两侧单位换算", () => {
   it("airplayDelayUsOf = ms×1000(正数进 anchorShiftUs ⇒ 桥内容落点后移)", () => {
     setGroupDelays(GID, { airplayMs: 120, sendspinMs: 0 });

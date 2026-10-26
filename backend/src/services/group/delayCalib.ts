@@ -1,6 +1,6 @@
 // 群组 A/V 延迟补偿的读写与缓存(按 groupId)。
 //
-// 语义(两侧一致):**正数 = 该侧更晚出声,负数 = 该侧更早出声**。单位 ms,范围 ±2000。
+// 语义(两侧一致):**正数 = 该侧更晚出声,负数 = 该侧更早出声**。单位 ms,范围 ±30000(常量见下 :20-21)。
 // 只有「两侧差值」影响 A/V 同步;分开存是为了纯 AirPlay 组 / 纯 Sendspin 组也能各自微调。
 //
 // 两个消费点:
@@ -29,22 +29,29 @@ export interface GroupDelays {
   sendspinMs: number;
 }
 
-const ZERO: GroupDelays = { airplayMs: 0, sendspinMs: 0 };
 const cache = new Map<string, GroupDelays>();
 
-/** 钳制到 ±2000ms 的整数;非数字 → 0。 */
+/** 全新的「全 0」补偿值。**必须每次新建对象**:调用方拿到的就是它,若复用同一个模块级
+ *  常量(或把它塞进 cache),任一调用方改写返回值就会污染「全局默认 + 所有无行组」的读值
+ *  —— 表现为别处莫名多出补偿,且刷新页面也复现不一致。 */
+function zeroDelays(): GroupDelays {
+  return { airplayMs: 0, sendspinMs: 0 };
+}
+
+/** 钳制到 ±30000ms 的整数;非数字 → 0。 */
 export function clampGroupDelayMs(v: unknown): number {
   const n = typeof v === "number" ? v : Number(v);
   if (!Number.isFinite(n)) return 0;
   return Math.min(GROUP_DELAY_MAX_MS, Math.max(GROUP_DELAY_MIN_MS, Math.round(n)));
 }
 
-/** 读某组的补偿(懒加载 + 缓存)。groupId 缺失 → 0。库异常 → 0(绝不阻断播放)。 */
+/** 读某组的补偿(懒加载 + 缓存)。groupId 缺失 → 0。库异常 → 0(绝不阻断播放)。
+ *  返回值是**新建对象**(缓存命中也另建一份),调用方改写它不会污染缓存或其他组。 */
 export function getGroupDelays(groupId: string | null | undefined): GroupDelays {
-  if (!groupId) return ZERO;
+  if (!groupId) return zeroDelays();
   const hit = cache.get(groupId);
-  if (hit) return hit;
-  let v: GroupDelays = ZERO;
+  if (hit) return { airplayMs: hit.airplayMs, sendspinMs: hit.sendspinMs };
+  let v: GroupDelays = zeroDelays();
   try {
     const row = db
       .select({ a: playerGroups.airplayDelayMs, s: playerGroups.sendspinDelayMs })
@@ -54,7 +61,7 @@ export function getGroupDelays(groupId: string | null | undefined): GroupDelays 
     if (row) v = { airplayMs: clampGroupDelayMs(row.a), sendspinMs: clampGroupDelayMs(row.s) };
   } catch { /* 库不可用 → 0 */ }
   cache.set(groupId, v);
-  return v;
+  return { airplayMs: v.airplayMs, sendspinMs: v.sendspinMs };
 }
 
 /** 写某组的补偿(缺省字段保持原值):**内存先更新(立即生效),再落库**。

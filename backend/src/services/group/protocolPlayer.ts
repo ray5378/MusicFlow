@@ -46,7 +46,25 @@ export async function bridgeJoinMember(groupId: string, deviceId: string): Promi
   route.push(spec);
   const groupName = sendspinGroupName(groupId);
   const r = await import("../sendspin/index.js");
-  const sync = await r.sendspinGroupBridgeSync(groupName, [...route]);
+  // 改法(洞 D2):泵侧 sync 失败必须**回滚本次加入**。
+  // 否则路由里会留下「主进程已 prepare、泵侧不知道」的半挂桥 —— 调用方按 MAJ-07 回落
+  // solo cast,设备既被桥占用又走 solo cast;而且因为登记还在,60s 对账
+  // (reconcileBridgeRoutesOnce 以「路由登记」为事实源)永远认为它合法、不会兜底摘除
+  // (与 D1 同一失效面:设备被 owner=bridge 永久占用,只能重启)。
+  // 语义:回滚后仍把原始错误抛给调用方(它据此降级 solo cast)。
+  let sync: Awaited<ReturnType<typeof r.sendspinGroupBridgeSync>>;
+  try {
+    sync = await r.sendspinGroupBridgeSync(groupName, [...route]);
+  } catch (e) {
+    const idx = route.findIndex((x) => x.deviceId === deviceId && x.token === token);
+    if (idx >= 0) route.splice(idx, 1);
+    // 摘会话失败(子进程没跑/已断)不回滚错误语义,交对账兜底,保持 best-effort。
+    await bridgeStopDevice(token, deviceId).catch(() => { /* ignore */ });
+    log.warn(
+      `[group][bridge] ${groupId}: 播中加入失败(泵侧 sync 异常)→ 已回滚 device=${deviceId}: ${(e as Error)?.message || e}`,
+    );
+    throw e;
+  }
   log.info(`[group][bridge] ${groupId}: 播中加入 device=${deviceId} sync=${sync.synced} backfill=${sync.backfilled} frames`);
   return true;
 }
@@ -325,7 +343,22 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
       for (const d of apSolo) jobs.push(createAirPlayProtocolPlayer(d).playMedia(item, baseUrl));
       const results = await Promise.allSettled(jobs);
       const ok = results.find(r => r.status === "fulfilled");
-      if (!ok) throw new Error(`组 ${groupId} 全部成员 cast 失败`);
+      if (!ok) {
+        // 修法(洞 D1):全成员 cast 失败 ⇒ 本组没有可用出流,必须**立刻回收桥路由**。
+        // 登记(上面的 activeBridgeRoutes.set)刻意保留在 allSettled 之前 —— 那是为了
+        // 保护起播窗口(对账恰好跑在起播过程中时,不能把正在建立的桥当孤儿摘掉)。
+        // 但失败分支若不回收,60s 对账就以「已登记」为事实源永远认为它合法,
+        // 设备被 owner=bridge 永久占用(native cast 被互斥拒 ⇒ 无声 / 音量失效 / 只能重启)。
+        // ⚠️ 回收本身失败只 warn,**绝不能吞掉原始错误**(原始错误才是主错误)。
+        try {
+          await teardownBridgeRoute();
+        } catch (e) {
+          log.warn(
+            `[group][cast] ${groupId}: 全成员失败后回收桥路由异常(忽略,继续抛原始错误): ${(e as Error)?.message || e}`,
+          );
+        }
+        throw new Error(`组 ${groupId} 全部成员 cast 失败`);
+      }
       const rejected = results.filter(r => r.status === "rejected");
       if (rejected.length > 0) {
         log.warn(`[group][cast] ${groupId}: ${rejected.length}/${results.length} 路播放失败`);
