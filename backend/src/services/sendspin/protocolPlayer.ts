@@ -107,8 +107,13 @@ export function createSendspinGroupPlayer(userGroupId: string): ProtocolPlayer {
       return { mediaUri: streamUrl };
     },
     async stop() {
-      const { sendspinGroupTransport } = await import("./index.js");
-      await sendspinGroupTransport(groupName, "stop");
+      // 改法1(组停统一语义):必须走 sendspinGroupStop(fork→groupStop op / in-proc→
+      // stopGroupCore,双路都清桥)。原走 transport stop → 子进程 stopCore 是**单客户端
+      // 停流语义,不清桥** ⇒ fork 下组桥 BridgeMember 停止后仍按 5-30s 退避无限重连
+      // (post-stop reconnect leak,attempt 无上限)。in-proc 本就清桥,fork 对齐后两侧
+      // 一致;顺序照旧(stopGroupCore 内 clearGroupBridges 先于 finishPlayback,勿调序)。
+      const { sendspinGroupStop } = await import("./index.js");
+      await sendspinGroupStop(groupName);
     },
     async pause() {
       const { sendspinGroupTransport } = await import("./index.js");

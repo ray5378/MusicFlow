@@ -22,6 +22,7 @@ const h = vi.hoisted(() => ({
   frontThrows: false,
   groupPlay: vi.fn(async () => {}),
   groupTransport: vi.fn(async () => {}),
+  groupStop: vi.fn(async () => {}),
   groupPumpActive: vi.fn(async () => false),
   groupPoll: vi.fn(async () => ({ playing: true, positionMs: 12_000, durationMs: 180_000 })),
 
@@ -64,6 +65,7 @@ vi.mock("../../src/services/sendspin/index.js", () => ({
     return h.front;
   },
   sendspinGroupPlay: h.groupPlay,
+  sendspinGroupStop: h.groupStop,
   sendspinGroupTransport: h.groupTransport,
   sendspinGroupPumpActive: h.groupPumpActive,
   sendspinGroupPoll: h.groupPoll,
@@ -308,11 +310,12 @@ describe("createSendspinGroupPlayer:组内 sendspin 成员共用一个 pump", ()
     });
   });
 
-  it("stop / pause → 转发 transport", async () => {
+  it("stop → sendspinGroupStop(改法1:组停统一清桥语义,不再走 transport stop);pause → transport", async () => {
     const p = createSendspinGroupPlayer(GID);
     await p.stop();
     await p.pause();
-    expect(h.groupTransport.mock.calls).toEqual([[GNAME, "stop"], [GNAME, "pause"]]);
+    expect(h.groupStop.mock.calls).toEqual([[GNAME]]);
+    expect(h.groupTransport.mock.calls).toEqual([[GNAME, "pause"]]);
   });
 
   describe("resume", () => {
