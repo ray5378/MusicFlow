@@ -410,12 +410,14 @@ DLNA 设备区块仍然渲染在群组页左侧（`index.vue:51-123`，`data-laz
 
 ### 5.1 三个时钟，别跨域相减
 
-| 时钟 | 定义 | 取值 | 用途 | 证据 |
-|---|---|---|---|---|
-| host 单调钟 | 服务器 `nowUs()`（monotonic） | 微秒 | 所有超时/窗口/深度计算 | `services/sendspin/streamEngine.ts:684-696` |
-| 组内时间戳基线 | 每个组**自身累计交付的内容位置** + 本批游标相对批前峰值的跳变（`deliveredByGroup` + `jumpUs`）。**不能**用共享游标 `tsUs` 直接打戳 | 微秒（bigint） | sendspin 下发戳、ring 条目 | `services/sendspin/server.ts:1454-1467` |
-| 桥首帧 `firstFrameTsUs` | 桥侧收到的**首个有效 AUDIO 帧的 tsUs**，即锚点候选 A | 微秒（bigint，可空） | 桥锚点计算的唯一输入 | `services/airplay/bridgeSession.ts:301-302`（声明）、`:402-403`（捕获点）、`:199`（`planBridgeAnchor.firstFrameTsUs`） |
-| RTP/NTP | AirPlay 子进程本地 RTP 时间戳 + 换算来的 NTP；`startNtp = ntpFromHostUs(A′ − L)` | 帧/秒 | 只用于设备侧排程 | `bridgeSession.ts:621-659`（`clock:"local-rtp-ntp"`）、`bridgeMath.ts:76+` |
+| 时钟 | 定义 | 用途 | 证据 |
+|---|---|---|---|
+| host 单调钟 | 服务器 `nowUs()`（monotonic µs） | 所有超时/窗口/深度计算 | `sendspin/streamEngine.ts:684-696` |
+| **组内时间戳基线** | 每个组**自身累计交付的内容位置** + 本批游标相对批前峰值的跳变（`deliveredByGroup` + `jumpUs`）。**不能**用共享游标 `tsUs` 直接打戳 | sendspin 下发戳、ring 条目 | `sendspin/server.ts:1454-1467` |
+| 桥首帧 `firstFrameTsUs` | 桥侧**首个有效 AUDIO 帧的 tsUs**，即锚点候选 A | 桥锚点唯一输入 | `airplay/bridgeSession.ts:301-302`（声明）、`:402-403`（捕获）、`:199` |
+| RTP/NTP | 子进程本地 RTP 戳 + `startNtp = ntpFromHostUs(A′ − L)` | 只用于设备侧排程 | `bridgeSession.ts:621-659`、`bridgeMath.ts:76+` |
+
+> 三套时钟的完整对照（谁能被墙钟带歪、`tsUs` 生产规则）见 [airplay-权威方案文档.md](./airplay-权威方案文档.md) §10.1/§10.2 —— 本节只保留**组维度**的判据。
 
 > **术语纠偏（重要）**：全仓 grep `contentClock` / `contentSec` / `contentEpoch` **零命中** —— 这三个词是**旧称，代码中不存在**（早期设计文档的概念名）。落到真实符号上必须写：**桥侧首帧 = `firstFrameTsUs`**（`bridgeSession.ts:301-302`、`:402-403`），**锚点 = `firstFrameTsUs + anchorShiftUs`**（`:209`），**组内时间戳基线 = 各组 `deliveredByGroup` 累计交付位置**（`sendspin/server.ts:1454-1467`）。凡本文旧称「内容时间线 0 点」的地方，一律按这三个真实符号理解。
 
@@ -438,56 +440,45 @@ audible  = max(audible, floorMs)              // 本轮目标（起播/seek）�
 
 ### 5.3 锚点 `startNtp` 一次性算死
 
-`maybeBeginStream()` 是桥从「收到首帧」到「开始吐 RTP」的唯一入口（`services/airplay/bridgeSession.ts:496-532`）：
+`maybeBeginStream()` 是桥从「收到首帧」到「开始吐 RTP」的唯一入口（`airplay/bridgeSession.ts:496-532`），关键五行：
 
 | 行 | 行为 |
 |---|---|
-| `:301-302` | `firstFrameTsUs: bigint \| null` 声明（注释：首帧有效 AUDIO 的 tsUs，A 候选；「锚点只在此刻确定」） |
-| `:402-403` | 捕获：`if (this.firstFrameTsUs === null && a.tsUs !== 0n) this.firstFrameTsUs = a.tsUs;` 并立即 `void this.maybeBeginStream()` |
-| `:497` | 前置条件：非 dry、未关闭、已连接、**首帧已到**（`firstFrameTsUs !== null`） |
+| `:402-403` | 捕获首帧：`if (this.firstFrameTsUs === null && a.tsUs !== 0n) this.firstFrameTsUs = a.tsUs;` 并立即 `void this.maybeBeginStream()` |
 | `:498` | **幂等闸门**：`if (this.aligner !== null) return;` —— 建过就永不重建 |
 | `:504` | `latencyFrames = max(1, player.negotiatedLatencyFrames)`（L 不得归零，与 SYNC 用同一值） |
-| `:505-512` | `planBridgeAnchor(...)` 一次算出 `anchorUs` / `commandedLeadUs` / `anchors`（含 `startNtp`） |
+| `:505-512` | `planBridgeAnchor(...)` 一次算出 `anchorUs`/`commandedLeadUs`/`anchors`（含 `startNtp`）；`:513-515` 的 `reAnchored` 打 `anchor unreachable … → re-anchor`（设计内路径，非故障） |
 | `:209` | 锚点公式：`anchorUs = firstFrameTsUs + BigInt(anchorShiftUs ?? 0)` —— 组延迟补偿的唯一乘法点 |
-| `:513-515` | `plan.reAnchored` ⇒ 打 `anchor unreachable ... → re-anchor` 警告（设计内路径，非故障） |
-| `:519` | `new BridgeTimelineAligner(plan.anchorUs, rate)` —— 之后只允许**微调**（drift 纠偏），不允许改锚点 |
-| `:522-532` | 把 `baseTs/startTs/headTs/startNtp/anchorUsShifted/anchorUs/latencyFrames/rate` 交给 `streamBridge` |
+
+逐行表（`:497` 前置条件 / `:519` aligner 建立 / `:522-532` 交给 `streamBridge` 的字段）见
+[airplay-权威方案文档.md](./airplay-权威方案文档.md) §10.5。
 
 **推论（写进产品预期）：** 会话建立后改 AirPlay 延迟、改设备、改 resample 状态，都不会影响已建立的锚点 —— 只能拆会话重建（见 §6.5）。
 
 ### 5.4 `stats` 是内容同步的权威判据
 
-每设备一行 JSON，默认 2s 一次（`statsIntervalMs` 默认 2000，`bridgeSession.ts:253`；发射点 `:621-659`）：
+每设备一行 JSON，默认 2s 一次（`statsIntervalMs` 默认 2000，`bridgeSession.ts:253`；发射点 `:621-659`）。**字段全表在
+[airplay-权威方案文档.md](./airplay-权威方案文档.md) §10.6**，这里只列组维度判读要用的 6 个：
 
-| 字段 | 含义 | 判读 |
-|---|---|---|
-| `ev` | 恒 `"tick"` | 用于日志过滤 `[airplay-bridge]` + `"ev":"tick"` |
-| `dev` / `gen` | 设备 id / 内容代次 | `gen` 变化 = 重锚/重投一代内容 |
-| `state` | `paused` / `live` / `connected` / `listening` | `live` 才在真正推流；**`state` 全程 `live` 但 `queueMs` 只有 4-12ms 是正常形态**，极易误判成「桥没在播」（`bridgeSession.ts:148` 注释） |
-| `clock` | 恒 `"local-rtp-ntp"` | 同源 host 单调钟，保证跨设备可比 |
-| `queueMs` / `maxQueueMs` | 桥内待发队列深度 | 长期贴近上限 = 投递过猛（旧实现症状） |
-| `late` | `bridgeLateCount`：lead 不足次数 | 持续增长 = 锚点太近/投递太晚 |
-| `realigned` | 重锚定次数 | 偶发正常；短时间多次 = 内容被丢弃 |
-| `driftUs` | 对齐残差 | 稳态应接近 0；持续非 0 = 时钟漂移或锚点错 |
-| `deltaUs` | 已写入 RAOP 的内容前沿相对 `A′` 的超前量（≈ L + 队列 + 在途） | **锚点错 X ⇒ 恒偏 X**，与 `driftUs`/`late` 可区分（`:630-634` 注释） |
-| `deltaP95Us` / `samples` | 近 25 个 `deltaUs` 样本的 p95 / 样本数 | 判稳定性，峰值比均值更可信 |
-| `anchorUs` / `leadUs` | 当前锚点 / 指令超前量 | `leadUs` 远大于窗口上沿 = 又回到老 bug |
-
-**判据（不依赖人耳）**：两台成员**逐拍**比对 `gen / clock / deltaUs / deltaP95Us / queueMs`。同 `gen`、`clock` 一致、`deltaUs` 差在噪声级（数百 µs）、`deltaP95Us` 形状相近 ⇒ 出流齐；某台 `gen` 落后 ⇒ 它重建过会话（成员不同步）。
-
-**另一条日志线：锚点事件 `ev:"anchor"`**（`bridgeSession.ts:596-612`）。与 `tick` 的区别是它**只在建流那一刻打一次**，是「这个会话到底按什么锚点走」的唯一凭据：
-
-| 字段 | 含义 |
+| 字段 | 判读 |
 |---|---|
-| `gen` | 内容代次 |
-| `scheduledAnchorUs` | 计划锚点 `plan.anchorUs` = `firstFrameTsUs + anchorShiftUs`（已含组延迟补偿） |
-| `shiftedAnchorUs` | 平移后的锚点 `plan.anchors.anchorUsShifted`（重采样路径下含群延迟补偿） |
-| `commandedLeadUs` | 指令超前量（与 `tick.leadUs` 应一致；不一致说明中间重锚过） |
-| `latePackets` | 恒 `0`（锚点时刻尚未收包；**诚实语义：只上报 scheduled anchor，绝不假装收到设备播放确认**，`:595` 注释） |
-| `mapping` | 恒 `"local-rtp-ntp"` |
-| `latencyFrames` / `baseTs` / `rate` | RECORD 协商值与 RTP 基戳 |
-| `resampled` | 是否经重采样（决定 `A′ = A + 群延迟` 是否生效） |
-| `reAnchored` | 是否走了「锚点不可达 → 热启重锚」分支 |
+| `gen` | 内容代次。**变化 = 重锚/重投一代内容**；某台落后 ⇒ 它重建过会话（成员不同步） |
+| `state` / `clock` | `live` 才在真正推流（`state` 全程 `live` 而 `queueMs` 只有 4-12ms 是**正常形态**，极易误判成「桥没在播」，`bridgeSession.ts:148` 注释）；`clock` 恒 `"local-rtp-ntp"`，出现别的值 = 时钟域已被改坏 |
+| `deltaUs` | 已写入 RAOP 的内容前沿相对 `A′` 的超前量（≈ L + 队列 + 在途）。**锚点错 X ⇒ 恒偏 X**，与 `driftUs`/`late` 可区分（`:630-634`） |
+| `deltaP95Us` / `samples` | 近 25 个 `deltaUs` 的 p95 / 样本数。判稳定性，峰值比均值更可信 |
+| `queueMs` / `maxQueueMs` | 桥内待发队列深度。长期贴上限 = 投递过猛（旧实现症状） |
+| `late` / `realigned` / `driftUs` | lead 不足次数 / 重锚次数 / 对齐残差。`late` 持续涨 = 锚点太近；`driftUs` 稳态应 ≈0 |
+
+**判据（不依赖人耳）**：两台成员**逐拍**比对 `gen / clock / deltaUs / deltaP95Us / queueMs`。同 `gen`、`clock` 一致、`deltaUs` 差在噪声级（数百 µs）、`deltaP95Us` 形状相近 ⇒ 出流齐。
+
+**另一条日志线：锚点事件 `ev:"anchor"`**（`bridgeSession.ts:596-612`），**只在建流那一刻打一次**，是「这个会话到底按什么锚点走」的唯一凭据：
+
+| 字段 | 判读 |
+|---|---|
+| `scheduledAnchorUs` | 计划锚点 `firstFrameTsUs + anchorShiftUs`（已含组延迟补偿）；`shiftedAnchorUs` 是重采样路径下含群延迟的平移值 |
+| `commandedLeadUs` | 指令超前量（应与 `tick.leadUs` 一致；不一致说明中间重锚过） |
+| `latePackets` / `mapping` | `latePackets` 恒 `0`、`mapping` 恒 `"local-rtp-ntp"`；**诚实语义：只上报 scheduled anchor，绝不假装收到设备播放确认**（`:595` 注释） |
+| `latencyFrames` / `baseTs` / `rate` / `resampled` / `reAnchored` | RECORD 协商值与 RTP 基戳 / 是否经重采样（决定 `A′ = A + 群延迟` 是否生效） / 是否走了「锚点不可达 → 热启重锚」 |
 
 > 排障用法：`tick.anchorUs` 与 `anchor.scheduledAnchorUs` 对比 —— 相等 ⇒ 会话锚点没变；不等 ⇒ 中途重锚（内容被丢弃一部分）。
 
@@ -603,14 +594,11 @@ if (next.airplayMs !== before.airplayMs && isBridgeRouteActive(id)) {
 
 ### 6.8 前端入口
 
-| 元素 | 位置 | 说明 | 证据 |
-|---|---|---|---|
-| 卡片回显 | 组卡片内 | **非 0 才占位**，避免正常组多一行噪音 | `frontend/src/views/Groups/index.vue:454-457` |
-| 回显文案 | `delayBadge(g)` | 只列非 0 的侧；两侧都 0 → 空串 | `index.vue:1050-1060` |
-| 按钮 | 「延迟补偿」 | 图标 `Clock`，`v-if="canUse"` | `index.vue:489-490` |
-| 弹窗 | 双 slider/输入 + 步进 10ms + 提示文案 | 正数=更晚出声 | `index.vue:714-780` |
-| 打开 | `openDelay(g)` | 拉 `GET /v1/groups/:id/delays` 回填 | `index.vue:1062-1084` |
-| 保存 | `saveDelay()` | `PUT`，成功后刷新列表（`rebuilt` 可用于提示静音） | `index.vue:1085-1112` |
+| 元素 | 说明 | 证据（`frontend/src/views/Groups/index.vue`） |
+|---|---|---|
+| 卡片回显 `delayBadge(g)` | **非 0 才占位**（避免正常组多一行噪音），只列非 0 的侧，两侧都 0 → 空串 | `:454-457`、`:1050-1060` |
+| 按钮 + 弹窗 | 按钮「延迟补偿」图标 `Clock`、`v-if="canUse"`；弹窗双 slider/输入 + 步进 10ms + 「正数=更晚出声」提示 | `:489-490`、`:714-780` |
+| 打开 / 保存 | `openDelay(g)` 拉 `GET` 回填；`saveDelay()` 走 `PUT`，成功后刷新列表（`rebuilt` 可用于提示静音） | `:1062-1084`、`:1085-1112` |
 
 ---
 
@@ -785,7 +773,7 @@ if (next.airplayMs !== before.airplayMs && isBridgeRouteActive(id)) {
 
 ### 10.1 现状：群组守卫已落地（`check-group-invariants.mjs`，G1~G12 + G12b，35 条断言）
 
-`backend/scripts/check-group-invariants.mjs`（2026-10-26 新增；文件本身尚未 `git add`，但**已被 CI 引用**）把本条清单固化成了**静态不变量守卫**。实测运行结果（`node backend/scripts/check-group-invariants.mjs`）：
+`backend/scripts/check-group-invariants.mjs`（2026-10-26 新增，已随本批提交并挂 CI）把本条清单固化成了**静态不变量守卫**。实测运行结果（`node backend/scripts/check-group-invariants.mjs`）：
 
 ```
 [群组不变量守卫] 35 条断言全部通过;4 项 TODO 缺口已登记(不阻断 CI,见上);1 项已裁定例外(2026-10-26 裁定,勿当 bug 修)
@@ -862,7 +850,7 @@ if (next.airplayMs !== before.airplayMs && isBridgeRouteActive(id)) {
 
 ### 12.1 行为 → 文件:函数（≈行号）
 
-> 行号为 **2026-10-26 基线 `a9f900f` 工作树实测**（含 O1/O2 两处修复后的 `index.ts` 421 行 / `protocolPlayer.ts` 605 行 / `delayCalib.ts` 116 行）。函数体长短会随修复变化，**函数名是稳定锚点，行号是快照**——对不上时以函数名为准，顺手更新本节。
+> 行号为 **2026-10-26 基线 `6c13bd6` 实测**（含 O1/O2 两处修复后的 `index.ts` 421 行 / `protocolPlayer.ts` 605 行 / `delayCalib.ts` 116 行）。函数体长短会随修复变化，**函数名是稳定锚点，行号是快照**——对不上时以函数名为准，顺手更新本节。
 
 | 要查的行为 | 位置 |
 |---|---|
@@ -904,12 +892,7 @@ if (next.airplayMs !== before.airplayMs && isBridgeRouteActive(id)) {
 
 ### 12.2 表 → 代码
 
-| 表 | 位置 |
-|---|---|
-| `player_groups` | `db/schema.ts:366-382` |
-| `group_queues` | `db/schema.ts:384-396` |
-| `sendspin_device_state` | `db/schema.ts:518-530` |
-| 延迟列迁移 | `db/index.ts:790-808` |
+`player_groups` `db/schema.ts:366-382` · `group_queues` `:384-396` · `sendspin_device_state` `:518-530` · 延迟列迁移 `db/index.ts:790-808`。
 
 ---
 
@@ -967,7 +950,7 @@ if (next.airplayMs !== before.airplayMs && isBridgeRouteActive(id)) {
 
 ---
 
-## 附录 C 发现的代码缺陷 / 口径不一致（只报告，未修改）
+## 附录 C 发现的代码缺陷 / 口径不一致（逐行状态列为准）
 
 | # | 位置 | 问题 | 影响 | 建议 |
 |---|---|---|---|---|
@@ -977,7 +960,7 @@ if (next.airplayMs !== before.airplayMs && isBridgeRouteActive(id)) {
 | C-4 | `services/group/watchdog.ts:89` vs `services/group/protocolPlayer.ts:427`/`:445`/`:455-456` | watchdog 判「已在播则跳过恢复」用的是 `state === "PLAYING" \|\| state === "PAUSED_PLAYBACK"`，而 `getGroupStatus` 只产出 `PLAYING` / `PAUSED` / `STOPPED`（`PAUSED_PLAYBACK` 是 DLNA 设备口径，不是组口径） | **`PAUSED` 分支永不命中**：用户手动暂停后成员回归，恢复流程仍会跑 `resumeActive` + `alignDeviceToPosition`，可能与用户的暂停意图冲突 | 组口径统一为 `PAUSED`；或在 `getGroupStatus` 里对 DLNA leader 保留 `PAUSED_PLAYBACK` 并同步两处 |
 | C-5 | `services/sendspin/server.ts:852-853` | `bridgePushTick` 的 per-bridge 循环内，拿到空 ring 时用 `return`（应是 `continue`） | 语义上等价（ring 对所有桥相同），但会让「后续桥」在本轮被跳过；也与「单桥失败不连累其他桥」的注释风格不一致 | 改 `continue`，或把 ring 取到循环外但仍留在 try 内 |
 | C-6 | `routes/api/groups.ts:130-134` | `PUT /:id/delays` 先 `const before = getGroupDelays(id)`（可能读库），再判 `gm.get(id)` 是否存在 | 对不存在的 id 白读一次库；顺序与 GET 分支（先判存在再读）不一致 | 把存在性判断提到 `getGroupDelays` 之前 |
-| C-7 | `backend/scripts/` | 群组维度**零守卫**（`ls scripts \| grep -ci group` = 0） | 群组语义（命名空间透传、DLNA 拒收、起播即落位、ring 不污染…）全靠人工 review | 按 §10.2 的 G1~G9 补脚本（另有 QA 在写，本文件不代写） |
+| C-7 | `backend/scripts/check-group-invariants.mjs` | ~~群组维度零守卫~~ | **已关闭（2026-10-26）**：`check-group-invariants.mjs`（740 行）覆盖 G1~G12 + G12b 共 35 条断言 + 4 项 TODO 缺口登记，已挂 `ci.yml` 第 26 个 job（`group-invariants-guard`，`ci.yml:356/362`）。剩余的 4 项命名类缺口见 §10.1「TODO 缺口」行，属产品侧确认后再改埋点 | 无（已落地）；新增群组不变量请在该脚本里加 G 编号，不要另起脚本 |
 | C-8（**待排期，现状未优化**） | `services/group/protocolPlayer.ts:320-324` | **每首歌无条件拆建桥路由**：`playMedia` 里先 `await teardownBridgeRoute()`（`:321`）再 `prepareBridgeRoute(apOnline)`（`:324`）—— 切歌并不改变成员构成，但每次都要 TEARDOWN + 新 SETUP | ①切歌时多一次桥会话重建（AirPlay 侧听感为一次重锚/短暂静默）；②新会话必然走一次 `pushInitialVolume(player, deviceId)`（`bridgeSession.ts:374`）**重推音量**；③放大单会话设备（HiVi）二次 RECORD 挂死风险 | 建议：成员集合与桥参数未变时复用既有桥路由，仅在「成员变化 / 延迟变化 / 锚点不可达 / 健康检查失败」时重建。**本文档按现状描述，不要读成「已优化」** |
 | C-9（待排期） | 全仓 | 成员命名空间前缀字面量**散落 30+ 处**（`services/playerRate.ts:296/316/317`、`services/player/QueueController.ts:34/36/37`、`services/playTarget.ts:74`、`services/dlna/announce.ts:51/74/78`、`services/peer.ts:664-667`、`services/sendspin/playerCore.ts:71`、`routes/api/peers.ts:309` …），没有单一常量源 | 改前缀/加 kind 时要逐处改，漏一处就是静默不匹配（历史 bug 同族） | 建议抽 `MEMBER_NAMESPACE` 常量并全量替换；因涉及 player/airplay/dlna/peer 四层且部分串被守卫正则钉定，需独立 change-set + 守卫同步更新，不宜与本次群组改动混做 |
 | C-10（**已修复（commit 前）**） | `services/airplay/childMain.ts:119-130` | **修复前**：子进程 `setVolumeDb` 只调 `runtime.setVolumeDb(deviceId, db)`，作用面是 **native runtime**（`sessionRuntime` 的会话表）；桥占用设备的会话在 `BridgeSessions` 里、**不在** runtime 表中 ⇒ 播放中改音量对桥设备恒落空 | **修复后回落链（现行代码）**：主进程 `control.ts:1226 applyVolumeDb` → `rpcFireAndForget(supervisor,"setVolumeDb",{deviceId,db})`（`control.ts:1228`）→ 子进程 `childMain.ts:119-130`：先 `runtime.setVolumeDb(...)`（`sessionRuntime.ts:372` 返回 **boolean**）取 `ok`（`:127`），`ok===false` 时 `bridgeSessions.setVolumeDb(deviceId, db)`（`:128`）→ `BridgeSessions.setVolumeDb`（`bridgeSession.ts:833-838`，遍历会话 `s.setVolumeDb(db)` `:836`）→ `BridgeSession.setVolumeDb`（`bridgeSession.ts:773-778`）→ `this.player?.setVolumeDb(db)`（`:775`） | **状态**：播放中音量变更已能落到桥 player；设计说明见 `bridgeSession.ts:770` 的注释。桥侧仍只在会话建立时 `pushInitialVolume`（`:374`，重连路径另一次 `:586`）拿初始音量 —— 那只是「建会话时对齐一次」，不再限制播放中变更 |

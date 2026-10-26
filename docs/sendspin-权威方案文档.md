@@ -565,11 +565,8 @@ MA 的 player audio transformer **只再导出编码器**（`FlacEncoder` / `Opu
    `syncVolume` 的听众 = 组内成员 **＋ 该组命名对应的裸设备连接**（设备还没起播时 `conn.group` 仍为空，
    靠「组名 = 裸 clientId」的既有约定把命令送到）。
 
-**前端配套**：`frontend/src/views/Groups/index.vue` 里群组成员行原有的「成员迷你音量条」**已移除**。
-理由：群组推流按 `ug:<gid>` 组对象的 volume 走（全组同一份 PCM、同一编码增益），
-而那个滑条打的是 `/v1/peers/sendspin:<id>/volume`，写的是该设备**自己那个单设备组**的 volume
-⇒ 群组播放时压根不参与，是「看着能动、实际没作用」的死控件。成员静音同理交回群组级入口，
-避免「组里两台设备各有一把旋钮」的错误心智模型。三个配套 i18n key 一并删除（zh/en 保持 1362 键对齐）。
+**前端配套**：群组成员行的「成员迷你音量条」**已移除** —— 它打的是 `/v1/peers/sendspin:<id>/volume`（该设备**单设备组**的音量），
+群组推流按 `ug:<gid>` 组对象的 volume 走，所以它是「看着能动、实际没作用」的死控件；成员静音同样交回群组级入口（避免「组里两台设备各有一把旋钮」的错误心智模型）。三个配套 i18n key 一并删除。
 
 **测试锁**：`backend/tests/services/sendspinVolumeCommand.test.ts`（9 例：hello 解析键名兼容/非法值过滤、
 unity 增益分派、未宣告命令**一条都不发**、只宣告 volume 也回退、入组即对齐、静音的独立旋钮语义、
@@ -593,7 +590,7 @@ sendspin 的 `-af` 链只算了 ②响度 + ⑤限制器 —— **是漏接，�
 - `resolveSendspinAf` 把片段交给 `resolveLoudnessAf({ extraFilters })` —— 顺序 **②→③→⑤** 由那**一个函数**单点保证（DSP 必须作用在「已经一样响」的信号上，反过来响度归一化会把调好的音色重新抹平），本函数只负责传，不自行拼接；
 - `GroupPump.groupDspFilters()` 在 `play()` 起播时算一次（改配置**下一首生效**，与产品语义一致），peerId 由 `dspPeerIdForGroup(groupName)` 翻译：用户组 `ug:<gid>` → `group:<gid>`（与前端「音色」下拉的群组条目同形），单设备组（组名 = 裸 clientId）→ `sendspin:<clientId>`；
 - **成组时成员自身的音色自动停用**仍由 `playerDspFilters` 内部的 `isPeerGrouped` 判据负责（整体返回空链）—— 判定只留那一个入口，这里不重复实现；
-- 三处刻意取舍：① 动态 `import("../playerDsp.js")`（它静态依赖组管理器，会把模块加载期绑死）；② 注入音源（测试）直接返回 `[]`，既有测试零影响；③ 读失败一律回退 `[]` ——「音色是可选装饰，绝不能因为它让整组放不出声」。
+- 三处取舍：① 动态 `import("../playerDsp.js")`（静态依赖组管理器会绑死模块加载期）；② 注入音源（测试）直接返回 `[]`；③ 读失败一律回退 `[]` ——「音色是可选装饰，绝不能因为它让整组放不出声」。
 
 > ⚠️ **逃生舱语义**：`enabled:false` 与 `SENDSPIN_LOUDNESS=0` 会让 `resolveLoudnessAf` **整条返回空**，
 > 此时 ③ 段 DSP 一并丢弃（见该函数 `extraFilters` 字段注释，与 D9/D5「关闭开关 = 滤镜链为空」一致）。
@@ -770,19 +767,9 @@ sendspin 版「rejoin」：`stream/start`（codec_header + 格式）→ `members
 
 ### 为什么必须回填
 
-| 事实 | 后果 |
-|---|---|
-| 预填充把组游标推到**领先墙钟一整个水位**（30s 档 ≈29s —— 这正是 §2.5 的抗抖动余量本身） | 「未来帧」都在游标之后 |
-| 新成员旧行为下只从**游标之后**收帧 | 它的首帧时间戳在 29s 之后 → **静默等 29 秒才出声**（2026-09-24 真机「加入新设备要很久才发出声音」） |
-
-**MA（aiosendspin `server/push_stream.py`）的解法**：组内保留**尚未播到**的音频缓存，新角色 `on_role_join` 时把「起点 ≥ late-join 目标时刻」的 chunk **立即回放**，之后无缝接实时流。
-
-| MA 机制 | MA 常量 | 本仓等价物 |
-|---|---|---|
-| `_pcm_chunk_cache` / `_role_chunk_cache`（按 `ts + duration <= now` 逐出） | `_HISTORY_KEEP_PAST_US = 1_000_000` | `SendspinGroup.recentByGroup`（键 = 编码组，逐出规则同款） |
-| `_send_cached_chunks_to_role`（只发起点 ≥ 目标时刻的 chunk） | `LATE_JOINER_MIN_LEAD_US = 100_000` | `SendspinGroup.seedLateJoin` |
-| `_pending_join_roles`（commit 在飞时**延迟 join**，不打断） | — | 同步回填，天然无竞态 |
-| `_start_catchup_encoding`（无编码缓存则按 PCM 缓存补编） | `ENCODER_CATCHUP_WARMUP_US = 120_000` | **不需要**：同组字节逐字节相同，直接复用缓存 |
+预填充会把组游标推到**领先墙钟一整个水位**，新成员只从游标之后收帧 ⇒ 首帧时间戳落在 ≈29s 之后 ⇒ 设备老实等到那一刻才播。
+MA 的回填**不是为了对齐**（MA 同样用绝对时间戳），而是为了让新成员拿到它**本该已经收到**的音频、立刻出声。
+详见坑 B14（「对齐不需要历史」≠「出声不需要历史」）。
 
 ### 本仓实现要点（`SendspinGroup.seedLateJoin`）
 
@@ -839,51 +826,42 @@ sendspin 版「rejoin」：`stream/start`（codec_header + 格式）→ `members
 
 ### 坑 A1 —— 给音频帧头加了 4 字节 `send_ahead`（最严重，完全无声）
 
-- **当时怎么想的**：看到 `aiosendspin` 某些版本在帧里带 `send_ahead`，认为要「对齐金标准」，于是把帧头从 9B 扩成 13B（`1B type + 8B ts + 4B send_ahead`）。
 - **真相**：`send_ahead` **根本不是 wire 字段**。设备 `sendspin-cpp` 的处理是 `client.cpp` 只剥 1B type → `player_role.cpp` 常量 `BINARY_TIMESTAMP_SIZE = 8` → **8B 之后一律当作编码音频**。多出的 4B 落在 payload 头部，首字节 `0x00` 而非 FLAC 同步字 `0xFF` → 每包 `Serious error decoding FLAC file`。
-- **为什么没早发现**：这个错误同时掩盖了自己 —— 帧格式错导致**每包都失败**，看起来像「解码器有问题」，于是去查 STREAMINFO、block size、喂料粒度，越查越远。
 - **教训**：**wire 格式的对错只有接收方能定义。** 任何「对齐某个参考实现」的推断，都必须回到接收端源码逐字节验证（`grep -rn "send_ahead" sendspin-cpp/` → **零命中**，一句话就证伪了）。
 - **⚠️ 2026-10-24 方向反转**：本坑仅适用于 2026.9.x 固件（`BINARY_TIMESTAMP_SIZE=8`）。2026.10.x 固件（sendspin-cpp 0.9.3）已按 rc1 规范把音频帧头升为 **13B（含 4B `send_ahead`）**——同样的 4 字节错位换了方向：9B 服务端对 2026.10 固件整链无声。教训升级版：**帧头口径跟着接收端固件版本走，换固件版本必须重新逐字节核验帧格式**（见文首增补节）。
 
 ### 坑 A2 —— 把 STREAMINFO block size 当成「决定性根因」
 
-- **当时怎么想的**：dump 出 ffmpeg 的 STREAMINFO 看到 `min=max=0x1000=4096`，而代码里写的是 4608，改完之后某些日志确实变了 → 认定这是决定性根因，还写进了 CHANGELOG。
 - **真相**：block size 必须正确（它是**必要条件**），但真正的决定性根因是坑 A1 的帧头错位。改 block size 时设备仍然静音，只是日志里少了一类报错，于是被误读成「接近解决了」。
 - **教训**：**相关不等于因果**，尤其在错误分布在多个层面时。「改完日志变好」和「症状消失」是两件事 —— 判断标准要定死在**最终症状**（出声/流畅），不能中途换成「报错变少」。
 
 ### 坑 A3 —— 用 `-frame_size 4096` 去「对齐 Music Assistant」
 
-- **当时怎么想的**：MA 实测每个 FLAC 帧是 4096 样本，于是想让 ffmpeg 也输出 4096。
 - **真相**：`-frame_size` **不是 flac encoder 的正式 AVOption**（`ffmpeg -h encoder=flac` 不列出），但作为通用编码器参数**实际生效**，而且会改变 STREAMINFO（`4096` → 声明 `1000 1000`）。ffmpeg 48kHz **自选 4608**。`-frame_size` 只影响编码器声明，**不能**约束消费者行为。
 - **教训**：把一个「看起来生效的参数」当成「这就是 MA 的秘密」，是典型的**把巧合当规律**。正确做法：让 ffmpeg 自选，然后**用编码器自选的块大小作为喂料单位**，并**从真实流里提取 STREAMINFO**，而不是两边各写一个魔数。
 
 ### 坑 A4 —— 固定 `sleep(25)` 做 pacing（一卡一卡的真凶）
 
-- **当时怎么想的**：每帧 25ms，发完睡 25ms，看起来很合理。
 - **真相**：encode + send 本身有开销，实际周期约 26ms，而时间戳只推 25ms。每包落后 1~1.8ms 并**单向累积**，实测漂到 **−611ms**。设备 hard sync 阈值只有 **5ms**，越界就往音乐里**插静音**补空 → 听感「一卡一卡」。
 - **教训**：任何「循环 + 固定 sleep」的节流都会累积漂移。必须**绝对时刻调度**，让误差正负自校正。另外：设备侧的同步阈值是**毫秒级**的（5ms！），不要假定「几十毫秒无所谓」。
 
 ### 坑 A5 —— 相信「服务端日志全绿 = 成功了」
 
-- **当时怎么想的**：`Stream Started` / `codec header` / `State changed to PLAYING` / `19200 ring_buffer` 全都出现了 → 断言「链路已通」。
 - **真相**：这些只是**协议层**的证据。上述日志全部出现、而实际上**完全无声**的情况，至少发生过两次 —— 协议层通了不等于耳朵旁边有声音。
 - **教训**：必须有一套**独立于己方的外部判据**。现在有了：6053 读回 `media_player state=2 (PLAYING)` —— 那是设备自己承认在播。在此之前只能靠用户耳朵，这是不可接受的验证链。
 
 ### 坑 A6 —— 设备日志抓晚了一拍 → 反过来改正确代码
 
-- **当时怎么想的**：看到日志里没有 `speaker_mixer Starting` → 断定「还是没出声」→ 去改代码。
 - **真相**：`speaker_mixer Starting` **只在首次打印**；`Processed new codec header` 也只在流建立瞬间打印一次。如果在**播放之后**才启动日志订阅，必然漏掉 → 「日志里没有」被误判成「没发生」。
 - **教训**：**先起订阅 → 确认连上 → 再触发动作 → 全程同一订阅内观察。** 采样时序错误会被读成事实。
 
 ### 坑 A7 —— 以为 `reboot_timeout: 60s` 是「延长」重启间隔
 
-- **当时怎么想的**：设备每 15 分钟 `No clients; rebooting` 自重启，想「改成 60s 应该更好」。
 - **真相**：官方原文 `Can be disabled by setting this to 0s. Defaults to 15min.` → **`0s` 才是关闭**，`60s` 会变成**每分钟重启一次**，比 15min 糟得多。
 - **教训**：涉及「0 表示什么」这类反直觉语义，**必须读官方文档原文**，不能凭字面推。
 
 ### 坑 A8 —— 以为 HA 连着 6053 就是「像 Music Assistant 那样解决问题」
 
-- **当时怎么想的**：「MA 播的时候从来不重启 → HA 现在连着 → 所以等价于 MA 的场景」。
 - **真相**：**MA 从不连 6053**（它只做 8927/8928）。MA 那会儿不重启，是因为当时有别的东西连着 6053 —— 多半是开着 ESPHome Dashboard 看日志。我们持久化连一条 6053 是**复刻一个巧合**，不是修根因。
 - **教训**：当 A、B 两种情形结果不同时，要先证明**那个变量真的不同**，不然只是在做模仿。
 
@@ -895,13 +873,11 @@ sendspin 版「rejoin」：`stream/start`（codec_header + 格式）→ `members
 
 ### 坑 A10 —— 想当然地认为「6053 能控制播放」
 
-- **当时怎么想的**：设备 yaml 里有两个 `media_player`，于是设想把音量 / 进度 / 下一首都走 6053。
 - **真相**：连上去 dump 后发现，**只有 1 个实体暴露**（没有 `name` 的实体 ESPHome 不暴露到 API），而且其 `featureFlags = 0x12520d` 里**没有 `SEEK` / `NEXT_TRACK` / `PREVIOUS_TRACK` / `PLAY`** —— 只能停不能起，也不能切歌、不能 seek。因为该实体背后是 speaker pipeline，面前只有一条 PCM 流，**压根没有曲目和队列的概念**。
 - **教训**：**能力要向设备询问，不要凭 yaml 里的组件名推断。** 成本极低（一次 connect + dump），比写完代码才发现不支持便宜太多。
 
 ### 坑 A11 —— `esphome-client` 的 PSK 字段名写错
 
-- **当时怎么想的**：照着另一个库的习惯写了 `encryptionKey`。
 - **真相**：这个库叫 **`psk`**（client 标识也是 `clientId` 而非 `clientInfo`）。写错后**静默走明文握手**，设备回一个 `0x01` noise 指示字节 → `EncryptionRequiredError`。另外它也**没有 `error` 事件**，失败原因是挂在 `lifecycle` 的 `disconnect.cause` 上。
 - **教训**：跨库 API 不要靠包名迁移经验。**让类型系统先拦一遍**——这两个错误都是 `tsc` 报出来的。
 
@@ -1068,35 +1044,19 @@ sendspin 版「rejoin」：`stream/start`（codec_header + 格式）→ `members
 | **6053 只读面** | `media_player state=2 (PLAYING)` |
 | **最终** | **用户耳朵验收** ← 唯一有效判据 |
 
-**正确出声的完整设备侧序列**（可作基准比对）：
+**正确出声的设备侧关键行**（首次起播时的顺序基准；切歌时 `speaker_mixer`/`i2s_audio` 不再打印，属正常）：
 
 ```
-Group update - state: playing, id: 3C:0F:02:F9:69:E4
-Stream Started
-Processed new codec header: flac, 48000 Hz, 2 ch, 16-bit
-sendspin_id: current
-State changed to PLAYING
-Created ring buffer with size 19200              ← 解码环形区
-speaker_mixer:369 Starting                        ← 输出链路起来（关键标志）
-i2s_audio.speaker:070 Starting                    ← I2S 输出起来（关键标志）
-Created ring buffer with size 96000 [speaker_task] ← 输出环形区（关键标志）
+Stream Started → Processed new codec header: flac, 48000 Hz, 2 ch, 16-bit → State changed to PLAYING
+Created ring buffer with size 19200                  ← 解码环形区（早于三件套）
+speaker_mixer:369 Starting                           ← 输出链路起来（关键标志）
+i2s_audio.speaker:070 Starting                       ← I2S 输出起来（关键标志）
+Created ring buffer with size 96000 [speaker_task]   ← 输出环形区（关键标志）
 ```
 
-切歌时（扬声器**不拆**）：
-
-```
-Stream ended - player:1 artwork:1 visualizer:1
-Group update - state: playing
-State changed to IDLE
-Stream Started
-Processed new codec header: flac, 48000 Hz, 2 ch, 16-bit
-sendspin_id: current
-State changed to PLAYING
-Created ring buffer with size 19200
-```
-
-> `speaker_mixer Starting` / `i2s_audio.speaker Starting` / `96000 ring_buffer` **只在首次出现一次**，后续切歌不再打印 —— 这是正常的，不代表掉链。判「有没有掉」看有没有 `stopped`。
-> `19200 ring_buffer` 早于三件套出现。
+> 三件套 `speaker_mixer Starting` / `i2s_audio.speaker Starting` / `96000 ring_buffer` **只在首次出现一次**，后续切歌不再打印 —— 不代表掉链。
+> 判「有没有掉」看有没有 `stopped`；切歌只有 `Stream ended → State changed to IDLE → Stream Started → PLAYING`。
+> 掉链与重启的区分：出现 `Rebooting` / `Stopped` 才是异常。
 
 ## 7.2 服务端自证日志速查
 
@@ -1228,14 +1188,7 @@ python3 -m venv /tmp/sendspin-venv
 
 监听 `0.0.0.0:<端口>/sendspin`，mDNS 不广播（手动填 IP 即可）；服务端拨入后日志显示 `server attached, admitted`。
 
-**联调对照表**：
-
-| 步骤 | 服务端日志 | 模拟器日志 |
-|---|---|---|
-| 连上 | `new connection from` | `CONNECTED+ADMITTED` / `server attached` |
-| 握手通过 | `handshake ok: <clientId>` | （无报错即过） |
-| 激活注册 | `activated <clientId> name=...` / `registered Sendspin client` | — |
-| 推流到达 | （按组推帧，无单帧日志） | `[audio] chunks=N bytes=M fmt=...` |
+**联调对照**（两侧日志一一对应）：连上 = `new connection from` ↔ `CONNECTED+ADMITTED`/`server attached`；握手 = `handshake ok: <clientId>`（模拟器无报错即过）；注册 = `activated <clientId> name=…`/`registered Sendspin client`；推流 = 服务端无单帧日志、模拟器打 `[audio] chunks=N bytes=M fmt=…`。
 
 **FAQ**：连上但 `chunks=0` → 看 `fmt=` 的 codec 是否在客户端声明的 `supported_formats` 里；`pairing_required` 被拒 → 未配对会话要开客户端 `unpaired_access`，或走正式配对流程；连不上 38927 → 确认插件 `sendspin-renderer` 已启用、端口（默认 38927）与防火墙，`curl` 拿到 `101` 即 WS 通路正常。
 
@@ -1327,19 +1280,13 @@ npx vitest run src/services/sendspin/playerGroup.test.ts
 
 ## 8.1 早期结构性错位（均已修复，存档备查）
 
-2026-09-17 的全面审计发现两处**结构性错位**（非参数微调能修）：**编码器生命周期** 与 **时间线/超前量**。均已修复并经真机验收。
+2026-09-17 审计发现两处**结构性错位**（非参数微调能修）：**编码器生命周期**（曾每 0.5s 重起 ffmpeg、
+每段一个完整 FLAC 文件）与**时间线/超前量**（曾按 `i * FRAME_MS * 1000` 推戳、`send_ahead` 用毫秒硬编码 800ms）。
+现均为「单实例长驻编码器 + 裸 FLAC 帧 + 样本精确推进」，`stream/start` 推迟到首块音频前。
 
-| 环节 | MA（aiosendspin） | 曾经的 MusicFlow | 结果 |
-|---|---|---|---|
-| **编码器生命周期** | 单实例长驻 | 每 0.5s 重起 ffmpeg，每段独立完整 FLAC 文件 | ❌ 结构性错位 → 已修 |
-| **下发字节形态** | 裸 FLAC 帧（无 `fLaC`/STREAMINFO） | 完整 FLAC 文件（每段自带 `fLaC`+STREAMINFO） | ❌ 无声根因 → 已修 |
-| **`stream/start` 时机** | 推迟到首块音频 | 已改为首帧前发 | ✅ |
-| **`stream/end` 时机** | 置 `_stream_started=False`，之后音频**全部丢弃**直到新 start | 发 `stream/end` + `group/update` | ⚠️ **无「丢音频」守卫**（未做） |
-| **chunk 时长** | 25ms | 曾 100ms + 0.5s 分段 | ✅ 已对齐 25ms |
-| **时间戳** | 样本精确推进 + residue | 曾 `i * FRAME_MS * 1000` | ✅ 已修（按实产样本） |
-| **`send_ahead` 单位/取值** | 微秒；`max(min_buffer, required_lead) + output_delay` | 曾毫秒；硬编码 800ms | ⚠️ 单位已对齐；仍不消费设备上报（坑 B6） |
-
-**存档教训**：MA 是**一个长生命周期编码器**，`stream/start` 已把 STREAMINFO 通过 `codec_header` 给过设备，之后只下发**裸 FLAC 帧**。设备拿到 `codec_header` 后按「连续帧流」解析；每 0.5s 塞一个 `fLaC` magic + STREAMINFO 进去 → 解码器在期待 frame sync 的位置遇到文件头 → **整帧作废、静默、零报错**（micro-flac 对损坏帧静默丢弃）。
+**存档教训**：MA 是**一个长生命周期编码器**，`stream/start` 已把 STREAMINFO 通过 `codec_header` 给过设备，
+之后只下发**裸 FLAC 帧**。设备拿到 `codec_header` 后按「连续帧流」解析；每 0.5s 塞一个 `fLaC` magic +
+STREAMINFO 进去 → 解码器在期待 frame sync 的位置遇到文件头 → **整帧作废、静默、零报错**（micro-flac 对损坏帧静默丢弃）。
 
 ## 8.2 现行对齐清单
 
@@ -1445,30 +1392,15 @@ docker restart musicflow
 
 # 第十部分：遗留与待办
 
-## 10.1 已实现（本轮及此前版本闭环）
+## 10.1 已实现（按主题归并；逐条历史在 git 里）
 
-- ✅ 9B 音频帧头（回归锁在 `framing.test.ts`）
-- ✅ 时间线按**实际产出**推进（`STALL_GRACE_US` 降级）
-- ✅ pacing 绝对时刻调度
-- ✅ codec 协商可配（`preferred_codec`，插件页下拉）
-- ✅ FLAC 编码器 asm.js + 真实元数据流提取 `codec_header`
-- ✅ FLAC `codec_header` last 位 = 1（v4.0.19）
-- ✅ 预填充档位 + **按设备容量自动钳制**（0.6 余量，v4.0.19）
-- ✅ 进度上报改为**可听位置** + seek 下界（v4.0.19）
-- ✅ `client/state` 根层解析 + `SYNC LOST` / `synchronized` 日志（v4.0.19）
-- ✅ 落后时让出宏任务（`setImmediate`）
-- ✅ 曲末分段排空
-- ✅ 流式解码 `PcmWindow`（**恒开**；旧 `SENDSPIN_STREAM_SOURCE` 开关已移除，窗口上限改为插件页可配）
-- ✅ 多房组管理（命名空间 + 增量成员口 + 直播沿加入）
-- ✅ **按 `(codec, gain)` 分组编码** + 时间线 `max-of-累计`（v4.0.20，§2.6，修「播中加入成员 → 整组卡顿」）— **真机实测 1.44× → 1.00×**（§8.3）
-- ✅ **late-join 回填** `seedLateJoin`（v4.0.20，§5.3，修「加入新设备要很久才出声」）— **真机实测 ≈29s → ≈0.1s**（§8.3）
-- ✅ ESPHome 6053 只读监控 + `GET /v1/sendspin/esphome`
-- ✅ 长音源 ref 长度溢出修复（v4.0.19）
-- ✅ **音量/静音改走 `server/command`**（本次修复，§2.15）—— 编码增益对能力设备恒 unity，
-  音量下发设备输出级，根治「改群组音量要等设备缓冲（30s 档）播完才生效」；配套移除前端
-  群组成员行的「成员迷你音量条」死控件
-- ✅ **③ 段音色 DSP 接入 sendspin 流**（本次修复，§2.16）—— 与 HTTP/DLNA 同序（②→③→⑤），
-  用户组染 `group:<gid>` / 单设备染 `sendspin:<id>`，成组时成员音色仍由 `isPeerGrouped` 自动停用
+- **帧格式**：音频帧头 9B / 13B **随接收端固件版本**（2026.9.x = 9B，2026.10.x(rc1) = 13B，两端剥掉的字节数必须一致），回归锁在 `framing.test.ts`。
+- **时间线**：按实际产出推进（`STALL_GRACE_US` 降级）、pacing 绝对时刻调度、落后时 `setImmediate` 让出宏任务、曲末分段排空、进度上报为**可听位置** + seek 下界。
+- **FLAC 链路**：asm.js 编码器 + 真实元数据流提取 `codec_header`、last-metadata-block 位 = 1、预填充档位按设备容量自动钳制（0.6 余量）、流式解码 `PcmWindow` 恒开。
+- **多房组**：命名空间 + 增量成员口 + 直播沿加入；**按 `(codec, gain)` 分组编码 + 时间线 `max-of-累计`**（修「播中加入成员 → 整组卡顿」，真机 1.44× → 1.00×）；**late-join 回填 `seedLateJoin`**（修「加入新设备很久才出声」，真机 ≈29s → ≈0.1s）。
+- **音量/音色**：音量/静音改走 `server/command`（编码增益对能力设备恒 unity，根治「改群组音量要等设备缓冲播完」），配套删掉前端成员迷你音量条死控件；③ 段音色 DSP 接入 sendspin 流（与 HTTP/DLNA 同序 ②→③→⑤，组染 `group:<gid>` / 单设备染 `sendspin:<id>`）。
+- **运维**：ESPHome 6053 只读监控 + `GET /v1/sendspin/esphome`（不回显 PSK）。
+- **其它**：codec 协商可配（`preferred_codec`）、`client/state` 根层解析 + `SYNC LOST`/`synchronized` 日志、长音源 ref 长度溢出修复。
 
 ## 10.2 未做（留待决定）
 
@@ -1541,13 +1473,9 @@ docker restart musicflow
    - 本地提交 → `git bundle` 中转推 230 → 230 `git push origin` + 打 `vX.Y.Z` tag → CI 自动跑（contract-gate / security / Version Guard / sync-to-gitee / build-and-push）→ Release 正文自动生成 + Docker 镜像产出。
    - 注意：`github.com` 本机常不可达，**发版一律走 230 中转**，不要在本机直推（详见本仓发版约定）。
 
-## 11.2 不要怎么做（反面清单，来自坑 B14 / B15 / A5 / B10）
+## 11.2 不要怎么做
 
-- ❌ **局部推理、用一条正确结论否掉另一条正确结论**（坑 B14）。读 MA 要读完整链路。
-- ❌ **凭「感觉更稳」选方案**（坑 B9 选 PCM、「对齐 MA」改 `frame_size` 坑 A3）。一切以 MA 对齐表 + 真机计数为准。
-- ❌ **「服务端日志全绿 = 成功」**（坑 A5）、**「单测全绿 = 真机不炸」**（坑 B10）。两者都只是门槛，最终判据是设备日志计数 + 用户耳朵。
-- ❌ **时间线把「并集」当推进量**（坑 B15）。多编码器 / 多成员时务必分组编码 + max-of-累计。
-- ❌ **改参数试运气**（坑 A2 / A3）。先读源码 / 抓字节对齐，再谈调参（§7.8）。
+反面清单（局部推理 / 凭感觉选方案 / 只看己方日志 / 把并集当推进量 / 改参数试运气）已按「模式 → 犯在哪 → 防呆规则」整理在 **§6.3** 的表里，不在此重复。
 
 ## 11.3 本仓仍挂账的分叉点（下一轮照 §11.1 走）
 
@@ -1563,195 +1491,54 @@ docker restart musicflow
 
 ---
 
-# 第十二部分：2026-10-21 全量验收（230 模拟播放器 + es客厅）与暂停中 seek 修复
+# 第十二部分：2026-10-21 全量验收与「暂停中 seek」缺陷
 
 > 方法学对齐 `docs/airplay-权威方案文档.md`：**服务端状态 + 播放器侧真实输出**双端对账，
 > 每个操作都要求「状态正确 + 进度真实前进/停止 +（有本地 PCM 的端）确有音频数据」。
 
-## 12.1 测试床
+## 12.1 测试床与用例（2026-10-21）
 
-| 端 | 类型 | 接入 | 播放器侧判据 |
-|---|---|---|---|
-| `MF-230-Real-PCM` | 230 模拟（aiosendspin SDK，PCM） | `ws://192.168.10.240:38927/sendspin` | `/root/ss_pcm_out.pcm` 字节增量（192000 B/s）+ RMS > -60dB |
-| `MF-230-Real-FLAC` | 230 模拟（SDK，FLAC） | 同上 | `/root/ss_flac_out.pcm`（SDK 解码后的 PCM）同上 |
-| `MF-230-CPP-Player` | 230 模拟（sendspin-cpp） | 同上 | ALSA `file` 插件持续写/截断，**只认状态 + 进度** |
-| `es客厅` | 真实设备 | 设备侧自动发现 | `/status` 的 `position` 真实推进 + `state` |
+四端：`MF-230-Real-PCM`（aiosendspin SDK）、`MF-230-Real-FLAC`（SDK，FLAC）、`MF-230-CPP-Player`
+（sendspin-cpp，ALSA file 只认状态+进度）、`es客厅`（真实设备）。PCM 端判据 = `/root/ss_*_out.pcm`
+字节增量（192000 B/s）+ RMS > −60dB；状态来源 `GET /v1/peers/:id/status` 与 `/queue`。
 
-判据来源：`GET /rest/api/v1/peers/:id/status`（state / position / volume / muted）、
-`GET /rest/api/v1/peers/:id/queue`（currentIndex / playMode / items）。
+用例：每端 11 项（起播、暂停、恢复、seek、连续快速 seek 100→40→70、**暂停中 seek → 恢复**、next、
+prev、音量/静音、自然结束自动下一首、停止）+ 组播 6 项（`SS-FULLTEST`：建组/起播/组 seek/暂停恢复/音量/停止）。
 
-## 12.2 用例矩阵（每端 11 项，共 44 项；组播 6 项）
+## 12.2 复现的真实缺陷：暂停中拖进度 → 自动开始播放
 
-起播、暂停、恢复、seek、连续快速 seek（100→40→70）、**暂停中 seek → 恢复**、next、prev、
-音量/静音、自然结束自动下一首、停止。
+**现象**：设备处于暂停态时拖动进度条，`state` 立刻变 `PLAYING` 并出声（四端全部复现）。
 
-组播（`SS-FULLTEST`，es客厅 + PCM + FLAC + C++）：建组、起播、组 seek（成员进度 spread）、
-暂停/恢复、音量、停止。
+**根因（两条路叠加）**：① `GroupPump.seek()` 为了让旧循环锚定新位置，内部会 `if (paused) resume()`；
+② `seekCore` 在非起播窗口走**完整重建流**（`playCore`），新建的泵默认未暂停。任一条都会把
+「暂停中拖进度」变成「开始播放」，与用户语义（拖动只改位置）及 DLNA / AirPlay 行为不一致。
 
-## 12.3 复现的真实缺陷：暂停中拖进度 → 自动开始播放
+**修复**：`seekCore` 先快照 `const wasPaused = !!g.paused;`，在**三个返回点**补回 `pauseCore` ——
+无在播曲（仅记忆位置）、起播窗口内（`busy`，只记起播位置）、重建流之后（日志追加 `(保持暂停)`）。
 
-**现象**：设备处于暂停态时拖动进度条，`state` 立刻变成 `PLAYING` 并开始出声（四端全部复现）。
+**回归守卫**：`sendspin-guard.yml` **P4** —— `wasPaused` 快照在位、`if (wasPaused) pauseCore(srv, clientId);`
+计数 ≥3、日志标记在位；单测 `tests/sendspin/playerCoreUnits.test.ts` 新增「暂停中 seek → 重建流后仍保持暂停」。
 
-**根因（两条路叠加）**：
-
-1. `GroupPump.seek()` 为了让旧循环锚定新位置，内部会 `if (paused) resume()`；
-2. 随后 `seekCore` 在非起播窗口走**完整重建流**（`playCore`），新建的泵默认未暂停。
-
-任一条都会把「暂停中拖进度」变成「开始播放」，与用户语义（拖动只改位置）及 DLNA / AirPlay 行为不一致。
-
-**修复**：`seekCore` 先快照 `const wasPaused = !!g.paused;`，在**三个返回点**补回 `pauseCore`：
-
-- 无在播曲（仅记忆位置）；
-- 起播窗口内（`busy`，只记起播位置）；
-- 重建流之后（日志追加 `(保持暂停)` 便于真机排障）。
-
-**回归守卫**：`sendspin-guard.yml` **P4** —— `wasPaused` 快照在位、`if (wasPaused) pauseCore(srv, clientId);` 计数 ≥3、
-日志标记在位；单测 `tests/sendspin/playerCoreUnits.test.ts` 新增「暂停中 seek → 重建流后仍保持暂停」。
-
-## 12.4 结果
+## 12.3 结果与两个测量陷阱
 
 - 四端 × 11 项 + 组播 6 项全部 PASS；组 seek 后各成员进度 `spread = 0`。
-- 唯一一次 `PCM seek` 报 FAIL（`pcm=0.0s`）经 `/root/ss_seek_probe.py` 逐秒采样复测：
-  seek 后首秒写入 13.80s、随后稳定 1.00s/s、`position` 1:1 前进 —— **测量窗口假阴性**，非产品问题。
-- 自动化下一首需等播放器 overrun 宽限（实测约 12s），验收等待窗口取 22s；窗口取 5s 会误判。
-
-## 12.5 复用脚本（230 主机）
-
-| 脚本 | 用途 |
-|---|---|
-| `/root/ss_full_test2.py` | 全量矩阵（50 例），按显示名解析 clientId，自动恢复音量 |
-| `/root/ss_seek_probe.py` | seek 后逐秒采样，判定「真出声」而非只看状态 |
-| `/root/ss_trace.py` / `/root/ss_next_probe.py` | next / seek-pause / 自动下一首的日志追踪 |
-| `/root/restart_players.sh` | 重启三台模拟播放器（PCM / FLAC / C++） |
-
+- **陷阱一（假阴性）**：唯一一次 `PCM seek` FAIL（`pcm=0.0s`）经 `/root/ss_seek_probe.py` 逐秒采样复测——
+  seek 后首秒写入 13.80s、随后稳定 1.00s/s、`position` 1:1 前进 ⇒ **测量窗口假阴性**，非产品问题。
+- **陷阱二（等不够）**：自动化下一首需等播放器 overrun 宽限（实测约 12s），验收窗口取 22s；取 5s 会误判。
+- 复用脚本（230）：`/root/ss_full_test2.py`（50 例矩阵，按显示名解析 clientId）、`/root/ss_seek_probe.py`
+  （seek 后逐秒采样）、`/root/ss_trace.py` / `ss_next_probe.py`（日志追踪）、`/root/restart_players.sh`（起三台模拟播放器）。
 
 # 附录
 
-## A. 设备配置（ESP32-S3，**已脱敏**）
+## A. 设备配置
 
-> **相对原始配置的改动点只有 3 处**：新增 `network:` 块、`buffer_size` 设为 6MB、`decode_memory` 用 `psram`。其余保持原样。
-> **api 密钥 / WiFi SSID / 密码已用 `XXXXX` 占位，烧录前请换成你自己的值。**
-
-```yaml
-# Board: Generic ESP32-S3 Board (Generic)
-# Definition: definitions/boards/generic-esp32s3/manifest.yaml
-esphome:
-  name: esp32-player2
-  friendly_name: esp32-player2
-
-esp32:
-  board: esp32-s3-devkitc-1
-  flash_size: 16MB
-  framework:
-    type: esp-idf
-    version: 5.5.4
-
-logger:
-web_server:
-  port: 80
-
-api:
-  encryption:
-    key: "XXXXXXXX"          # ← 换成你自己的 api.encryption.key
-  reboot_timeout: 600s
-
-ota:
-  - platform: esphome
-    password: !secret esp32_player_meet__encryption_key
-
-# ★ 改动 1：关掉 sendspin 自动打开的高性能网络优化（未配 network: 块时该优化被自动启用，
-#   社区实测是「每隔几分钟掉一次」的直接原因，见坑 B7）。
-network:
-  enable_ipv6: true
-  enable_high_performance: false
-
-wifi:
-  networks:
-    - ssid: XXXXX            # ← 换成你自己的 WiFi SSID
-      password: XXXXX        # ← 换成你自己的 WiFi 密码
-  manual_ip:
-    static_ip: 192.168.10.245
-    gateway: 192.168.10.1
-    subnet: 255.255.255.0
-    dns1: 223.5.5.5
-    dns2: 8.8.8.8
-  # 关闭 Wi-Fi 省电，避免连接不稳定导致音频流中断
-  power_save_mode: none
-  # 8.5dB 是 ESPHome 允许的下限(默认 20.5dB)；RSSI < -70dBm 建议回到 17~20.5
-  output_power: 8.5
-  ap:
-    ssid: XXXXX              # ← 换成你自己的 AP SSID
-    password: XXXXX          # ← 换成你自己的 AP 密码
-
-captive_portal:
-
-psram:
-  mode: octal
-  speed: 80MHz
-
-sendspin:
-  id: sendspin_hub
-
-i2s_audio:
-  - id: i2s_output
-    i2s_lrclk_pin: GPIO7
-    i2s_bclk_pin: GPIO6
-
-speaker:
-  - platform: i2s_audio
-    id: speaker_id
-    dac_type: external
-    i2s_dout_pin: GPIO5
-    i2s_audio_id: i2s_output
-    sample_rate: 48000
-    bits_per_sample: 16bit
-    channel: stereo
-  - platform: mixer
-    id: mixer_speaker_id
-    output_speaker: speaker_id
-    source_speakers:
-      - id: announcement_spk_mixer_input
-      - id: media_spk_mixer_input
-  - platform: resampler
-    id: media_spk_resampling_input
-    output_speaker: media_spk_mixer_input
-  - platform: resampler
-    id: announcement_spk_resampling_input
-    output_speaker: announcement_spk_mixer_input
-
-media_source:
-  # HTTP 音频源平台名 = audio_http（写成 http_request 会报「平台未找到」，见坑 B13）
-  - platform: audio_http
-    id: http_source_media
-  - platform: audio_http
-    id: http_source_announcement
-  - platform: sendspin
-    id: sendspin_source
-    # ★ 改动 2：6MB。FLAC 下解锁 20/25/30s 预设（见 §3.2 对照表）。
-    #   选型公式：buffer_size ≥ 档位 × 实测码率 ÷ 0.6。
-    buffer_size: 6000000
-    # ★ 改动 3：改回 psram（官方文档明写 internal 在 ESP32-S3 上收益极小，见坑 B8）。
-    decode_memory: psram
-    task_stack_in_psram: true
-
-media_player:
-  - platform: sendspin
-    id: sendspin_group_media_player
-  - platform: speaker_source
-    name: "Speaker Media Player"
-    id: speaker_media_player_id
-    media_pipeline:
-      speaker: media_spk_resampling_input
-      num_channels: 2
-      sources:
-        - sendspin_source
-        - http_source_media
-    announcement_pipeline:
-      speaker: announcement_spk_resampling_input
-      num_channels: 1
-      sources:
-        - http_source_announcement
-```
+> ⚠️ **本节原载 2026.9.0 / 9B 帧头基线的完整配置，已随 2026.10.x（sendspin-cpp 0.9.3 / spec 1.0.0-rc1）反转而作废**
+> —— 照它烧会得到「每包 `Error decoding FLAC frame: -2`、整链无声」（见开篇增补表与坑 A1 的反转说明）。
+> **现行配置见本文开篇「ESPHome 2026.10.x 设备配置示例」**（13B 帧头 / PAKE 带 round / `supported_commands` 走 `client/state`）。
+>
+> 那份配置相对厂商原版的改动点只有 3 处，本节保留这三条（对新配置同样适用）：显式写 `network:` 块（否则高性能网络优化被自动打开，坑 B7）、
+> 按容量档位选 `buffer_size`（§3.2）、`decode_memory: psram`（S3 上收益见坑 B8）。`api.encryption.key` / SSID / 密码一律 `XXXXX` 占位，
+> 烧录前换成自己的值；`static_ip` 不得多台共用（见下「两个提醒」）。
 
 ### 排障时临时追加（验证完记得撤掉）
 
