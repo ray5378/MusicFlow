@@ -44,6 +44,15 @@ export function computeBridgeBackoffMs(
   return Math.round(Math.min(maxMs, exp * jitter));
 }
 
+/** ENOENT 连续 N 次上报 permanent-loss(退避 5s 起 ×2 封顶 30s:N=12 ≈ 累计 5 分钟)。 */
+const BRIDGE_ENOENT_PERMANENT_AFTER = 12;
+
+/** connect 错误是否 ENOENT(Unix socket 文件不存在)。 */
+function isEnoentError(err: unknown): boolean {
+  if ((err as { code?: string })?.code === "ENOENT") return true;
+  return err instanceof Error && err.message.includes("ENOENT");
+}
+
 const defaultSchedule = (fn: () => void, ms: number): (() => void) => {
   const t = setTimeout(fn, ms);
   return () => clearTimeout(t);
@@ -92,6 +101,8 @@ export class BridgeSource {
   private queue: Uint8Array[] = [];
   private queuedBytes = 0;
   private maxQueueMs = 0;
+  /** ENOENT 连败计数(改法5:socket 文件消失的 permanent-loss 观测)。 */
+  private connectEnoentStreak = 0;
   private sentFrames = 0;
   private sentBytes = 0;
   private reconnects = 0;
@@ -221,6 +232,24 @@ export class BridgeSource {
         this.opts.log?.(`bridge connect failed: ${err instanceof Error ? err.message : String(err)}`);
         if (!this.stopping) {
           this.reconnects++;
+          // 改法5(观测,不自停):ENOENT = 桥 socket 文件已不在(BridgeServer close
+          // unlink 后的典型残留),该路径上退避重连注定失败。连续 12 次(退避 5s 起
+          // ×2 封顶 30s,累计 ≈5 分钟)经 onStateChange 上报一次 permanent-loss 供
+          // 对账/观测判定。**member 不得自停**:rebuildBridgeRoutes 靠「原 token 同
+          // socketPath + 退避重连」接上,自停会破坏子进程崩溃重建语义。
+          if (isEnoentError(err)) {
+            this.connectEnoentStreak++;
+            if (this.connectEnoentStreak === BRIDGE_ENOENT_PERMANENT_AFTER) {
+              this.opts.log?.(
+                `bridge permanent-loss: ENOENT 连续 ${this.connectEnoentStreak} 次(~5min,socket 文件消失;上报观测,不自停)`,
+              );
+              // 直接透传一次事件:setState 对同态迁移去重会吞掉 reason,这里必须让
+              // onStateChange 观察方看到 permanent-loss 标记。
+              this.opts.onStateChange?.("stalled", { reason: `permanent-loss:ENOENT x${this.connectEnoentStreak}` });
+            }
+          } else {
+            this.connectEnoentStreak = 0;
+          }
           this.setState("stalled", { reason: "connect-failed" });
         }
         this.scheduleReconnect();
@@ -249,6 +278,7 @@ export class BridgeSource {
       this.opts.log?.(`bridge socket error: ${err?.message ?? "unknown"}`); // close 随后到来
     });
     this.attempt = 0; // 连接成功,退避归位
+    this.connectEnoentStreak = 0; // 连上即清 ENOENT 连败计数
     this.opts.onConnected(sock);
     this.setState("live");
     this.drain();

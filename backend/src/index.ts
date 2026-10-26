@@ -470,7 +470,7 @@ getEventManager().on("device_list_changed", () => {
 // createCastSession for stream URLs).
 import { startAirPlayService, wireAirPlayPersistence, loadPersistedAirPlayDevices, isAirPlayDeviceDisabled, isAirPlayEnabled } from "./services/airplay/control.js";
 import { getAirPlayDevices, getAirPlayDevice, onAirPlayEvent } from "./services/airplay/discovery.js";
-import { splitGroupMembers } from "./services/group/protocolPlayer.js";
+import { splitGroupMembers, startBridgeRouteReconciler } from "./services/group/protocolPlayer.js";
 // AirPlay 渲染器插件默认关闭(插件管理页开关):开启才启动 mDNS 服务与设备注册,
 // 关闭时零常驻资源(无网络监听/定时器/会话/peer/player)。
 if (isAirPlayEnabled()) {
@@ -580,7 +580,12 @@ startOrphanPruner();
 
 // ffmpeg 出流看门狗:周期对账在途转码进程,回收「既不产字节也不退出」的僵死 ffmpeg
 // (先于 kill 联动失效的场景,如上游源卡住)。30s 一轮,幂等启动,不做启动对账。
+
 startFfmpegReconciler();
+
+// 桥路由对账(改法4):60s 周期「检测+摘除+warn」,收敛单侧孤儿(泵侧句柄/会话侧
+// token 与主进程路由登记不符)。幂等启动;第一版不做 rebuild 自动重建(触发条件单独评审)。
+startBridgeRouteReconciler();
 
 /** 解析队列 key(裸设备 id 或裸组 id)所落物理接收端的 host(IP/主机名)。
  *  仅供重启恢复的 per-host 互斥使用。

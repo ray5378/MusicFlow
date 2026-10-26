@@ -833,7 +833,7 @@ export function pollCore(srv: SendspinServer | null, clientId: string): { playin
   // srv.group(clientId) 是单设备组,其 paused/current 不反映真实播放态 ——
   // 只读它会导致暂停后仍报 playing(HA 卡片进度条不锁帧、暂停键常显"播放")。
   const g = srv ? resolveLiveGroup(srv, clientId) : (ephemeralGroup(clientId) as any);
-  // [conn-group-diag] 临时诊断(复现假 IDLE 自持循环用,复现完撤):conn.group 与
+  // [conn-group-diag] 常驻观测埋点(假 IDLE 取证):conn.group 与
   // 「真正含此连接的 ug: 组」失配时打一行 —— 失配 ⇒ playing 恒 false ⇒
   // idle_early 复查(同 pollState 源)结构性确认已停放行切歌。
   if (srv && srv.groups) {

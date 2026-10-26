@@ -816,21 +816,26 @@ export async function sendspinGroupLeave(groupName: string, clientId: string): P
 
 /** 用户组桥集合同步(Phase 5,§5.2「加入/摘除 AirPlay」+ 子进程重启 re-attach):
  *  把目标桥规格数组同步到活跃组(热复用/停旧起新/摘除),新加入者做 ring 回填。
- *  返回 { synced, backfilled } 供调用方日志。 */
+ *  返回 { synced, backfilled, confirmed } 供调用方日志/摘除确认(confirmed=false =
+ *  泵侧同步**未发生**(supervisor 未运行),调用方不得据此推进依赖侧效果,见
+ *  group/protocolPlayer.bridgeLeaveMember)。 */
 export async function sendspinGroupBridgeSync(
   groupName: string,
   sockets: BridgeSocketSpec[],
-): Promise<{ synced: number; backfilled: number }> {
+): Promise<{ synced: number; backfilled: number; confirmed: boolean }> {
   if (isForkMode()) {
-    if (!sendspinSupervisor.isRunning()) return { synced: 0, backfilled: 0 };
-    return sendspinSupervisor.rpc<{ synced: number; backfilled: number }>("bridgeSync", {
+    // confirmed=false:supervisor 未运行 = 泵侧同步**没发生**。旧实现静默假装成功,
+    // 调用方无法区分「没摘/摘了」→ bridgeLeaveMember 在句柄未摘时拆 sock ⇒ 单侧孤儿。
+    if (!sendspinSupervisor.isRunning()) return { synced: 0, backfilled: 0, confirmed: false };
+    const r = await sendspinSupervisor.rpc<{ synced: number; backfilled: number }>("bridgeSync", {
       group: groupName,
       sockets,
     });
+    return { synced: r.synced, backfilled: r.backfilled, confirmed: true };
   }
   const { bridgeSyncCore } = await import("./playerCore.js");
   const backfilled = bridgeSyncCore(getServer(), groupName, sockets);
-  return { synced: sockets.length, backfilled };
+  return { synced: sockets.length, backfilled, confirmed: true };
 }
 
 /** 用户组传输指令(stop/pause/resume/seek/volume):core 函数本就 group-name 无关
@@ -854,6 +859,47 @@ export async function sendspinGroupTransport(
     case "seek": if (srv) seekCore(srv, groupName, Number(arg) || 0); break;
     case "volume": if (srv) setVolumeCore(srv, groupName, Number(arg) || 0); break;
   }
+}
+
+/** 泵侧组桥事实源(对账/观测用):全部组桥句柄扁平快照。
+ *  fork → rpc bridgeStatus(子进程侧事实);in-proc → 直读本地 server。 */
+export async function sendspinBridgeStatus(): Promise<
+  Array<{ group: string; deviceId: string; generation: number | null; state: string | null }>
+> {
+  if (isForkMode()) {
+    if (!sendspinSupervisor.isRunning()) return [];
+    return sendspinSupervisor.rpc<Array<{ group: string; deviceId: string; generation: number | null; state: string | null }>>("bridgeStatus");
+  }
+  const srv = getServer();
+  const out: Array<{ group: string; deviceId: string; generation: number | null; state: string | null }> = [];
+  if (!srv) return out;
+  for (const g of srv.groups.values()) {
+    for (const [deviceId, h] of g.bridges ?? []) {
+      const st = typeof h.stats === "function" ? h.stats() : undefined;
+      out.push({
+        group: g.name,
+        deviceId,
+        generation: typeof h.generation === "number" ? h.generation : null,
+        state: st?.state ?? null,
+      });
+    }
+  }
+  return out;
+}
+
+/** 泵侧摘单座桥句柄(对账兜底/运维用)。注意用 groups.get(**不自动建组** ——
+ *  srv.group() 对不存在的组会静默新建空组,对账器绝不能造组)。 */
+export async function sendspinBridgeDetach(groupName: string, deviceId: string): Promise<boolean> {
+  if (isForkMode()) {
+    if (!sendspinSupervisor.isRunning()) return false;
+    const r = await sendspinSupervisor.rpc<{ removed: boolean }>("bridgeDetach", { group: groupName, deviceId });
+    return !!r?.removed;
+  }
+  const srv = getServer();
+  const g = srv?.groups.get(groupName);
+  if (!g) return false;
+  const { detachGroupBridge } = await import("./bridgeAttach.js");
+  return detachGroupBridge(g, deviceId);
 }
 
 /** 用户组轮询(播放在播/位置/时长):供组 player pollState 与组状态派生。 */

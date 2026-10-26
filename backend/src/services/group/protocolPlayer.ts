@@ -61,9 +61,17 @@ export async function bridgeLeaveMember(groupId: string, deviceId: string): Prom
   const [removed] = route.splice(idx, 1);
   const groupName = sendspinGroupName(groupId);
   const r = await import("../sendspin/index.js");
-  await r.sendspinGroupBridgeSync(groupName, [...route]).catch(() => null); // 泵侧摘句柄(best-effort)
-  await bridgeStopDevice(removed.token, deviceId);
-  log.info(`[group][bridge] ${groupId}: 播中摘除 device=${deviceId}(设备回到可 cast 状态)`);
+  // 改法3(洞 C):泵侧摘句柄**未确认**(sync 抛错 / fork 下 supervisor 未运行静默
+  // no-op → confirmed=false)时**推迟 bridgeStopDevice** —— 否则句柄没摘成、sock 先
+  // unlink,BridgeMember 顶着死路径无限退避重连(单侧孤儿)。推迟后设备被桥多占用
+  // ≤2 个对账周期(60s 对账兜底摘除),远好于永久孤儿。
+  const sync = await r.sendspinGroupBridgeSync(groupName, [...route]).catch(() => null);
+  if (sync?.confirmed) {
+    await bridgeStopDevice(removed.token, deviceId);
+    log.info(`[group][bridge] ${groupId}: 播中摘除 device=${deviceId}(设备回到可 cast 状态)`);
+  } else {
+    log.warn(`[group][bridge] ${groupId}: 泵侧摘句柄未确认(${sync ? "confirmed=false" : "sync 异常"}),推迟 bridgeStop 交对账兜底 device=${deviceId} token=${removed.token}`);
+  }
   return true;
 }
 
@@ -445,4 +453,107 @@ export async function getGroupStatus(groupId: string): Promise<{
   const st = await getDeviceStatus(leader.id);
   // DLNA leader 的设备音量是单机标度;组音量以 GroupManager 为准(用户调的是「组」)。
   return { ...st, volume: persistedVolume };
+}
+
+// ---- 改法4:桥路由对账(检测+摘除+warn,60s 周期;第一版不做 rebuild 重建)----
+// 事实源 = activeBridgeRoutes(主进程路由登记)。两侧现状:sendspin 泵侧句柄
+// (sendspinBridgeStatus)/ airplay 会话侧(bridgeStatus)。登记里没有而侧上有 →
+// 单侧孤儿(历史来源:摘除吞错拆 sock、空组回收不清桥、fork 组停不清桥)。
+// 宽限:孤儿连续两轮(≥60s 间隔)仍在才摘 —— 避开 bridgePrepare 成功→route.push
+// 之间、rebuildBridgeRoutes 重锚定中的瞬态窗口。rebuild 触发条件另行评审,本版只摘不建。
+let bridgeReconcilerTimer: NodeJS.Timeout | null = null;
+/** 孤儿首见时刻(key → ms epoch):连续两轮仍在才动手。 */
+const bridgeOrphanFirstSeen = new Map<string, number>();
+/** 宽限窗(ms):略小于一个对账周期,保证第二轮必过线。 */
+const BRIDGE_RECONCILE_GRACE_MS = 55_000;
+
+/** 幂等启动对账定时器(60s 周期)。 */
+export function startBridgeRouteReconciler(intervalMs = 60_000): void {
+  if (bridgeReconcilerTimer !== null) return;
+  bridgeReconcilerTimer = setInterval(() => { void reconcileBridgeRoutesOnce(); }, intervalMs);
+  bridgeReconcilerTimer.unref?.();
+}
+
+export function stopBridgeRouteReconciler(): void {
+  if (bridgeReconcilerTimer !== null) {
+    clearInterval(bridgeReconcilerTimer);
+    bridgeReconcilerTimer = null;
+  }
+}
+
+/** 测试复位(定时器 + 孤儿首见表 + 路由表)。 */
+export function resetBridgeRouteReconcilerForTest(): void {
+  stopBridgeRouteReconciler();
+  bridgeOrphanFirstSeen.clear();
+  activeBridgeRoutes.clear();
+}
+
+/** 测试注入:直接设定活跃桥路由(仅 *.test.ts;生产路由由 playMedia/bridgeJoinMember 维护)。 */
+export function setBridgeRoutesForTest(routes: Map<string, BridgeSocketSpec[]>): void {
+  activeBridgeRoutes.clear();
+  for (const [k, v] of routes) activeBridgeRoutes.set(k, [...v]);
+}
+
+/** 单轮对账:两侧现状 vs 路由登记,超宽限的孤儿逐侧摘除 + warn。全程 best-effort。 */
+export async function reconcileBridgeRoutesOnce(): Promise<void> {
+  try {
+    const wantedDevices = new Set<string>();
+    const wantedTokens = new Set<string>();
+    for (const specs of activeBridgeRoutes.values()) {
+      for (const s of specs) {
+        wantedDevices.add(s.deviceId);
+        wantedTokens.add(`${s.deviceId}:${s.token}`);
+      }
+    }
+    const now = Date.now();
+    const { sendspinBridgeStatus, sendspinBridgeDetach } = await import("../sendspin/index.js");
+    // 侧 1:sendspin 泵侧句柄(以 deviceId 对账)
+    let spin: Array<{ group: string; deviceId: string }> = [];
+    try { spin = await sendspinBridgeStatus(); } catch { spin = []; }
+    const seenSpin = new Set<string>();
+    for (const b of spin) {
+      const key = `spin:${b.group}:${b.deviceId}`;
+      if (wantedDevices.has(b.deviceId)) { bridgeOrphanFirstSeen.delete(key); continue; }
+      seenSpin.add(key);
+      if (!reapOrphan(key, now)) continue;
+      const ok = await sendspinBridgeDetach(b.group, b.deviceId).catch(() => false);
+      log.warn(`[group][bridge] 对账摘除孤儿句柄: side=sendspin group=${b.group} device=${b.deviceId} detached=${ok}(路由登记无此设备)`);
+    }
+    for (const k of [...bridgeOrphanFirstSeen.keys()]) {
+      if (k.startsWith("spin:") && !seenSpin.has(k)) bridgeOrphanFirstSeen.delete(k);
+    }
+    // 侧 2:airplay 会话侧(以 deviceId:token 对账 —— 同设备换 token 的旧会话也算孤儿)
+    const { airplaySupervisor } = await import("../airplay/supervisor.js");
+    if (airplaySupervisor.isRunning()) {
+      type AirSess = { deviceId: string; token: string };
+      let sessions: AirSess[] = [];
+      try { sessions = await airplaySupervisor.rpc<AirSess[]>("bridgeStatus"); } catch { sessions = []; }
+      const seenAir = new Set<string>();
+      for (const s of sessions) {
+        const key = `air:${s.deviceId}:${s.token}`;
+        if (wantedTokens.has(`${s.deviceId}:${s.token}`)) { bridgeOrphanFirstSeen.delete(key); continue; }
+        seenAir.add(key);
+        if (!reapOrphan(key, now)) continue;
+        await bridgeStopDevice(s.token, s.deviceId).catch(() => { /* 摘会话失败下轮重试 */ });
+        log.warn(`[group][bridge] 对账摘除孤儿会话: side=airplay device=${s.deviceId} token=${s.token}(路由登记无此 token)`);
+      }
+      for (const k of [...bridgeOrphanFirstSeen.keys()]) {
+        if (k.startsWith("air:") && !seenAir.has(k)) bridgeOrphanFirstSeen.delete(k);
+      }
+    }
+  } catch (e) {
+    log.warn(`[group][bridge] 对账轮失败(下轮重试): ${(e as Error)?.message || e}`);
+  }
+}
+
+/** 宽限判定:首见登记;满宽限(连续两轮仍在)返回 true 并清除登记。 */
+function reapOrphan(key: string, now: number): boolean {
+  const t0 = bridgeOrphanFirstSeen.get(key);
+  if (t0 === undefined) {
+    bridgeOrphanFirstSeen.set(key, now);
+    return false;
+  }
+  if (now - t0 < BRIDGE_RECONCILE_GRACE_MS) return false;
+  bridgeOrphanFirstSeen.delete(key);
+  return true;
 }
