@@ -128,6 +128,18 @@ export function airplay2DelayUsOf(groupId: string | null | undefined): number {
   return getGroupDelays(groupId).airplay2Ms * 1000;
 }
 
+/** 桥投递窗口用的锚点位移(µs):按**该桥协议**读对应格子(raop → airplay 格,
+ *  ap2-* → airplay2 格)。组名非 ug: ⇒ 0n(历史行为)。
+ *  正数 = 桥侧更晚出声(与 planBridgeAnchor.anchorShiftUs 同向)。
+ *  投递窗口必须含它:桥侧可听时刻 = 组时间线 + shift;窗口不跟随 ⇒ shift 会被
+ *  桥内对齐器当「帧提前到达」drop/skip 出清(2026-10-27 真机实锤),补偿整体失效。 */
+export function bridgeAnchorShiftUsOf(groupName: string, protocol: string): bigint {
+  const id = parseUserGroupId(groupName);
+  if (!id) return 0n;
+  const d = getGroupDelays(id);
+  return BigInt((protocol.startsWith("ap2-") ? d.airplay2Ms : d.airplayMs) * 1000);
+}
+
 /** 从 sendspin 组名取用户组 id:`ug:<gid>` → gid;设备组(裸 clientId)→ null。 */
 export function parseUserGroupId(groupName: string): string | null {
   if (typeof groupName !== "string" || !groupName.startsWith("ug:")) return null;

@@ -46,7 +46,7 @@ import { peekPump, stopGroupPump } from "./streamEngine.js";
 import { recordSendspinDebug } from "./debugLog.js";
 import { esphomeBridge } from "./esphomeBridge.js";
 import { computeCommonSendAhead, type SendAheadInput } from "./group.js";
-import { sendspinDelayUsOfGroupName } from "../group/delayCalib.js";
+import { bridgeAnchorShiftUsOf, sendspinDelayUsOfGroupName } from "../group/delayCalib.js";
 import { recordProbedRate } from "../playerRate.js";
 import { b64urlDecode, b64urlEncode } from "./util.js";
 import type { PairingStore } from "./pairingStore.js";
@@ -791,8 +791,12 @@ export class SendspinGroup {
     //   若窗口仍按原始 ts 判定、交付时再减 sendAhead，首帧 ts' 会落到 now+1.0s <
     //   RAOP 可达线 now+1.05s ⇒ 必然 self-anchor 2.5s(8cb4742 前的 45s 路径)。
     const ahead = BigInt(this.commonSendAheadUs());
-    const lo = now + BigInt(BRIDGE_PUSH_FLOOR_US) + ahead;
-    const hi = now + BigInt(BRIDGE_PUSH_HORIZON_US) + ahead;
+    // 窗口跟随**桥自己的可听域**:audibleAt(帧) = tsUs + anchorShiftUs(桥会话内
+    // anchorUs = firstFrameTsUs + shift)。shift 不进窗口 ⇒ 后移的锚点被对齐器判
+    // 「帧提前到达」用 drop/skip 出清,手动延迟补偿整体失效(2026-10-27 实锤)。
+    const shift = this.bridgeAnchorShiftUs(deviceId);
+    const lo = now + BigInt(BRIDGE_PUSH_FLOOR_US) + ahead - shift;
+    const hi = now + BigInt(BRIDGE_PUSH_HORIZON_US) + ahead - shift;
     const epoch = this.bridgeContentEpoch;
     const capUs = BigInt(BRIDGE_BACKFILL_MAX_US);
     let totalUs = 0n;
@@ -805,7 +809,11 @@ export class SendspinGroup {
       if (e.tsUs > hi) break; // 窗口外(未来):交给补投定时器
       if (totalUs + BigInt(e.durUs) > capUs) continue; // 回填总量上限(防御;跳过异常大帧继续扫)
       try {
-        b.pushAudio(e.data, e.tsUs - ahead); // 可听域:设备出音=ts−send_ahead(权威文档763)
+        // 可听域+延迟补偿:ts' = ts − send_ahead + shift。shift 进**投递时戳**而非锚点
+        // —— 桥内对齐器看到的仍是首帧 target=0 的纯净节奏,不会再消化锚点平移
+        // (anchorUs 含 shift 时首帧 target=−shift,insert/skip 把补偿整体吞掉,真根因);
+        // 设备出声时刻 = 组时间线 + shift,正是手动延迟补偿的语义。
+        b.pushAudio(e.data, e.tsUs - ahead + shift);
       } catch { /* 单桥失败不连累 */ break; }
       n++;
       totalUs += BigInt(e.durUs);
@@ -852,8 +860,10 @@ export class SendspinGroup {
         const ring = this.recentByGroup.get(this.encoderKey("pcm", 100));
         if (!ring || ring.length === 0) return;
         const ahead = BigInt(this.commonSendAheadUs());
-        const lo = now + BigInt(BRIDGE_PUSH_FLOOR_US) + ahead;
-        const hi = now + BigInt(BRIDGE_PUSH_HORIZON_US) + ahead;
+        // 同 backfillBridge:窗口按该桥协议读对应延迟格,跟随桥锚点位移。
+        const shift = this.bridgeAnchorShiftUs(deviceId);
+        const lo = now + BigInt(BRIDGE_PUSH_FLOOR_US) + ahead - shift;
+        const hi = now + BigInt(BRIDGE_PUSH_HORIZON_US) + ahead - shift;
         this.deliverBridgeWindow(b, deviceId, ring, lo, hi, ahead);
       } catch { /* 单桥失败不连累组泵 */ }
     }
@@ -874,6 +884,7 @@ export class SendspinGroup {
     ahead: bigint,
   ): number {
     const epoch = this.bridgeContentEpoch;
+    const shift = this.bridgeAnchorShiftUs(deviceId); // 与窗口同一取值(动态读,PUT 后下一 tick 生效)
     let last = this.bridgeWatermarks.get(deviceId) ?? 0n;
     let n = 0;
     for (const e of ring) {
@@ -886,7 +897,8 @@ export class SendspinGroup {
       }
       if (e.tsUs > hi) break; // 顺延
       try {
-        b.pushAudio(e.data, e.tsUs - ahead);
+        // ts' = ts − ahead + shift:延迟补偿进投递时戳(见 backfillBridge 注释)。
+        b.pushAudio(e.data, e.tsUs - ahead + shift);
       } catch { /* 单桥失败不连累 */ break; }
       n++;
       last = e.tsUs;
@@ -905,6 +917,16 @@ export class SendspinGroup {
   onBridgesCleared(): void {
     this.bridgeWatermarks.clear();
     this.stopBridgePushTimer();
+  }
+
+  /** 本桥的锚点位移(µs,正 = 桥侧更晚出声):按组延迟补偿里**该桥协议**对应那一格
+   *  (raop → airplay_delay_ms;ap2-* → airplay2_delay_ms)。**动态读**缓存
+   *  (PUT /delays 写时更新缓存 ⇒ 下一补投 tick 即生效,无需任何重建/通知链);
+   *  组名非 ug:(单测桩/设备组)或该桥无规格 ⇒ 0n(历史行为)。
+   *  协议取自 bridgeSpecs(bridgeAttach 同步时记录的唯一真值)。 */
+  private bridgeAnchorShiftUs(deviceId: string): bigint {
+    const proto = this.bridgeSpecs.find((s) => s.deviceId === deviceId)?.protocol ?? "raop";
+    return bridgeAnchorShiftUsOf(this.name, proto);
   }
 
   constructor(name: string, server: SendspinServer) {

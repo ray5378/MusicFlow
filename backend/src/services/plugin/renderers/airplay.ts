@@ -93,10 +93,11 @@ Casts music to AirPlay speakers, TVs and other devices on the LAN as a renderer.
 - AirPlay 桥是组泵 PCM 的**旁路接收者**:只负责把组泵产出的 PCM 加密发给设备,**不参与选歌、不推进队列**;选什么歌、放到哪儿一律以组泵为准。
 
 ### 延迟补偿
-- 每个组可分别设置 \`airplay_delay_ms\` 与 \`sendspin_delay_ms\`;
-- 两侧语义一致:**正数 = 该侧更晚出声,负数 = 该侧更早出声**;
+- 每个组可分别设置三格:\`airplay_delay_ms\`(AirPlay 1)、\`airplay2_delay_ms\`(AirPlay 2)、\`sendspin_delay_ms\`;
+- 三侧语义一致:**正数 = 该侧更晚出声,负数 = 该侧更早出声**;
 - 取值范围 ±30000ms,步进 10ms;
-- 改 AirPlay 侧会**重建该组的桥**(锚点在会话建立时算死),表现为该组 AirPlay 成员约 **1~2 秒静音**;Sendspin 侧是帧级下发戳偏移,约 0.5~1 秒后生效,不中断播放。
+- **AP1 与 AP2 为什么要分开**:AP1 走 44.1kHz 重采样,AirPlay 2 走 48kHz 直通,两条链路的抵达延迟不是同一个数,共用一格的话调一格会同时动两台设备,谁也调不准。取值是**逐成员**的 —— 每台 AirPlay 成员按自己实际用的协议读对应那一格,不是组级开关;
+- 改 AP1 或 AP2 任一格都会**重建该组的桥**(锚点在会话建立时算死),表现为该组 AirPlay 成员约 **1~2 秒静音**;Sendspin 侧是帧级下发戳偏移,约 0.5~1 秒后生效,不中断播放。
 
 ### AirPlay 2 支持情况
 - 已配对且支持 AP2 的设备走 **AP2 realtime(48kHz)**;

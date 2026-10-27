@@ -824,6 +824,9 @@
       <div style="font-size:12px;color:var(--el-text-color-secondary);line-height:1.5;margin:6px 0 0 108px;">
         {{ t('groups.delayAirplayHint') }}
       </div>
+      <div v-if="delayProfile.ap1Members === 0" style="font-size:12px;color:var(--el-color-warning);line-height:1.5;margin:4px 0 0 108px;">
+        {{ t('groups.delayNoMembers', { side: 'AirPlay 1' }) }}
+      </div>
 
       <div style="display:flex;align-items:center;gap:12px;margin-top:16px;">
         <div style="width:96px;font-size:13px;">AirPlay 2</div>
@@ -836,6 +839,9 @@
       </div>
       <div style="font-size:12px;color:var(--el-text-color-secondary);line-height:1.5;margin:6px 0 0 108px;">
         {{ t('groups.delayAirplay2Hint') }}
+      </div>
+      <div v-if="delayProfile.ap2Members === 0" style="font-size:12px;color:var(--el-color-warning);line-height:1.5;margin:4px 0 0 108px;">
+        {{ t('groups.delayNoMembers', { side: 'AirPlay 2' }) }}
       </div>
 
       <div style="display:flex;align-items:center;gap:12px;margin-top:16px;">
@@ -850,12 +856,18 @@
       <div style="font-size:12px;color:var(--el-text-color-secondary);line-height:1.5;margin:6px 0 0 108px;">
         {{ t('groups.delaySendspinHint') }}
       </div>
+      <div v-if="delayProfile.sendspinMembers === 0" style="font-size:12px;color:var(--el-color-warning);line-height:1.5;margin:4px 0 0 108px;">
+        {{ t('groups.delayNoMembers', { side: 'Sendspin' }) }}
+      </div>
 
       <div style="margin-top:16px;padding:9px 12px;background:var(--el-fill-color-light);border-radius:6px;font-size:12px;line-height:1.6;">
         <div v-for="(line, i) in delayDiffLines" :key="i">{{ line }}</div>
       </div>
       <div style="font-size:12px;color:var(--el-text-color-secondary);line-height:1.6;margin-top:10px;">
         {{ delayRangeText }}
+      </div>
+      <div style="font-size:12px;color:var(--el-text-color-secondary);line-height:1.6;margin-top:6px;">
+        {{ t('groups.delayNegativeLimit') }}
       </div>
 
       <template #footer>
@@ -1164,6 +1176,8 @@ const delayGroup = ref<any>(null);
 const delayAirplay = ref(0);
 const delayAirplay2 = ref(0);
 const delaySendspin = ref(0);
+/** 成员协议画像(后端按 selectAirPlayBridgeProtocol 现算):为 0 的格子对本组不生效。 */
+const delayProfile = ref({ ap1Members: 0, ap2Members: 0, sendspinMembers: 0 });
 const delayMin = ref(-30000);
 const delayMax = ref(30000);
 const delayStep = ref(10);
@@ -1218,6 +1232,11 @@ async function openDelay(g: any): Promise<void> {
     delayAirplay.value = Number(d.airplayMs ?? 0);
     delayAirplay2.value = Number(d.airplay2Ms ?? 0);
     delaySendspin.value = Number(d.sendspinMs ?? 0);
+    delayProfile.value = {
+      ap1Members: Number(d.ap1Members ?? 0),
+      ap2Members: Number(d.ap2Members ?? 0),
+      sendspinMembers: Number(d.sendspinMembers ?? 0),
+    };
     if (typeof d.minMs === "number") delayMin.value = d.minMs;
     if (typeof d.maxMs === "number") delayMax.value = d.maxMs;
     if (typeof d.stepMs === "number" && d.stepMs > 0) delayStep.value = d.stepMs;

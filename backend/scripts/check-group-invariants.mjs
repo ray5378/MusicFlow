@@ -720,16 +720,14 @@ console.log("===== G13 AP1/AP2 延迟必须按成员协议分格(混合组里各
   const openAt = gtAt === -1 ? -1 : ctl.indexOf("{", gtAt);
   const prepB = openAt === -1 ? null : sliceBraces(ctl, openAt);
   check(
-    "bridgePrepareDevice 按成员协议分格:两个取值口同在,分支判据是 isAp2BridgeProtocol(protocol)",
+    "bridgePrepareDevice 的 anchorShiftUs 必须恒 0(延迟补偿唯一落点 = 投递时戳;锚点再平移 = 双加,对齐器裁内容)",
     prepB !== null &&
-      count(prepB, "airplay2DelayUsOf(") === 1 &&
-      count(prepB, "airplayDelayUsOf(") === 1 &&
-      /isAp2BridgeProtocol\(\s*protocol\s*\)/.test(prepB),
+      count(prepB, "airplay2DelayUsOf(") === 0 &&
+      count(prepB, "airplayDelayUsOf(") === 0 &&
+      /anchorShiftUs:\s*0,/.test(prepB),
     prepB === null
       ? miss("bridgePrepareDevice")
-      : `ap2 口=${prepB === null ? 0 : count(prepB, "airplay2DelayUsOf(")} ap1 口=${
-          prepB === null ? 0 : count(prepB, "airplayDelayUsOf(")
-        } 判据=${prepB === null ? "-" : /isAp2BridgeProtocol\(\s*protocol\s*\)/.test(prepB)}`,
+      : `锚点复取组值(双加)= 对齐器把补偿整段裁掉;anchorShiftUs 必须恒 0`,
   );
   // AP2 侧同样是把锚点在会话建立时算死 ⇒ 第三格变了不重建桥 = 「只改 AP2」调了没反应。
   const api = code(API_GROUPS);

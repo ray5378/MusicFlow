@@ -18,7 +18,12 @@ import {
   invalidateGroupDelays,
   setGroupDelays,
 } from "../../services/group/delayCalib.js";
-import { isBridgeRouteActive, rebuildBridgeRoutes } from "../../services/group/protocolPlayer.js";
+import {
+  bridgeJoinMember,
+  isBridgeRouteActive,
+  rebuildBridgeRoutes,
+} from "../../services/group/protocolPlayer.js";
+import { selectAirPlayBridgeProtocol } from "../../services/airplay/control.js";
 
 export function registerGroups(app: Hono): void {
 app.get("/v1/groups", (c) => {
@@ -112,10 +117,26 @@ app.get("/v1/groups/:id/delays", permMiddleware(PERM.RENDERER_USE), (c) => {
     return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.group.notFoundOrNoPerm"), 404);
   }
   const d = getGroupDelays(id);
+  // 成员协议画像:每一格补偿只对「实际走该协议的成员」生效 —— 没有成员的格子
+  // 调了也不可感(2026-10-27 用户实测教训:把 AP1 设备的补偿调进了 AP2 格)。
+  // AP1/AP2 的归属按 selectAirPlayBridgeProtocol 现算,与桥真正选协议的唯一来源一致。
+  let ap1Members = 0;
+  let ap2Members = 0;
+  let sendspinMembers = 0;
+  for (const m of gm.get(id)?.memberIds ?? []) {
+    if (m.startsWith("sendspin:")) sendspinMembers += 1;
+    else if (m.startsWith("airplay:")) {
+      if (selectAirPlayBridgeProtocol(m.slice("airplay:".length)) === "raop") ap1Members += 1;
+      else ap2Members += 1;
+    }
+  }
   return c.json({
     airplayMs: d.airplayMs,
     airplay2Ms: d.airplay2Ms,
     sendspinMs: d.sendspinMs,
+    ap1Members,
+    ap2Members,
+    sendspinMembers,
     minMs: GROUP_DELAY_MIN_MS,
     maxMs: GROUP_DELAY_MAX_MS,
     stepMs: GROUP_DELAY_STEP_MS,
@@ -144,13 +165,23 @@ app.put("/v1/groups/:id/delays", permMiddleware(PERM.RENDERER_USE), async (c) =>
   // (代价:该组 AirPlay 成员约 1~2s 静音;Sendspin 成员不受影响)。
   let rebuilt = 0;
   // AP1 与 AP2 走的是同一个 anchorShiftUs,同样在会话建立时算死 ⇒ 两格任一变化都要重建。
-  if (
-    (next.airplayMs !== before.airplayMs || next.airplay2Ms !== before.airplay2Ms) &&
-    isBridgeRouteActive(id)
-  ) {
-    try {
-      rebuilt = await rebuildBridgeRoutes(id);
-    } catch { /* 重建失败不影响保存结果:下次会话按新值建立 */ }
+  if (next.airplayMs !== before.airplayMs || next.airplay2Ms !== before.airplay2Ms) {
+    if (isBridgeRouteActive(id)) {
+      try {
+        rebuilt = await rebuildBridgeRoutes(id);
+      } catch { /* 重建失败不影响保存结果:下次会话按新值建立 */ }
+    } else {
+      // 兜底自愈(2026-10-27):登记缺失(容器重启后 resume-active 恢复的桥/历史泄漏)
+      // 但组内桥在播 ⇒ 逐成员幂等 join。join 对「登记缺失」现场初始化路由、prepare
+      // 新会话(子进程自拆同设备旧会话)、泵 sync 停旧句柄起新句柄并回填 ——
+      // 补偿新值随新会话锚定立即生效,不再依赖登记是否幸运地存在。
+      for (const m of gm.get(id)?.memberIds ?? []) {
+        if (!m.startsWith("airplay:")) continue;
+        try {
+          if (await bridgeJoinMember(id, m.slice("airplay:".length))) rebuilt += 1;
+        } catch { /* 单成员失败不连累其余;其会话保持旧值直至下次重建 */ }
+      }
+    }
   }
   return c.json({
     airplayMs: next.airplayMs,

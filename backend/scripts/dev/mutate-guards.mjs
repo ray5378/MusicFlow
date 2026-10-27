@@ -313,11 +313,11 @@ const CASES = [
   {
     id: "G13-b",
     guard: "group",
-    why: "bridgePrepareDevice 把 AP2 分支也接到 AP1 取值口(同组 AP2 成员用错补偿)",
+    why: "bridgePrepareDevice 锚点复取组值 —— 与投递时戳双加,对齐器把补偿整段裁掉(切歌吞 2 秒)",
     file: CTL,
-    from: "(isAp2BridgeProtocol(protocol) ? airplay2DelayUsOf(groupId) : airplayDelayUsOf(groupId))",
-    to: "(isAp2BridgeProtocol(protocol) ? airplayDelayUsOf(groupId) : airplayDelayUsOf(groupId))",
-    expect: "bridgePrepareDevice 按成员协议分格",
+    from: "    anchorShiftUs: 0,",
+    to: "    anchorShiftUs: groupId ? airplayDelayUsOf(groupId) : 0,",
+    expect: "anchorShiftUs 必须恒 0",
   },
   {
     id: "G13-c",
@@ -333,8 +333,8 @@ const CASES = [
     guard: "group",
     why: "PUT 的重建条件漏掉 airplay2Ms(只改 AP2 那一格时调了没反应)",
     file: API,
-    from: "(next.airplayMs !== before.airplayMs || next.airplay2Ms !== before.airplay2Ms) &&",
-    to: "(next.airplayMs !== before.airplayMs) &&",
+    from: "(next.airplayMs !== before.airplayMs || next.airplay2Ms !== before.airplay2Ms)",
+    to: "(next.airplayMs !== before.airplayMs)",
     expect: "PUT delays 的重建条件必须覆盖 airplay2Ms",
   },
 

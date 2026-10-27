@@ -1067,6 +1067,8 @@
     "delayDiffTipLater": "想让 {side} 追上，就把 {side} 调小或把 Sendspin 调大",
     "delayDiffTipEarlier": "想让 Sendspin 追上，就把 Sendspin 调小或把 {side} 调大",
     "delayRange": "范围 ±{sec} 秒，步进 {step} ms；AP1 与 AP2 各按成员自身协议生效，同一组里混着接也没关系",
+    "delayNoMembers": "本组没有走{side}的成员，这一格当前调了不会生效",
+    "delayNegativeLimit": "负值（更早出声）受设备缓冲限制：提前超过约 1 秒通常听不出变化。想对齐时，优先把慢的一侧用正值调晚",
     "delayReset": "重置为 0",
     "delayApply": "保存并生效",
     "delaySaved": "已保存",

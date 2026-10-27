@@ -89,63 +89,16 @@ afterEach(() => {
   delete process.env.MUSICFLOW_AIRPLAY_BRIDGE;
 });
 
-describe("bridgePrepareDevice:anchorShiftUs 取值面", () => {
-  it("有 groupId → 取**按组**补偿(用户逐组调的值必须生效)", async () => {
-    await bridgePrepareDevice("a1", "token-1", "raop", "g1");
-    const payload = h.rpcCalls[0].payload;
-    expect(h.rpcCalls[0].method).toBe("bridgePrepare");
-    expect(payload.anchorShiftUs).toBe(123_000);
-    expect(payload.anchorShiftUs).not.toBe(h.state.globalShiftUs);
-  });
-
-  it("无 groupId → 回落全局 bridge.avShiftMs(历史行为不变)", async () => {
-    await bridgePrepareDevice("a1", "token-2", "raop");
-    expect(h.rpcCalls[0].payload.anchorShiftUs).toBe(7_777);
-  });
-
-  it("groupId 为 null / 空串 → 同样回落全局值(路由层可能传空)", async () => {
-    await bridgePrepareDevice("a1", "token-3", "raop", null);
-    await bridgePrepareDevice("a1", "token-4", "raop", "");
-    expect(h.rpcCalls.map((c) => c.payload.anchorShiftUs)).toEqual([7_777, 7_777]);
-  });
-
-  it("按组值为 0 时用 0(不能被 `||` 语义吞掉回落到全局值)", async () => {
-    await bridgePrepareDevice("a1", "token-5", "raop", "g-zero");
-    expect(h.rpcCalls[0].payload.anchorShiftUs).toBe(0);
-  });
-
-  it("负补偿(该侧更早出声)原样下发", async () => {
-    await bridgePrepareDevice("a1", "token-6", "raop", "g2");
-    expect(h.rpcCalls[0].payload.anchorShiftUs).toBe(-45_000);
-  });
-});
-
-describe("bridgePrepareDevice:anchorShiftUs 按成员协议分格(AP1 / AP2 互不干扰)", () => {
-  it("协议 ap2-realtime → 读 airplay2 格(同一 groupId 下与 AP1 值可以完全不同)", async () => {
-    await bridgePrepareDevice("a1", "token-ap2", "ap2-realtime", "g1");
-    expect(h.rpcCalls[0].payload.anchorShiftUs).toBe(66_000);
-    expect(h.rpcCalls[0].payload.anchorShiftUs).not.toBe(123_000);
-  });
-
-  it("协议 raop → 仍读 airplay 格(新增第三格不得改写 AP1 成员的既有取值)", async () => {
-    await bridgePrepareDevice("a1", "token-ap1", "raop", "g1");
-    expect(h.rpcCalls[0].payload.anchorShiftUs).toBe(123_000);
-  });
-
-  it("同一组两台成员协议不同 → 各取各的格(混合组的落点本来就不是一个数)", async () => {
-    await bridgePrepareDevice("a1", "t-1", "raop", "g1");
-    await bridgePrepareDevice("a1", "t-2", "ap2-realtime", "g1");
-    expect(h.rpcCalls.map((c) => c.payload.anchorShiftUs)).toEqual([123_000, 66_000]);
-  });
-
-  it("负的 AP2 补偿原样下发(该侧更早出声)", async () => {
-    await bridgePrepareDevice("a1", "token-ap2-neg", "ap2-realtime", "g2");
-    expect(h.rpcCalls[0].payload.anchorShiftUs).toBe(-77_000);
-  });
-
-  it("AP2 成员但无组上下文 → 仍回落全局旧值(solo cast 不读按组格)", async () => {
-    await bridgePrepareDevice("a1", "token-ap2-solo", "ap2-realtime");
-    expect(h.rpcCalls[0].payload.anchorShiftUs).toBe(7_777);
+describe("bridgePrepareDevice:anchorShiftUs 必须恒 0(补偿唯一落点=投递时戳)", () => {
+  // 双加教训(2026-10-27):投递时戳(ts' = ts − ahead + shift)已携带全部补偿;
+  // 锚点若再平移,桥内 anchorUs = 投递时戳 + 平移 = 双份 ⇒ 对齐器把多出的那份
+  // 判「内容超前」整段裁掉(切歌吞 2 秒、净补偿归零)。此用例钉死恒 0。
+  it("任何 groupId/协议/正负值组合 ⇒ payload.anchorShiftUs 恒 0", async () => {
+    await bridgePrepareDevice("a1", "t1", "raop", "g1");
+    await bridgePrepareDevice("a1", "t2", "ap2-realtime", "g1");
+    await bridgePrepareDevice("a1", "t3", "raop"); // 无组上下文
+    await bridgePrepareDevice("a1", "t4", "raop", "g2"); // 负值格
+    for (const c of h.rpcCalls) expect(c.payload.anchorShiftUs).toBe(0);
   });
 });
 

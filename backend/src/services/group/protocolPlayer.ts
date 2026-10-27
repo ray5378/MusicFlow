@@ -36,8 +36,20 @@ export function isBridgeRouteActive(groupId: string): boolean {
  *  不 rejoinMembersAirplay」)。桥路由未激活时返回 false(调用方回落 legacy join)。
  *  抛错 = bridgePrepare 失败(调用方按 MAJ-07 降级:回落 solo cast)。 */
 export async function bridgeJoinMember(groupId: string, deviceId: string): Promise<boolean> {
-  const route = activeBridgeRoutes.get(groupId);
-  if (!route || !isAirplayBridgeEnabled()) return false;
+  let route = activeBridgeRoutes.get(groupId);
+  // 自愈(2026-10-27):容器重启后 resume-active 恢复的桥可能没有路由登记
+  // (PUT delays 实测 isBridgeRouteActive=false ⇒ 重建不触发 ⇒ 补偿改值失效)。
+  // 路由缺失不再一票否决:现场初始化空路由走完整 join —— 子进程 prepare 自带
+  // 「拆同 deviceId 旧会话」,泵 sync 自动停旧句柄起新句柄并回填,链路自洽。
+  if (!route) {
+    if (!isAirplayBridgeEnabled()) return false;
+    // 只自愈「设备确实有桥会话在跑」的情形(登记缺失的恢复桥/泄漏桥);
+    // 组未在播或设备无桥时保持旧契约 false —— 否则会给空闲组挂一座孤儿桥。
+    if (!isBridgeOwned(deviceId)) return false;
+    route = [];
+    activeBridgeRoutes.set(groupId, route);
+  }
+  if (!isAirplayBridgeEnabled()) return false;
   if (route.some((r) => r.deviceId === deviceId)) return true; // 已在路由内,幂等
   const token = newBridgeToken();
   bridgeSocketPath(deviceId, token); // <100B 断言(与 playMedia 路径同源)
