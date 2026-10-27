@@ -707,6 +707,24 @@ describe("状态派生(pollState / getGroupStatus)", () => {
     expect(st.state).toBe("STOPPED");
   });
 
+  it("getGroupStatus:【v4.8.1】可听前 buffering → BUFFERING(sendspin leader)", async () => {
+    setGroup(["sendspin:sp1"]);
+    h.state.front = { clients: new Map([["sp1", { ready: true }]]), groups: new Map([["ug:g1", {}]]) };
+    h.state.groupPoll = { playing: true, paused: false, positionMs: 0, durationMs: 120_000, buffering: true };
+    expect((await getGroupStatus("g1")).state).toBe("BUFFERING");
+  });
+
+  it("getGroupStatus:【v4.8.1】桥占用 airplay leader + buffering → BUFFERING;缺省退化 PLAYING", async () => {
+    setGroup(["airplay:a1", "sendspin:sp1"]);
+    apOn("a1");
+    h.bridgeOwned.add("a1");
+    h.state.front = { clients: new Map([["sp1", { ready: true }]]), groups: new Map([["ug:g1", {}]]) };
+    h.state.groupPoll = { playing: true, paused: false, positionMs: 0, durationMs: 120_000, buffering: true };
+    expect((await getGroupStatus("g1")).state).toBe("BUFFERING");
+    h.state.groupPoll = { playing: true, paused: false, positionMs: 1_000, durationMs: 120_000 };
+    expect((await getGroupStatus("g1")).state).toBe("PLAYING");
+  });
+
   it("getGroupStatus:桥占用 airplay leader → 从组泵派生(否则 status 全程 STOPPED)", async () => {
     setGroup(["airplay:a1", "sendspin:sp1"]);
     apOn("a1");

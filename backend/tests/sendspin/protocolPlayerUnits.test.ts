@@ -583,3 +583,36 @@ describe("media_changed 事件(起播即推,HA 卡片不必等轮询)", () => {
     expect(r.mediaUri).toBeTruthy();
   });
 });
+
+// ==================== 【v4.8.1】可听前 BUFFERING 映射 ====================
+// 根因:切歌可听前 pollCore 报 playing:true 而位置钳下界 ⇒ 三端「2s 轮询 + 本地 PLAYING 插值」
+// 互相打架,进度「前进 ~2s 又跳回 0」循环。修复 = 可听前报 BUFFERING,三端据非 PLAYING 停插值。
+describe("【v4.8.1】可听前 BUFFERING:buffering → BUFFERING 瞬态,缺省退化 PLAYING", () => {
+  const GID = "ug1";
+  it("组 player:buffering:true → BUFFERING", async () => {
+    h.groupPoll.mockResolvedValue({ playing: true, paused: false, positionMs: 0, durationMs: 180_000, buffering: true });
+    const st = await createSendspinGroupPlayer(GID).pollState();
+    expect(st.playbackState).toBe(PlaybackState.BUFFERING);
+  });
+
+  it("组 player:buffering:false(已可听)→ PLAYING", async () => {
+    h.groupPoll.mockResolvedValue({ playing: true, paused: false, positionMs: 2_000, durationMs: 180_000, buffering: false });
+    expect((await createSendspinGroupPlayer(GID).pollState()).playbackState).toBe(PlaybackState.PLAYING);
+  });
+
+  it("in-proc solo:pollCore buffering → BUFFERING;stub 组缺字段(undefined)退化 PLAYING", async () => {
+    h.fork = false;
+    h.pollCore.mockReturnValue({ playing: true, paused: false, positionMs: 0, durationMs: 10_000, buffering: true });
+    expect((await createSendspinProtocolPlayer("c1").pollState()).playbackState).toBe(PlaybackState.BUFFERING);
+    h.pollCore.mockReturnValue({ playing: true, paused: false, positionMs: 500, durationMs: 10_000 });
+    expect((await createSendspinProtocolPlayer("c1").pollState()).playbackState).toBe(PlaybackState.PLAYING);
+  });
+
+  it("fork proxy:RPC 透传 buffering → BUFFERING(旧子进程缺字段退化 PLAYING)", async () => {
+    h.fork = true;
+    rpcFor({ poll: { playing: true, paused: false, positionMs: 0, durationMs: 200_000, buffering: true } });
+    expect((await createSendspinProtocolPlayer("c1").pollState()).playbackState).toBe(PlaybackState.BUFFERING);
+    rpcFor({ poll: { playing: true, paused: false, positionMs: 700, durationMs: 200_000 } });
+    expect((await createSendspinProtocolPlayer("c1").pollState()).playbackState).toBe(PlaybackState.PLAYING);
+  });
+});

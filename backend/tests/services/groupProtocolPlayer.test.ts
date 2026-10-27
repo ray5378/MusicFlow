@@ -574,6 +574,20 @@ describe("getGroupStatus:音量权威 = GroupManager 持久值", () => {
     expect(st).toEqual({ state: "PLAYING", position: 12, duration: 200, volume: 33, muted: true, media: { title: "T" }, updatedAt: expect.any(Number) });
   });
 
+  it("【v4.8.1】leader 是 sendspin:可听前 buffering → 状态串 BUFFERING(停插值防回跳)", async () => {
+    mkGroup("g1", ["sendspin:c1"]);
+    front([["c1", { ready: true }]], [["ug:g1", {}]]);
+    H.groupPollImpl = async () => ({ playing: true, paused: false, positionMs: 0, durationMs: 200000, buffering: true });
+    expect((await getGroupStatus("g1")).state).toBe("BUFFERING");
+  });
+
+  it("【v4.8.1】buffering 缺省(旧子进程)→ 退化 PLAYING", async () => {
+    mkGroup("g1", ["sendspin:c1"]);
+    front([["c1", { ready: true }]], [["ug:g1", {}]]);
+    H.groupPollImpl = async () => ({ playing: true, paused: false, positionMs: 1000, durationMs: 200000 });
+    expect((await getGroupStatus("g1")).state).toBe("PLAYING");
+  });
+
   it("leader 是 sendspin:pump 未在播 → STOPPED", async () => {
     mkGroup("g1", ["sendspin:c1"]);
     front([["c1", { ready: true }]], [["ug:g1", {}]]);

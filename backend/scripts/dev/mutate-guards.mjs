@@ -59,6 +59,9 @@ const WD = "backend/src/services/group/watchdog.ts";
 const DC = "backend/src/services/group/delayCalib.ts";
 const API = "backend/src/routes/api/groups.ts";
 const CTL = "backend/src/services/airplay/control.ts";
+const SE = "backend/src/services/sendspin/streamEngine.ts";
+const SPP = "backend/src/services/sendspin/protocolPlayer.ts";
+const GPP = "backend/src/services/group/protocolPlayer.ts";
 
 /**
  * 每条 = 一处违规手法。
@@ -336,6 +339,38 @@ const CASES = [
     from: "if (memberId.startsWith(\"airplay:\") && after !== before)",
     to: "if (after !== before)",
     expect: "PUT delays 仅 AirPlay 成员值变化才重建桥",
+  },
+
+
+  // ===== G14 可听前 BUFFERING(v4.8.1) =====
+  // 价值:audibleStarted 置位/复位与四处映射全是「删一行也全绿」的静默断点 ——
+  // 缺置位 = 永远 BUFFERING;缺映射 = 回跳循环无声回归,用户感知为「进度条又坏了」。
+  {
+    id: "G14-a",
+    guard: "group",
+    why: "pushLoop 首次越过下界的置位行被删 ⇒ 进度永远停在下界,看门狗等不到 PLAYING",
+    file: SE,
+    from: "        if (!this.group.audibleStarted && this.group.positionMs > floorMs) this.group.audibleStarted = true;\n",
+    to: "",
+    expect: "streamEngine 推流/排空两处首次越过下界置位 audibleStarted",
+  },
+  {
+    id: "G14-b",
+    guard: "group",
+    why: "pollCore 丢 buffering 字段 ⇒ 三端恢复本地插值,回跳循环无声回归",
+    file: PC,
+    from: "    buffering: !!g.current && !g.paused && (g as any).audibleStarted === false,\n",
+    to: "",
+    expect: "pollCore 必须返回 buffering",
+  },
+  {
+    id: "G14-c",
+    guard: "group",
+    why: "getGroupStatus 丢 BUFFERING 映射 ⇒ /status 消费方(HA/前端)恢复插值",
+    file: GPP,
+    from: "      state: st.paused ? \"PAUSED\" : st.playing ? ((st as any).buffering ? \"BUFFERING\" : \"PLAYING\") : \"STOPPED\",",
+    to: "      state: st.paused ? \"PAUSED\" : st.playing ? \"PLAYING\" : \"STOPPED\",",
+    expect: "getGroupStatus 两处 sendspin 分支必须把 buffering 映射成",
   },
 
   // ===== check-airplay-bridge.mjs(⑮⑯⑰) =====

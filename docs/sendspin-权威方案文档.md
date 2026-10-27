@@ -458,6 +458,7 @@ await sleep(dueMs - Date.now());   // 自校正，±0.5ms 振荡
   ```
   （`cursorUs` 与 `nowUs()` 同为 host monotonic 时钟，可直接相减）。取帧仍用 `playCursorMs`，只有对外上报换口径。
 - **保住 seek 语义**：可听位置带**下界** `reportedFloorMs`（本轮起播位置 / seek 目标）。正常起播下界为 0 → 开播即 `00:00`；拖到 40s 时下界为 40s → UI 立刻显示目标值，不会被「缓冲还没建立」拉低（对齐 MA `controller.py` 的 `elapsed_time` 防回跳）。
+- **可听前报 BUFFERING（v4.8.1）**：静默预填充 / seek 重建期间（位置钳在下界）`pollCore` 返回 `buffering:true`（`SendspinGroup.audibleStarted`：play/seek/rehost/起播复位，pushLoop 与曲末排空首次越过下界置位），四处映射成 `BUFFERING` 瞬态——三端（HA 卡片 / Web 前端 / 客户端）据非 PLAYING **停止本地插值**，修复「切歌进度前进 ~2s 又跳回 0」循环（详见 [group-权威方案文档.md](./group-权威方案文档.md) §4.5）。
 
 ## 2.9 推流循环落后时**必须让出宏任务**
 
@@ -816,6 +817,16 @@ MA 的回填**不是为了对齐**（MA 同样用绝对时间戳），而是为�
 - 240 实测（3.0.35 整曲缓冲期）：主进程 ~220MB 平稳；子进程 ~300MB 基线、切歌尖峰 ~570MB，锯齿回落无单调泄漏。回收点：播完/切歌/停止即 `pcm = null`，断连/空组走 `stopGroupPump` + `reclaimSendspinOrphans`。
 
 ---
+
+## 5.5 成员级 A/V 延迟补偿（v4.8.0，按成员一格）
+
+组里每个成员独立一格：`player_groups.member_delays_json`（成员 id `sendspin:<clientId>` / `airplay:<deviceId>` → ms，±30000 / 步进 10）。**正数 = 该设备更晚出声**；旧按协议三格（airplay/airplay2/sendspin_delay_ms）已删除，**旧值不迁移**（v4.8.0，升级后归零重调）。
+
+- **sendspin 侧生效（帧级、真·实时）**：`sendspinDelayUsOfClient(groupName, clientId)` 动态读缓存 → 逐拍下发 `c.sendAudio(ts + offset, data)`（`server.ts:1522`）+ 迟到回填逐客户端（`:1658`）；下一次 `pushFrame`（约 0.5~1s，取决于设备 `send_ahead`）即按新值打戳，无会话重建。
+- **airplay 侧生效（桥）**：投递窗口/时戳位移（`bridgeAnchorShiftUs(deviceId)`，`server.ts:818-820` / `:885-887` / `:908`）；随**桥会话建立**锚定，改值需重建/自愈该成员桥。
+- **铁律**：`ring` 的 `tsUs` 一律不打偏移（时间线唯一基准，§2.6）；桥内锚点恒 0（双加会被对齐器判「内容超前」整段裁掉）。
+- **late-join 回填必须逐客户端带各自偏移**，否则新成员「一进场就错位、后进门」。
+- 接口 `GET/PUT /v1/groups/:id/delays`（PUT 收 `{memberId, ms}`，越组 400）；细节唯一出处 [group-权威方案文档.md](./group-权威方案文档.md) §6。
 
 # 第六部分：踩坑记录（**特色错误必须记住**）
 
@@ -1395,9 +1406,9 @@ docker restart musicflow
 ## 10.1 已实现（按主题归并；逐条历史在 git 里）
 
 - **帧格式**：音频帧头 9B / 13B **随接收端固件版本**（2026.9.x = 9B，2026.10.x(rc1) = 13B，两端剥掉的字节数必须一致），回归锁在 `framing.test.ts`。
-- **时间线**：按实际产出推进（`STALL_GRACE_US` 降级）、pacing 绝对时刻调度、落后时 `setImmediate` 让出宏任务、曲末分段排空、进度上报为**可听位置** + seek 下界。
+- **时间线**：按实际产出推进（`STALL_GRACE_US` 降级）、pacing 绝对时刻调度、落后时 `setImmediate` 让出宏任务、曲末分段排空、进度上报为**可听位置** + seek 下界 + **可听前报 BUFFERING 瞬态**（`audibleStarted`，v4.8.1，三端停插值防回跳）。
 - **FLAC 链路**：asm.js 编码器 + 真实元数据流提取 `codec_header`、last-metadata-block 位 = 1、预填充档位按设备容量自动钳制（0.6 余量）、流式解码 `PcmWindow` 恒开。
-- **多房组**：命名空间 + 增量成员口 + 直播沿加入；**按 `(codec, gain)` 分组编码 + 时间线 `max-of-累计`**（修「播中加入成员 → 整组卡顿」，真机 1.44× → 1.00×）；**late-join 回填 `seedLateJoin`**（修「加入新设备很久才出声」，真机 ≈29s → ≈0.1s）。
+- **多房组**：命名空间 + 增量成员口 + 直播沿加入；**按 `(codec, gain)` 分组编码 + 时间线 `max-of-累计`**（修「播中加入成员 → 整组卡顿」，真机 1.44× → 1.00×）；**late-join 回填 `seedLateJoin`**（修「加入新设备很久才出声」，真机 ≈29s → ≈0.1s）；**成员级 A/V 延迟补偿**（`member_delays_json` 按成员一格，v4.8.0，见 §5.5）。
 - **音量/音色**：音量/静音改走 `server/command`（编码增益对能力设备恒 unity，根治「改群组音量要等设备缓冲播完」），配套删掉前端成员迷你音量条死控件；③ 段音色 DSP 接入 sendspin 流（与 HTTP/DLNA 同序 ②→③→⑤，组染 `group:<gid>` / 单设备染 `sendspin:<id>`）。
 - **运维**：ESPHome 6053 只读监控 + `GET /v1/sendspin/esphome`（不回显 PSK）。
 - **其它**：codec 协商可配（`preferred_codec`）、`client/state` 根层解析 + `SYNC LOST`/`synchronized` 日志、长音源 ref 长度溢出修复。

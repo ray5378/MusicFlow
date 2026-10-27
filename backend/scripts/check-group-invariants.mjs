@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// ==================== 群组(Groups)不变量静态守卫(G1–G12) ====================
+// ==================== 群组(Groups)不变量静态守卫(G1–G14) ====================
 //
 // 背景:群组是「多台设备共用同一条内容时间线」的唯一载体,它踩过的坑**全是静默的** ——
 // 不报错、不崩溃、既有用例也全绿,只表现为「听着不对 / 点了没反应」:
@@ -849,6 +849,69 @@ console.log("===== G12 重复成员:全量口 throw / 增量口 no-op(语义刻�
         (dupAt !== -1 && dupAt >= newOnesAt
           ? " —— 顺序颠倒:过滤先跑完,重复项已被摘走,判定失效"
           : ""),
+  );
+}
+
+// ===========================================================================
+// G14 可听前 BUFFERING 瞬态(v4.8.1):切歌进度「前进~2s 又跳回 0」循环防线
+// ===========================================================================
+console.log("===== G14 可听前 BUFFERING 瞬态(audibleStarted ⇒ pollCore.buffering ⇒ 四处映射) =====");
+{
+  const STREAM_ENGINE = "backend/src/services/sendspin/streamEngine.ts";
+  const SPIN_PROTO = "backend/src/services/sendspin/protocolPlayer.ts";
+  const SPIN_INDEX = "backend/src/services/sendspin/index.ts";
+
+  const srv14 = code(SPIN_SERVER);
+  check(
+    "SendspinGroup 必须声明 audibleStarted 标志(可听前 buffering 的唯一状态源)",
+    count(srv14, "audibleStarted = false") === 1 && count(srv14, "audibleStarted = true") === 0,
+    "audibleStarted 字段缺失/被改名 ⇒ pollCore.buffering 恒 false,三端回跳循环回归",
+  );
+  const se14 = code(STREAM_ENGINE);
+  check(
+    "streamEngine 必须在 play/seek/rehost 三处复位 audibleStarted(漏一处 ⇒ 该路径回跳回归)",
+    count(se14, "audibleStarted = false") === 3,
+    "复位点缺失 ⇒ 对应路径切歌/seek 后进度回跳循环回归",
+  );
+  check(
+    "streamEngine 推流/排空两处首次越过下界置位 audibleStarted(漏置位 ⇒ 永远 BUFFERING 不出声)",
+    count(se14, "audibleStarted = true") === 2,
+    "置位点缺失 ⇒ 进度条永远停在下界,看门狗也等不到 PLAYING",
+  );
+  const core14 = code(SPIN_CORE);
+  check(
+    "pollCore 必须返回 buffering(签名 + 返回字段;stub 组 undefined 退化 false)",
+    core14.includes("durationMs: number; buffering: boolean }")
+      && core14.includes("buffering: !!g.current && !g.paused && (g as any).audibleStarted === false,"),
+    "pollCore 丢了 buffering 字段 ⇒ 三端恢复本地插值,回跳循环回归",
+  );
+  check(
+    "playerCore cast 起播两处必须复位 audibleStarted(漏复位 ⇒ 上一首遗留 true,新曲直接误报 PLAYING)",
+    count(core14, "g.audibleStarted = false") === 2,
+    "cast 起播复位缺失 ⇒ 切歌后立即误报 PLAYING,进度回跳回归",
+  );
+  const spp14 = code(SPIN_PROTO);
+  check(
+    "sendspin protocolPlayer 三处 pollState 必须把 buffering 映射成 BUFFERING",
+    count(spp14, "(st as any).buffering ? PlaybackState.BUFFERING") === 3,
+    "映射缺失 ⇒ 可听前报 PLAYING,客户端插值与轮询打架",
+  );
+  check(
+    "sendspin protocolPlayer 两处 catch 兜底必须带 buffering:false(探不到 ≠ buffering)",
+    count(spp14, "buffering: false") === 2,
+    "兜底缺 buffering ⇒ 不可达时误报 BUFFERING,tracker 瞬态屏蔽被滥用",
+  );
+  const gpp14 = code(GROUP_PROTOCOL_PLAYER);
+  check(
+    "getGroupStatus 两处 sendspin 分支必须把 buffering 映射成 \"BUFFERING\" 字符串",
+    count(gpp14, 'buffering ? \"BUFFERING\" : \"PLAYING\"') === 2 && count(gpp14, "buffering: false") === 2,
+    "组状态缺 BUFFERING ⇒ /status 消费方(HA/前端)恢复插值,回跳循环回归",
+  );
+  const sidx14 = code(SPIN_INDEX);
+  check(
+    "sendspinGroupPoll 签名带 buffering 且 fork 未跑兜底带 buffering:false(RPC 透传契约)",
+    sidx14.includes("durationMs: number; buffering: boolean }") && count(sidx14, "buffering: false") === 1,
+    "签名/兜底缺 buffering ⇒ fork 模式下 buffering 丢失,组状态恒 PLAYING",
   );
 }
 

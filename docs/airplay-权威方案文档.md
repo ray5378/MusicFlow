@@ -29,7 +29,7 @@
 > **基线**：MusicFlow **v4.6.77** · 后端 `backend/src/services/airplay/*`（实测 21 个 `.ts`） · 230 测试床 shairport-sync（AP1/AP2）· 真机 HiVi H5MKII / MUZO / WR320
 > **文档来历**：合并此前分散在 `PLAYBACK_SEEK_MA_REWORK.md`、`archive/MusicFlow-AirPlay2(E2~E5)课题立项与实施计划-2026-10-20.md`、`CHANGELOG` 4.6.5x 条目、230 真机排障记录与 `check-airplay-playback-chain.mjs` 守卫注释，并以 **2026-10-20 / 2026-10-21 / 2026-10-22 三轮 HiVi 真机实测** 的最新结论为准。
 > **怎么读**：**第一～五部分是正确做法，照做即可**；**第六部分是踩过的坑（含被推翻的旧结论），务必别重蹈**；第七部分是回归守卫清单（7 个脚本 / 273 个 `check()` 调用点(其中 1 处是 8 次展开的模板)，运行时 280 条断言）；**第八部分是 DLNA + AirPlay 合一设备的流转权威方案**（同设备双身份、双向时序、失败表、验收矩阵）；
-> **第九部分是实现级代码地图**（21 个文件逐个 + 行为→代码反查表，排障从这里开始）；**第十部分是桥接环的时间基准**（`tsUs` 唯一口径、窗口/水位/锚点/stats 判据）；**第十一部分是群组 A/V 延迟补偿 R31**（两侧独立、±30s、改完要重建该组桥）。
+> **第九部分是实现级代码地图**（21 个文件逐个 + 行为→代码反查表，排障从这里开始）；**第十部分是桥接环的时间基准**（`tsUs` 唯一口径、窗口/水位/锚点/stats 判据）；**第十一部分是群组 A/V 延迟补偿 R31**（v4.8.0 起按成员一格、±30s；AirPlay 侧改完要重建/自愈该成员桥，细节唯一出处 group 权威文档 §6）。
 > **本文是 AirPlay 链路的唯一权威**。与其它文档冲突时，以本文为准。
 
 ---
@@ -1222,7 +1222,7 @@ npx vitest run tests/airplay tests/dlna/controlTransportGuards.test.ts tests/ser
 | 桥侧出声时刻(锚点) | `bridgeSession.ts::maybeBeginStream`(:496)→`planBridgeAnchor`(:198)→`raop.ts::streamBridge`(:908) |
 | 桥代次切换(track/seek/stop/rehost) | `bridgeSession.ts::onBoundary`(:422);发送侧 `bridgeMember.ts::sendBoundary` / `notifyGeneration` |
 | 解码归一(为什么这里没有 loudnorm) | `decoder.ts::buildAirplayAf`(:79) + `spawnDecoder`(:102);归一唯一出处 `routes/rest::resolveRequestAf` |
-| 桥接 A/V 标定(按组 / 全局) | `group/delayCalib.ts::airplayDelayUsOf`(:99)→`control.ts::bridgePrepareDevice`(:296,:319)→`ipcProtocol.BridgePrepareArgs`(:55)→`bridgeSession.planBridgeAnchor`(:207) |
+| 桥接 A/V 标定(按成员,v4.8.0) | `sendspin/server.ts::bridgeAnchorShiftUs`(:947)→`group/delayCalib.ts::bridgeAnchorShiftUsOf`→投递窗口/时戳位移(`server.ts:818-820`/`:885-887`/`:908`);桥内 `planBridgeAnchor` 的 `anchorShiftUs` **恒 0**(G13-b);无组上下文兜底仍走 `control.ts::bridgePrepareDevice`→`bridge.avShiftMs` |
 | 桥降噪(realigned 刷屏) | `bridgeSession.ts::realignedLogLevel`(:79) |
 
 # 第十部分：桥接环（BridgeRing）时间基准
@@ -1240,7 +1240,7 @@ npx vitest run tests/airplay tests/dlna/controlTransportGuards.test.ts tests/ser
 | 概念（叙述用词） | 代码符号（真实标识符） | 声明 / 赋值位置 | 含义 |
 |---|---|---|---|
 | 内容时钟；「0 点 = 桥首帧(pump 首帧)」 | `firstFrameTsUs` | 声明 `airplay/bridgeSession.ts:199`（`BridgeSessionOpts.firstFrameTsUs: bigint`）、字段 `:302`（`private firstFrameTsUs: bigint \| null = null`）、**首次赋值** `:402-403`（`if (this.firstFrameTsUs === null && a.tsUs !== 0n) { this.firstFrameTsUs = a.tsUs;`） | 本代内容的第一个非零 `tsUs`；之后的锚点、`deltaUs` 全部相对它 |
-| 锚点（设备侧出声时刻） | `anchorUs = firstFrameTsUs + anchorShiftUs` | `airplay/bridgeSession.ts:209`（`let anchorUs = opts.firstFrameTsUs + BigInt(opts.anchorShiftUs ?? 0);`） | `anchorShiftUs` = R31 按组 AirPlay 延迟（见第十一部分）；`firstFrameTsUs` 是 0 点，`anchorUs` 是 0 点在设备时钟上的落点 |
+| 锚点（设备侧出声时刻） | `anchorUs = firstFrameTsUs + anchorShiftUs` | `airplay/bridgeSession.ts:209`（`let anchorUs = opts.firstFrameTsUs + BigInt(opts.anchorShiftUs ?? 0);`） | `anchorShiftUs` **现恒 0**(G13-b:补偿唯一落点 = 投递窗口/时戳位移,见第十一部分);`firstFrameTsUs` 是 0 点,`anchorUs` 是 0 点在设备时钟上的落点 |
 | 内容位置基线（组时间戳推力基线） | `groupDelivered` / `peakBaseUs` / `jumpUs` | `sendspin/server.ts:1454`（`// 组内时间戳基线 = 本组自身累计交付的内容位置 + 本批游标相对批前峰值的跳变`，实算 `:1454-1463`） | 每编码组按自身累计交付字节打戳,不用共享游标(b93efc1 行为,见 10.2) |
 | stats 里的 `w` / `m` / `clock` / `delta` | 真实字段 `ev` / `dev` / `gen` / `state` / `clock:"local-rtp-ntp"` / `queueMs` / `maxQueueMs` / `late` / `realigned` / `driftUs` / `deltaUs` / `deltaP95Us` / `samples` / `anchorUs` / `leadUs` | `airplay/bridgeSession.ts:637-660`（`emitStatsTick` 的 `console.log` JSON） | **没有 `w=` / `m=` 这两个字段**;见 10.6 判据表 |
 
@@ -1373,66 +1373,64 @@ commandedLeadUs = A − now
 4. **不许在换算里引入墙钟** —— `Date.now()` 出现在 `hostClock`/`clock.ts`/`bridgeMath.ts`/`raop.ntpNow` 即红。
 5. **不许把桥集合并进 `members` 或 `commonSendAheadUs`** —— 前者破坏成员语义,后者让全组 +3.7s(MAJ-01)。
 
-# 第十一部分：群组 A/V 延迟补偿（R31，v4.6.77 ★ 新增）
+# 第十一部分：群组 A/V 延迟补偿（R31，v4.6.77 引入；v4.8.0 起按成员）
 
 > **问题**:同一台机器两种身份(AirPlay 桥 / Sendspin)出声时刻差一个常量。
 > 桥的可听时刻 = `startNtp + L_true`,而 `startNtp = A − L_assumed`(我们用 RECORD 回包的
 > `Audio-Latency`,缺省 1s)。HiVi(00226CFFA0C0,MUZO 固件)**根本不回 `Audio-Latency`**
 > ⇒ `L_true` 协议上不可知 ⇒ 桥整体早/晚 `(L_true − L_assumed)`。Sendspin 侧是按帧头
 > `ts − send_ahead` 出声的确定性实现 ⇒ 只能靠**人工标定**把这个常量补掉。
-> R31 把这条能力做成**按组、两侧独立可调、即时生效**。
+> R31 把这条能力做成**按成员、独立可调**(v4.8.0 起存储为 `player_groups.member_delays_json`,
+> 每个成员一格,不再按协议三格)。
 
-## 11.1 两个值的语义（**正数 = 该侧更晚出声**）
+## 11.1 语义与存储（**正数 = 该设备更晚出声**）
 
-| 列 | 作用侧 | 语义 | 生效粒度 |
-|---|---|---|---|
-| `player_groups.airplay_delay_ms` | AirPlay（桥） | **正 = AirPlay 更晚出声**，负 = 更早 | 桥会话**立锚时**（`anchorShiftUs`），改完需重建该组桥 |
-| `player_groups.sendspin_delay_ms` | Sendspin | **正 = Sendspin 更晚出声**，负 = 更早 | 帧级：`pushFrame` 下发戳偏移，**真·实时**（约 0.5~1s 后听到，取决于设备 `send_ahead`） |
+| 项 | 说明 |
+|---|---|
+| 存储 | `player_groups.member_delays_json`(text, default "{}"):命名空间成员 id → ms 的 JSON map |
+| 键 | `airplay:<deviceId>`(桥投递窗口/时戳位移) / `sendspin:<clientId>`(帧级下发戳偏移) |
+| 范围 | ±30000ms / 步进 10ms / 越界钳到边界 / 缺省 0(新组与旧三格**均归零**,v4.8.0 旧列删除不迁移) |
+| 读写 | `services/group/delayCalib.ts`(178 行):`getMemberDelays` / `getMemberDelayMs` / `setMemberDelay` / `getTrackLeadMs` / `clampGroupDelayMs` |
 
-范围 ±30000ms / 步进 10ms / 越界钳到边界不报错 / 缺省 0·0 / `delayCalib.ts` 的 7 个导出与缓存语义 /
-DB 补列与旧全局值一次性迁移 / 接口与前端入口，**唯一出处是
-[group-权威方案文档.md](./group-权威方案文档.md) §6.1/§6.2/§6.6/§6.7/§6.8**（坐标：`delayCalib.ts:20-21`、`:23`、
-`:41-46`、`db/schema.ts:377-378`、`db/index.ts:782-810`、`routes/api/groups.ts:107-160`）。本文件只保留
-**AirPlay 侧链路**与**铁律** —— 这两处是「改完必须重建桥」的成因，属 airplay 侧独有。
+范围、解析、缓存语义、DB 迁移、接口与前端入口,**唯一出处是
+[group-权威方案文档.md](./group-权威方案文档.md) §6**(坐标:`delayCalib.ts:23-26`、`:51-55`、`:77-100`、`:113+`;
+`db/schema.ts` 的 `memberDelaysJson`;`routes/api/groups.ts:113-188`)。本文件只保留
+**AirPlay 侧链路**与**铁律** —— 这两处是「改完必须重建/自愈桥」的成因,属 airplay 侧独有。
 
-> ⚠️ 口径**以常量为准**：文件头 `:3` 与 `clampGroupDelayMs` docstring `:41` 已于 2026-10-26 改成 ±30000
-> （`delayCalib.ts` 现 116 行）；历史「±2000」是过期注释。
+> ⚠️ 口径**以常量为准**:`GROUP_DELAY_MIN/MAX_MS = ±30000`(`delayCalib.ts:23-24`)。
+> 历史「±2000」是过期口径。v4.8.0 前的「三格(airplay/airplay2/sendspin_delay_ms)」与
+> 「AP1 内置 300ms 播种」均已删除,不要在任何新代码/文档里引用。
 
-## 11.2 AirPlay 侧链路（为什么改完必须重建桥）
+## 11.2 AirPlay 成员侧链路（投递窗口/时戳位移 + 重建/自愈）
 
 ```
-routes/api/groups.ts:124  PUT /v1/groups/:id/delays
-  └─ setGroupDelays(id, {airplayMs, sendspinMs})            // 内存立即生效(DelayCalib.ts:62)
-  └─ if (next.airplayMs !== before.airplayMs && isBridgeRouteActive(id))   // :141
-         rebuilt = await rebuildBridgeRoutes(id)            // :143  ← 一次性拆建该组桥
+member_delays_json["airplay:<deviceId>"]
+  └─ bridgeAnchorShiftUsOf(groupName, deviceId)          // delayCalib.ts，动态读缓存
+       └─ SendspinGroup.bridgeAnchorShiftUs(deviceId)     // server.ts:947-949
+            ├─ 补投窗口: lo/hi = now + FLOOR/HORIZON + ahead − shift   // server.ts:818-820 / 885-887
+            └─ 投递时戳: 与窗口同一取值, ts' 同加 shift                 // server.ts:908
 
-group/protocolPlayer.ts:99  rebuildBridgeRoutes(onlyGroupId?)
-  └─ 逐设备用【原 token】重发 bridgePrepareDevice(…)        // 泵侧 BridgeMember 退避重连自动接上
-
-control.ts:296  bridgePrepareDevice(deviceId, token, protocol, groupId?)
-  └─ anchorShiftUs: groupId ? airplayDelayUsOf(groupId)     // :319 有组 ⇒ 按组值
-                            : getBridgeAvShiftUs()          //      无组 ⇒ 旧的全局值
-  └─ airplaySupervisor.rpc("bridgePrepare", {…, anchorShiftUs})
-
-ipcProtocol.ts:55  BridgePrepareArgs.anchorShiftUs?: number  // 子进程不碰 DB
-childMain.ts:131   case "bridgePrepare" → bridgeSessions.prepare({…, anchorShiftUs})
-bridgeSession.ts:207-209  anchorUs = firstFrameTsUs + (anchorShiftUs ?? 0)
-bridgeSession.ts:511      planBridgeAnchor({…, anchorShiftUs: this.opts.anchorShiftUs ?? 0})
+routes/api/groups.ts:129  PUT /v1/groups/:id/delays  {memberId, ms}
+  └─ members.includes(memberId) 校验(越组写入 400 memberNotInGroup)
+  └─ setMemberDelay(id, memberId, ms)                    // 内存先更新,再落库
+  └─ 仅 memberId 以 airplay: 开头且 after !== before:
+       ├─ isBridgeRouteActive(id) → rebuildBridgeRoutes(id)  // 重建该组桥(该组 AirPlay ~1-2s 静音)
+       └─ 桥在播但路由登记缺失 → bridgeJoinMember 逐成员兜底自愈(2026-10-27,幂等)
 ```
 
-**为什么必须重建**:锚点在 `maybeBeginStream` 里**一次算死**(`bridgeSession.ts:498`
-`if (this.aligner !== null) return`),中途改 `opts.anchorShiftUs` 不会重算。因此
-「改完立即生效」只能让会话重新立锚 ⇒ 重建该组桥(代价:该组 AirPlay 成员约 1~2s 静音;
-Sendspin 成员不受影响,因为重建只碰桥)。
+**为什么 AirPlay 侧要重建/自愈**:补偿随**桥会话建立**锚定(`maybeBeginStream` 幂等闸门,
+`bridgeSession.ts:498`),已建会话不会中途重算;投递窗口/时戳虽是动态读,其位移的完整可听
+效果要等下一次会话建立才兑现。Sendspin 成员无此问题(帧级)。
 
-> **注意**:`anchorShiftUs` 由主进程在 `bridgePrepare` 时**读一次**下发,子进程**不读 DB**;
-> 所以不存在「运行中自己刷新」的路径 —— 这一点是本链路的设计取舍(子进程零 DB 依赖)。
+> **铁律(G13-b,别改回去)**:桥内锚点 `anchorShiftUs` **恒 0**。v4.6.77 曾把补偿接在
+> `planBridgeAnchor.anchorShiftUs`,真机实锤「锚点也平移 = 双加,对齐器把多出的那份判
+> 内容超前整段裁掉」——切歌吞 2 秒、净补偿归零。v4.7.x 起补偿唯一落点 = 投递窗口/时戳位移。
 
-## 11.3 Sendspin 侧链路（帧级实时）
+## 11.3 Sendspin 成员侧链路（帧级实时）
 
-- 链路：`server.ts:433 groupDelayUs(name)` → `:1387 sendspinDelayUs()`（桩 server 无该方法 ⇒ `typeof` 兜底 `0n`）→ `:1425 dspDelayUs`（`pushFrame` 每批读一次）→ `:1479 c.sendAudio(ts + dspDelayUs, data)`；迟到回填用**同一偏移**（`:1609-1610`，注释在 `:1607`）。
-- 实时性：`setGroupDelays` 先更新内存 ⇒ 下一次 `pushFrame`（25ms 一批）立刻按新值打戳，听到的变化约 `send_ahead` 后（0.5~1s）。
-- **late-join 必须同偏移**：回填不同步会让新成员「一进场就错位、后进门」。
+- 链路:`sendspinDelayUsOfClient(groupName, clientId)`(delayCalib.ts,动态读)→ `server.ts:1428 sendspinDelayUsOf(clientId)` → 逐拍下发 `:1522 c.sendAudio(ts + …, data)`;迟到回填逐客户端各自偏移(`:1658`)。
+- 实时性:PUT 写缓存 ⇒ 下一次 `pushFrame`(约 0.5~1s,取决于设备 `send_ahead`)即按新值打戳,无会话重建。
+- **late-join 回填必须同偏移(逐客户端)**:回填不同步会让新成员「一进场就错位、后进门」。
 - 完整链路图与环语义见 [group-权威方案文档.md](./group-权威方案文档.md) §6.4。
 
 ## 11.4 铁律（导致「AirPlay 被一起带偏」的那条）
@@ -1449,22 +1447,21 @@ Sendspin 成员不受影响,因为重建只碰桥)。
 
 | 步骤 | 期望 |
 |---|---|
-| ① 未标定(两值 0)的同组播放 | 两台设备的 `{ev:"tick"}` 行 `deltaUs` 相差一个**恒定**量(即 `L_true − L_assumed`),`driftUs` 均 ≤ 1ms |
-| ② PUT `airplayMs = +X` 且桥在跑 | 响应 `rebuilt = 1`;日志 `[group][bridge] … bridge-sync` 重新出现;桥侧先 `sessions: stop` 再 `prepare`(同 token);随后 `ev:"anchor"` 行的 `scheduledAnchorUs` 相对上一次 **+X ms** |
-| ③ PUT 后重放同一首歌 | 两台 `deltaUs` 差值缩小 |X|;调到 0 附近即对齐 |
-| ④ 只改 `sendspinMs` | 不重建桥(`rebuilt = 0`),下一批 `pushFrame` 生效;`frame` 戳与 ring `tsUs` 的差 = 新偏移 |
-| ⑤ 纯 AirPlay 组 / 纯 Sendspin 组 | 各自单独调,互不影响(值分开存) |
-| ⑥ 重启后端 | GET 回读值不变(落库);GetWithMembers 列表也带当前值 |
+| ① 未标定(成员值全 0)的同组播放 | 两台设备的 `{ev:"tick"}` 行 `deltaUs` 相差一个**恒定**量(即 `L_true − L_assumed`),`driftUs` 均 ≤ 1ms |
+| ② PUT `{memberId:"airplay:<dev>", ms:+X}` 且桥在跑 | 响应 `rebuilt ≥ 1`;日志 `[group][bridge] … bridge-sync` 重新出现;桥侧先 `sessions: stop` 再 `prepare`(同 token)或走 join 自愈 |
+| ③ PUT 后重放同一首歌 | 两台 `deltaUs` 差值缩小 \|X\|;调到 0 附近即对齐 |
+| ④ 只改 `sendspin:` 成员 | 不重建桥(`rebuilt = 0`),下一批 `pushFrame` 生效;`frame` 戳与 ring `tsUs` 的差 = 新偏移 |
+| ⑤ 纯 AirPlay 组 / 纯 Sendspin 组 / 同协议两台 | 各自单独调,互不影响(按成员一格) |
+| ⑥ 重启后端 | GET 回读值不变(落库);GET 的 `memberDelays` map 带全部当前值 |
 
 ## 11.6 守卫与用例
 
 | 项 | 内容 |
 |---|---|
-| 单测 | `tests/group/delayCalib.test.ts`(钳制 / 落库回读 / 只改一侧 / 单位换算 / `ug:` 解析)、`tests/routes/apiGroupDelays.test.ts`(默认 0 / 写入回读 / 越界钳制 / 单侧更新 / 组不存在 404) |
-| 静态守卫 | `check-airplay-bridge.mjs` 组⑧:`commonSendAheadUs` 体内不得出现 bridge/lead;R31 自身不改守卫文案 |
-| 回归风险 | ①`ring.tsUs` 被加偏移;②重建范围写成「全部组」而非 `onlyGroupId`;③只改 Sendspin 值时也重建桥(白掉 1~2s 静音);④`parseUserGroupId` 放宽到裸 clientId(设备组会被套上组的偏移) |
+| 单测 | `tests/group/delayCalib.test.ts`(成员级钳制 / 落库回读 / 单成员写 / 单位换算 / 非法 JSON 兜底)、`tests/routes/apiGroupDelays.test.ts`(默认 0 / 越组 400 / 越界钳制 / 单成员更新 / `trackLeadMs` 隐藏口 / 组不存在 404) |
+| 静态守卫 | `check-group-invariants.mjs` G7(`tsUs` 不进 ring)/ G10 / G11 / **G13(按成员,含 G13-b 锚点恒 0)**;`check-airplay-bridge.mjs` 组⑧:`commonSendAheadUs` 体内不得出现 bridge/lead |
+| 回归风险 | ①`ring.tsUs` 被加偏移;②重建范围写成「全部组」而非 `onlyGroupId`;③只改 Sendspin 成员时也重建桥(白掉 1~2s 静音);④取值口串格(airplay 成员读成 sendspin 格);⑤`parseUserGroupId` 放宽到裸 clientId(设备组会被套上组的偏移) |
 
----
 
 # 附录 A：日志锚点速查
 
@@ -1504,7 +1501,7 @@ Sendspin 成员不受影响,因为重建只碰桥)。
 | 设备表 | `airplay_devices`(DB) |
 | 会话凭证 | `airplay_stream_tokens`(DB,TTL 30min,同 song+device 复用) |
 | 设备音量态 | `airplay_device_state`(DB,`volume` / `muted`) |
-| 组延迟补偿 | `player_groups.airplay_delay_ms` / `sendspin_delay_ms`(DB,±30000ms) |
+| 组延迟补偿(按成员,v4.8.0) | `player_groups.member_delays_json`(DB,成员 id → ms,±30000ms) |
 | 全局标定位移 | `settings['bridge.avShiftMs']`(±2000ms,仅无组上下文兜底) |
 | 组延迟接口 | `GET/PUT /rest/api/v1/groups/:id/delays` |
 | 全局标定接口 | `GET/PUT /rest/api/v1/bridge/av-shift` |
@@ -1521,6 +1518,8 @@ Sendspin 成员不受影响,因为重建只碰桥)。
 | 4.6.7x | 桥接环落地:MFAB 通道 / 可听域窗口化投递 / 组内按组打戳(b93efc1)/ 深锚仅纯桥组 / aligner drop 钳制 / `realigned` 降噪;详见 §9~§10 |
 | **4.6.77** | **群组 A/V 延迟补偿(R31)**:`player_groups.airplay_delay_ms` / `sendspin_delay_ms`(±30s,步进 10ms,正=更晚);AirPlay 侧接 `bridgePrepareDevice.anchorShiftUs`(取代全局 `bridge.avShiftMs`,迁移一次性继承),改完只重建**该组**桥;Sendspin 侧帧级实时(`pushFrame` 戳偏移 + `seedLateJoin` 同偏移);接口 `GET/PUT /v1/groups/:id/delays`(响应带 `rebuilt`);**铁律:环里 `tsUs` 一律不动**(§11) |
 | 4.6.77 同时 | 混合组锚点 lead 由 `min(sendAhead,800ms)=500ms` 抬到 `BRIDGE_PUSH_FLOOR_US + BRIDGE_PUSH_TICK_MS*1000 = 1.75s`(修「每首歌开头丢 1s」,`sendspin/constants.ts:96`);桥投递恢复 `ts' = ts − sendAhead` 并把窗口边界整体 +sendAhead 搬回原 ts 域(修桥恒晚 500ms + 首帧自锚 2.5s) |
+| 4.7.x | 延迟三格化(AP1/AP2/Sendspin 独立格)+ 补偿落点改**投递时戳位移**(桥内锚点恒 0,G13-b,修「锚点双加被对齐器裁掉」)+ join 兜底自愈 + 混合组锚点 lead 抬到 5s(`BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US`,修切歌吞新歌开头) |
+| **4.8.0** | **延迟补偿改按成员**:`member_delays_json`(成员 id → ms)取代三格列(旧列 DROP,值不迁移);取消 300ms 播种;取值口 `bridgeAnchorShiftUsOf(groupName, deviceId)` / `sendspinDelayUsOfClient`;PUT 改 `{memberId, ms}`(越组 400);前端改成员弹窗(§11 全节重写) |
 | 未发布(本文同批) | 桥会话音量回落修复(缺陷 **D-1**):`BridgeSession.setVolumeDb`(`bridgeSession.ts:773`)+`BridgeSessionManager.setVolumeDb`(`:833`)+`childMain.ts:119` 的「native 未命中回落桥」——桥占用设备的volume RPC 不再恒落空;回归用例 `tests/airplay/bridgeVolumeRouting.test.ts`(7 个 `it`);缺陷 **D-2**(每首歌无条件 teardown+prepare 桥路由)明确**留待下一轮**,见附录 D |
 
 # 附录 D：已知缺陷 / 待排期（2026-10-26 盘点）
@@ -1531,8 +1530,6 @@ Sendspin 成员不受影响,因为重建只碰桥)。
 | # | 现状（代码事实） | 线上影响 | 状态 | 代码坐标 |
 |---|---|---|---|---|
 | D-1 | 桥占用设备的音量 RPC 曾经只查 native 会话表（`sessionRuntime.ts` 的 `this.sessions`），而桥会话在**另一个**表（`childMain.ts` 的 `bridgeSessions`），且该表没有按 deviceId 下发的入口 ⇒ `setVolumeDb` RPC 对桥占用设备**恒落空** | 桥设备（现场 HiVi）切歌 / 拖音量条 / 进出静音后，音量**冻结在起播值**；`push initial volume` 只在建会话（`bridgeSession.ts:374`）与 RAOP 重连（`:586`）各推一次 | **已修（2026-10-26）**：`BridgeSession.setVolumeDb`（:773）+ `BridgeSessionManager.setVolumeDb`（:833）+ `childMain.ts:119` 的「native 未命中回落桥」；回归用例 `backend/tests/airplay/bridgeVolumeRouting.test.ts`（7 个 `it`） | `bridgeSession.ts:773` / `:818` / `:833`、`childMain.ts:119-129` |
-| D-2 | `group/protocolPlayer.ts::playMedia` 每次起播**无条件**先 `teardownBridgeRoute()` 再 `prepareBridgeRoute()`（`:320-324`），即使路由存在、deviceId 集合与 `apOnline` 完全一致、每个设备都 `isBridgeOwned` | 每首歌拆一次桥：① 设备侧 TEARDOWN/SETUP/RECORD 重握手（现场约 1~2s 静音）② 新 token ⇒ 新桥会话 ⇒ 音量走 `pushInitialVolume` 而非「保持当前值」（D-1 修好后不再表现为**音量丢失**，只剩**重建开销**）③ `maybeBeginStream` 的锚点一次性算死（`:498` `if (this.aligner !== null) return`），重建必然重锚 | **待排期（本轮明确不动）**：复用条件 = 路由存在 + deviceId 集合与 `apOnline` 完全一致 + 每个 device `isBridgeOwned`；命中则跳过 teardown/prepare，并打 debug `[group][bridge] <gid>: 复用既有桥路由(切歌不重建)` | `group/protocolPlayer.ts:313`（`playMedia`）、`:320-324`（无条件拆/建：`:321` teardown、`:324` prepare）、`teardownBridgeRoute`(:278)、`prepareBridgeRoute`(:289)、`bridgeSession.ts:498` |
+| D-2 | `group/protocolPlayer.ts::playMedia` 每次起播**无条件**先 `teardownBridgeRoute()` 再 `prepareBridgeRoute()`（`:320-324`），即使路由存在、deviceId 集合与 `apOnline` 完全一致、每个设备都 `isBridgeOwned` | 每首歌拆一次桥：① 设备侧 TEARDOWN/SETUP/RECORD 重握手（现场约 1~2s 静音）② 新 token ⇒ 新桥会话 ⇒ 音量走 `pushInitialVolume` 而非「保持当前值」（D-1 修好后不再表现为**音量丢失**，只剩**重建开销**）③ `maybeBeginStream` 的锚点一次性算死（`:498` `if (this.aligner !== null) return`），重建必然重锚 | **已修（v4.7.x 暖复用）**：复用条件 = 路由存在 + deviceId 集合与 `apOnline` 完全一致 + 每个 device `isBridgeOwned`；命中则跳过 teardown/prepare，并打 debug `[group][bridge] <gid>: 复用既有桥路由(切歌不重建)` | `group/protocolPlayer.ts:313`（`playMedia`）、`:320-324`（无条件拆/建：`:321` teardown、`:324` prepare）、`teardownBridgeRoute`(:278)、`prepareBridgeRoute`(:289)、`bridgeSession.ts:498` |
 
-**D-2 与 D-1 的关系（别混）**：D-2 是**性能/重锚**问题，D-1 是**功能**问题（音量落不到设备）。
-本轮只修 D-1；D-2 保留现状，因此**现阶段每首歌仍会重建桥**，重建期间 `pushInitialVolume` 会按
-`airplay_device_state` 落库值重推一次音量（这也是 D-1 在老代码里被掩盖成「切歌后音量看着还在」的原因）。
+**D-2 与 D-1 的关系（别混）**：D-2 是**性能/重锚**问题，D-1 是**功能**问题（音量落不到设备）。两者均已修复：D-1 见上；D-2 由 v4.7.x「桥路由暖复用」修复（`routeReusable` 判据，`group/protocolPlayer.ts:437-443`，守卫 G13 钉死）——成员集合与桥参数未变时切歌复用既有路由与 token，不再无条件拆建桥。

@@ -2,6 +2,14 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.8.2] - 2026-10-27
+
+### Docs / 群组·AirPlay·Sendspin 三份权威文档对齐 v4.8.x 现状 + G14 回归守卫 + 覆盖率补齐
+
+- **文档（按现状重写）**：`docs/group-权威方案文档.md` §0.4/§6 延迟补偿从「按协议三格 + 300ms 播种」整体重写为「按成员一格」（`member_delays_json` / 成员级取值口 / PUT `{memberId, ms}` / join 兜底自愈），新增 §4.5 可听前 BUFFERING 瞬态；§1.1 数据模型表、§10.1 守卫清单（G1~G14 / 57 条）、代码地图与附录 B/C 坐标全部同步。`docs/airplay-权威方案文档.md` §11 全节重写（AirPlay 侧链路 = 投递窗口/时戳位移、桥内锚点恒 0 G13-b、重建/join 自愈、验收判据改成员口径），代码地图标定行、索引表同步，附录 C 补 4.7.x / 4.8.0 版本行。`docs/sendspin-权威方案文档.md` §2.8 补可听前 BUFFERING，新增 §5.5 成员级延迟补偿。历史遗留状态修正：group 文档附录 C-8（每首歌无条件拆桥）与 airplay 文档 D-2 标记为已修复（v4.7.x `routeReusable` 暖复用，守卫 G13 已钉）。
+- **回归守卫**：`check-group-invariants.mjs` 新增 **G14 可听前 BUFFERING 瞬态**（9 条断言：`SendspinGroup.audibleStarted` 声明唯一 / streamEngine 三处复位 / 推流+排空两处置位 / `pollCore` 返回字段 / playerCore 两处 cast 复位 / sendspin protocolPlayer 三处映射 + 两处兜底 / getGroupStatus 双分支映射 / `sendspinGroupPoll` 签名与 fork 兜底），总断言 48 → **57**；`dev/mutate-guards.mjs` 新增 G14-a/b/c 变异用例，负向验证 **3/3 能被真实违规打红**（基线三守卫全绿）。
+- **覆盖率补齐**（v4.8.1 新代码路径）：`delayCalib` 非法 JSON / 非对象 JSON 兜底 2 条（此前 `parseMemberDelays` catch 分支 0 覆盖）；可听前 BUFFERING 映射 6 条 —— sendspin protocolPlayer 组 player / in-proc solo / fork proxy 三处 + `getGroupStatus` sendspin leader 与桥占用 airplay leader 双分支，含「旧子进程缺字段退化 PLAYING」兼容断言。
+
 ## [4.8.1] - 2026-10-27
 
 ### Fix / 切歌可听前进度「前进~2s 又跳回 0」循环:可听前上报 BUFFERING 瞬态

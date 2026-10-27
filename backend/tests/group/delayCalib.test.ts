@@ -4,6 +4,7 @@
 // (sendspinDelayUsOfClient)。范围 ±30s(用户定稿)。
 import "../plugins/_env.js";
 import { describe, it, expect, beforeAll, beforeEach } from "vitest";
+import { eq } from "drizzle-orm";
 import { db, initDatabase } from "../../src/db/index.js";
 import { playerGroups } from "../../src/db/schema.js";
 import {
@@ -180,5 +181,26 @@ describe("切歌垫片(组级,API 隐藏调参口)", () => {
     invalidateGroupDelays(GID);
     expect(getTrackLeadMs(GID)).toBe(1500);
     expect(getMemberDelayMs(GID, "airplay:hivi")).toBe(300);
+  });
+});
+
+describe("member_delays_json 非法内容兜底(防脏数据扩散)", () => {
+  it("非法 JSON → 整表按 {} 处理(读不炸);写一口即整表回写自愈", () => {
+    db.update(playerGroups).set({ memberDelaysJson: "not-json{{{" }).where(eq(playerGroups.id, GID)).run();
+    invalidateGroupDelays(GID);
+    expect(getMemberDelays(GID)).toEqual({});
+    expect(getMemberDelayMs(GID, "airplay:hivi")).toBe(0);
+    setMemberDelay(GID, "airplay:hivi", 250);
+    invalidateGroupDelays(GID);
+    expect(getMemberDelayMs(GID, "airplay:hivi")).toBe(250);
+  });
+
+  it("JSON 合法但非对象(数组)→ {};成员值非有限数 → 0(逐项钳制)", () => {
+    db.update(playerGroups).set({ memberDelaysJson: "[1,2]" }).where(eq(playerGroups.id, GID)).run();
+    invalidateGroupDelays(GID);
+    expect(getMemberDelays(GID)).toEqual({});
+    db.update(playerGroups).set({ memberDelaysJson: '{"airplay:hivi":"oops"}' }).where(eq(playerGroups.id, GID)).run();
+    invalidateGroupDelays(GID);
+    expect(getMemberDelayMs(GID, "airplay:hivi")).toBe(0);
   });
 });
