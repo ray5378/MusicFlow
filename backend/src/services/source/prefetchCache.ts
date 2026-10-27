@@ -213,6 +213,25 @@ export async function judgePrefetchedBuffer(buf: Buffer, expectedSec: number): P
     if (expectedSec > 0 && buf.length < expectedSec * PREFETCH_HARD_MIN_BYTES_PER_SEC) {
       return { ...base, dead: true, reason: "too-small-hard" };
     }
+    // ★ 中段缓冲兜底（2026-10-27 二次补刀：240 把 minAudioKB 调到 2048 后暴露）。
+    //   《纵身一跃》上游给的 972KB 是**真音频**（129kbps 的 60s 试听），在
+    //   minAudioKB=2048 的实例上落进本分支 —— 32kbps 地板装得下它（217s×4KB=868KB），
+    //   于是按弱信号放行 ⇒ 照播 60s 假歌。「太小」的判据值是可调的，跟着它调就会
+    //   漏掉所有「够小但内容仍不完整」的源，故不能只靠体积判。
+    //   ≥64KB 的缓冲 music-metadata 解析是可靠的：解析出时长且比基准短超判死线
+    //   ⇒ 照 preview 档判死（与下方主路径同一把尺子）；解析失败/解不出时长才弱信号放行。
+    if (buf.length >= PREFETCH_MIN_AUDIO_BYTES && expectedSec > 0) {
+      const icfg = prefetchIntegrityConfig();
+      try {
+        const meta = await parseBuffer(buf, { duration: true } as any);
+        const d = (meta as any)?.format?.duration;
+        if (typeof d === "number" && Number.isFinite(d) && d > 0 && expectedSec - d > icfg.deltaSec) {
+          return { ...base, dead: true, reason: "preview", actualSec: d, via: "metadata" };
+        }
+      } catch {
+        // 解析不出（冷门容器/怪 tag）⇒ 保守放过，保持弱信号（同规则 4）。
+      }
+    }
     return { ...base, dead: true, reason: "too-small" };
   }
   if (!(expectedSec > 0)) return base;

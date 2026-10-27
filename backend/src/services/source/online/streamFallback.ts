@@ -541,6 +541,9 @@ export function clearFallbackCache(songId?: string) {
 export function markUnplayable(songId: string, opts?: { ttlMs?: number }): void {
   if (!songId) return;
   const ttlMs = opts?.ttlMs && opts.ttlMs > 0 ? opts.ttlMs : negativeTtlMs;
+  // 立即清掉可能存在的正缓存：否则同一首歌同时持有「可播(1h)」与「不可播」两条，
+  // 读视图按正缓存优先 ⇒ 判跳失效（见 addPlayable 的注释）。
+  playableCache.delete(songId);
   setFallback(songId, null, { transient: false, ttlMs });
 }
 
@@ -565,11 +568,27 @@ export function clearStreamFallbackCache(): void {
 const playableCache = new Map<string, number>();
 
 function addPlayable(songId: string) {
+  // ★ 2026-10-27（《纵身一跃》第四刀）：**已知不可播的歌不得被「源解析成功」重新标成
+  //   可播**。VIP 试听源的直链能 200/206 正常解析（源没错，错在内容只有 60s），于是
+  //   队列预解析（RESOLVE-AUDIO）先写正缓存，把判官刚写的负缓存盖住；而
+  //   getCachedPlayability 读正缓存优先 ⇒ 判跳失效，照播 60s 假歌。
+  //   负缓存未过期期间一律拒绝写正缓存；负缓存过期（源可能已恢复）后自动解禁。
+  if (isNegativeFresh(songId)) return;
   playableCache.set(songId, Date.now());
   if (playableCache.size > PLAYABLE_CACHE_MAX) {
     const oldest = playableCache.keys().next().value;
     if (oldest !== undefined) playableCache.delete(oldest);
   }
+}
+
+/**
+ * 负结果是否仍然有效（**只读**，不做过期删除 —— 这里是写路径的判据，不是读视图）。
+ * 只认「明确不可播」（url 为空且非 transient）；网络抖动档不拦截正缓存。
+ */
+function isNegativeFresh(songId: string): boolean {
+  const e = fallbackCache.get(songId);
+  if (!e || e.url || e.transient) return false;
+  return Date.now() - e.at < e.ttlMs;
 }
 
 /** 正结果是否仍然可信(带 TTL)；过期则删除并返回 false。 */

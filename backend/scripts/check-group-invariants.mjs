@@ -960,6 +960,70 @@ console.log("===== G15 预取完整性:上游截断对账 + too-small 硬下界 
   );
 }
 
+// ===========================================================================
+// G16 正缓存不得盖住负缓存(v4.8.4 第四刀):《纵身一跃》最终防线
+// VIP 试听源的直链是活的(200/206 可解析),错的是内容只有 60s。于是队列预解析
+// 每次都顺利写下「可播」正缓存(1h),而 getCachedPlayability 先读正缓存 ⇒
+// 判官刚写的负缓存被盖掉,跳过永远不生效,照播 60s。契约:负缓存鲜活期内
+// 不许并存正缓存;过期后自动解禁(源恢复即复活,不永久拉黑)。
+// ===========================================================================
+console.log("===== G16 正缓存不得盖住未过期负缓存(判跳才看得见) =====");
+{
+  const fb = code(FALLBACK);
+  const declN = countInSrc("function isNegativeFresh(");
+  const callN = countInSrc("isNegativeFresh(songId)");
+  check(
+    "isNegativeFresh 单一声明(负缓存鲜活性判定口,不许散落多处各判一套)",
+    declN.n === 1 && /function isNegativeFresh\(songId: string\): boolean \{/.test(fb),
+    `全仓声明 ${declN.n} 处(${declN.where}) 签名命中=${/function isNegativeFresh\(songId: string\): boolean \{/.test(fb)}`,
+  );
+  const addBody = bodyByName(fb, /function addPlayable\(songId: string/);
+  check(
+    "addPlayable 写正缓存前先判负缓存未过期 ⇒ 拒绝写(源解析成功也不许翻回 playable)",
+    !!addBody && /if \(isNegativeFresh\(songId\)\) return;/.test(addBody) && callN.n >= 1,
+    `addPlayable 体命中=${!!addBody} 拦截行=${addBody ? /if \(isNegativeFresh\(songId\)\) return;/.test(addBody) : "找不到函数体"} 调用点 ${callN.n} 处 ⇒ 缺拦截 = VIP 60s 假歌照播`,
+  );
+  const mkBody = bodyByName(fb, /function markUnplayable\(songId: string/);
+  check(
+    "markUnplayable 立即清掉该歌正缓存(判死与可播不得并存两条矛盾结论)",
+    !!mkBody && /playableCache\.delete\(songId\);/.test(mkBody),
+    `markUnplayable 体命中=${!!mkBody} 清正缓存行=${mkBody ? /playableCache\.delete\(songId\);/.test(mkBody) : "找不到函数体"}`,
+  );
+}
+
+// ===========================================================================
+// G17 判官中段缓冲兜底(v4.8.4 第三刀):minAudioKB 调大后不许漏判
+// 《纵身一跃》972KB 在 minAudioKB=2048 的实例上落进 too-small 分支,而 32kbps 地板
+// (217s×4KB=868KB)装得下它 ⇒ 硬下界不命中,按弱信号放行 ⇒ 照播 60s。
+// 「太小」的判据值是可调的,跟着它调就会漏掉所有「够小但内容仍不完整」的源,
+// 故 too-small 分支内必须再按 music-metadata 的真实时长判一次死(与主路径同尺子)。
+// ===========================================================================
+console.log("===== G17 判官中段缓冲兜底:够小也不许凭体积蒙混过关 =====");
+{
+  const pf = code(PREFETCH);
+  const iHard = pf.indexOf("expectedSec * PREFETCH_HARD_MIN_BYTES_PER_SEC");
+  const iMid = pf.indexOf("buf.length >= PREFETCH_MIN_AUDIO_BYTES && expectedSec > 0");
+  const iWeak = pf.lastIndexOf('return { ...base, dead: true, reason: "too-small" };');
+  check(
+    "too-small 分支内顺序 = 硬下界 → 中段兜底 → 才落弱信号(顺序颠倒 = 兜底永不执行)",
+    iHard >= 0 && iMid > iHard && iWeak > iMid,
+    `硬下界@${iHard} 中段兜底@${iMid} 弱信号@${iWeak}`,
+  );
+  const seg = iMid >= 0 && iWeak > iMid ? pf.slice(iMid, iWeak) : "";
+  const sameRule = /expectedSec - d > icfg\.deltaSec/.test(seg);
+  const deadRet = count(pf, 'return { ...base, dead: true, reason: "preview", actualSec: d, via: "metadata" };') === 1;
+  check(
+    "中段兜底按真实时长判死(与主路径同一把尺子 icfg.deltaSec,不是另立一套阈值)",
+    sameRule && deadRet,
+    `同尺子=${sameRule} 判死返回唯一=${deadRet} ⇒ 尺子不一致 = 同一首歌两处结论相反`,
+  );
+  check(
+    "解析失败走 catch 保守放行(冷门容器/怪 tag 不得被误判成试听)",
+    /catch \{/.test(seg) && /parseBuffer\(buf/.test(seg),
+    `catch 兜底=${/catch \{/.test(seg)} 解析调用=${/parseBuffer\(buf/.test(seg)} ⇒ 无 catch = 解析抛异常直接炸预取`,
+  );
+}
+
 // ---------------------------------------------------------------------------
 if (failures.length) {
   console.error(`\n[群组不变量守卫] FAIL:${failures.length} 项(通过 ${passed} 项)`);

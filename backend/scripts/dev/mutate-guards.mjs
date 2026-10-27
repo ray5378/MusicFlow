@@ -62,6 +62,8 @@ const CTL = "backend/src/services/airplay/control.ts";
 const SE = "backend/src/services/sendspin/streamEngine.ts";
 const SPP = "backend/src/services/sendspin/protocolPlayer.ts";
 const GPP = "backend/src/services/group/protocolPlayer.ts";
+const BF = "backend/src/services/source/bufferedFetch.ts";
+const SF = "backend/src/services/source/online/streamFallback.ts";
 
 /**
  * 每条 = 一处违规手法。
@@ -371,6 +373,83 @@ const CASES = [
     from: "      state: st.paused ? \"PAUSED\" : st.playing ? ((st as any).buffering ? \"BUFFERING\" : \"PLAYING\") : \"STOPPED\",",
     to: "      state: st.paused ? \"PAUSED\" : st.playing ? \"PLAYING\" : \"STOPPED\",",
     expect: "getGroupStatus 两处 sendspin 分支必须把 buffering 映射成",
+  },
+
+  // ===== G15 预取完整性三闸(v4.8.3) =====
+  // 价值:两道闸都是「阈值常量」 —— 放宽容差或降低地板都静默失效,残缺源继续以弱信号放行
+  // (照播 60s 试听片段),且不报任何错。
+  {
+    id: "G15-a",
+    guard: "group",
+    why: "截断对账容差放宽到 0.5 ⇒ 上游只吐一半也当完整,残缺字节照交判官",
+    file: BF,
+    from: "const TRUNCATION_TOLERANCE = 0.9;",
+    to: "const TRUNCATION_TOLERANCE = 0.5;",
+    expect: "上游截断对账",
+  },
+  {
+    id: "G15-b",
+    guard: "group",
+    why: "硬算术下界地板降到 1B/s ⇒ 下界永不命中,chunked 截断源恒落弱信号",
+    file: PF,
+    from: "export const PREFETCH_HARD_MIN_BYTES_PER_SEC = 4000;",
+    to: "export const PREFETCH_HARD_MIN_BYTES_PER_SEC = 1;",
+    expect: "PREFETCH_HARD_MIN_BYTES_PER_SEC = 4000",
+  },
+
+  // ===== G16 正缓存不得盖负缓存(v4.8.4) =====
+  // 价值:这是《纵身一跃》真凶(并发竞态)的两处落点,都是「删一行也全绿」的静默断点 ——
+  // 删掉任一处,VIP 试听源直链 206 可解析就会把正缓存写回去盖住负缓存,判跳失效。
+  {
+    id: "G16-a",
+    guard: "group",
+    why: "addPlayable 漏判负缓存鲜活性 ⇒ probe 飞行期落下的负缓存被 206 正缓存盖住,照播 60s",
+    file: SF,
+    from: "  if (isNegativeFresh(songId)) return;\n",
+    to: "",
+    expect: "addPlayable 写正缓存前先判负缓存未过期",
+  },
+  {
+    id: "G16-b",
+    guard: "group",
+    why: "markUnplayable 不清正缓存 ⇒ 同一首歌并存「可播(1h)」与「不可播」,读视图按正缓存优先 ⇒ 判跳失效",
+    file: SF,
+    from: "  // 读视图按正缓存优先 ⇒ 判跳失效（见 addPlayable 的注释）。\n  playableCache.delete(songId);\n",
+    to: "  // 读视图按正缓存优先 ⇒ 判跳失效（见 addPlayable 的注释）。\n",
+    expect: "markUnplayable 立即清掉该歌正缓存",
+  },
+
+  // ===== G17 判官中段缓冲兜底(v4.8.4) =====
+  // 价值:minAudioKB 是可调项(240 实例 = 2048) —— 跟着它调,几乎所有 mp3 都落 too-small。
+  // 兜底被摘掉 ⇒ 「够小但内容仍不完整」的源恒按弱信号放行,前面几道闸白装。
+  {
+    id: "G17-a",
+    guard: "group",
+    why: "中段兜底闸门被短路 ⇒ 32kbps 地板装得下的残缺源(972KB/60s)按弱信号放行,照播试听片段",
+    file: PF,
+    from: "    if (buf.length >= PREFETCH_MIN_AUDIO_BYTES && expectedSec > 0) {",
+    to: "    if (false) {",
+    expect: "too-small 分支内顺序",
+  },
+  {
+    id: "G17-b",
+    guard: "group",
+    why: "判死返回被删 ⇒ 解析出 60s 也只落到弱信号,残缺源永不记负缓存",
+    file: PF,
+    from: '          return { ...base, dead: true, reason: "preview", actualSec: d, via: "metadata" };\n',
+    to: "",
+    expect: "中段兜底按真实时长判死",
+  },
+  {
+    id: "G17-c",
+    guard: "group",
+    why: "try/catch 保护整块删掉 ⇒ 冷门容器解析抛异常直接炸穿预取,不是保守放过",
+    file: PF,
+    from:
+      "      try {\n        const meta = await parseBuffer(buf, { duration: true } as any);\n        const d = (meta as any)?.format?.duration;\n        if (typeof d === \"number\" && Number.isFinite(d) && d > 0 && expectedSec - d > icfg.deltaSec) {\n          return { ...base, dead: true, reason: \"preview\", actualSec: d, via: \"metadata\" };\n        }\n      } catch {\n        // 解析不出（冷门容器/怪 tag）⇒ 保守放过，保持弱信号（同规则 4）。\n      }\n",
+    to:
+      "      const meta = await parseBuffer(buf, { duration: true } as any);\n      const d = (meta as any)?.format?.duration;\n      if (typeof d === \"number\" && Number.isFinite(d) && d > 0 && expectedSec - d > icfg.deltaSec) {\n        return { ...base, dead: true, reason: \"preview\", actualSec: d, via: \"metadata\" };\n      }\n",
+    expect: "解析失败走 catch 保守放行",
   },
 
   // ===== check-airplay-bridge.mjs(⑮⑯⑰) =====
