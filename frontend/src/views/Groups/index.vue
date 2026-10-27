@@ -860,18 +860,6 @@
         {{ t('groups.delayNoMembers', { side: 'Sendspin' }) }}
       </div>
 
-      <div style="display:flex;align-items:center;gap:12px;margin-top:16px;">
-        <div style="width:96px;font-size:13px;">{{ t('groups.delayTrackLead') }}</div>
-        <el-input-number
-          v-model="delayTrackLead"
-          :min="0" :max="delayMax" :step="100" :step-strictly="true"
-          controls-position="right" style="width:150px"
-        />
-        <span style="font-size:12px;color:var(--el-text-color-secondary);">ms</span>
-      </div>
-      <div style="font-size:12px;color:var(--el-text-color-secondary);line-height:1.5;margin:6px 0 0 108px;">
-        {{ t('groups.delayTrackLeadHint') }}
-      </div>
 
       <div style="margin-top:16px;padding:9px 12px;background:var(--el-fill-color-light);border-radius:6px;font-size:12px;line-height:1.6;">
         <div v-for="(line, i) in delayDiffLines" :key="i">{{ line }}</div>
@@ -1192,7 +1180,6 @@ const delayGroup = ref<any>(null);
 const delayAirplay = ref(0);
 const delayAirplay2 = ref(0);
 const delaySendspin = ref(0);
-const delayTrackLead = ref(0);
 /** 成员协议画像(后端按 selectAirPlayBridgeProtocol 现算):为 0 的格子对本组不生效。 */
 const delayProfile = ref({ ap1Members: 0, ap2Members: 0, sendspinMembers: 0 });
 const delayMin = ref(-30000);
@@ -1249,7 +1236,6 @@ async function openDelay(g: any): Promise<void> {
     delayAirplay.value = Number(d.airplayMs ?? 0);
     delayAirplay2.value = Number(d.airplay2Ms ?? 0);
     delaySendspin.value = Number(d.sendspinMs ?? 0);
-    delayTrackLead.value = Number(d.trackLeadMs ?? 0);
     delayProfile.value = {
       ap1Members: Number(d.ap1Members ?? 0),
       ap2Members: Number(d.ap2Members ?? 0),
@@ -1270,7 +1256,6 @@ function resetDelay(): void {
   delayAirplay.value = 0;
   delayAirplay2.value = 0;
   delaySendspin.value = 0;
-  delayTrackLead.value = 0;
 }
 
 async function saveDelay(): Promise<void> {
@@ -1282,7 +1267,6 @@ async function saveDelay(): Promise<void> {
       airplayMs: delayAirplay.value,
       airplay2Ms: delayAirplay2.value,
       sendspinMs: delaySendspin.value,
-      trackLeadMs: delayTrackLead.value,
     });
     showDelay.value = false;
     if (Number(r.data?.rebuilt) > 0) ElMessage.success(t("groups.delaySavedReconnect"));

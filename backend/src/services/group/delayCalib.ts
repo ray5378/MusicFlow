@@ -33,9 +33,9 @@ export const GROUP_DELAY_STEP_MS = 10;
  *  仅作**创建默认**与**一次性播种**,不参与运行时钳制/兜底(无组上下文仍为 0)。 */
 export const DEFAULT_AIRPLAY_ALIGN_MS = 300;
 
-/** 切歌垫片的组级默认(ms):**0 = 关闭**(用户定调 2026-10-27,手动修改后下一首
- *  切歌自动生效)。sendspin/constants.ts 的 BRIDGE_TRACK_SWITCH_LEAD_US 仅为「无组
- *  上下文」的兜底口径。 */
+/** 切歌垫片的组级默认(ms):**0 = 完全自动**(A 方案:生效 lead = max(组值, 冷/暖动态))。
+ *  组值保留为 API 隐藏调参口(前端弹窗已移除);动态口径见 sendspin/constants.ts 的
+ *  BRIDGE_TRACK_LEAD_COLD/WARM_US。 */
 export const DEFAULT_TRACK_LEAD_MS = 0;
 
 export interface GroupDelays {

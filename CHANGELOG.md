@@ -2,6 +2,15 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.7.5] - 2026-10-27
+
+### Feature / 切歌同步 A+B 对齐 Music Assistant:动态 lead + 桥会话暖复用(切歌零重建零吞音)
+
+- **动态 lead(A)**:垫片不再手设,按桥的**实际启动路径**声明 —— track 冷启(句柄重建,RAOP 握手+设备缓冲)⇒ 2500ms;track 暖复用或 seek/rehost(会话原地续用仅重锚)⇒ 800ms;生效 = max(组值, 动态);env `BRIDGE_TRACK_LEAD_COLD_MS`/`BRIDGE_TRACK_LEAD_WARM_MS` 可调(0=关)。旧固定垫片 BRIDGE_TRACK_SWITCH_LEAD_US 移除(固定值贴下限真机不稳定)。
+- **桥会话暖复用(B,对齐 MA _can_reuse_stream_warm)**:playMedia 路由复用判据(上一条路由与在线 AirPlay 成员**同集合且协议一致**)⇒ 不拆桥、token 沿用;BridgeSessionManager.prepare 暖分支(同 token+设备+协议+RAOP 目标+健康)⇒ RAOP 会话跨曲目保活,新曲由 BOUNDARY(track) 驱动重锚(与 seek 同路径);句柄热复用信号(bridgeWarmAttach)回灌 lead 选择。**240 真机验证:切歌连续 7 次 warm-reuse、零 sessions:stop、driftUs=0/realigned=0/latePackets=0**。
+- **前端**:移除「切歌垫片」手设项(全自动,无需手动);组值 trackLeadMs 保留为 API 隐藏调参口(PUT 不带即归 0)。
+- 测试/守卫:新增 bridgeSessionWarmReuse 用例(⚠️ dry 会话必须显式 `dry: true`);路由暖复用/成员变化冷启用例;bridgePushFrame 动态冷/暖/手动 max 用例(vi.hoisted 钉 env 防默认值漂移);群组守卫 +4 条(动态 lead 声明/复用判据把守拆桥/token 沿用/暖挂载信号);全量 584 文件回归通过。
+
 ## [4.7.4] - 2026-10-27
 
 ### Feature / 切歌垫片按群组可配(弹窗第四行,默认 0=关闭,下一首歌自动生效)

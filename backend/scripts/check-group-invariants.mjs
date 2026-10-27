@@ -247,6 +247,8 @@ const SPIN_CORE = "backend/src/services/sendspin/playerCore.ts";
 const BRIDGE_SESSION = "backend/src/services/airplay/bridgeSession.ts";
 const PREFETCH = "backend/src/services/source/prefetchCache.ts";
 const FALLBACK = "backend/src/services/source/online/streamFallback.ts";
+const GROUP_PROTOCOL_PLAYER = "backend/src/services/group/protocolPlayer.ts";
+const SPIN_BRIDGE_ATTACH = "backend/src/services/sendspin/bridgeAttach.ts";
 const GROUPS_VUE = "frontend/src/views/Groups/index.vue";
 
 // ===========================================================================
@@ -743,9 +745,44 @@ console.log("===== G13 AP1/AP2 延迟必须按成员协议分格(混合组里各
   // AP2 侧同样是把锚点在会话建立时算死 ⇒ 第三格变了不重建桥 = 「只改 AP2」调了没反应。
   const genB = bodyByName(code(SPIN_SERVER), atLineStart("notifyBridgeGeneration"));
   check(
-    "切歌垫片按组读 trackSwitchLeadUsOf(回写常量 ⇒ 弹窗改值下一首不生效)",
-    genB !== null && genB.includes("trackSwitchLeadUsOf(") && count(genB, "BRIDGE_TRACK_SWITCH_LEAD_US") === 0,
-    genB === null ? miss("notifyBridgeGeneration") : "垫片必须动态读组值",
+    "切歌垫片动态 lead(A 方案):max(组值, 冷/暖动态) —— track 冷启才用冷 lead",
+    genB !== null
+      && genB.includes("trackSwitchLeadUsOf(")
+      && genB.includes("BRIDGE_TRACK_LEAD_COLD_US")
+      && genB.includes("BRIDGE_TRACK_LEAD_WARM_US")
+      && genB.includes('reason === "track"')
+      && genB.includes("bridgeWarmAttach")
+      && count(genB, "BRIDGE_TRACK_SWITCH_LEAD_US") === 0,
+    genB === null ? miss("notifyBridgeGeneration") : "垫片必须是动态 lead 声明(固定值贴下限真机不稳定)",
+  );
+  // B 方案(对齐 MA warm reuse):路由暖复用三件套 —— 复用判据把守拆桥 / token 沿用 /
+  // 子进程暖 prepare + 暖挂载信号回灌 lead 选择。
+  const gppCode = code(GROUP_PROTOCOL_PLAYER);
+  check(
+    "桥路由暖复用:playMedia 复用判据把守拆桥(每首拆桥 = 恒冷启,切歌吞音根因)",
+    gppCode.includes("const routeReusable =")
+      && gppCode.includes("if (!routeReusable) await teardownBridgeRoute();")
+      && gppCode.includes("prepareBridgeRoute(apOnline, routeReusable ? prevRoute : undefined)"),
+    "playMedia 必须按 routeReusable 决定是否拆桥",
+  );
+  const pbrB = bodyByName(gppCode, atLineStart("prepareBridgeRoute"));
+  check(
+    "prepareBridgeRoute 沿用旧 token(同设备同协议 ⇒ 子进程暖复用会话)",
+    pbrB !== null && pbrB.includes("reuse?.find") && pbrB.includes("prevSpec ? prevSpec.token :"),
+    pbrB === null ? miss("prepareBridgeRoute") : "token 恒随机 ⇒ 暖复用永远不成立",
+  );
+  const bsmB = bodyByName(code(BRIDGE_SESSION), atLineStart("prepare"));
+  check(
+    "桥会话 prepare 暖复用分支(同 token 同协议同目标且健康 ⇒ 原样续用)",
+    bsmB !== null && bsmB.includes("warm-reuse") && bsmB.includes("prev.warmReusable")
+      && bsmB.includes("for (const [, s] of [...this.sessions])"),
+    bsmB === null ? miss("BridgeSessionManager.prepare") : "prepare 恒冷启 ⇒ RAOP 握手零复用",
+  );
+  const sgbB = bodyByName(code(SPIN_BRIDGE_ATTACH), atLineStart("syncGroupBridges"));
+  check(
+    "syncGroupBridges 上报暖/冷挂载(bridgeWarmAttach ⇒ track 边界选暖/冷 lead)",
+    sgbB !== null && sgbB.includes("g.bridgeWarmAttach = nextSpecs.length > 0 && !rebuilt"),
+    sgbB === null ? miss("syncGroupBridges") : "暖挂载信号丢失 ⇒ track 边界恒按冷启垫",
   );
   const api = code(API_GROUPS);
   const putSeg = sliceBetween(api, 'app.put("/v1/groups/:id/delays"', 'app.delete("/v1/groups/:id"');

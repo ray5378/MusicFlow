@@ -50,6 +50,7 @@ export function syncGroupBridges(
   const bridges = g.bridges;
   if (!bridges) return;
   const prevSpecs = new Map((g.bridgeSpecs ?? []).map((s) => [s.deviceId, s]));
+  let rebuilt = false; // B 方案:有句柄重建 ⇒ track 边界用冷 lead(见 SendspinGroup.bridgeWarmAttach)
   const seen = new Set<string>();
   const nextSpecs: BridgeSocketSpec[] = [];
   for (const spec of specs) {
@@ -74,6 +75,7 @@ export function syncGroupBridges(
     const handle = factory(spec);
     handle.start?.();
     bridges.set(spec.deviceId, handle);
+    rebuilt = true;
     nextSpecs.push(spec);
   }
   // 摘除不再 bridging 的设备
@@ -84,6 +86,8 @@ export function syncGroupBridges(
       g.onBridgeHandleRemoved?.(deviceId); // 窗口投递水位/定时器清理(§6.2)
     }
   }
+  // B 方案:全暖复用(无句柄重建)⇒ track 边界用暖 lead;有重建/首挂 ⇒ 冷 lead。
+  g.bridgeWarmAttach = nextSpecs.length > 0 && !rebuilt;
   g.bridgeSpecs = nextSpecs;
   if (nextSpecs.length > 0) g.ensureBridgePushTimer?.(); // 桥在跑 → 保证补投定时器在跑(§6.2)
   log.info(`bridge-sync group=${g.name} before=${prevSpecs.size} after=${nextSpecs.length} devices=[${nextSpecs.map((s) => s.deviceId).join(",")}]`);

@@ -497,6 +497,12 @@ export class BridgeSession {
     return this.server?.listeningOn ?? null;
   }
 
+  /** 暖复用判据(B 方案,对齐 MA _can_reuse_stream_warm):会话未关闭且链路未降级
+   *  (AP2 link-loss/error;RAOP 重连退避不算 —— 会话对象会自愈重连)。 */
+  get warmReusable(): boolean {
+    return !this.closed && this.ap2LinkLoss === null && this.ap2Session?.currentState !== "error";
+  }
+
   /** 起 listener(+ 非 dry 时 RAOP 握手,等首帧 AUDIO 后进入四锚点驱动推流)。 */
   async start(): Promise<void> {
     const handlers: BridgeServerHandlers = {
@@ -1212,8 +1218,22 @@ export class BridgeSessionManager {
     return false;
   }
 
-  /** 起一座桥会话(同 deviceId 旧会话先拆 = 新流语义)。 */
+  /** 起一座桥会话(同 deviceId 旧会话先拆 = 新流语义;同 token 暖复用除外)。 */
   async prepare(opts: BridgeSessionOpts): Promise<{ listening: true; socketPath: string }> {
+    // 暖复用(B 方案,对齐 MA sendspin_bridge._can_reuse_stream_warm):同 token + 同
+    // 设备 + 同协议 + 同 RAOP 目标 + 会话健康 ⇒ 原样续用 —— RAOP 握手/设备缓冲零重来,
+    // 新曲内容由组泵 BOUNDARY(track) 驱动重锚(与 seek 同路径,bridgeAttach.syncGroupBridges
+    // 热复用句柄)。token 由主进程 protocolPlayer 的路由复用保证「复用 = 同 token」;
+    // token 变 = 上游判定冷启(成员/协议变化),走下方拆旧建新。
+    const prev = this.sessions.get(opts.token);
+    if (
+      prev && prev.deviceId === opts.deviceId && prev.opts.protocol === opts.protocol
+      && prev.opts.host === opts.host && prev.opts.port === opts.port
+      && prev.warmReusable
+    ) {
+      log.info(`[airplay-bridge] sessions: prepare warm-reuse deviceId=${opts.deviceId} token=${opts.token} gen=${prev.snapshot().generation}`);
+      return { listening: true, socketPath: prev.listeningOn ?? opts.socketPath };
+    }
     for (const [, s] of [...this.sessions]) {
       if (s.deviceId === opts.deviceId) {
         this.sessions.delete(s.token);

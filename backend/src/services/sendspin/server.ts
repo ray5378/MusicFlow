@@ -36,6 +36,8 @@ import {
   BRIDGE_PUSH_HORIZON_US,
   BRIDGE_PUSH_FLOOR_US,
   BRIDGE_BACKFILL_MAX_US,
+  BRIDGE_TRACK_LEAD_COLD_US,
+  BRIDGE_TRACK_LEAD_WARM_US,
 } from "./constants.js";
 import { nowUs } from "./clock.js";
 import { MessageRouter } from "./messages.js";
@@ -723,9 +725,12 @@ export class SendspinGroup {
    *  投递时只投当前代次 —— 旧代次帧即使 ts 落在新窗口内也不可信(中途 seek/
    *  rehost 时旧 cursor 可达 now+10s,仅重置水位挡不住)。 */
   private bridgeContentEpoch = 0;
-  /** 切歌垫片(µs):新代次时间线整体 +Δ,随内容推进消耗归零(见 BRIDGE_TRACK_SWITCH_LEAD_US)。
+  /** 切歌垫片(µs):新代次时间线整体 +Δ,随内容推进消耗归零(动态 lead 见 notifyBridgeGeneration)。
    *  **只加在打戳/ring/投递时间线上**,deliveredByGroup 计量(样本数口径)不受影响。 */
   private pendingTrackLeadUs = 0n;
+  /** 本次桥挂载是否全暖复用(B 方案,对齐 MA warm reuse):syncGroupBridges 无句柄
+   *  重建时置 true;notifyBridgeGeneration 的 track 边界据此选暖/冷 lead。 */
+  bridgeWarmAttach = false;
   /** 桥补投定时器(250ms;timer-only 单写者,unref 不阻进程退出)。 */
   private bridgePushTimer: NodeJS.Timeout | undefined;
 
@@ -757,10 +762,15 @@ export class SendspinGroup {
     //  - 水位清零(缺失/0n 哨兵 = 本代次尚未投递):下一 tick 从当前窗口重算。
     this.bridgeContentEpoch++;
     this.bridgeWatermarks.clear();
-    // 切歌垫片:内容代次切换(track/seek/rehost 类)时全组统一晚 Δ 起播,给桥的重
-    // 锚定留窗口 —— 否则 esp32 先播、桥内对齐器裁掉新曲开头(切歌吞音)。
-    // Δ **按组可配**(弹窗第四行,0=关闭):混合组/单一组的重锚定耗时不同。
-    this.pendingTrackLeadUs = trackSwitchLeadUsOf(parseUserGroupId(this.name));
+    // 切歌垫片(A 方案,对齐 MA set_timing 动态 lead):内容代次切换时全组统一晚 Δ
+    // 起播,给桥的重锚定留窗口 —— 否则 esp32 先播、桥内对齐器裁掉新曲开头(切歌吞音)。
+    //  - reason=track 且本次路由冷启(句柄重建,RAOP 握手+设备缓冲)⇒ 冷 lead;
+    //  - reason=track 且路由暖复用(B 方案)/seek/rehost(会话原地续用,仅重锚)⇒ 暖 lead;
+    //  - 生效 = max(组值 track_switch_lead_ms(API 隐藏调参口,默认 0), 动态 lead)。
+    const manualLeadUs = trackSwitchLeadUsOf(parseUserGroupId(this.name));
+    const coldBoundary = reason === "track" && !this.bridgeWarmAttach;
+    const dynamicLeadUs = BigInt(coldBoundary ? BRIDGE_TRACK_LEAD_COLD_US : BRIDGE_TRACK_LEAD_WARM_US);
+    this.pendingTrackLeadUs = manualLeadUs > dynamicLeadUs ? manualLeadUs : dynamicLeadUs;
     this.ensureBridgePushTimer();
   }
 

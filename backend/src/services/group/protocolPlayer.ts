@@ -394,17 +394,21 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
    *  返回:成功规格数组 + 需回落 solo cast 的设备列表。 */
   async function prepareBridgeRoute(
     apOnline: string[],
+    /** B 方案暖复用:上一条路由的 specs —— 同设备同协议沿用旧 token ⇒ 子进程暖复用会话。 */
+    reuse?: BridgeSocketSpec[],
   ): Promise<{ sockets: BridgeSocketSpec[]; soloFallback: string[] } | null> {
     if (!isAirplayBridgeEnabled() || apOnline.length === 0) return null;
     const sockets: BridgeSocketSpec[] = [];
     const soloFallback: string[] = [];
     for (const d of apOnline) {
-      const token = randomBytes(12).toString("hex");
+      // 协议先选(B 方案:暖复用判据含协议一致 ⇒ token 沿用与否取决于协议)。
+      const protocol = selectAirPlayBridgeProtocol(d);
+      const prevSpec = reuse?.find((r) => r.deviceId === d && r.protocol === protocol);
+      // 同设备同协议沿用旧 token ⇒ 子进程暖复用会话(RAOP 握手零重来);否则新 token(冷启语义)。
+      const token = prevSpec ? prevSpec.token : randomBytes(12).toString("hex");
       try {
         // socketPath 在主进程按同一实现计算(bridgeSocketPath,<100B 断言在此抛)。
         bridgeSocketPath(d, token);
-        // 协议逐成员选(AP1 → raop;已配对 AP2 → ap2-realtime;未配对/不支持 → raop)。
-        const protocol = selectAirPlayBridgeProtocol(d);
         await bridgePrepareDevice(d, token, protocol, groupId);
         sockets.push({ deviceId: d, socketPath: bridgeSocketPath(d, token), token, protocol });
       } catch (e) {
@@ -425,11 +429,18 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
       if (dlnaOnline.length === 0 && apOnline.length === 0 && spinOnline.length === 0) {
         throw new Error(`组 ${groupId} 无在线成员,无法播放`);
       }
-      // 上一条桥路由先拆(新 playMedia 重建路由;同代次 socket 会话随之回收)。
-      await teardownBridgeRoute();
+      // B 方案(对齐 MA warm reuse):上一条桥路由与当前在线 AirPlay 成员**同集合且
+      // 协议一致** ⇒ 复用 token 且不拆会话 —— 桥子进程按「同 token 同协议」暖复用
+      // (RAOP 握手/设备缓冲零重来),新曲由 BOUNDARY(track) 驱动重锚(与 seek 同路径);
+      // 句柄热复用见 bridgeAttach.syncGroupBridges。成员/协议变化 ⇒ 冷启(拆旧建新)。
+      const prevRoute = activeBridgeRoutes.get(groupId);
+      const routeReusable = spinOnline.length > 0 && !!prevRoute && prevRoute.length > 0
+        && apOnline.length === prevRoute.length
+        && apOnline.every((d) => prevRoute.some((r) => r.deviceId === d && r.protocol === selectAirPlayBridgeProtocol(d)));
+      if (!routeReusable) await teardownBridgeRoute();
       // 路由快照(§5.1):bridgeEnabled && spin>0 && ap>0 → "bridge";
       // 否则 "legacy-cast"(flag=0 时与旧行为逐字节同路径)。
-      const bridgeRoute = spinOnline.length > 0 ? await prepareBridgeRoute(apOnline) : null;
+      const bridgeRoute = spinOnline.length > 0 ? await prepareBridgeRoute(apOnline, routeReusable ? prevRoute : undefined) : null;
       const jobs: Array<Promise<{ mediaUri: string }>> = [];
       if (spinOnline.length > 0) {
         // sendspin 子集共用一个 pump 同一时间线(多房间同步),不是逐成员 cast。

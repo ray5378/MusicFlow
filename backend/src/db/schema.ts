@@ -380,8 +380,8 @@ export const playerGroups = sqliteTable("player_groups", {
   airplayDelayMs: integer("airplay_delay_ms").notNull().default(0),
   airplay2DelayMs: integer("airplay2_delay_ms").notNull().default(0),
   sendspinDelayMs: integer("sendspin_delay_ms").notNull().default(0),
-  // 切歌垫片(ms):内容代次切换时组时间线前移量,随内容消耗归零(v4.7.3 §BRIDGE_TRACK_SWITCH_LEAD_US)。
-  // 每组独立:混合组/单一组的桥重锚定耗时不同,0 = 关闭垫片。默认 1000(常量同源)。
+  // 切歌垫片的手动覆盖(ms):生效 = max(组值, 冷/暖动态 lead —— A 方案,见
+  // sendspin/constants.ts BRIDGE_TRACK_LEAD_COLD/WARM_US)。0 = 完全自动(默认)。
   trackSwitchLeadMs: integer("track_switch_lead_ms").notNull().default(0),
   createdAt: text("created_at").default(""),
   updatedAt: text("updated_at").default(""),

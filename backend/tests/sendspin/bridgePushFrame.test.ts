@@ -7,7 +7,13 @@
 //   ③ clearPlayback/finishPlayback → BOUNDARY{track/stop}(§4.4);
 //   ④ encodedBytesPerSec:有桥恒 ≥192000B/s(48k/s16le/2ch),FLAC 实测/名义不得低估桥吞吐;
 //   ⑤ 无桥无成员 → 返回 0(原语义,行为零变化)。
-import { describe, it, expect, afterEach, beforeAll } from "vitest";
+import { describe, it, expect, afterEach, beforeAll, vi } from "vitest";
+// A 方案动态 lead:钉住测试口径(冷=1000ms/暖=0),避免默认值漂移影响窗口断言。
+// vi.hoisted 先于模块 import 求值 —— constants.ts 在 import 期读 env。
+vi.hoisted(() => {
+  process.env.BRIDGE_TRACK_LEAD_COLD_MS = "1000";
+  process.env.BRIDGE_TRACK_LEAD_WARM_MS = "0";
+});
 import "../plugins/_env.js";
 import { initDatabase } from "../../src/db/index.js";
 import { setGroupDelays } from "../../src/services/group/delayCalib.js";
@@ -191,14 +197,31 @@ describe("⑥ 投递窗口跟随桥锚点位移(anchorShiftUs)", () => {
     }
   });
 
-  it("切歌垫片默认 0(未设置的组):无垫片,投递时戳 = ts − ahead(行为与 v4.7.2 逐字节一致)", async () => {
+  it("切歌垫片动态·冷边界(A 方案):未配置组 + track 冷启 ⇒ 动态冷 lead(测试 env=1000ms),投递时戳整体 +Δ", async () => {
+    const g = new SendspinGroup("g-lead-cold", { log() {} } as any);
+    (g as any).encoders.set("pcm:100", new PhaseEncoder([1000, 1000, 1000]));
+    const b = bridgeStub("ap-c");
+    g.bridges.set("ap-c", b as any);
+    liveGroups.push(g);
+
+    g.notifyBridgeGeneration(1, "track"); // track 冷启(组值未配置)⇒ 动态冷 lead
+    const ahead = BigInt(g.commonSendAheadUs());
+    // 打戳时 ts 已含垫片 Δ:ts0=now+1s ⇒ 落窗 ts0+Δ=now+2s ∈ [now+1.5,now+2.5]+ahead
+    const ts0 = nowUs() + ahead + 1_000_000n;
+    await g.pushFrame(ts0, PCM());
+    g.bridgePushTick();
+    expect(b.pushed.length).toBeGreaterThan(0);
+    expect(b.pushed[0]!.ts).toBe((ts0 as bigint) + 1_000_000n - ahead);
+  });
+
+  it("切歌垫片动态·暖边界(A 方案):未配置组 + seek(会话复用仅重锚)⇒ 动态暖 lead(测试 env=0)⇒ 无垫片", async () => {
     const g = new SendspinGroup("g-lead-zero", { log() {} } as any);
     (g as any).encoders.set("pcm:100", new PhaseEncoder([1000]));
     const b = bridgeStub("ap-0");
     g.bridges.set("ap-0", b as any);
     liveGroups.push(g);
 
-    g.notifyBridgeGeneration(1, "track"); // 切歌 ⇒ 组未配置 ⇒ Δ=0
+    g.notifyBridgeGeneration(1, "seek"); // 暖边界 ⇒ 动态暖 lead
     const ahead = BigInt(g.commonSendAheadUs());
     const ts0 = nowUs() + ahead + 2_000_000n;
     await g.pushFrame(ts0, PCM());

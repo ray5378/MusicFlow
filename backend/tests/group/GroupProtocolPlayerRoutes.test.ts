@@ -550,6 +550,37 @@ describe("playMedia 扇出与桥接降级", () => {
     expect(h.prepareCalls).toHaveLength(0);
     expect(h.calls.a1).toContain("play");
   });
+
+  it("B 方案暖复用:上一条路由与在线成员同集合同协议 ⇒ 不拆会话、沿用 token(子进程据此暖复用)", async () => {
+    setGroup(["sendspin:sp1", "airplay:a1"]);
+    h.state.front = { clients: new Map([["sp1", { ready: true }]]), groups: new Map() };
+    apOn("a1");
+    setBridgeRoutesForTest(new Map([["g1", [{ deviceId: "a1", socketPath: "/tmp/b_a1_old.sock", token: "oldtok", protocol: "raop" }]]]));
+    h.prepareCalls.length = 0;
+    h.bridgeStopCalls.length = 0;
+    const p = createGroupProtocolPlayer("g1");
+    await p.playMedia(makeItem(), "http://base");
+
+    expect(h.bridgeStopCalls).toHaveLength(0); // 不拆会话 = RAOP 握手/设备缓冲零重来
+    expect(h.prepareCalls).toHaveLength(1); // 仍 prepare(子进程做健康判定与暖复用)
+    expect(h.prepareCalls[0]!.token).toBe("oldtok"); // 沿用旧 token
+    expect(h.spinPlayCalls[0]!.extra.sockets[0]!.token).toBe("oldtok");
+  });
+
+  it("B 方案冷启:成员变化(新增 a2)⇒ 拆旧建新,token 全新", async () => {
+    setGroup(["sendspin:sp1", "airplay:a1", "airplay:a2"]);
+    h.state.front = { clients: new Map([["sp1", { ready: true }]]), groups: new Map() };
+    apOn("a1");
+    apOn("a2");
+    setBridgeRoutesForTest(new Map([["g1", [{ deviceId: "a1", socketPath: "/tmp/x", token: "oldtok", protocol: "raop" }]]]));
+    h.prepareCalls.length = 0;
+    h.bridgeStopCalls.length = 0;
+    const p = createGroupProtocolPlayer("g1");
+    await p.playMedia(makeItem(), "http://base");
+
+    expect(h.bridgeStopCalls.map((c: any) => c.token)).toEqual(["oldtok"]); // 旧路由拆除
+    expect(h.prepareCalls.map((c: any) => c.token)).not.toContain("oldtok");
+  });
 });
 
 describe("传输类扇出(桥占用成员跳过,setVolume 例外)", () => {
