@@ -658,22 +658,24 @@ console.log("===== G11 延迟只在读视图,不得进 PlayerGroup 实体 / pers
   const gi = code(GROUP_INDEX);
   const entB = bodyByHead(gi, /(?:^|\n)export\s+interface\s+PlayerGroup\b/);
   check(
-    "PlayerGroup 实体接口不得含 airplayDelayMs / airplay2DelayMs / sendspinDelayMs",
+    "PlayerGroup 实体接口不得含 airplayDelayMs / airplay2DelayMs / sendspinDelayMs / trackSwitchLeadMs",
     entB !== null &&
       count(entB, "airplayDelayMs") === 0 &&
       count(entB, "airplay2DelayMs") === 0 &&
-      count(entB, "sendspinDelayMs") === 0,
+      count(entB, "sendspinDelayMs") === 0 &&
+      count(entB, "trackSwitchLeadMs") === 0,
     entB === null
       ? miss("interface PlayerGroup")
       : "实体带上延迟字段 ⇒ 任何 persist/emit 都会拿内存里的旧值覆盖 DB 值",
   );
   const viewB = bodyByHead(gi, /(?:^|\n)export\s+interface\s+PlayerGroupWithMembers\b/);
   check(
-    "读视图 PlayerGroupWithMembers 必须带三个延迟字段(前端回显不能丢)",
+    "读视图 PlayerGroupWithMembers 必须带三格延迟字段与切歌垫片(前端回显不能丢)",
     viewB !== null &&
       viewB.includes("airplayDelayMs") &&
       viewB.includes("airplay2DelayMs") &&
-      viewB.includes("sendspinDelayMs"),
+      viewB.includes("sendspinDelayMs") &&
+      viewB.includes("trackSwitchLeadMs"),
     viewB === null
       ? miss("interface PlayerGroupWithMembers")
       : "读视图缺延迟字段 ⇒ 弹窗回显恒 0,用户以为没保存",
@@ -684,7 +686,8 @@ console.log("===== G11 延迟只在读视图,不得进 PlayerGroup 实体 / pers
     perB !== null &&
       count(perB, "airplayDelayMs") === 0 &&
       count(perB, "airplay2DelayMs") === 0 &&
-      count(perB, "sendspinDelayMs") === 0,
+      count(perB, "sendspinDelayMs") === 0 &&
+      count(perB, "trackSwitchLeadMs") === 0,
     perB === null ? miss("persist") : "persist 写了延迟字段 ⇒ 组改名/调音量后延迟被整行 upsert 冲回默认值",
   );
 }
@@ -738,6 +741,12 @@ console.log("===== G13 AP1/AP2 延迟必须按成员协议分格(混合组里各
       : `锚点复取组值(双加)= 对齐器把补偿整段裁掉;anchorShiftUs 必须恒 0`,
   );
   // AP2 侧同样是把锚点在会话建立时算死 ⇒ 第三格变了不重建桥 = 「只改 AP2」调了没反应。
+  const genB = bodyByName(code(SPIN_SERVER), atLineStart("notifyBridgeGeneration"));
+  check(
+    "切歌垫片按组读 trackSwitchLeadUsOf(回写常量 ⇒ 弹窗改值下一首不生效)",
+    genB !== null && genB.includes("trackSwitchLeadUsOf(") && count(genB, "BRIDGE_TRACK_SWITCH_LEAD_US") === 0,
+    genB === null ? miss("notifyBridgeGeneration") : "垫片必须动态读组值",
+  );
   const api = code(API_GROUPS);
   const putSeg = sliceBetween(api, 'app.put("/v1/groups/:id/delays"', 'app.delete("/v1/groups/:id"');
   check(

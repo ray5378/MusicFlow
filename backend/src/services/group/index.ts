@@ -111,6 +111,7 @@ export interface PlayerGroupWithMembers extends PlayerGroup {
   airplayDelayMs: number;
   airplay2DelayMs: number;
   sendspinDelayMs: number;
+  trackSwitchLeadMs: number;
 }
 
 /** 读视图附加的延迟补偿字段(供前端回显;不存在即 0)。 */
@@ -118,12 +119,14 @@ function delayView(id: string): {
   airplayDelayMs: number;
   airplay2DelayMs: number;
   sendspinDelayMs: number;
+  trackSwitchLeadMs: number;
 } {
   const d = getGroupDelays(id);
   return {
     airplayDelayMs: d.airplayMs,
     airplay2DelayMs: d.airplay2Ms,
     sendspinDelayMs: d.sendspinMs,
+    trackSwitchLeadMs: d.trackLeadMs,
   };
 }
 

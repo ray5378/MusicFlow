@@ -46,8 +46,8 @@ import { peekPump, stopGroupPump } from "./streamEngine.js";
 import { recordSendspinDebug } from "./debugLog.js";
 import { esphomeBridge } from "./esphomeBridge.js";
 import { computeCommonSendAhead, type SendAheadInput } from "./group.js";
-import { bridgeAnchorShiftUsOf, sendspinDelayUsOfGroupName } from "../group/delayCalib.js";
-import { BRIDGE_TRACK_SWITCH_LEAD_US } from "./constants.js";
+import { bridgeAnchorShiftUsOf, parseUserGroupId, sendspinDelayUsOfGroupName } from "../group/delayCalib.js";
+import { trackSwitchLeadUsOf } from "../group/delayCalib.js";
 import { recordProbedRate } from "../playerRate.js";
 import { b64urlDecode, b64urlEncode } from "./util.js";
 import type { PairingStore } from "./pairingStore.js";
@@ -759,7 +759,8 @@ export class SendspinGroup {
     this.bridgeWatermarks.clear();
     // 切歌垫片:内容代次切换(track/seek/rehost 类)时全组统一晚 Δ 起播,给桥的重
     // 锚定留窗口 —— 否则 esp32 先播、桥内对齐器裁掉新曲开头(切歌吞音)。
-    this.pendingTrackLeadUs = BigInt(BRIDGE_TRACK_SWITCH_LEAD_US);
+    // Δ **按组可配**(弹窗第四行,0=关闭):混合组/单一组的重锚定耗时不同。
+    this.pendingTrackLeadUs = trackSwitchLeadUsOf(parseUserGroupId(this.name));
     this.ensureBridgePushTimer();
   }
 

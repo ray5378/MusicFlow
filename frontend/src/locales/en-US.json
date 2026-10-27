@@ -1061,6 +1061,8 @@
     "delayAirplayHint": "AirPlay 1 members (44.1 kHz path). Positive = later, negative = earlier. AP1 members of this group reconnect after saving (~1-2 s silence)",
     "delayAirplay2Hint": "AirPlay 2 members (48 kHz passthrough). Independent from the row above; applies only to devices negotiated as AirPlay 2",
     "delaySendspinHint": "Positive = later, negative = earlier. Applied per frame, live within ~0.5-1 s",
+    "delayTrackLead": "Track-switch lead",
+    "delayTrackLeadHint": "On track switch the whole group starts this much later, giving the AirPlay bridge time to re-anchor (removes swallowed audio at switch). 0 = off; applies from the next track; pure Sendspin groups unaffected",
     "delayDiffSame": "Current offset: {side} aligned with Sendspin (0 ms)",
     "delayDiffLater": "Current offset: {side} is {ms} ms later than Sendspin.",
     "delayDiffEarlier": "Current offset: {side} is {ms} ms earlier than Sendspin.",

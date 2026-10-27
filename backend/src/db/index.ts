@@ -825,6 +825,10 @@ export function initDatabase() {
       } catch { /* 聚合失败 → 保持 0 */ }
       log.info(`player_groups 新增 airplay2_delay_ms 列(继承既有 airplay_delay_ms,峰值 ${carried}ms)`);
     }
+    if (!cols.includes("track_switch_lead_ms")) {
+      sqlite.exec("ALTER TABLE player_groups ADD COLUMN track_switch_lead_ms INTEGER NOT NULL DEFAULT 1000");
+      log.info("player_groups 新增 track_switch_lead_ms 列(切歌垫片,默认 0=关闭)");
+    }
     // 内置默认对齐点一次性播种(2026-10-27):AirPlay 链路固有偏差实测 ≈300ms,
     // **AP1 与 AP2 两格通用**(用户定标)。只升「从未调过补偿」的组(三格全 0);
     // 用户调过的组一律不动。settings 标记防重复执行。

@@ -33,6 +33,11 @@ export const GROUP_DELAY_STEP_MS = 10;
  *  仅作**创建默认**与**一次性播种**,不参与运行时钳制/兜底(无组上下文仍为 0)。 */
 export const DEFAULT_AIRPLAY_ALIGN_MS = 300;
 
+/** 切歌垫片的组级默认(ms):**0 = 关闭**(用户定调 2026-10-27,手动修改后下一首
+ *  切歌自动生效)。sendspin/constants.ts 的 BRIDGE_TRACK_SWITCH_LEAD_US 仅为「无组
+ *  上下文」的兜底口径。 */
+export const DEFAULT_TRACK_LEAD_MS = 0;
+
 export interface GroupDelays {
   /** 正数 = AirPlay 1(RAOP)成员更晚出声,负数 = 更早。 */
   airplayMs: number;
@@ -41,6 +46,9 @@ export interface GroupDelays {
   airplay2Ms: number;
   /** 正数 = Sendspin 更晚出声,负数 = 更早。 */
   sendspinMs: number;
+  /** 切歌垫片(ms):内容代次切换时组时间线前移量,随内容消耗归零。0 = 关闭。
+   *  混合组/单一组的桥重锚定耗时不同,故按组独立。 */
+  trackLeadMs: number;
 }
 
 const cache = new Map<string, GroupDelays>();
@@ -49,7 +57,7 @@ const cache = new Map<string, GroupDelays>();
  *  常量(或把它塞进 cache),任一调用方改写返回值就会污染「全局默认 + 所有无行组」的读值
  *  —— 表现为别处莫名多出补偿,且刷新页面也复现不一致。 */
 function zeroDelays(): GroupDelays {
-  return { airplayMs: 0, airplay2Ms: 0, sendspinMs: 0 };
+  return { airplayMs: 0, airplay2Ms: 0, sendspinMs: 0, trackLeadMs: DEFAULT_TRACK_LEAD_MS };
 }
 
 /** 钳制到 ±30000ms 的整数;非数字 → 0。 */
@@ -64,7 +72,14 @@ export function clampGroupDelayMs(v: unknown): number {
 export function getGroupDelays(groupId: string | null | undefined): GroupDelays {
   if (!groupId) return zeroDelays();
   const hit = cache.get(groupId);
-  if (hit) return { airplayMs: hit.airplayMs, airplay2Ms: hit.airplay2Ms, sendspinMs: hit.sendspinMs };
+  if (hit) {
+    return {
+      airplayMs: hit.airplayMs,
+      airplay2Ms: hit.airplay2Ms,
+      sendspinMs: hit.sendspinMs,
+      trackLeadMs: hit.trackLeadMs,
+    };
+  }
   let v: GroupDelays = zeroDelays();
   try {
     const row = db
@@ -72,6 +87,7 @@ export function getGroupDelays(groupId: string | null | undefined): GroupDelays 
         a: playerGroups.airplayDelayMs,
         a2: playerGroups.airplay2DelayMs,
         s: playerGroups.sendspinDelayMs,
+        tl: playerGroups.trackSwitchLeadMs,
       })
       .from(playerGroups)
       .where(eq(playerGroups.id, groupId))
@@ -81,24 +97,31 @@ export function getGroupDelays(groupId: string | null | undefined): GroupDelays 
         airplayMs: clampGroupDelayMs(row.a),
         airplay2Ms: clampGroupDelayMs(row.a2),
         sendspinMs: clampGroupDelayMs(row.s),
+        trackLeadMs: clampGroupDelayMs(row.tl),
       };
     }
   } catch { /* 库不可用 → 0 */ }
   cache.set(groupId, v);
-  return { airplayMs: v.airplayMs, airplay2Ms: v.airplay2Ms, sendspinMs: v.sendspinMs };
+  return {
+    airplayMs: v.airplayMs,
+    airplay2Ms: v.airplay2Ms,
+    sendspinMs: v.sendspinMs,
+    trackLeadMs: v.trackLeadMs,
+  };
 }
 
 /** 写某组的补偿(缺省字段保持原值):**内存先更新(立即生效),再落库**。
  *  @returns 实际生效值(已钳制)。 */
 export function setGroupDelays(
   groupId: string,
-  patch: { airplayMs?: unknown; airplay2Ms?: unknown; sendspinMs?: unknown },
+  patch: { airplayMs?: unknown; airplay2Ms?: unknown; sendspinMs?: unknown; trackLeadMs?: unknown },
 ): GroupDelays {
   const cur = getGroupDelays(groupId);
   const next: GroupDelays = {
     airplayMs: patch.airplayMs === undefined ? cur.airplayMs : clampGroupDelayMs(patch.airplayMs),
     airplay2Ms: patch.airplay2Ms === undefined ? cur.airplay2Ms : clampGroupDelayMs(patch.airplay2Ms),
     sendspinMs: patch.sendspinMs === undefined ? cur.sendspinMs : clampGroupDelayMs(patch.sendspinMs),
+    trackLeadMs: patch.trackLeadMs === undefined ? cur.trackLeadMs : clampGroupDelayMs(patch.trackLeadMs),
   };
   cache.set(groupId, next);
   try {
@@ -107,6 +130,7 @@ export function setGroupDelays(
         airplayDelayMs: next.airplayMs,
         airplay2DelayMs: next.airplay2Ms,
         sendspinDelayMs: next.sendspinMs,
+        trackSwitchLeadMs: next.trackLeadMs,
         updatedAt: new Date().toISOString(),
       })
       .where(eq(playerGroups.id, groupId))
@@ -132,6 +156,13 @@ export function airplayDelayUsOf(groupId: string | null | undefined): number {
  *  不会凭空丢掉既有标定 —— 继承值与 AP2 实际链路有偏差属于预期,用户在 UI 里各调一格即可。 */
 export function airplay2DelayUsOf(groupId: string | null | undefined): number {
   return getGroupDelays(groupId).airplay2Ms * 1000;
+}
+
+/** 切歌垫片(µs):按组读 track_switch_lead_ms。组名非 ug: ⇒ 回退默认常量
+ *  (无组上下文/单测桩保持历史行为)。下一首切歌即生效(动态读,无需重建)。 */
+export function trackSwitchLeadUsOf(groupId: string | null | undefined): bigint {
+  if (!groupId) return 0n; // 无组上下文(单测桩/设备组):无垫片
+  return BigInt(getGroupDelays(groupId).trackLeadMs * 1000);
 }
 
 /** 桥投递窗口用的锚点位移(µs):按**该桥协议**读对应格子(raop → airplay 格,

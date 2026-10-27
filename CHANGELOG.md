@@ -2,6 +2,16 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.7.4] - 2026-10-27
+
+### Feature / 切歌垫片按群组可配(弹窗第四行,默认 0=关闭,下一首歌自动生效)
+
+- 切歌垫片 Δ(v4.7.3 引入,固定 1s)改为**每群组独立设置**:弹窗新增「切歌垫片」一行(0~30000ms,步进 100),持久化 `player_groups.track_switch_lead_ms`(**默认 0=关闭**,用户定调:手动修改后下一首歌自动生效,无需重建/重启)。
+- 生效机制:投递时按组动态读(`trackSwitchLeadUsOf`),**下一首切歌即生效**;混合组/单一组各自调各自的值(桥重锚定耗时不同);纯 Sendspin 组设多少都无影响。
+- API:`GET/PUT /v1/groups/:id/delays` 增 `trackLeadMs`;读视图 `PlayerGroupWithMembers` 带出(守卫 G11 同步钉四格)。
+- 验证:bridgePushFrame 垫片按组用例(ug 组设 1500 ⇒ 时戳 +Δ 随内容消耗归零;未配置组行为与 v4.7.2 逐字节一致)+ delayCalib 四格独立读写/默认 0/0=关闭用例;群组守卫 **44 条**全绿(垫片按组读断言:notifyBridgeGeneration 不得回写常量);tsc=0。
+- 教训(测试基建):tests/sendspin 内**严禁改 process.env.DATA_DIR** —— vitest 同 worker 顺序跑多文件,env 泄漏会毒化 group/routes 测试(no such column 扩散,2026-10-27 实锤);delayCalib 的内存缓存(落库失败被 catch)足以支撑本文件用例。
+
 ## [4.7.3] - 2026-10-27
 
 ### Feature / 切歌垫片:全组统一晚 Δ 起播,消除 AirPlay 桥切歌吞音

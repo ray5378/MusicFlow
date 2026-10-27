@@ -60,6 +60,7 @@ describe("/v1/groups/:id/delays", () => {
     expect(body.airplayMs).toBe(300);
     expect(body.airplay2Ms).toBe(300);
     expect(body.sendspinMs).toBe(0);
+    expect(body.trackLeadMs).toBe(0);
     expect(body.minMs).toBe(-30000);
     expect(body.maxMs).toBe(30000);
     expect(body.stepMs).toBe(10);

@@ -134,6 +134,7 @@ app.get("/v1/groups/:id/delays", permMiddleware(PERM.RENDERER_USE), (c) => {
     airplayMs: d.airplayMs,
     airplay2Ms: d.airplay2Ms,
     sendspinMs: d.sendspinMs,
+    trackLeadMs: d.trackLeadMs,
     ap1Members,
     ap2Members,
     sendspinMembers,
@@ -159,6 +160,7 @@ app.put("/v1/groups/:id/delays", permMiddleware(PERM.RENDERER_USE), async (c) =>
     airplayMs: body.airplayMs,
     airplay2Ms: body.airplay2Ms,
     sendspinMs: body.sendspinMs,
+    trackLeadMs: body.trackLeadMs,
   });
   // AirPlay 侧的锚点(startNtp)在桥会话建立时就算死了,中途改 anchorShiftUs 不生效。
   // 因此只有「AirPlay 值真的变了且该组桥在跑」时,才重建该组桥换立即生效
@@ -187,6 +189,7 @@ app.put("/v1/groups/:id/delays", permMiddleware(PERM.RENDERER_USE), async (c) =>
     airplayMs: next.airplayMs,
     airplay2Ms: next.airplay2Ms,
     sendspinMs: next.sendspinMs,
+    trackLeadMs: next.trackLeadMs,
     minMs: GROUP_DELAY_MIN_MS,
     maxMs: GROUP_DELAY_MAX_MS,
     stepMs: GROUP_DELAY_STEP_MS,
