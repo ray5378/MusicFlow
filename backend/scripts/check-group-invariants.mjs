@@ -170,8 +170,8 @@ function bodyByName(text, nameRe) {
     if (c === "{") {
       let j = i - 1;
       while (j >= 0 && /\s/.test(text[j])) j -= 1;
-      if (text[j] === ":") {
-        const skip = sliceBraces(text, i); // 返回类型里的对象字面量类型
+      if (text[j] === ":" || text[j] === "<") {
+        const skip = sliceBraces(text, i); // 返回类型里的对象字面量类型(`Promise<{ ... }>` 由 `<` 命中)
         if (!skip) return null;
         i += skip.length;
         continue;
