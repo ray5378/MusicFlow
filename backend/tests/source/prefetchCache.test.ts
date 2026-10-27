@@ -514,15 +514,26 @@ describe("⑦ 完整性判官", () => {
     expect(getCachedPlayability(ROW_W.id)).toBe("unplayable");
   });
 
-  it("(e) 过小文件(<64KB):不登记;重试一次仍过小 ⇒ 不写负缓存(弱信号交给播放侧探测)", async () => {
+  it("(e) 过小文件(1KB,期望 200s):硬算术下界判死 too-small-hard ⇒ 记负缓存、不重试(2026-10-27)", async () => {
+    // 1KB 连 32kbps 地板都装不下 200s(需 800KB)⇒「残缺」是硬结论,不再走
+    // 「重试一次、不记负缓存」的宽待 —— 那套宽待只配给「装得下、只是这次拿少了」。
     mode = "tiny";
     await prefetchSong(ROW_W.id);
     await quiesce();
-    expect(calls.length).toBe(2); // 首抓 + 重试一次(2026-10-21)
+    expect(calls.length).toBe(1); // 硬判死,不再有第二轮重试
     expect(prefetchHit(ROW_W.id)).toBeNull();
-    // too-small 是弱信号(240 实测同一首随后播放整曲缓冲成功):不写 5 分钟「无源」,
-    // 否则 QueueController.judgePlayable 会直接判跳。
-    expect(getCachedPlayability(ROW_W.id)).toBe("unknown");
+    expect(getCachedPlayability(ROW_W.id)).toBe("unplayable");
+  });
+
+  it("(e2) 过小文件但装得下期望时长(无基准行):仍走弱信号 ⇒ 重试一次、不写负缓存", async () => {
+    // 2026-10-21 策略的适用面(2026-10-27 起被硬下界收窄):expectedSec=0 无从算
+    // 硬下界 ⇒ 保持「重试一次、不写负缓存」—— 240 实测同一首随后播放整曲缓冲成功。
+    mode = "tiny";
+    await prefetchSong(ROW_NODUR.id);
+    await quiesce();
+    expect(calls.length).toBe(2); // 首抓 + 重试一次(2026-10-21)
+    expect(prefetchHit(ROW_NODUR.id)).toBeNull();
+    expect(getCachedPlayability(ROW_NODUR.id)).toBe("unknown");
   });
 
   it("(f) env PREFETCH_INTEGRITY_OFF=1:整体关闭判官,试听片段也正常登记(一键回退)", async () => {
@@ -541,12 +552,14 @@ describe("⑦ 完整性判官", () => {
     expect(prefetchHit(ROW_W.id)).not.toBeNull();
   });
 
-  it("(h) markUnplayable 负缓存带 TTL:写入后 unplayable,推进 5 分钟后自动复活", async () => {
+  it("(h) markUnplayable 负缓存带 TTL(统一 2h,2026-10-27):5min 后仍 unplayable,越过 2h 自动复活", async () => {
     vi.useFakeTimers();
     try {
       markUnplayable("pf-w");
       expect(getCachedPlayability("pf-w")).toBe("unplayable");
-      vi.advanceTimersByTime(5 * 60 * 1000 + 1000); // 越过 MARK_UNPLAYABLE_TTL_MS
+      vi.advanceTimersByTime(5 * 60 * 1000 + 1000); // 旧固定 5min 已过 ⇒ 仍 unplayable(防回退钉子)
+      expect(getCachedPlayability("pf-w")).toBe("unplayable");
+      vi.advanceTimersByTime(2 * 60 * 60 * 1000); // 越过统一 TTL
       expect(getCachedPlayability("pf-w")).toBe("unknown");
     } finally {
       vi.useRealTimers();

@@ -123,7 +123,7 @@ afterEach(() => {
   clearStreamFallbackCache();
   configureStreamFallbackCache({
     playableTtlMs: 60 * 60 * 1000,
-    negativeTtlMs: 45 * 1000,
+    negativeTtlMs: 2 * 60 * 60 * 1000, // 模块默认(2026-10-27 统一,原 45s)
     transientBackoffMs: 5 * 1000,
   });
   sqlite.prepare("DELETE FROM songs WHERE plugin_entry = ?").run(PROVIDER);
@@ -137,7 +137,7 @@ afterAll(() => {
 });
 
 describe("缓存 TTL — 负结果不是永久拉黑", () => {
-  it("全部候选被门禁拦下 → 写负结果；negativeTtl(45s) 过期后重新探测", async () => {
+  it("全部候选被门禁拦下 → 写负结果；negativeTtl(默认 2h) 过期后重新探测", async () => {
     const { searchCalls } = enableProvider([MISMATCHED_CAND]);
     seedSong("ttl-neg", { url: "http://orig/broken.mp3", title: "恋人", artist: "李荣浩" });
 
@@ -150,7 +150,7 @@ describe("缓存 TTL — 负结果不是永久拉黑", () => {
     expect(searchCalls.length).toBe(1);
 
     // 过期后：重新探测 —— 这是「源恢复自动复活」的关键（旧实现此处永远返回 null）
-    nowShift = 46_000;
+    nowShift = 2 * 60 * 60 * 1000 + 1_000;
     expect(getCachedPlayability("ttl-neg")).toBe("unknown");
     expect(await findFallbackStream("ttl-neg", "恋人", "李荣浩", "黑马", 275, PROVIDER, "qq")).toBeNull();
     expect(searchCalls.length).toBe(2);
@@ -167,7 +167,7 @@ describe("缓存 TTL — 负结果不是永久拉黑", () => {
 
     // 平台侧恢复：候选改为艺人一致
     enableProvider([MATCHED_CAND]);
-    nowShift = 46_000;
+    nowShift = 2 * 60 * 60 * 1000 + 1_000;
 
     const url = await ensurePlayableStream(songRowOf("ttl-revive"));
     expect(url).toBeTruthy();
@@ -211,7 +211,7 @@ describe("缓存 TTL — 网络异常不判定不可播", () => {
     expect(await findFallbackStream("ttl-transient", "恋人", "李荣浩", "黑马", 275, PROVIDER, "qq")).toBeNull();
     expect(searchCalls.length).toBe(1);
 
-    // 退避过后：立刻重试（不等 45s 的负 TTL）
+    // 退避过后：立刻重试（不等 2h 的负 TTL）
     nowShift = 6_000;
     expect(await findFallbackStream("ttl-transient", "恋人", "李荣浩", "黑马", 275, PROVIDER, "qq")).toBeNull();
     expect(searchCalls.length).toBe(2);

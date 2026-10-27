@@ -110,6 +110,14 @@ export const PREFETCH_INTEGRITY_DELTA_SEC = 15;
 /** 音频文件的最小合理字节数（低于此高度可疑：真音频不可能这么小）。 */
 export const PREFETCH_MIN_AUDIO_BYTES = 64 * 1024;
 /**
+ * **硬算术下界**用的地板码率（字节/秒），4000 = 32kbps（2026-10-27）。
+ * 任何真实音乐流都 ≥32kbps：buf < expectedSec × 4000 时，无论什么编码都装不下
+ * expectedSec 秒 ⇒ 「残缺」是**硬结论**而非弱信号，不走「重试一次不记负缓存」
+ * 的宽待（那套宽待只配给「装得下、只是这次拿少了」的场景）。取地板值防误杀：
+ * 宁可漏过一个 24kbps 的天书，不可误杀正常歌。
+ */
+export const PREFETCH_HARD_MIN_BYTES_PER_SEC = 4000;
+/**
  * **码率推算路径**的判死线（秒），默认 80 —— 比 metadata 真值路径（15s）宽松得多。
  * 用户 2026-10-12 拍板：推算 `actual ≈ bytes*8/bitrate` 是近似值（VBR 文件平均码率
  * ≠ 瞬时码率、大封面/冗余地 tag 也占字节，可超可不足），只在 duration 缺失
@@ -134,7 +142,7 @@ export function prefetchIntegrityConfig(): { enabled: boolean; deltaSec: number;
 
 export interface PrefetchVerdict {
   dead: boolean;
-  /** 判死原因（too-small / not-audio / preview）；放过时为 undefined。 */
+  /** 判死原因（too-small / too-small-hard / not-audio / preview）；放过时为 undefined。 */
   reason?: string;
   /** probe 档拿到的实际时长（秒，能解析出才有）。 */
   actualSec?: number;
@@ -154,6 +162,10 @@ export interface PrefetchVerdict {
  *      函数体注释）：几 KB 的 JSON/HTML 错误页是**硬结论**，不是「弱信号 too-small」。
  *   2. `buf.length < PREFETCH_MIN_AUDIO_BYTES` → dead: too-small（**弱信号**，
  *      2026-10-21 策略：只重试一次、不写负缓存，见下方 tooSmallRetry 注释）；
+ *      ★ 2026-10-27 起先过一道**硬算术下界**：`buf < expectedSec × 4000`（32kbps
+ *      地板，装不下期望时长）⇒ dead: too-small-hard，照常记负缓存 —— 残缺是硬
+ *      结论，宽待只配给「装得下、只是这次拿少了」的场景（fetch 层截断对账的
+ *      chunked 兜底，见 bufferedFetch.ts TRUNCATION_TOLERANCE）；
  *   3. 基准 <= 0（曲库无 duration）→ 放过（没有参考答案，只靠绝对阈值会误杀真短歌）；
  *   4. `parseBuffer` 解析失败 → 放过（magic 已认它是音频容器；冷门容器/怪 metadata 不杀）；
  *   5. 能解析出时长且 `expected - actual > deltaSec` → dead: preview；
@@ -193,6 +205,14 @@ export async function judgePrefetchedBuffer(buf: Buffer, expectedSec: number): P
     return { ...base, dead: true, reason: "not-audio" };
   }
   if (buf.length < prefetchMinAudioBytes()) {
+    // ★ 硬算术下界（2026-10-27，《纵身一跃》事故补刀）：期望时长连地板码率都装不下
+    //   ⇒ 必然残缺，不是「弱信号」。fetch 层对账只拦「有 content-length」的截断，
+    //   chunked 响应（无 cl）提前断流时会漏到这里 —— 用 32kbps 地板一算便知。
+    //   命中即走 markUnplayable 记负缓存（调用方对非 "too-small" 的 reason 一律判死），
+    //   不再享受「重试一次、不记负缓存」的宽待。expectedSec<=0 无从算起，保持弱信号。
+    if (expectedSec > 0 && buf.length < expectedSec * PREFETCH_HARD_MIN_BYTES_PER_SEC) {
+      return { ...base, dead: true, reason: "too-small-hard" };
+    }
     return { ...base, dead: true, reason: "too-small" };
   }
   if (!(expectedSec > 0)) return base;

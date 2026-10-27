@@ -188,6 +188,9 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // ---------------- 单次尝试 ----------------
 
+/** 上游截断对账容差:实收 < content-length × 0.9 ⇒ 判「上游截断」(2026-10-27)。 */
+const TRUNCATION_TOLERANCE = 0.9;
+
 async function attemptOnce(
   url: string,
   headers: Record<string, string>,
@@ -277,6 +280,22 @@ async function attemptOnce(
           progress.elapsedMs = now - t0;
         }
       }
+    }
+    // ===== 上游截断对账(2026-10-27,《纵身一跃》事故) =====
+    // 上游提前 EOF(连接被代理/源中途掐断)时 reader.read() 同样返回 done —— 不对账
+    // 就会把残缺字节当 ok:true 交回:答应 972KB 实收 <64KB,判官只能按 too-small
+    // 弱信号放行,坏源永远建立不起「无源」结论。响应头有 content-length 且实收
+    // 明显不足(<90%)⇒ 判「上游截断」,走 stalled 语义(transient:可重试、不写
+    // 可播性缓存)。只对「缺」判死;超发(downloaded > cl)不拦 —— 打包差异不该挡
+    // 真音频。无 content-length(chunked)对不了账,交由判官 too-small 硬下界兜底。
+    if (Number.isFinite(cl) && cl > 0 && downloaded < cl * TRUNCATION_TOLERANCE) {
+      return {
+        ok: false,
+        kind: "stalled",
+        attempts: 1,
+        ms: Date.now() - t0,
+        err: `upstream truncated: content-length=${cl} received=${downloaded}`,
+      };
     }
     if (downloaded === 0) {
       return { ok: false, kind: "dead", status: res.status, attempts: 1, ms: Date.now() - t0, err: "empty body" };

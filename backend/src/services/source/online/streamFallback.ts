@@ -53,13 +53,15 @@ const PLAYABLE_CACHE_MAX = 5000;
 //     首次拉流会失败一次,由 /rest/stream 的「上游失败即 evictStreamFallbackCache」
 //     自愈并重新换源 —— 所以正 TTL 取长只会**减少上游探测次数**,代价是"直到有人播
 //     才发现链过期"这一次失败。此前是裸 Set 永不失效(比 1 小时更差),现改为带 TTL。
-//   - 负结果:所有平台都没有可播候选 → 45s 后重新探测,**源恢复即自动复活**。
+//   - 负结果:所有平台都没有可播候选 → 默认 **2 小时**后重新探测,**源恢复即自动
+//     复活**(2026-10-27 用户拍板统一:此前默认 45s,靠 core-pre-probe 插件配置
+//     negativeTtlSeconds(默认 7200)拉长 —— 现在模块默认与插件默认对齐,两类负缓存
+//     (探测型 + 内容型 markUnplayable)读同一份可配置 TTL;持久死链播到即跳过,
+//     不再每次重试几十秒,VIP/版权恢复后 2 小时内自动复活)。
 //   - 网络异常:只短期退避,**不判定不可播**(网络抖动 ≠ 这首歌没有源)。
 const PLAYABLE_TTL_DEFAULT_MS = 60 * 60 * 1000;
-const NEGATIVE_TTL_DEFAULT_MS = 45 * 1000;
+const NEGATIVE_TTL_DEFAULT_MS = 2 * 60 * 60 * 1000;
 const TRANSIENT_BACKOFF_DEFAULT_MS = 5 * 1000;
-/** 内容型判死（markUnplayable）的负缓存有效期：比网络型负缓存长，理由见函数注释。 */
-const MARK_UNPLAYABLE_TTL_MS = 5 * 60 * 1000;
 
 /** 单曲探测超时默认值(毫秒)。预探测路径可传更短的值(不阻塞播放)。 */
 export const PROBE_TIMEOUT_DEFAULT_MS = 12 * 1000;
@@ -530,13 +532,15 @@ export function clearFallbackCache(songId?: string) {
 /**
  * 内容型判死（预取完整性判官专用）：把「整首字节已抓到、但内容是试听片段/假成功」
  * 记为负结果。与探测路径的负缓存**同一份数据**（`getCachedPlayability` 直接读），
- * 但 TTL 默认 5 分钟（探测路径的负 TTL 只有 45s，面向网络抖动）——
- * 判据是完整字节跑出来的硬结论，不是一次抖动；又不锁死太久：平台版权/试听策略
- * 会变，过期后自动复活重探。
+ * 且共用**同一份可配置 TTL**（`negativeTtlMs`，模块默认 2 小时，core-pre-probe
+ * 插件配置 negativeTtlSeconds 可覆写）—— 2026-10-27 用户拍板统一，废除原独立
+ * 固定值 5 分钟（5 分钟过期太快，重复播放场景每 5 分钟重蹈一次坏源）。
+ * 判据是完整字节跑出来的硬结论，不是一次抖动；又不锁死太久：平台版权/VIP/试听
+ * 策略会变，过期后自动复活重探。
  */
 export function markUnplayable(songId: string, opts?: { ttlMs?: number }): void {
   if (!songId) return;
-  const ttlMs = opts?.ttlMs && opts.ttlMs > 0 ? opts.ttlMs : MARK_UNPLAYABLE_TTL_MS;
+  const ttlMs = opts?.ttlMs && opts.ttlMs > 0 ? opts.ttlMs : negativeTtlMs;
   setFallback(songId, null, { transient: false, ttlMs });
 }
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// ==================== 群组(Groups)不变量静态守卫(G1–G14) ====================
+// ==================== 群组(Groups)不变量静态守卫(G1–G15) ====================
 //
 // 背景:群组是「多台设备共用同一条内容时间线」的唯一载体,它踩过的坑**全是静默的** ——
 // 不报错、不崩溃、既有用例也全绿,只表现为「听着不对 / 点了没反应」:
@@ -36,7 +36,7 @@
 //      DLNA 路径的「cast 后校准 seek」= 2026-10-26 已裁定例外,不要当 bug 去"修")
 //   G4 成员位置基准取真实内容时间线(getGroupStatus),不得用墙钟/会话时长推算
 //   G5 单泵(pushFrame 唯一出流入口;桥侧不得自建选歌/判死分支)
-//   G6 组内换源上限 3 + markUnplayable 负缓存 TTL 5 分钟
+//   G6 组内换源上限 3 + 负缓存 TTL 统一(markUnplayable 读 negativeTtlSeconds 配置,默认 2 小时)
 //   G7 ring 的 tsUs 不得被延迟补偿污染(偏移只加在成员下发戳)
 //   G8 watchdog 悬挂→恢复必须走统一起播路径(resumeActive → playCurrent)
 //   G9 内容同步 tick 的权威判据字段仍在(删了就回盲调)
@@ -247,6 +247,7 @@ const SPIN_CORE = "backend/src/services/sendspin/playerCore.ts";
 const BRIDGE_SESSION = "backend/src/services/airplay/bridgeSession.ts";
 const PREFETCH = "backend/src/services/source/prefetchCache.ts";
 const FALLBACK = "backend/src/services/source/online/streamFallback.ts";
+const BFETCH = "backend/src/services/source/bufferedFetch.ts";
 const GROUP_PROTOCOL_PLAYER = "backend/src/services/group/protocolPlayer.ts";
 const SPIN_BRIDGE_ATTACH = "backend/src/services/sendspin/bridgeAttach.ts";
 const GROUPS_VUE = "frontend/src/views/Groups/index.vue";
@@ -490,7 +491,7 @@ console.log("===== G5 单泵(pushFrame 唯一出流入口;桥侧不得自建选�
 // ===========================================================================
 // G6 组内换源上限 + 判死负缓存
 // ===========================================================================
-console.log("===== G6 组内换源上限 3 + markUnplayable TTL 5 分钟 =====");
+console.log("===== G6 组内换源上限 3 + 负缓存 TTL 统一(默认 2 小时,可配) =====");
 {
   const pf = code(PREFETCH);
   const declN = countInSrc("PREFETCH_MAX_ALT_SOURCES =");
@@ -501,12 +502,23 @@ console.log("===== G6 组内换源上限 3 + markUnplayable TTL 5 分钟 =====")
     `prefetchCache 声明=${prefOk} 全仓声明 ${declN.n} 处(${declN.where})`,
   );
   const fb = code(FALLBACK);
-  const ttlN = countInSrc("MARK_UNPLAYABLE_TTL_MS =");
-  const ttlOk = /const\s+MARK_UNPLAYABLE_TTL_MS\s*=\s*5\s*\*\s*60\s*\*\s*1000\s*;/.test(fb);
+  const ttlN = countInSrc("MARK_UNPLAYABLE_TTL_MS");
   check(
-    "MARK_UNPLAYABLE_TTL_MS = 5 * 60 * 1000 且只声明一次(负缓存失效=同一坏源反复重试)",
-    ttlOk && ttlN.n === 1,
-    `streamFallback 声明=${ttlOk} 全仓声明 ${ttlN.n} 处(${ttlN.where})`,
+    "MARK_UNPLAYABLE_TTL_MS 已废除(2026-10-27 统一:内容型判死与探测型负缓存读同一份 negativeTtlSeconds 配置,不再固定 5 分钟)",
+    ttlN.n === 0,
+    `全仓仍声明 ${ttlN.n} 处(${ttlN.where}) ⇒ 两套 TTL 会再度分叉`,
+  );
+  const negOk = /const\s+NEGATIVE_TTL_DEFAULT_MS\s*=\s*2\s*\*\s*60\s*\*\s*60\s*\*\s*1000\s*;/.test(fb);
+  check(
+    "NEGATIVE_TTL_DEFAULT_MS = 2 小时(与 core-pre-probe negativeTtlSeconds 默认 7200 对齐)",
+    negOk,
+    `streamFallback 声明=${negOk} ⇒ 模块默认必须与插件默认一致,否则插件未配置时回落出两套口径`,
+  );
+  const muOk = /opts\.ttlMs : negativeTtlMs/.test(fb);
+  check(
+    "markUnplayable 默认 TTL 走 negativeTtlMs(跟随插件配置,过期自动复活)",
+    muOk,
+    `streamFallback 声明=${muOk} ⇒ markUnplayable 脱离配置会回到固定 TTL`,
   );
 }
 
@@ -912,6 +924,39 @@ console.log("===== G14 可听前 BUFFERING 瞬态(audibleStarted ⇒ pollCore.bu
     "sendspinGroupPoll 签名带 buffering 且 fork 未跑兜底带 buffering:false(RPC 透传契约)",
     sidx14.includes("durationMs: number; buffering: boolean }") && count(sidx14, "buffering: false") === 1,
     "签名/兜底缺 buffering ⇒ fork 模式下 buffering 丢失,组状态恒 PLAYING",
+  );
+}
+
+// ===========================================================================
+// G15 预取完整性三闸(v4.8.3):上游截断对账 + too-small 硬下界
+// 《纵身一跃》事故:上游(汽水 VIP 源)提前断流,attemptOnce 把残缺字节当 ok:true
+// 交回,判官只能按 too-small 弱信号放行(不记负缓存),坏源永远建立不起「无源」
+// 结论 —— 播 60s 断一次,每次重蹈。两道闸把「残缺」从弱信号升级成硬结论。
+// ===========================================================================
+console.log("===== G15 预取完整性:上游截断对账 + too-small 硬下界 =====");
+{
+  const bf = code(BFETCH);
+  const tolDecl = /const\s+TRUNCATION_TOLERANCE\s*=\s*0\.9\s*;/.test(bf);
+  const truncChk = /downloaded < cl \* TRUNCATION_TOLERANCE/.test(bf);
+  check(
+    "attemptOnce 收尾对账 content-length(实收 < 90% ⇒ stalled,上游提前 EOF 不得以 ok:true 交回残缺字节)",
+    tolDecl && truncChk && count(bf, "upstream truncated") === 1,
+    `容差声明=${tolDecl} 对账判断=${truncChk} 截断错误串 ${count(bf, "upstream truncated")} 处 ⇒ 缺任一 = 回到假成功`,
+  );
+  const pf = code(PREFETCH);
+  const hardDecl = /export\s+const\s+PREFETCH_HARD_MIN_BYTES_PER_SEC\s*=\s*4000\s*;/.test(pf);
+  const hardN = countInSrc("PREFETCH_HARD_MIN_BYTES_PER_SEC =");
+  check(
+    "PREFETCH_HARD_MIN_BYTES_PER_SEC = 4000(32kbps 地板)且只声明一次",
+    hardDecl && hardN.n === 1,
+    `prefetchCache 声明=${hardDecl} 全仓声明 ${hardN.n} 处(${hardN.where})`,
+  );
+  const hardChk = /expectedSec \* PREFETCH_HARD_MIN_BYTES_PER_SEC/.test(pf);
+  const hardReason = count(pf, '"too-small-hard"') === 1;
+  check(
+    "判官 too-small 先过硬算术下界(装不下期望时长 ⇒ too-small-hard 判死记负缓存,不走弱信号宽待)",
+    hardChk && hardReason,
+    `下界判断=${hardChk} too-small-hard 判死=${hardReason} ⇒ 缺任一 = chunked 截断仍被当弱信号放行`,
   );
 }
 

@@ -3,8 +3,9 @@
 // v4.6.1 完整性判官把「整首字节已抓到、但内容是试听片段/假成功」写成 streamFallback
 // 负缓存(见 prefetchCache.ts 红线 3 的唯一例外)。这条写路径与探测路径**共用同一份
 // 数据**(getCachedPlayability 直接读),但语义有三处不同,必须单独钉住:
-//   ① TTL 默认 5 分钟(探测路径负 TTL 只有 45s,面向网络抖动)——
-//      判据是完整字节跑出来的硬结论,不是一次抖动;又不锁死:平台版权/试听策略会变。
+//   ① TTL 读 negativeTtlSeconds 配置(2026-10-27 统一:模块默认 2 小时,插件可覆写;
+//      原独立固定值 5 分钟已废除 —— 5 分钟过期太快,重复播放场景每 5 分钟重蹈坏源)——
+//      判据是完整字节跑出来的硬结论,不是一次抖动;又不锁死:平台版权/VIP/试听策略会变。
 //   ② transient=false —— 「不可播」是**确定**结论,不是「网络异常不可判定」。
 //      调用方(getCachedPlayability 的消费者)据此敢跳歌;若误写成 transient 就会
 //      退化成「照常播放」,用户又听到 30s 试听片段。
@@ -82,7 +83,7 @@ afterEach(() => {
   clearStreamFallbackCache();
   configureStreamFallbackCache({
     playableTtlMs: 60 * 60 * 1000,
-    negativeTtlMs: 45 * 1000,
+    negativeTtlMs: 2 * 60 * 60 * 1000, // 模块默认(2026-10-27 统一,原 45s)
     transientBackoffMs: 5 * 1000,
   });
 });
@@ -93,7 +94,7 @@ afterAll(() => {
   unregisterPlugin(PROVIDER);
 });
 
-describe("markUnplayable — 判官负缓存契约(TTL 5min / 非 transient / 可复活)", () => {
+describe("markUnplayable — 判官负缓存契约(TTL 读配置默认 2h / 非 transient / 可复活)", () => {
   it("写入后即 unplayable,且明确不是 transient(确定结论,调用方敢跳歌)", () => {
     markUnplayable(SONG_ID);
     const v = getCachedPlayability(SONG_ID);
@@ -102,11 +103,11 @@ describe("markUnplayable — 判官负缓存契约(TTL 5min / 非 transient / �
     expect(v).not.toBe("unknown");
   });
 
-  it("默认 TTL 5 分钟:4min59s 仍 unplayable,越过 5min 自动复活为 unknown", () => {
+  it("默认 TTL 2 小时(2026-10-27 统一,废除固定 5min):5min 后仍 unplayable,越过 2h 自动复活为 unknown", () => {
     markUnplayable(SONG_ID);
-    nowShift = 5 * 60 * 1000 - 1000; // 差 1s 到期
+    nowShift = 5 * 60 * 1000 + 1000; // 旧固定 5 分钟已过 ⇒ 仍必须 unplayable(防回退钉子)
     expect(getCachedPlayability(SONG_ID)).toBe("unplayable");
-    nowShift = 5 * 60 * 1000 + 1000; // 过期
+    nowShift = 2 * 60 * 60 * 1000 + 1000; // 越过统一 TTL
     expect(getCachedPlayability(SONG_ID)).toBe("unknown");
   });
 
@@ -131,10 +132,10 @@ describe("markUnplayable — 判官负缓存契约(TTL 5min / 非 transient / �
     expect(hit).toBeNull();
     expect(searchCalls.length).toBe(0);
 
-    // 越过 5min ⇒ 负缓存过期 ⇒ 重新走真实探测(本例候选不匹配 ⇒ 仍无源,但确实重探了)。
-    nowShift = 5 * 60 * 1000 + 1000;
+    // 越过 2h ⇒ 负缓存过期 ⇒ 重新走真实探测(本例候选不匹配 ⇒ 仍无源,但确实重探了)。
+    nowShift = 2 * 60 * 60 * 1000 + 1000;
     const after = await findFallbackStream(SONG_ID, "恋人", "李荣浩", "黑马", 275, PROVIDER, "");
     expect(searchCalls.length).toBeGreaterThan(0);
-    expect(after).toBeNull(); // 候选仍不匹配 ⇒ 回到负结果(45s 后还会再探)
+    expect(after).toBeNull(); // 候选仍不匹配 ⇒ 回到负结果(2 小时后还会再探)
   });
 });

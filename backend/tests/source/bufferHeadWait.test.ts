@@ -242,12 +242,15 @@ describe("batch44-R:整曲缓冲有界等待(首字节优先)", () => {
     expect(getCachedPlayability(ROW_W.id)).toBe("unplayable");
   });
 
-  it("(h) 播放路径判官:too-small 是弱信号 ⇒ 不判死、不记负缓存、回退直通", async () => {
-    payloadBytes = 1024; // <64KB
+  it("(h) 播放路径判官:1KB 装不下 200s ⇒ too-small-hard 硬判死(2026-10-27,不再弱信号回退直通)", async () => {
+    // 2026-10-27 起判官先过硬算术下界:1KB 连 32kbps 地板(800KB/200s)都装不下 ⇒
+    // 「残缺」是硬结论 —— 记负缓存 + 显式失败(队列跳下一首),不再回退直通让用户
+    // 听到播到一半断的歌(《纵身一跃》事故)。弱信号宽待只配给「装得下、只是这次
+    // 拿少了」的场景(覆盖见 integrityOrder.test.ts 45KB/10s 与 prefetchCache (e2))。
+    payloadBytes = 1024; // <64KB 且远小于 200s×32kbps
     const src = await resolveTranscodeInput({}, ROW_W, { buffering: true });
-    expect(src?.source).toContain("/rest/dlna/stream/"); // 落既有直通通道
-    expect(src?.source).not.toContain("/rest/membuf/");
-    expect(getCachedPlayability(ROW_W.id)).toBe("unknown"); // 绝不能误标无源
+    expect(src).toBeNull(); // 显式失败,不落直通(与 (f) 试听片段同语义)
+    expect(getCachedPlayability(ROW_W.id)).toBe("unplayable");
   });
 });
 

@@ -7,7 +7,10 @@
 //
 // 本文件锁住修复后的顺序语义：
 //   ① 非音频（HTML/JSON 错误页）⇒ not-audio 硬结论（无论多小/多大都走负缓存）；
-//   ② 是音频但太小 ⇒ too-small 弱信号（保持「重试一次、不记负缓存」）；
+//   ② 是音频但太小 ⇒ 先过**硬算术下界**（2026-10-27，《纵身一跃》补刀）：
+//      buf < expectedSec × 4000（32kbps 地板，装不下期望时长）⇒ too-small-hard
+//      硬判死（记负缓存）；装得下但 <64KB ⇒ too-small 弱信号（保持「重试一次、
+//      不记负缓存」—— 那套宽待只配给「装得下、只是这次拿少了」的场景）；
 //   ③ 正常 mp3 不受影响（缓存路径未退化）；
 //   ④ 60s 真音频 vs 期望 276s ⇒ preview（metadata 口径 15s）；
 //   ⑤ 期望 0 ⇒ 放过。
@@ -69,10 +72,23 @@ describe("judgePrefetchedBuffer：magic 先于 too-small（顺序锁）", () => 
     expect(v.reason).toBe("not-audio");
   });
 
-  it("10KB 真 mp3（magic 认音频但被截断）⇒ too-small 弱信号（重试一次、不记负缓存）", async () => {
+  it("10KB 真 mp3 vs 期望 276s ⇒ too-small-hard 硬判死（装不下 276s，2026-10-27 起不再按弱信号放行）", async () => {
     const v = await judgePrefetchedBuffer(mp3Bytes(10 * 1024), 276);
     expect(v.dead).toBe(true);
+    expect(v.reason).toBe("too-small-hard");
+  });
+
+  it("45KB 真 mp3 vs 期望 10s（装得下 10s×32kbps）⇒ too-small 弱信号（重试一次、不记负缓存）", async () => {
+    // 45_000 > 10×4000=40_000：地板码率下装得下 10s ⇒ 不是硬结论，保持弱信号宽待。
+    const v = await judgePrefetchedBuffer(mp3Bytes(45 * 1000), 10);
+    expect(v.dead).toBe(true);
     expect(v.reason).toBe("too-small");
+  });
+
+  it("39KB 真 mp3 vs 期望 10s（差 1KB 装不下）⇒ too-small-hard（下界贴线不放过）", async () => {
+    const v = await judgePrefetchedBuffer(mp3Bytes(39 * 1000), 10);
+    expect(v.dead).toBe(true);
+    expect(v.reason).toBe("too-small-hard");
   });
 
   it("正常 mp3（128KB / 解析出 276s）⇒ 放过（缓存路径不受影响）", async () => {
