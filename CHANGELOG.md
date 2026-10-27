@@ -2,6 +2,18 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.8.4] - 2026-10-27
+
+### Fix / 预取完整性四五闸:中段缓冲按真实时长判死 + 正缓存不得盖负缓存
+
+- **根因续（240 生产二次暴露）**：v4.8.3 的两道闸是按**体积**判的——硬下界 32kbps 地板（217s×4KB=868KB）装得下《纵身一跃》972KB（129kbps 的 60s 试听），硬下界不命中 ⇒ 按 `too-small` 弱信号放行，照播 60s。而 240 实例把 `prefetch.settings.minAudioKB` 调到了 2048，绝大多数 mp3 都会落进 too-small 分支——**「太小」的判据值是可调的，跟着它调就会漏掉所有「够小但内容仍不完整」的源**。
+- **闸 4（判官中段缓冲兜底）**：too-small 分支内在硬下界之后、落弱信号之前，对 ≥64KB（`PREFETCH_MIN_AUDIO_BYTES`）的缓冲用 `parseBuffer` 解析真实时长——`expectedSec - d > icfg.deltaSec` ⇒ `reason:"preview", via:"metadata"` **判死记负缓存**（与下方主路径同一把尺子，不另立阈值）；解析失败/解不出时长才保守放过。顺序为「硬下界 → 中段兜底 → 弱信号」，颠倒则兜底永不执行。
+- **闸 5（正缓存不得盖负缓存，真凶=并发竞态）**：VIP 试听源的直链**能 200/206 正常解析**，错的只是内容只有 60s。于是队列预解析（RESOLVE-AUDIO）在 `await probe()`（网络 I/O，最长 12s）飞行期间，判官在预取侧落下 `markUnplayable(songId)`；等 probe 返回 206 ok，`addPlayable` 又把 1h 正缓存写回去——负缓存当场被盖，`getCachedPlayability` 读正缓存优先 ⇒ 判跳失效。两处修复：`markUnplayable` 立即 `playableCache.delete(songId)`（判死与可播不得并存）；`addPlayable` 写前 `if (isNegativeFresh(songId)) return;`（负缓存未过期一律拒绝写正缓存）。负缓存过期后自动解禁，源恢复即复活，不永久拉黑。
+- **守卫**：`check-group-invariants.mjs` 新增 **G16 正缓存不得盖负缓存**（`isNegativeFresh` 单一声明 / `addPlayable` 拦截行 / `markUnplayable` 清正缓存）+ **G17 中段缓冲兜底**（顺序 / 同尺子判死 / catch 保守放行），总断言 62 → **68**。
+- **测试**：新增 `tests/source/online/streamFallbackNegativeShadow.test.ts`（5 条，含**用可控 gate 的 fetch 把 probe 悬停**复现并发竞态的用例）；`prefetchMinAudioKB.test.ts`（5 条，seed 用 240 真实值 `minAudioKB=2048`，钉死「调大阈值不许漏判」）。
+- **变异验证**：摘掉 `addPlayable` 拦截行 ⇒ 竞态用例精确变红（其余 4 条不假绿）；摘掉 `markUnplayable` 清正缓存行 ⇒ 短路用例精确变红。两处契约都有测试咬住，不是靠注释撑着。
+- **生产验证（240）**：自然连播到 idx=198 时日志判死 `reason=preview 实际60s 期望217s ⇒ 记无源负缓存`，`QueueController` 立即「无可用音源,跳过(留在队列)」并直落 idx=199 播放——跳过生效。
+
 ## [4.8.3] - 2026-10-27
 
 ### Fix / 预取完整性三闸:上游截断对账 + 判官硬算术下界 + 负缓存 TTL 统一 2 小时
