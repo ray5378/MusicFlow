@@ -529,9 +529,9 @@ console.log("===== G7 延迟补偿只作用于成员下发戳(ring 时间基准�
         : `污染行:${dirty.join(" | ").slice(0, 160)}`,
   );
   check(
-    "成员下发戳是唯一加偏移的地方:sendAudio(ts + dspDelayUs",
-    pushB !== null && /sendAudio\(\s*ts\s*\+\s*dspDelayUs/.test(pushB),
-    pushB === null ? miss("pushFrame") : "未见 sendAudio(ts + dspDelayUs —— 偏移没生效或动了 ring 基准",
+    "成员下发戳是唯一加偏移的地方:sendAudio(ts + this.sendspinDelayUsOf(c.clientId)",
+    pushB !== null && /sendAudio\(\s*ts\s*\+\s*this\.sendspinDelayUsOf\(c\.clientId/.test(pushB) && !/ts\s*\+\s*dspDelayUs/.test(pushB),
+    pushB === null ? miss("pushFrame") : "未见按成员偏移 sendAudio(ts + sendspinDelayUsOf(...) —— 偏移没生效或动了 ring 基准",
   );
   const lateLine = sv.split("\n").filter((l) => l.includes("sendAudio(it.tsUs"));
   check(
@@ -624,31 +624,29 @@ console.log("===== G10 延迟补偿参数域(±30s / 步进 10ms 单一源 + 写
   pin("GROUP_DELAY_MIN_MS", "-30000");
   pin("GROUP_DELAY_MAX_MS", "30000");
   pin("GROUP_DELAY_STEP_MS", "10");
-  // 内置默认对齐点(AP1/AP2 通用,用户定标 2026-10-27):创建默认与一次性播种共用同一常量。
-  pin("DEFAULT_AIRPLAY_ALIGN_MS", "300");
   const cgB = bodyByName(code(GROUP_INDEX), atLineStart("createGroup"));
   check(
-    "createGroup 播种内置默认对齐点且经 setGroupDelays(不经 persist —— G11)",
-    cgB !== null && cgB.includes("setGroupDelays(id") && cgB.includes("DEFAULT_AIRPLAY_ALIGN_MS"),
-    cgB === null ? miss("createGroup") : "新组补偿默认丢失 ⇒ 每个新组都要手动摸 300ms",
+    "createGroup 不得播种延迟(300ms 对齐点已取消 ⇒ 新组默认全 0,成员各自设值)",
+    cgB !== null && count(cgB, "setGroupDelays") === 0 && count(cgB, "DEFAULT_AIRPLAY_ALIGN_MS") === 0,
+    cgB === null ? miss("createGroup") : "createGroup 播种延迟 ⇒ 新组成员被静默带上默认偏移",
   );
-  const setB = bodyByName(dc, atLineStart("setGroupDelays"));
+  const setB = bodyByName(dc, atLineStart("setMemberDelay"));
   check(
-    "setGroupDelays 三侧取值都过 clampGroupDelayMs(绕过即把越界值写进内存+DB)",
+    "setMemberDelay 取值必经 clampGroupDelayMs(绕过即把越界值写进内存+DB)",
     setB !== null &&
-      count(setB, "clampGroupDelayMs(") >= 3,
+      count(setB, "clampGroupDelayMs(") >= 1,
     setB === null
-      ? miss("setGroupDelays")
-      : `clamp 调用 ${setB === null ? 0 : count(setB, "clampGroupDelayMs(")} 处(应 ≥3:airplay + airplay2 + sendspin)`,
+      ? miss("setMemberDelay")
+      : `clamp 调用 ${setB === null ? 0 : count(setB, "clampGroupDelayMs(")} 处(应 ≥1)`,
   );
   const api = code(API_GROUPS);
   const putSeg = sliceBetween(api, 'app.put("/v1/groups/:id/delays"', 'app.delete("/v1/groups/:id"');
   check(
-    "PUT /v1/groups/:id/delays 经 setGroupDelays,且 AirPlay 值变化时重建该组桥(锚点建时算死,不重建=调了没反应)",
-    putSeg !== null && putSeg.includes("setGroupDelays(") && putSeg.includes("rebuildBridgeRoutes("),
+    "PUT /v1/groups/:id/delays 经 setMemberDelay,且 AirPlay 成员值变化时重建该组桥(补偿随桥会话建立锚定,不重建=调了没反应)",
+    putSeg !== null && putSeg.includes("setMemberDelay(") && putSeg.includes("rebuildBridgeRoutes("),
     putSeg === null
       ? miss('app.put("/v1/groups/:id/delays")')
-      : `setGroupDelays=${putSeg.includes("setGroupDelays(")} rebuildBridgeRoutes=${putSeg.includes("rebuildBridgeRoutes(")}`,
+      : `setMemberDelay=${putSeg.includes("setMemberDelay(")} rebuildBridgeRoutes=${putSeg.includes("rebuildBridgeRoutes(")}`,
   );
 }
 
@@ -665,6 +663,7 @@ console.log("===== G11 延迟只在读视图,不得进 PlayerGroup 实体 / pers
       count(entB, "airplayDelayMs") === 0 &&
       count(entB, "airplay2DelayMs") === 0 &&
       count(entB, "sendspinDelayMs") === 0 &&
+      count(entB, "memberDelays") === 0 &&
       count(entB, "trackSwitchLeadMs") === 0,
     entB === null
       ? miss("interface PlayerGroup")
@@ -672,12 +671,13 @@ console.log("===== G11 延迟只在读视图,不得进 PlayerGroup 实体 / pers
   );
   const viewB = bodyByHead(gi, /(?:^|\n)export\s+interface\s+PlayerGroupWithMembers\b/);
   check(
-    "读视图 PlayerGroupWithMembers 必须带三格延迟字段与切歌垫片(前端回显不能丢)",
+    "读视图 PlayerGroupWithMembers 必须带按成员延迟表与切歌垫片(前端回显不能丢)",
     viewB !== null &&
-      viewB.includes("airplayDelayMs") &&
-      viewB.includes("airplay2DelayMs") &&
-      viewB.includes("sendspinDelayMs") &&
-      viewB.includes("trackSwitchLeadMs"),
+      viewB.includes("memberDelays") &&
+      viewB.includes("trackSwitchLeadMs") &&
+      count(viewB, "airplayDelayMs") === 0 &&
+      count(viewB, "airplay2DelayMs") === 0 &&
+      count(viewB, "sendspinDelayMs") === 0,
     viewB === null
       ? miss("interface PlayerGroupWithMembers")
       : "读视图缺延迟字段 ⇒ 弹窗回显恒 0,用户以为没保存",
@@ -689,40 +689,47 @@ console.log("===== G11 延迟只在读视图,不得进 PlayerGroup 实体 / pers
       count(perB, "airplayDelayMs") === 0 &&
       count(perB, "airplay2DelayMs") === 0 &&
       count(perB, "sendspinDelayMs") === 0 &&
+      count(perB, "memberDelays") === 0 &&
       count(perB, "trackSwitchLeadMs") === 0,
     perB === null ? miss("persist") : "persist 写了延迟字段 ⇒ 组改名/调音量后延迟被整行 upsert 冲回默认值",
   );
 }
 
 // ===========================================================================
-// G13 AirPlay 1 / AirPlay 2 延迟分格(第三格 airplay2_delay_ms)
+// G13 延迟补偿按成员(v4.8.0 起,取代旧的按协议三格)
 // ===========================================================================
-console.log("===== G13 AP1/AP2 延迟必须按成员协议分格(混合组里各读各的) =====");
+console.log("===== G13 延迟补偿按成员(取值口按成员 id 查表,不再按协议分格) =====");
 {
   const dc = code(DELAY_CALIB);
-  const ap1B = bodyByName(dc, atLineStart("airplayDelayUsOf"));
+  const bshB = bodyByName(dc, atLineStart("bridgeAnchorShiftUsOf"));
   check(
-    "airplayDelayUsOf 只读 airplayMs 格(读到 airplay2Ms ⇒ AP1 成员被 AP2 的值带着跑偏)",
-    ap1B !== null && /\.airplayMs\s*\*\s*1000/.test(ap1B) && count(ap1B, "airplay2Ms") === 0,
-    ap1B === null ? miss("airplayDelayUsOf") : "AP1 取值口串到 AP2 格 ⇒ 混合组里 AP1 成员被 AP2 的标定值拉偏",
+    "bridgeAnchorShiftUsOf 按设备的成员格子取值(airplay:<deviceId> ⇒ 每台桥独立补偿)",
+    bshB !== null && bshB.includes("getMemberDelayMs(") && bshB.includes("`airplay:${airplayDeviceId}`"),
+    bshB === null ? miss("bridgeAnchorShiftUsOf") : "桥位移不按成员取值 ⇒ 每设备补偿退化为按协议一刀切",
   );
-  const ap2B = bodyByName(dc, atLineStart("airplay2DelayUsOf"));
+  const sscB = bodyByName(dc, atLineStart("sendspinDelayUsOfClient"));
   check(
-    "airplay2DelayUsOf 存在且只读 airplay2Ms 格(反向串格同样炸)",
-    ap2B !== null && /\.airplay2Ms\s*\*\s*1000/.test(ap2B) && count(ap2B, "airplayMs") === 0,
-    ap2B === null ? miss("airplay2DelayUsOf") : "AP2 取值口串到 AP1 格 ⇒ 第三格形同虚设",
+    "sendspinDelayUsOfClient 按客户端的成员格子取值(sendspin:<clientId>)",
+    sscB !== null && sscB.includes("getMemberDelayMs(") && sscB.includes("`sendspin:${clientId}`"),
+    sscB === null ? miss("sendspinDelayUsOfClient") : "Sendspin 偏移不按成员取值 ⇒ 每设备补偿退化为组级一格",
   );
-  const getB = bodyByName(dc, atLineStart("getGroupDelays"));
+  const getB = bodyByName(dc, atLineStart("getMemberDelays"));
   check(
-    "getGroupDelays 的 select 必须列 airplay2DelayMs(漏列 ⇒ 第三格恒读 0)",
-    getB !== null && getB.includes("playerGroups.airplay2DelayMs"),
-    getB === null ? miss("getGroupDelays") : "读路径没列新列 ⇒ 保存成功但读回 0,用户以为没存上",
+    "getMemberDelays 的 select 必须列 memberDelaysJson(漏列 ⇒ 成员补偿恒读 0)",
+    getB !== null && getB.includes("playerGroups.memberDelaysJson"),
+    getB === null ? miss("getMemberDelays") : "读路径没列新列 ⇒ 保存成功但读回 0,用户以为没存上",
   );
-  const setB = bodyByName(dc, atLineStart("setGroupDelays"));
+  const setB = bodyByName(dc, atLineStart("setMemberDelay"));
   check(
-    "setGroupDelays 必须把 airplay2Ms 落库(只改内存 ⇒ 重启即回 0)",
-    setB !== null && setB.includes("airplay2DelayMs:"),
-    setB === null ? miss("setGroupDelays") : "写路径漏写新列 ⇒ 重启后 AP2 补偿丢失",
+    "setMemberDelay 必须把 memberDelaysJson 落库(只改内存 ⇒ 重启即回 0)",
+    setB !== null && setB.includes("memberDelaysJson:"),
+    setB === null ? miss("setMemberDelay") : "写路径漏写新列 ⇒ 重启后成员补偿丢失",
+  );
+  const basB = bodyByName(code(SPIN_SERVER), atLineStart("bridgeAnchorShiftUs"));
+  check(
+    "sendspin server bridgeAnchorShiftUs 按桥设备直传取值(协议分格逻辑退役)",
+    basB !== null && basB.includes("bridgeAnchorShiftUsOf(this.name, deviceId)") && count(basB, "protocol") === 0,
+    basB === null ? miss("bridgeAnchorShiftUs") : "桥位移仍在读协议格 ⇒ 每设备补偿回归",
   );
   const ctl = code(AIRPLAY_CONTROL);
   // bodyByName 在本签名上会误判:返回类型是对象字面量 `Promise<{ ... }>`,
@@ -785,11 +792,11 @@ console.log("===== G13 AP1/AP2 延迟必须按成员协议分格(混合组里各
     sgbB === null ? miss("syncGroupBridges") : "暖挂载信号丢失 ⇒ track 边界恒按冷启垫",
   );
   const api = code(API_GROUPS);
-  const putSeg = sliceBetween(api, 'app.put("/v1/groups/:id/delays"', 'app.delete("/v1/groups/:id"');
+  const putSeg2 = sliceBetween(api, 'app.put("/v1/groups/:id/delays"', 'app.delete("/v1/groups/:id"');
   check(
-    "PUT delays 的重建条件必须覆盖 airplay2Ms(只判 airplayMs ⇒ 只改 AP2 那格时不生效)",
-    putSeg !== null && /next\.airplay2Ms\s*!==\s*before\.airplay2Ms/.test(putSeg),
-    putSeg === null ? miss('app.put("/v1/groups/:id/delays")') : "重建条件漏了 airplay2Ms",
+    "PUT delays 必须校验成员属组(memberId ∉ memberIds 拒绝)+ 仅 AirPlay 成员值变化才重建桥",
+    putSeg2 !== null && putSeg2.includes("members.includes(memberId)") && putSeg2.includes('memberId.startsWith("airplay:")'),
+    putSeg2 === null ? miss('app.put("/v1/groups/:id/delays")') : "重建条件漏 airplay 成员判据 ⇒ Sendspin 值变化也白白重建桥",
   );
 }
 

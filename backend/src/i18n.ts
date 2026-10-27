@@ -192,6 +192,7 @@ const CATALOG: Record<BackendLocale, Catalog> = {
 
     "errors.group.notFound": "组不存在",
     "errors.group.notFoundOrNoPerm": "组不存在或无权限",
+    "errors.group.memberNotInGroup": "该成员不在此群组中",
     "errors.group.empty": "组内无成员",
 
     "errors.flow.notExist": "流程不存在",
@@ -385,6 +386,7 @@ const CATALOG: Record<BackendLocale, Catalog> = {
 
     "errors.group.notFound": "Group not found",
     "errors.group.notFoundOrNoPerm": "Group not found or no permission",
+    "errors.group.memberNotInGroup": "Member is not in this group",
     "errors.group.empty": "Group has no members",
 
     "errors.flow.notExist": "Flow does not exist",

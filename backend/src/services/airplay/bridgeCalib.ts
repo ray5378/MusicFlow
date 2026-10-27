@@ -12,7 +12,7 @@
 // 单方面调小会让设备跑空(underrun → 周期性静音),那是另一个更严重的 bug。
 //
 // 语义:**正值 = 桥整体延后**(用来修「AirPlay 比 SENDSPIN 快」);0 = 不标定(历史行为)。
-// 生效时机:下一次桥会话建立(切歌 / 组重建 / 桥重连)时进入 planBridgeAnchor;R31 起**有组上下文一律取按组值** airplayDelayUsOf(groupId)(group/delayCalib.ts:92),本文件的全局值只在无组时兜底。
+// 生效时机:下一次桥会话建立(切歌 / 组重建 / 桥重连)时进入 planBridgeAnchor;R31 起**有组上下文一律取组内按成员值**(group/delayCalib.ts 按成员 id 查表;v4.8.0 起补偿落点 = 投递时戳,见 sendspin/server.ts),本文件的全局值只在无组时兜底。
 // `[airplay-bridge] {ev:"anchor"}` 事件里的 `anchorShiftUs` 即生效值(可现场验收)。
 import { getSetting } from "../settings.js";
 

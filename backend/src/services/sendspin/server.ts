@@ -48,7 +48,7 @@ import { peekPump, stopGroupPump } from "./streamEngine.js";
 import { recordSendspinDebug } from "./debugLog.js";
 import { esphomeBridge } from "./esphomeBridge.js";
 import { computeCommonSendAhead, type SendAheadInput } from "./group.js";
-import { bridgeAnchorShiftUsOf, parseUserGroupId, sendspinDelayUsOfGroupName } from "../group/delayCalib.js";
+import { bridgeAnchorShiftUsOf, parseUserGroupId, sendspinDelayUsOfClient } from "../group/delayCalib.js";
 import { trackSwitchLeadUsOf } from "../group/delayCalib.js";
 import { recordProbedRate } from "../playerRate.js";
 import { b64urlDecode, b64urlEncode } from "./util.js";
@@ -431,10 +431,10 @@ export class SendspinServer {
     this.onClosed?.(conn);
   }
 
-  /** 用户组(`ug:<gid>`)的 Sendspin 延迟补偿(µs):**正数 = 该组 Sendspin 更晚出声**。
+  /** 用户组(`ug:<gid>`)的 Sendspin 延迟补偿(µs,**按成员**):**正数 = 该客户端更晚出声**。
    *  单测用桩 server 时该方法不存在,调用方一律 `typeof === "function"` 兜底 0。 */
-  groupDelayUs(groupName: string): bigint {
-    return sendspinDelayUsOfGroupName(groupName);
+  groupDelayUs(groupName: string, clientId: string): bigint {
+    return sendspinDelayUsOfClient(groupName, clientId);
   }
 
   group(name: string): SendspinGroup {
@@ -937,14 +937,12 @@ export class SendspinGroup {
     this.stopBridgePushTimer();
   }
 
-  /** 本桥的锚点位移(µs,正 = 桥侧更晚出声):按组延迟补偿里**该桥协议**对应那一格
-   *  (raop → airplay_delay_ms;ap2-* → airplay2_delay_ms)。**动态读**缓存
+  /** 本桥的锚点位移(µs,正 = 桥侧更晚出声):按**该桥设备**读它的成员格子
+   *  (`airplay:<deviceId>`,v4.8.0 起按成员存,不再按协议分格)。**动态读**缓存
    *  (PUT /delays 写时更新缓存 ⇒ 下一补投 tick 即生效,无需任何重建/通知链);
-   *  组名非 ug:(单测桩/设备组)或该桥无规格 ⇒ 0n(历史行为)。
-   *  协议取自 bridgeSpecs(bridgeAttach 同步时记录的唯一真值)。 */
+   *  组名非 ug:(单测桩/设备组)或成员没设过 ⇒ 0n(历史行为)。 */
   private bridgeAnchorShiftUs(deviceId: string): bigint {
-    const proto = this.bridgeSpecs.find((s) => s.deviceId === deviceId)?.protocol ?? "raop";
-    return bridgeAnchorShiftUsOf(this.name, proto);
+    return bridgeAnchorShiftUsOf(this.name, deviceId);
   }
 
   constructor(name: string, server: SendspinServer) {
@@ -1423,9 +1421,9 @@ export class SendspinGroup {
    *  抵消,长期严格等于真实上网的音频量。`deliveredPeak` 单调不减、且新编码组以
    *  当前峰值为基线登记,所以成员增删(含播中加入)都不会让时间线倒退或停滞。
    */
-  /** 本组的 Sendspin 延迟补偿(µs;正数 = 更晚出声)。单测桩 server 无该方法 → 0。 */
-  private sendspinDelayUs(): bigint {
-    return typeof this.server.groupDelayUs === "function" ? this.server.groupDelayUs(this.name) : 0n;
+  /** 单个 Sendspin 成员的延迟补偿(µs;正数 = 更晚出声,**按成员**)。单测桩 server 无该方法 → 0。 */
+  private sendspinDelayUsOf(clientId: string): bigint {
+    return typeof this.server.groupDelayUs === "function" ? this.server.groupDelayUs(this.name, clientId) : 0n;
   }
 
   async pushFrame(tsUs: bigint, pcm: Float32Array): Promise<number> {
@@ -1459,10 +1457,10 @@ export class SendspinGroup {
       if (!groups.has(k)) this.deliveredByGroup.delete(k);
     }
 
-    // 按组 Sendspin 延迟补偿(µs,正数=更晚出声)。**只作用于「成员下发戳」**,
+    // Sendspin 延迟补偿(v4.8.0 起**按成员**,µs,正数=更晚出声)。**只作用于「成员下发戳」**,
     // 绝不改 ring 里的 tsUs —— ring 是桥投递窗口/水位/late-join 回填的唯一时间基准,
-    // 改它会把 AirPlay 侧与 late-join 一起带偏。
-    const dspDelayUs = this.sendspinDelayUs();
+    // 改它会把 AirPlay 侧与 late-join 一起带偏。逐成员在各自下发点取值(见下方 sendAudio),
+    // 没设过的成员取 0(行为兼容)。
 
     const before = this.deliveredPeak;
     let peak = before;
@@ -1518,7 +1516,7 @@ export class SendspinGroup {
         if (data && data.length > 0) {
           bytes += data.length;
           // 同一份字节分发给组内全部成员 —— 字节与时间戳序列完全一致。
-          for (const c of g.members) c.sendAudio(ts + dspDelayUs, data);
+          for (const c of g.members) c.sendAudio(ts + this.sendspinDelayUsOf(c.clientId ?? ""), data);
           if (n > 0) ring.push({ tsUs: ts, durUs: Math.round((n * 1_000_000) / SAMPLE_RATE), data, ep: this.bridgeContentEpoch });
           // 桥投递(§6.2):挂在 pcm:100 组的 chunk 循环体里 —— 桥按
           // s16le/48k/2ch 消费(与 PCM 编码器字面输出一致,即 MFAB AUDIO payload)。
@@ -1652,9 +1650,9 @@ export class SendspinGroup {
     // ★ 先宣告、后音频(见 flushAnnounceFor:先给货后宣告会留空窗,设备丢弃该流)。
     if (!this.pendingAnnounces.includes(c)) this.pendingAnnounces.push(c);
     this.flushAnnounceFor(c);
-    // 与 pushFrame 同一偏移:否则 late-join 的新成员会比老成员早/晚 dspDelayUs,
+    // 与 pushFrame 同一偏移(按成员):否则 late-join 的新成员会比老成员早/晚补偿量,
     // 进场瞬间听出一个跳变(ring 内仍是时间线域戳,故此处补)。
-    const dspDelayUs = this.sendspinDelayUs();
+    const dspDelayUs = this.sendspinDelayUsOf(c.clientId ?? "");
     for (const it of items) c.sendAudio(it.tsUs + dspDelayUs, it.data);
     this.server.log(
       "info",

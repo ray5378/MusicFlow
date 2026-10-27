@@ -2,6 +2,17 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.8.0] - 2026-10-27
+
+### Feature / 延迟补偿从按协议三格改为按组内成员独立设置(每台播放器一格)
+
+- **语义变更**:群组 A/V 延迟补偿的存储粒度从「按协议一刀切」(airplay_delay_ms / airplay2_delay_ms / sendspin_delay_ms 三格,组内同协议成员共用)改为**按成员独立存**(`member_delays_json`,member id → ms 的 JSON map,键与 memberIds 完全同源)。组里同协议的两台音箱现在也能各拿各的补偿值。
+- **取值口重构**(delayCalib.ts):`airplayDelayUsOf` / `airplay2DelayUsOf` / `sendspinDelayUsOfGroupName` 退役,新增 `getMemberDelays` / `getMemberDelayMs` / `setMemberDelay`(键 = `airplay:<deviceId>` / `sendspin:<clientId>`)、`bridgeAnchorShiftUsOf(groupName, deviceId)`(按桥设备直传)、`sendspinDelayUsOfClient(groupName, clientId)`(逐客户端下发戳偏移)。补偿落点不变:AirPlay = 投递时戳位移(随桥会话建立锚定,保存后自动重建桥生效,约 1~2s 静音);Sendspin = pushFrame 下发戳偏移(帧级实时)。
+- **API 变更**:`GET/PUT /v1/groups/:id/delays` 改成员粒度 —— GET 返回 `{ memberDelays, trackLeadMs, minMs, maxMs, stepMs }`;PUT 收 `{ memberId, ms }`(memberId 必须在本组成员列表,越组写入 400),可选 `trackLeadMs`(切歌垫片隐藏调参口,保留)。仅 AirPlay 成员值变化才触发桥重建。
+- **前端**(Groups 页):点击组内播放器名称从「复制设备 ID」改为弹出**该成员的延迟补偿弹窗**(单数值输入 ±30000/步进 10,服务端按设备实际协议与身份取值,用户无需关心 AP1/AP2);chip 上回显非 0 补偿徽标;组级三格弹窗与「延迟补偿」按钮移除。
+- **默认值变更(用户裁定)**:取消 AirPlay 内置默认对齐点 300ms(createGroup 播种与一次性迁移删除),新组/新成员默认 0 起步;旧三格数值**不迁移**,升级后全部归零重调;旧列在 initDatabase 幂等迁移中删除。
+- 守卫同步:check-group-invariants G10/G11/G13 延迟断言全部改钉成员级取值口/落库/校验(createGroup 禁播种);dev/mutate-guards G13-a~d 变异目标同步。测试:delayCalib / apiGroupDelays / GroupManagerDelayView 按成员语义重写,bridgePushFrame 窗口位移用例改按成员格取值。
+
 ## [4.7.6] - 2026-10-27
 
 ### Fix / 混合组锚点 lead 定标 5s:消除切歌时 AirPlay 接收端吞新歌开头(真机 100% 复现)

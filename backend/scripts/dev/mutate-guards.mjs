@@ -298,17 +298,17 @@ const CASES = [
     expect: "顺序颠倒",
   },
 
-  // ===== G13 AP1/AP2 延迟分格 =====
-  // 价值:第三格是新增概念,断言一旦恒真就没人会发现「AP2 成员实际在读 AP1 的值」——
-  // 表现为用户调 AP2 那一格完全没反应,或反过来把 AP1 成员拉偏。
+  // ===== G13 延迟补偿按成员(v4.8.0) =====
+  // 价值:成员格是新增概念,断言一旦恒真就没人会发现「某台设备实际在读别的成员/协议格的值」——
+  // 表现为用户调某台设备完全没反应,或补偿退化回按协议一刀切。
   {
     id: "G13-a",
     guard: "group",
-    why: "airplay2DelayUsOf 偷读 airplayMs 格(第三格形同虚设,AP2 成员跟着 AP1 的标定值跑)",
+    why: "bridgeAnchorShiftUsOf 偷读别的成员格(每台桥的补偿互相拉扯)",
     file: DC,
-    from: "  return getGroupDelays(groupId).airplay2Ms * 1000;",
-    to: "  return getGroupDelays(groupId).airplayMs * 1000;",
-    expect: "airplay2DelayUsOf 存在且只读 airplay2Ms 格",
+    from: "  return BigInt(getMemberDelayMs(id, `airplay:${airplayDeviceId}`) * 1000);",
+    to: "  return BigInt(getMemberDelayMs(id, `sendspin:${airplayDeviceId}`) * 1000);",
+    expect: "bridgeAnchorShiftUsOf 按设备的成员格子取值(airplay:<deviceId>)",
   },
   {
     id: "G13-b",
@@ -316,26 +316,26 @@ const CASES = [
     why: "bridgePrepareDevice 锚点复取组值 —— 与投递时戳双加,对齐器把补偿整段裁掉(切歌吞 2 秒)",
     file: CTL,
     from: "    anchorShiftUs: 0,",
-    to: "    anchorShiftUs: groupId ? airplayDelayUsOf(groupId) : 0,",
+    to: "    anchorShiftUs: groupId ? 300 : 0,",
     expect: "anchorShiftUs 必须恒 0",
   },
   {
     id: "G13-c",
     guard: "group",
-    why: "读路径漏列新列(第三格恒读 0,UI 永远显示不入 DB 的值)",
+    why: "读路径漏列新列(成员补偿恒读 0,UI 永远显示不入 DB 的值)",
     file: DC,
-    from: "        a2: playerGroups.airplay2DelayMs,\n",
+    from: "        md: playerGroups.memberDelaysJson,\n",
     to: "",
-    expect: "getGroupDelays 的 select 必须列 airplay2DelayMs",
+    expect: "getMemberDelays 的 select 必须列 memberDelaysJson",
   },
   {
     id: "G13-d",
     guard: "group",
-    why: "PUT 的重建条件漏掉 airplay2Ms(只改 AP2 那一格时调了没反应)",
+    why: "PUT 的重建条件漏掉 airplay 成员判据(Sendspin 值变化也白白重建桥,或 AirPlay 变化不重建)",
     file: API,
-    from: "(next.airplayMs !== before.airplayMs || next.airplay2Ms !== before.airplay2Ms)",
-    to: "(next.airplayMs !== before.airplayMs)",
-    expect: "PUT delays 的重建条件必须覆盖 airplay2Ms",
+    from: "if (memberId.startsWith(\"airplay:\") && after !== before)",
+    to: "if (after !== before)",
+    expect: "PUT delays 仅 AirPlay 成员值变化才重建桥",
   },
 
   // ===== check-airplay-bridge.mjs(⑮⑯⑰) =====

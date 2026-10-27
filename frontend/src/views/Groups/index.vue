@@ -505,11 +505,6 @@
             <span>{{ t('groups.deviceCount', { count: g.members.length }) }}</span>
             <span class="meta-dot">·</span>
             <span :class="{ 'online': onlineCount(g) > 0 }">{{ t('groups.onlineCount', { count: onlineCount(g) }) }}</span>
-            <!-- 延迟补偿回显:非 0 才占位,避免正常组卡片多一行噪音。 -->
-            <template v-if="delayBadge(g)">
-              <span class="meta-dot">·</span>
-              <span style="color: var(--el-color-primary);">{{ delayBadge(g) }}</span>
-            </template>
           </div>
         </div>
         <div class="group-id-row">
@@ -521,11 +516,11 @@
               <span
                 class="member-chip"
                 :class="{ offline: !m.available }"
-                @click="copyPeer(memberPeerId(m), m.name)"
-                :title="t('groups.copyDeviceId', { id: m.deviceId })"
+                @click="canUse && openMemberDelay(g, m)"
+                :title="t('groups.delayMemberTitle')"
               >
                 {{ m.name }}
-                <MfIcon name="CopyDocument" class="member-copy-icon"  />
+                <span v-if="memberDelayMs(g, m)" class="member-delay-badge">{{ fmtDelayMs(memberDelayMs(g, m)) }}</span>
                 <span v-if="!m.available" class="member-offline">{{ t('groups.offline') }}</span>
               </span>
             </template>
@@ -540,8 +535,6 @@
             :disabled="groupMemberPeerIds(g).length === 0"
             @click="openOutputConfig(groupMemberPeerIds(g), g.name)"
           ><MfIcon name="SlidersHorizontal" />{{ t('groups.outputConfig') }}</el-button>
-          <!-- 群组延迟补偿(A/V 标定,按组):正数 = 该侧更晚出声,负数 = 该侧更早出声。 -->
-          <el-button v-if="canUse" size="small" @click="openDelay(g)"><MfIcon name="Clock" />{{ t('groups.delayConfig') }}</el-button>
           <div class="device-hide-toggle" :title="t('groups.hideToggleGroupTitle')">
             <el-switch
               :model-value="isHidden(`group:${g.id}`)"
@@ -797,90 +790,35 @@
       <div v-if="!canManage" class="form-tip">{{ t('groups.sendspinEsphomeAdminOnly') }}</div>
     </el-dialog>
 
-    <!-- 群组延迟补偿(A/V 标定,按组)。
-         语义两侧一致:**正数 = 该侧更晚出声,负数 = 该侧更早出声**。
-         AirPlay 侧:锚点在桥会话建立时算死 ⇒ 保存后自动重建该组桥(约 1~2s 静音);
-         Sendspin 侧:帧级下发戳偏移 ⇒ 真·实时,约 0.5~1s 后听到。 -->
+    <!-- 成员延迟补偿(按成员,点击组内播放器名称弹出)。
+         语义:**正数 = 该设备更晚出声,负数 = 该设备更早出声**。
+         AirPlay 成员:补偿随桥会话建立锚定 ⇒ 保存后服务端自动重建该组桥(约 1~2s 静音)换立即生效;
+         Sendspin 成员:帧级下发戳偏移 ⇒ 真·实时,约 0.5~1s 后听到。 -->
     <el-dialog
-      v-model="showDelay"
-      :title="t('groups.delayTitle')"
-      width="468px"
+      v-model="showMemberDelay"
+      :title="t('groups.delayMemberTitle')"
+      width="420px"
       :append-to-body="true"
       destroy-on-close
     >
       <div style="font-size:12px;color:var(--el-text-color-secondary);margin:-8px 0 14px;">
-        {{ delayGroup?.name || '' }}<span v-if="delayGroup"> · {{ t('groups.deviceCount', { count: delayGroup.members.length }) }}</span>
+        {{ memberDelayTarget?.name || '' }}<span v-if="memberDelayGroup"> · {{ memberDelayGroup.name }}</span>
       </div>
-
       <div style="display:flex;align-items:center;gap:12px;">
-        <div style="width:96px;font-size:13px;">AirPlay</div>
+        <div style="width:96px;font-size:13px;">{{ t('groups.delayMemberLabel') }}</div>
         <el-input-number
-          v-model="delayAirplay"
-          :min="delayMin" :max="delayMax" :step="delayStep" :step-strictly="true"
-          controls-position="right" style="width:150px"
+          v-model="memberDelayVal"
+          :min="memberDelayMin" :max="memberDelayMax" :step="memberDelayStep" :step-strictly="true"
+          style="width:150px;"
         />
-        <span style="font-size:12px;color:var(--el-text-color-secondary);">ms</span>
+        <span style="font-size:13px;">ms</span>
       </div>
-      <div style="font-size:12px;color:var(--el-text-color-secondary);line-height:1.5;margin:6px 0 0 108px;">
-        {{ t('groups.delayAirplayHint') }}
+      <div style="font-size:12px;color:var(--el-text-color-secondary);line-height:1.6;margin:12px 0 0;">
+        {{ t('groups.delayMemberHint') }}
       </div>
-      <div v-if="delayProfile.ap1Members === 0" style="font-size:12px;color:var(--el-color-warning);line-height:1.5;margin:4px 0 0 108px;">
-        {{ t('groups.delayNoMembers', { side: 'AirPlay 1' }) }}
-      </div>
-
-      <div style="display:flex;align-items:center;gap:12px;margin-top:16px;">
-        <div style="width:96px;font-size:13px;">AirPlay 2</div>
-        <el-input-number
-          v-model="delayAirplay2"
-          :min="delayMin" :max="delayMax" :step="delayStep" :step-strictly="true"
-          controls-position="right" style="width:150px"
-        />
-        <span style="font-size:12px;color:var(--el-text-color-secondary);">ms</span>
-      </div>
-      <div style="font-size:12px;color:var(--el-text-color-secondary);line-height:1.5;margin:6px 0 0 108px;">
-        {{ t('groups.delayAirplay2Hint') }}
-      </div>
-      <div v-if="delayProfile.ap2Members === 0" style="font-size:12px;color:var(--el-color-warning);line-height:1.5;margin:4px 0 0 108px;">
-        {{ t('groups.delayNoMembers', { side: 'AirPlay 2' }) }}
-      </div>
-
-      <div style="display:flex;align-items:center;gap:12px;margin-top:16px;">
-        <div style="width:96px;font-size:13px;">Sendspin</div>
-        <el-input-number
-          v-model="delaySendspin"
-          :min="delayMin" :max="delayMax" :step="delayStep" :step-strictly="true"
-          controls-position="right" style="width:150px"
-        />
-        <span style="font-size:12px;color:var(--el-text-color-secondary);">ms</span>
-      </div>
-      <div style="font-size:12px;color:var(--el-text-color-secondary);line-height:1.5;margin:6px 0 0 108px;">
-        {{ t('groups.delaySendspinHint') }}
-      </div>
-      <div v-if="delayProfile.sendspinMembers === 0" style="font-size:12px;color:var(--el-color-warning);line-height:1.5;margin:4px 0 0 108px;">
-        {{ t('groups.delayNoMembers', { side: 'Sendspin' }) }}
-      </div>
-
-
-      <div style="margin-top:16px;padding:9px 12px;background:var(--el-fill-color-light);border-radius:6px;font-size:12px;line-height:1.6;">
-        <div v-for="(line, i) in delayDiffLines" :key="i">{{ line }}</div>
-      </div>
-      <div style="font-size:12px;color:var(--el-text-color-secondary);line-height:1.6;margin-top:10px;">
-        {{ delayRangeText }}
-      </div>
-      <div style="font-size:12px;color:var(--el-text-color-secondary);line-height:1.6;margin-top:6px;">
-        {{ t('groups.delayNegativeLimit') }}
-      </div>
-      <div style="font-size:12px;color:var(--el-color-warning);line-height:1.6;margin-top:6px;">
-        {{ t('groups.delayRestartHint') }}
-      </div>
-
       <template #footer>
-        <div style="display:flex;align-items:center;">
-          <el-button size="small" @click="resetDelay">{{ t('groups.delayReset') }}</el-button>
-          <div style="flex:1"></div>
-          <el-button size="small" @click="showDelay = false">{{ t('common.cancel') }}</el-button>
-          <el-button size="small" type="primary" :loading="delaySaving" @click="saveDelay">{{ t('groups.delayApply') }}</el-button>
-        </div>
+        <el-button size="small" @click="resetMemberDelay">{{ t('groups.delayReset') }}</el-button>
+        <el-button size="small" type="primary" :loading="memberDelaySaving" @click="saveMemberDelay">{{ t('groups.delayApply') }}</el-button>
       </template>
     </el-dialog>
   </div>
@@ -897,10 +835,8 @@ import api from "@/api";
 import IdBadge from "@/components/IdBadge.vue";
 import SendspinPairing from "@/views/Settings/SendspinPairing.vue";
 import OutputConfigDialog from "@/components/OutputConfigDialog.vue";
-import { useCopy } from "@/composables/useCopy";
 import { apiErrorText } from "@/utils/apiError";
 
-const { copy } = useCopy();
 const { t } = useI18n();
 
 const authStore = useAuthStore();
@@ -910,10 +846,6 @@ const canUse = computed(() => authStore.isAdmin || authStore.hasPerm(PERM.RENDER
 // 管理能力:管理员或具 renderer.manage。仅 manage 可删除播放器设备本体、全局禁用。
 // 删除设备是「根级」操作,普通用户一律不可(与 use 区分)。
 const canManage = computed(() => authStore.isAdmin || authStore.hasPerm(PERM.RENDERER_MANAGE));
-
-function copyPeer(peerId: string, name: string) {
-  copy(peerId, t("groups.copyPeer", { name }));
-}
 
 const playerStore = usePlayerStore();
 
@@ -1169,112 +1101,73 @@ function openOutputConfig(peerIds: string[], name: string): void {
 }
 
 
-// ---- 群组延迟补偿(A/V 标定,按组)----
-// 语义两侧一致:**正数 = 该侧更晚出声,负数 = 该侧更早出声**。
-//   AirPlay 侧 → 桥锚点 anchorShiftUs;锚点在桥会话建立时算死,故保存后自动重建该组桥
-//                (该组 AirPlay 成员约 1~2 秒静音,Sendspin 成员不受影响)。
-//   Sendspin 侧 → pushFrame 下发戳偏移(帧级,真·实时,约 0.5~1 秒后听到)。
-// 只有两侧「差值」影响 A/V 同步,分开设是为了纯 AirPlay 组 / 纯 Sendspin 组也能各自微调。
-const showDelay = ref(false);
-const delayGroup = ref<any>(null);
-const delayAirplay = ref(0);
-const delayAirplay2 = ref(0);
-const delaySendspin = ref(0);
-/** 成员协议画像(后端按 selectAirPlayBridgeProtocol 现算):为 0 的格子对本组不生效。 */
-const delayProfile = ref({ ap1Members: 0, ap2Members: 0, sendspinMembers: 0 });
-const delayMin = ref(-30000);
-const delayMax = ref(30000);
-const delayStep = ref(10);
-const delaySaving = ref(false);
+// ---- 成员延迟补偿(按成员,点击组内播放器名称弹出)----
+// 语义:**正数 = 该设备更晚出声,负数 = 该设备更早出声**。
+//   AirPlay 成员   → 桥投递时戳位移;随桥会话建立锚定,保存后服务端自动重建该组桥
+//                    (该组 AirPlay 成员约 1~2 秒静音)换立即生效。
+//   Sendspin 成员 → pushFrame 下发戳偏移(帧级,真·实时,约 0.5~1 秒后听到)。
+const showMemberDelay = ref(false);
+const memberDelayGroup = ref<any>(null);
+const memberDelayTarget = ref<any>(null);
+const memberDelayVal = ref(0);
+const memberDelayMin = ref(-30000);
+const memberDelayMax = ref(30000);
+const memberDelayStep = ref(10);
+const memberDelaySaving = ref(false);
 
-/** 某一侧相对 Sendspin 的差值说明(>0 = 该侧更晚)。
- *  AP1 与 AP2 各出一格:混合组里两条链路的抵达延迟本就不是一个数,合成一行会把两边都糊掉。 */
-function diffLineOf(value: number, side: string): string {
-  const d = (value || 0) - (delaySendspin.value || 0);
-  if (!d) return t("groups.delayDiffSame", { side });
-  const head = d > 0
-    ? t("groups.delayDiffLater", { ms: Math.abs(d), side })
-    : t("groups.delayDiffEarlier", { ms: Math.abs(d), side });
-  const tip = d > 0
-    ? t("groups.delayDiffTipLater", { side })
-    : t("groups.delayDiffTipEarlier", { side });
-  return `${head} ${tip}`;
+/** 某成员当前补偿值(ms):组读视图的 memberDelays(member id → ms)。没设过 → 0。 */
+function memberDelayMs(g: any, m: any): number {
+  const id = memberPeerId(m);
+  return id ? Number(g?.memberDelays?.[id] ?? 0) : 0;
 }
 
-const delayDiffLines = computed(() => [
-  diffLineOf(delayAirplay.value, "AirPlay"),
-  diffLineOf(delayAirplay2.value, "AirPlay 2"),
-]);
-
-const delayRangeText = computed(() =>
-  t("groups.delayRange", {
-    sec: Math.round(Math.max(Math.abs(delayMin.value), Math.abs(delayMax.value)) / 1000),
-    step: delayStep.value,
-  }),
-);
-
-
-/** 卡片上的延迟补偿回显(ms):正数=更晚、负数=更早;两侧都 0 → 空串(不占位)。 */
-function delayBadge(g: any): string {
-  const a = Number(g?.airplayDelayMs || 0);
-  const a2 = Number(g?.airplay2DelayMs || 0);
-  const b = Number(g?.sendspinDelayMs || 0);
-  if (!a && !a2 && !b) return "";
-  const fmt = (v: number) => (v > 0 ? `+${v}` : `${v}`);
-  const parts: string[] = [];
-  if (a) parts.push(`AirPlay ${fmt(a)}ms`);
-  if (a2) parts.push(`AP2 ${fmt(a2)}ms`);
-  if (b) parts.push(`Sendspin ${fmt(b)}ms`);
-  return t("groups.delayBadge", { text: parts.join(" / ") });
+/** chip 上的回显文案:+300ms / -120ms。 */
+function fmtDelayMs(v: number): string {
+  return v > 0 ? `+${v}ms` : `${v}ms`;
 }
 
-async function openDelay(g: any): Promise<void> {
-  delayGroup.value = g;
+async function openMemberDelay(g: any, m: any): Promise<void> {
+  const id = memberPeerId(m);
+  if (!id) return;
+  memberDelayGroup.value = g;
+  memberDelayTarget.value = m;
+  memberDelayVal.value = memberDelayMs(g, m);
   try {
     const r = await api.get(`/rest/api/v1/groups/${g.id}/delays`);
     const d = r.data || {};
-    delayAirplay.value = Number(d.airplayMs ?? 0);
-    delayAirplay2.value = Number(d.airplay2Ms ?? 0);
-    delaySendspin.value = Number(d.sendspinMs ?? 0);
-    delayProfile.value = {
-      ap1Members: Number(d.ap1Members ?? 0),
-      ap2Members: Number(d.ap2Members ?? 0),
-      sendspinMembers: Number(d.sendspinMembers ?? 0),
-    };
-    if (typeof d.minMs === "number") delayMin.value = d.minMs;
-    if (typeof d.maxMs === "number") delayMax.value = d.maxMs;
-    if (typeof d.stepMs === "number" && d.stepMs > 0) delayStep.value = d.stepMs;
-  } catch (e) {
-    ElMessage.error(apiErrorText(e, t("groups.delayLoadFailed")));
-    return;
-  }
-  showDelay.value = true;
+    if (typeof d.minMs === "number") memberDelayMin.value = d.minMs;
+    if (typeof d.maxMs === "number") memberDelayMax.value = d.maxMs;
+    if (typeof d.stepMs === "number" && d.stepMs > 0) memberDelayStep.value = d.stepMs;
+    if (d.memberDelays && Object.prototype.hasOwnProperty.call(d.memberDelays, id)) {
+      memberDelayVal.value = Number(d.memberDelays[id] ?? 0);
+    }
+  } catch { /* 拉不到就用组读视图回显值,不拦弹窗 */ }
+  showMemberDelay.value = true;
 }
 
-/** 一侧都不补偿(两侧归零)。 */
-function resetDelay(): void {
-  delayAirplay.value = 0;
-  delayAirplay2.value = 0;
-  delaySendspin.value = 0;
+/** 归零(该设备不补偿)。 */
+function resetMemberDelay(): void {
+  memberDelayVal.value = 0;
 }
 
-async function saveDelay(): Promise<void> {
-  const g = delayGroup.value;
-  if (!g) return;
-  delaySaving.value = true;
+async function saveMemberDelay(): Promise<void> {
+  const g = memberDelayGroup.value;
+  const m = memberDelayTarget.value;
+  if (!g || !m) return;
+  const id = memberPeerId(m);
+  memberDelaySaving.value = true;
   try {
-    const r = await api.put(`/rest/api/v1/groups/${g.id}/delays`, {
-      airplayMs: delayAirplay.value,
-      airplay2Ms: delayAirplay2.value,
-      sendspinMs: delaySendspin.value,
-    });
-    showDelay.value = false;
+    const r = await api.put(`/rest/api/v1/groups/${g.id}/delays`, { memberId: id, ms: memberDelayVal.value });
+    // 本地回显同步:组读视图的 memberDelays 原地更新(免整列表重拉)。
+    if (!g.memberDelays) g.memberDelays = {};
+    g.memberDelays[id] = Number(r.data?.memberDelays?.[id] ?? memberDelayVal.value);
+    showMemberDelay.value = false;
     if (Number(r.data?.rebuilt) > 0) ElMessage.success(t("groups.delaySavedReconnect"));
     else ElMessage.success(t("groups.delaySaved"));
   } catch (e) {
     ElMessage.error(apiErrorText(e, t("groups.delaySaveFailed")));
   } finally {
-    delaySaving.value = false;
+    memberDelaySaving.value = false;
   }
 }
 
@@ -2344,7 +2237,7 @@ onBeforeUnmount(() => { stopSendspinPolling(); });
       padding: 3px 10px; font-size: 12px; color: var(--fnos-text-primary-dim); cursor: pointer;
       transition: background 0.15s;
       &:hover { background: rgba(255,255,255,0.14); }
-      .member-copy-icon { font-size: 11px; color: var(--fnos-text-tertiary); opacity: 0.6; }
+      .member-delay-badge { font-size: 11px; color: var(--fnos-text-tertiary); opacity: 0.6; }
       &.offline { color: var(--fnos-text-muted); }
       .member-offline { font-size: 11px; background: rgba(255,255,255,0.14); color: var(--fnos-text-secondary); border-radius: 8px; padding: 0 6px; }
     }

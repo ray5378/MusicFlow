@@ -779,74 +779,29 @@ export function initDatabase() {
     log.warn(`sendspin_device_state 补列失败: ${e instanceof Error ? e.message : e}`);
   }
 
-  // 结构升级(2026-10-26):player_groups 新增按组 A/V 延迟补偿两列(ms)。
-  // 语义:**正数 = 该侧更晚出声,负数 = 更早出声**。
-  // 旧实现只有一条全局 bridge.avShiftMs;升级时把它**一次性落到既有组**,
-  // 否则用户此前调好的补偿会凭空归零(且全局接口此后只作 groupId 缺失时的兜底)。
+  // 结构升级(v4.8.0):player_groups 延迟补偿改**按成员**存 —— 新增 member_delays_json
+  // (member id → ms 的 JSON map),并删除旧的按协议三格(airplay/airplay2/sendspin_delay_ms)。
+  // 旧值**不迁移**(用户裁定:全部归零重调,一步到位不留兜底)。
   try {
     const cols = (sqlite.prepare("PRAGMA table_info(player_groups)").all() as { name?: unknown }[]).map((c) =>
       String(c?.name ?? ""),
     );
-    if (!cols.includes("airplay_delay_ms")) {
-      sqlite.exec("ALTER TABLE player_groups ADD COLUMN airplay_delay_ms INTEGER NOT NULL DEFAULT 0");
-      let carried = 0;
-      try {
-        const row = sqlite.prepare("SELECT value FROM settings WHERE key = ?").get("bridge.avShiftMs") as
-          | { value?: unknown }
-          | undefined;
-        const v = Math.round(Number(row?.value));
-        if (Number.isFinite(v) && v !== 0) {
-          sqlite.prepare("UPDATE player_groups SET airplay_delay_ms = ?").run(v);
-          carried = v;
-        }
-      } catch { /* settings 表不存在/无该键 → 保持 0 */ }
-      log.info(`player_groups 新增 airplay_delay_ms 列(继承旧全局值 ${carried}ms)`);
+    if (!cols.includes("member_delays_json")) {
+      sqlite.exec("ALTER TABLE player_groups ADD COLUMN member_delays_json TEXT NOT NULL DEFAULT '{}'");
+      log.info("player_groups 新增 member_delays_json 列(按成员延迟补偿)");
     }
-    if (!cols.includes("sendspin_delay_ms")) {
-      sqlite.exec("ALTER TABLE player_groups ADD COLUMN sendspin_delay_ms INTEGER NOT NULL DEFAULT 0");
-      log.info("player_groups 新增 sendspin_delay_ms 列");
-    }
-    // 结构升级(2026-10-27):AP2 realtime 出声链路接通后,AirPlay 侧必须按协议拆两格。
-    // 新增列**继承当时 airplay_delay_ms 的非零值**:用户此前标定的是整体(TL delay),
-    // 分成两格后若让 AP2 侧凭空归零,等于把已经调好的组悄悄打散。继承后可以各自再微调。
-    // 全 0 的组(绝大多数)不受影响 —— 值为 0 时不复制,保持「三项干净」。
-    if (!cols.includes("airplay2_delay_ms")) {
-      sqlite.exec("ALTER TABLE player_groups ADD COLUMN airplay2_delay_ms INTEGER NOT NULL DEFAULT 0");
-      let carried = 0;
+    for (const col of ["airplay_delay_ms", "airplay2_delay_ms", "sendspin_delay_ms"]) {
+      if (!cols.includes(col)) continue;
       try {
-        const row = sqlite
-          .prepare("SELECT COUNT(*) AS n, MAX(ABS(airplay_delay_ms)) AS mx FROM player_groups")
-          .get() as { n?: unknown; mx?: unknown } | undefined;
-        const mx = Math.round(Number(row?.mx));
-        if (Number(row?.n) > 0 && Number.isFinite(mx) && mx !== 0) {
-          sqlite.prepare("UPDATE player_groups SET airplay2_delay_ms = airplay_delay_ms").run();
-          carried = mx;
-        }
-      } catch { /* 聚合失败 → 保持 0 */ }
-      log.info(`player_groups 新增 airplay2_delay_ms 列(继承既有 airplay_delay_ms,峰值 ${carried}ms)`);
+        sqlite.exec(`ALTER TABLE player_groups DROP COLUMN ${col}`);
+        log.info(`player_groups 删除旧延迟列 ${col}(按协议三格 → 按成员 member_delays_json)`);
+      } catch (e) {
+        log.warn(`player_groups DROP COLUMN ${col} 失败(不影响启动): ${e instanceof Error ? e.message : e}`);
+      }
     }
     if (!cols.includes("track_switch_lead_ms")) {
       sqlite.exec("ALTER TABLE player_groups ADD COLUMN track_switch_lead_ms INTEGER NOT NULL DEFAULT 1000");
-      log.info("player_groups 新增 track_switch_lead_ms 列(切歌垫片,默认 0=关闭)");
-    }
-    // 内置默认对齐点一次性播种(2026-10-27):AirPlay 链路固有偏差实测 ≈300ms,
-    // **AP1 与 AP2 两格通用**(用户定标)。只升「从未调过补偿」的组(三格全 0);
-    // 用户调过的组一律不动。settings 标记防重复执行。
-    try {
-      const seeded = sqlite.prepare("SELECT value FROM settings WHERE key = ?").get("group.airplayAlignSeeded");
-      if (!seeded) {
-        const seededRun = sqlite
-          .prepare(
-            "UPDATE player_groups SET airplay_delay_ms = 300, airplay2_delay_ms = 300 WHERE airplay_delay_ms = 0 AND airplay2_delay_ms = 0 AND sendspin_delay_ms = 0",
-          )
-          .run();
-        sqlite
-          .prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)")
-          .run("group.airplayAlignSeeded", String(seededRun.changes));
-        log.info(`内置默认对齐点播种: ${seededRun.changes} 个未标定组的 airplay/airplay2_delay_ms → 300ms`);
-      }
-    } catch (e) {
-      log.warn(`默认对齐点播种失败(不影响启动): ${e instanceof Error ? e.message : e}`);
+      log.info("player_groups 新增 track_switch_lead_ms 列(切歌垫片)");
     }
   } catch (e) {
     log.warn(`player_groups 补列失败: ${e instanceof Error ? e.message : e}`);

@@ -20,7 +20,6 @@ import { airplaySupervisor } from "./supervisor.js";
 import { rpcFireAndForget } from "../rendererHost/front.js";
 import { getAirPlayDevice, getAirPlayDevices, onAirPlayEvent, startAirPlayDiscovery, stopAirPlayDiscovery, setAirPlayPersist, removeAirPlayDevice, type AirPlayDevice } from "./discovery.js";
 import { getBridgeAvShiftUs } from "./bridgeCalib.js";
-import { airplay2DelayUsOf, airplayDelayUsOf } from "../group/delayCalib.js";
 import { getEffectiveBaseUrl, getCachedDevices, setDeviceVolume, setDeviceMute, stopDevicePlayback, loopbackBase } from "../dlna/control.js";
 import { sqlite } from "../../db/index.js";
 import { createAirPlaySession } from "./session.js";

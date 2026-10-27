@@ -370,16 +370,14 @@ export const playerGroups = sqliteTable("player_groups", {
   memberIds: text("member_ids").notNull().default("[]"), // dlna deviceId[] serialized
   // 组级音量:独立于成员设备音量,空组/全离线也持久。新建未改过=20(用户定稿)。
   volume: integer("volume").notNull().default(20),
-  // 群组 A/V 延迟补偿(ms)。语义三侧一致:**正数 = 该侧更晚出声,负数 = 该侧更早出声**。
-  // 只有「两两差值」影响实际听感到齐;分开存是因为三条路的抵达延迟物理上不同:
-  //   airplay_delay_ms   → AirPlay 1(RAOP)成员的 bridgePrepare.anchorShiftUs(桥内容落点整体平移)
-  //   airplay2_delay_ms  → AirPlay 2(AP2 realtime)成员的同一个 anchorShiftUs(**按成员协议二选一**)
-  //   sendspin_delay_ms  → pushFrame 下发戳偏移(帧级,真·实时)
-  // AP1 与 AP2 必须分开:AP1 走 44.1kHz 重采样 + 明文 RTSP,AP2 走 48kHz 直通 + 加密链路,
-  // 同一台扬声器的两种接法都不等延迟,更别说不同型号 —— 共用一格等于让用户在两个设备间两头凑。
-  airplayDelayMs: integer("airplay_delay_ms").notNull().default(0),
-  airplay2DelayMs: integer("airplay2_delay_ms").notNull().default(0),
-  sendspinDelayMs: integer("sendspin_delay_ms").notNull().default(0),
+  // 群组 A/V 延迟补偿(v4.8.0 起**按成员**存):member id(airplay:<deviceId> /
+  // sendspin:<clientId>,与 memberIds 完全同源)→ ms 的 JSON map。语义:**正数 = 该设备
+  // 更晚出声,负数 = 该设备更早出声**。组里每个播放器独立一格,不再按协议(AP1/AP2/
+  // Sendspin)一刀切 —— 同协议的两台音箱抵达延迟也可以不同。
+  //   airplay 成员   → 桥投递时戳位移(随桥会话建立锚定 ⇒ 改完要重建桥才生效)
+  //   sendspin 成员 → pushFrame 下发戳偏移(帧级,真·实时)
+  // 取值口/写路径见 services/group/delayCalib.ts(按成员 id 查表)。
+  memberDelaysJson: text("member_delays_json").notNull().default("{}"),
   // 切歌垫片的手动覆盖(ms):生效 = max(组值, 冷/暖动态 lead —— A 方案,见
   // sendspin/constants.ts BRIDGE_TRACK_LEAD_COLD/WARM_US)。0 = 完全自动(默认)。
   trackSwitchLeadMs: integer("track_switch_lead_ms").notNull().default(0),

@@ -22,7 +22,7 @@ import { getServer as getSendspinServer } from "../sendspin/runtime.js";
 import { sendspinSupervisor } from "../sendspin/supervisor.js";
 import { getSendspinDeviceVolume } from "../sendspin/peerVolume.js";
 import { createLogger } from "../../utils/logger.js";
-import { DEFAULT_AIRPLAY_ALIGN_MS, getGroupDelays, setGroupDelays } from "./delayCalib.js";
+import { getMemberDelays, getTrackLeadMs } from "./delayCalib.js";
 
 /** 成员 kind:airplay / sendspin / dlna(仅历史数据可解析,**新提交一律拒收**,
  *  2026-10-24 起 DLNA 禁止入组 —— 设备自拉流无共享时间线)。 */
@@ -105,28 +105,21 @@ export interface GroupMemberInfo {
 
 export interface PlayerGroupWithMembers extends PlayerGroup {
   members: GroupMemberInfo[];
-  /** 延迟补偿回显(ms):**正数 = 该侧更晚出声,负数 = 该侧更早出声**。
-   *  三格:AP1 / AP2 / Sendspin。只在「读视图」里带出(不写进 PlayerGroup/persist),
-   *  避免与落库路径耦合 —— 见 G11:实体带上延迟字段会被 persist 的整行 upsert 冲回默认值。 */
-  airplayDelayMs: number;
-  airplay2DelayMs: number;
-  sendspinDelayMs: number;
+  /** 延迟补偿回显(ms,**按成员**):member id → ms。**正数 = 该设备更晚出声,负数 = 更早**。
+   *  只在「读视图」里带出(不写进 PlayerGroup/persist),避免与落库路径耦合 ——
+   *  见 G11:实体带上延迟字段会被 persist 的整行 upsert 冲回默认值。 */
+  memberDelays: Record<string, number>;
   trackSwitchLeadMs: number;
 }
 
-/** 读视图附加的延迟补偿字段(供前端回显;不存在即 0)。 */
+/** 读视图附加的延迟补偿字段(供前端回显;按成员,没设过的成员不在 map 里)。 */
 function delayView(id: string): {
-  airplayDelayMs: number;
-  airplay2DelayMs: number;
-  sendspinDelayMs: number;
+  memberDelays: Record<string, number>;
   trackSwitchLeadMs: number;
 } {
-  const d = getGroupDelays(id);
   return {
-    airplayDelayMs: d.airplayMs,
-    airplay2DelayMs: d.airplay2Ms,
-    sendspinDelayMs: d.sendspinMs,
-    trackSwitchLeadMs: d.trackLeadMs,
+    memberDelays: getMemberDelays(id),
+    trackSwitchLeadMs: getTrackLeadMs(id),
   };
 }
 
@@ -213,10 +206,6 @@ export class GroupManager extends EventEmitter {
     };
     this.persist(g);
     this.groups.set(id, g);
-    // 内置默认对齐点:AP1 与 AP2 两格都从 300ms 起步(用户定标的 AirPlay 链路
-    // 固有偏差实测近似,通用)。**必须经 setGroupDelays 落库**(persist 不得写
-    // 延迟字段 —— G11:整行 upsert 会拿内存旧值覆盖 DB);弹窗回显即见 300。
-    setGroupDelays(id, { airplayMs: DEFAULT_AIRPLAY_ALIGN_MS, airplay2Ms: DEFAULT_AIRPLAY_ALIGN_MS });
     this.emit("group_created", g);
     return g;
   }

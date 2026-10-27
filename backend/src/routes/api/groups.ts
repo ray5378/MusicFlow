@@ -14,16 +14,17 @@ import {
   GROUP_DELAY_MAX_MS,
   GROUP_DELAY_MIN_MS,
   GROUP_DELAY_STEP_MS,
-  getGroupDelays,
+  getMemberDelays,
   invalidateGroupDelays,
-  setGroupDelays,
+  getTrackLeadMs,
+  setMemberDelay,
+  setTrackLeadMs,
 } from "../../services/group/delayCalib.js";
 import {
   bridgeJoinMember,
   isBridgeRouteActive,
   rebuildBridgeRoutes,
 } from "../../services/group/protocolPlayer.js";
-import { selectAirPlayBridgeProtocol } from "../../services/airplay/control.js";
 
 export function registerGroups(app: Hono): void {
 app.get("/v1/groups", (c) => {
@@ -105,39 +106,20 @@ app.post("/v1/groups/:id/members", permMiddleware(PERM.RENDERER_USE), async (c) 
   }
 });
 
-// 群组 A/V 延迟补偿(ms)。**语义:正数 = 该侧更晚出声,负数 = 该侧更早出声**。
-// 两侧各自独立存,但只有「差值」影响 A/V 同步 —— 分开是为了纯 AirPlay 组 /
-// 纯 Sendspin 组也能各自微调。范围 ±30s(用户定稿),步进 10ms。
+// 群组 A/V 延迟补偿(ms,**按成员**)。**语义:正数 = 该设备更晚出声,负数 = 该设备更早出声**。
+// 范围 ±30s(用户定稿),步进 10ms。前端点击组内播放器名称弹出的弹窗逐成员读写;
+// memberDelays 的键 = 命名空间成员 id(airplay:<deviceId> / sendspin:<clientId>)。
 
 app.get("/v1/groups/:id/delays", permMiddleware(PERM.RENDERER_USE), (c) => {
   const user = c.get("user")!;
   const id = c.req.param("id")!;
-  // 管理员 isOwnedBy 恒真 ⇒ 必须先确认组真的存在,否则不存在的 id 会拿到 200/0。
+  // 管理员 isOwnedBy 恒真 ⇒ 必须先确认组真的存在,否则不存在的 id 会拿到 200/空表。
   if (!gm.get(id) || !gm.isOwnedBy(id, user?.id ?? "", !!user?.isAdmin)) {
     return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.group.notFoundOrNoPerm"), 404);
   }
-  const d = getGroupDelays(id);
-  // 成员协议画像:每一格补偿只对「实际走该协议的成员」生效 —— 没有成员的格子
-  // 调了也不可感(2026-10-27 用户实测教训:把 AP1 设备的补偿调进了 AP2 格)。
-  // AP1/AP2 的归属按 selectAirPlayBridgeProtocol 现算,与桥真正选协议的唯一来源一致。
-  let ap1Members = 0;
-  let ap2Members = 0;
-  let sendspinMembers = 0;
-  for (const m of gm.get(id)?.memberIds ?? []) {
-    if (m.startsWith("sendspin:")) sendspinMembers += 1;
-    else if (m.startsWith("airplay:")) {
-      if (selectAirPlayBridgeProtocol(m.slice("airplay:".length)) === "raop") ap1Members += 1;
-      else ap2Members += 1;
-    }
-  }
   return c.json({
-    airplayMs: d.airplayMs,
-    airplay2Ms: d.airplay2Ms,
-    sendspinMs: d.sendspinMs,
-    trackLeadMs: d.trackLeadMs,
-    ap1Members,
-    ap2Members,
-    sendspinMembers,
+    memberDelays: getMemberDelays(id),
+    trackLeadMs: getTrackLeadMs(id),
     minMs: GROUP_DELAY_MIN_MS,
     maxMs: GROUP_DELAY_MAX_MS,
     stepMs: GROUP_DELAY_STEP_MS,
@@ -151,45 +133,46 @@ app.put("/v1/groups/:id/delays", permMiddleware(PERM.RENDERER_USE), async (c) =>
     return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.group.notFoundOrNoPerm"), 404);
   }
   const body = await c.req.json().catch(() => ({} as any));
-  const before = getGroupDelays(id);
   if (!gm.get(id)) {
     return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.group.notFound"), 404);
   }
-  // 内存值先更新(落库在后):Sendspin 侧下一次 pushFrame 立刻按新值打戳 = 真·实时。
-  const next = setGroupDelays(id, {
-    airplayMs: body.airplayMs,
-    airplay2Ms: body.airplay2Ms,
-    sendspinMs: body.sendspinMs,
-    trackLeadMs: body.trackLeadMs,
-  });
-  // AirPlay 侧的锚点(startNtp)在桥会话建立时就算死了,中途改 anchorShiftUs 不生效。
-  // 因此只有「AirPlay 值真的变了且该组桥在跑」时,才重建该组桥换立即生效
-  // (代价:该组 AirPlay 成员约 1~2s 静音;Sendspin 成员不受影响)。
+  // 可选:切歌垫片组值(API 隐藏调参口,前端弹窗已移除)。0 = 完全自动。
+  if (body.trackLeadMs !== undefined) setTrackLeadMs(id, body.trackLeadMs);
+  // 单成员写入口:memberId 必须是本组成员(命名空间 id),越组写入一律拒绝。
   let rebuilt = 0;
-  // AP1 与 AP2 走的是同一个 anchorShiftUs,同样在会话建立时算死 ⇒ 两格任一变化都要重建。
-  if (next.airplayMs !== before.airplayMs || next.airplay2Ms !== before.airplay2Ms) {
-    if (isBridgeRouteActive(id)) {
-      try {
-        rebuilt = await rebuildBridgeRoutes(id);
-      } catch { /* 重建失败不影响保存结果:下次会话按新值建立 */ }
-    } else {
-      // 兜底自愈(2026-10-27):登记缺失(容器重启后 resume-active 恢复的桥/历史泄漏)
-      // 但组内桥在播 ⇒ 逐成员幂等 join。join 对「登记缺失」现场初始化路由、prepare
-      // 新会话(子进程自拆同设备旧会话)、泵 sync 停旧句柄起新句柄并回填 ——
-      // 补偿新值随新会话锚定立即生效,不再依赖登记是否幸运地存在。
-      for (const m of gm.get(id)?.memberIds ?? []) {
-        if (!m.startsWith("airplay:")) continue;
+  const memberId = typeof body.memberId === "string" ? body.memberId : "";
+  if (memberId) {
+    const members = gm.get(id)?.memberIds ?? [];
+    if (!members.includes(memberId)) {
+      return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.group.memberNotInGroup"), apiErrorStatus(BusinessErrorCode.INVALID_PARAM));
+    }
+    const before = getMemberDelays(id)[memberId] ?? 0;
+    // 内存值先更新(落库在后):Sendspin 侧下一次 pushFrame 立刻按新值打戳 = 真·实时。
+    const after = setMemberDelay(id, memberId, body.ms);
+    // AirPlay 侧的补偿随桥会话建立锚定 ⇒ 只有「该 airplay 成员的值真的变了且该组桥
+    // 在跑」时才重建该组桥换立即生效(代价:该组 AirPlay 成员约 1~2s 静音;Sendspin 不受影响)。
+    if (memberId.startsWith("airplay:") && after !== before) {
+      if (isBridgeRouteActive(id)) {
         try {
-          if (await bridgeJoinMember(id, m.slice("airplay:".length))) rebuilt += 1;
-        } catch { /* 单成员失败不连累其余;其会话保持旧值直至下次重建 */ }
+          rebuilt = await rebuildBridgeRoutes(id);
+        } catch { /* 重建失败不影响保存结果:下次会话按新值建立 */ }
+      } else {
+        // 兜底自愈(2026-10-27):登记缺失(容器重启后 resume-active 恢复的桥/历史泄漏)
+        // 但组内桥在播 ⇒ 逐成员幂等 join。join 对「登记缺失」现场初始化路由、prepare
+        // 新会话(子进程自拆同设备旧会话)、泵 sync 停旧句柄起新句柄并回填 ——
+        // 补偿新值随新会话锚定立即生效,不再依赖登记是否幸运地存在。
+        for (const m of members) {
+          if (!m.startsWith("airplay:")) continue;
+          try {
+            if (await bridgeJoinMember(id, m.slice("airplay:".length))) rebuilt += 1;
+          } catch { /* 单成员失败不连累其余;其会话保持旧值直至下次重建 */ }
+        }
       }
     }
   }
   return c.json({
-    airplayMs: next.airplayMs,
-    airplay2Ms: next.airplay2Ms,
-    sendspinMs: next.sendspinMs,
-    trackLeadMs: next.trackLeadMs,
+    memberDelays: getMemberDelays(id),
+    trackLeadMs: getTrackLeadMs(id),
     minMs: GROUP_DELAY_MIN_MS,
     maxMs: GROUP_DELAY_MAX_MS,
     stepMs: GROUP_DELAY_STEP_MS,

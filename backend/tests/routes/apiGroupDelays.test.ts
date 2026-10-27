@@ -1,6 +1,5 @@
-// GET/PUT /v1/groups/:id/delays 接口测试。
-// 语义:**正数 = 该侧更晚出声,负数 = 该侧更早出声**;范围 ±30s,越界钳制不报错。
-// 只有「两侧差值」影响 A/V;分开设是为了纯 AirPlay / 纯 Sendspin 组也能各自微调。
+// GET/PUT /v1/groups/:id/delays 接口测试(v4.8.0 起**按成员**)。
+// 语义:**正数 = 该设备更晚出声,负数 = 该设备更早出声**;范围 ±30s,越界钳制不报错。
 import "../plugins/_env.js";
 import { describe, it, expect, beforeAll, beforeEach } from "vitest";
 import { Hono } from "hono";
@@ -40,6 +39,26 @@ function adminHeaders(uid: string): Record<string, string> {
   return { Authorization: `Bearer ${token}`, "content-type": "application/json" };
 }
 
+/** 直接落库建组(成员 allowlist 只在 createGroup/setMembers 校验,这里绕开):
+ *  每个用例唯一 id,避免单例 GroupManager 内存里的陈旧组串场。 */
+function seedGroup(uid: string, memberIds: string[] = ["airplay:hivi", "sendspin:esp1"]): string {
+  const id = `g-${uuidv4()}`;
+  db.insert(playerGroups)
+    .values({ id, name: "客厅组", memberIds: JSON.stringify(memberIds), ownerUserId: uid })
+    .run();
+  invalidateGroupDelays(id);
+  getGroupManager().loadFromDb(); // 让单例内存表看到新行(否则 GET/PUT 的 gm.get 拿不到)
+  return id;
+}
+
+function putDelays(id: string, headers: Record<string, string>, body: Record<string, unknown>) {
+  return app.request(`/rest/api/v1/groups/${id}/delays`, {
+    method: "PUT",
+    headers,
+    body: JSON.stringify(body),
+  });
+}
+
 beforeAll(() => {
   if (!process.env.APP_VERSION) process.env.APP_VERSION = "1.0.0";
   initDatabase();
@@ -48,131 +67,78 @@ beforeAll(() => {
 beforeEach(() => {
   db.delete(playerGroups).run();
   db.delete(users).run();
+  getGroupManager().loadFromDb();
 });
 
-describe("/v1/groups/:id/delays", () => {
-  it("新组读到内置默认对齐点 300/300/0,并带回钳制范围与步进(前端据此渲染 input-number)", async () => {
+describe("/v1/groups/:id/delays(按成员)", () => {
+  it("新组读到空成员表 + 钳制范围与步进(前端据此渲染 input-number)", async () => {
     const uid = seedAdmin();
-    const g = getGroupManager().createGroup("客厅组", [], uid);
-    const res = await app.request(`/rest/api/v1/groups/${g.id}/delays`, { headers: adminHeaders(uid) });
+    const id = seedGroup(uid);
+    const res = await app.request(`/rest/api/v1/groups/${id}/delays`, { headers: adminHeaders(uid) });
     expect(res.status).toBe(200);
     const body = (await res.json()) as any;
-    expect(body.airplayMs).toBe(300);
-    expect(body.airplay2Ms).toBe(300);
-    expect(body.sendspinMs).toBe(0);
+    expect(body.memberDelays).toEqual({});
     expect(body.trackLeadMs).toBe(0);
     expect(body.minMs).toBe(-30000);
     expect(body.maxMs).toBe(30000);
     expect(body.stepMs).toBe(10);
   });
 
-  it("PUT 写入两侧并回读一致(正数=更晚,负数=更早)", async () => {
+  it("PUT 单成员写入并回读一致(正数=更晚,负数=更早);组无活跃桥 → rebuilt=0", async () => {
     const uid = seedAdmin();
-    const g = getGroupManager().createGroup("客厅组", [], uid);
+    const id = seedGroup(uid);
     const headers = adminHeaders(uid);
-    const put = await app.request(`/rest/api/v1/groups/${g.id}/delays`, {
-      method: "PUT",
-      headers,
-      body: JSON.stringify({ airplayMs: 120, sendspinMs: -60 }),
-    });
+    const put = await putDelays(id, headers, { memberId: "airplay:hivi", ms: 120 });
     expect(put.status).toBe(200);
     const saved = (await put.json()) as any;
-    expect(saved.airplayMs).toBe(120);
-    expect(saved.sendspinMs).toBe(-60);
-    expect(saved.rebuilt).toBe(0); // 该组没有活跃桥 → 不需要重连
+    expect(saved.memberDelays["airplay:hivi"]).toBe(120);
+    expect(saved.rebuilt).toBe(0);
 
-    const get = await app.request(`/rest/api/v1/groups/${g.id}/delays`, { headers });
+    const get = await app.request(`/rest/api/v1/groups/${id}/delays`, { headers });
     const body = (await get.json()) as any;
-    expect(body.airplayMs).toBe(120);
-    expect(body.sendspinMs).toBe(-60);
+    expect(body.memberDelays["airplay:hivi"]).toBe(120);
+    expect(body.memberDelays["sendspin:esp1"]).toBeUndefined();
   });
 
-  it("PUT 一次写三侧 airplay/airplay2/sendspin,回读三项都一致", async () => {
+  it("成员互相独立:再写另一台不影响已设成员(逐设备调不会被互相清零)", async () => {
     const uid = seedAdmin();
-    const g = getGroupManager().createGroup("混合组", [], uid);
+    const id = seedGroup(uid);
     const headers = adminHeaders(uid);
-    const put = await app.request(`/rest/api/v1/groups/${g.id}/delays`, {
-      method: "PUT",
-      headers,
-      body: JSON.stringify({ airplayMs: 120, airplay2Ms: -45, sendspinMs: -60 }),
-    });
-    expect(put.status).toBe(200);
-    const saved = (await put.json()) as any;
-    expect(saved.airplayMs).toBe(120);
-    expect(saved.airplay2Ms).toBe(-45);
-    expect(saved.sendspinMs).toBe(-60);
-
-    const get = await app.request(`/rest/api/v1/groups/${g.id}/delays`, { headers });
-    const body = (await get.json()) as any;
-    expect(body.airplayMs).toBe(120);
-    expect(body.airplay2Ms).toBe(-45);
-    expect(body.sendspinMs).toBe(-60);
-  });
-
-  it("只改第三格时 AP1 / Sendspin 两格不受影响(前端逐格调不会互相清零)", async () => {
-    const uid = seedAdmin();
-    const g = getGroupManager().createGroup("只调AP2", [], uid);
-    const headers = adminHeaders(uid);
-    await app.request(`/rest/api/v1/groups/${g.id}/delays`, {
-      method: "PUT",
-      headers,
-      body: JSON.stringify({ airplayMs: 80, airplay2Ms: 10, sendspinMs: 20 }),
-    });
-    const res = await app.request(`/rest/api/v1/groups/${g.id}/delays`, {
-      method: "PUT",
-      headers,
-      body: JSON.stringify({ airplay2Ms: -70 }),
-    });
+    await putDelays(id, headers, { memberId: "airplay:hivi", ms: 80 });
+    const res = await putDelays(id, headers, { memberId: "sendspin:esp1", ms: -70 });
     const body = (await res.json()) as any;
-    expect(body.airplayMs).toBe(80);
-    expect(body.airplay2Ms).toBe(-70);
-    expect(body.sendspinMs).toBe(20);
-  });
-
-  it("第三格同样被钳到 ±30s(绕过 clamp 会把越界值写进 DB)", async () => {
-    const uid = seedAdmin();
-    const g = getGroupManager().createGroup("AP2越界", [], uid);
-    const res = await app.request(`/rest/api/v1/groups/${g.id}/delays`, {
-      method: "PUT",
-      headers: adminHeaders(uid),
-      body: JSON.stringify({ airplay2Ms: 999999 }),
-    });
-    expect(res.status).toBe(200);
-    expect(((await res.json()) as any).airplay2Ms).toBe(30000);
+    expect(body.memberDelays["airplay:hivi"]).toBe(80);
+    expect(body.memberDelays["sendspin:esp1"]).toBe(-70);
   });
 
   it("越界值被钳到 ±30s 而不是 400", async () => {
     const uid = seedAdmin();
-    const g = getGroupManager().createGroup("客厅组", [], uid);
-    const res = await app.request(`/rest/api/v1/groups/${g.id}/delays`, {
-      method: "PUT",
-      headers: adminHeaders(uid),
-      body: JSON.stringify({ airplayMs: 999999, sendspinMs: -999999 }),
-    });
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as any;
-    expect(body.airplayMs).toBe(30000);
-    expect(body.sendspinMs).toBe(-30000);
+    const id = seedGroup(uid);
+    const headers = adminHeaders(uid);
+    const r1 = await putDelays(id, headers, { memberId: "airplay:hivi", ms: 999999 });
+    expect(r1.status).toBe(200);
+    expect(((await r1.json()) as any).memberDelays["airplay:hivi"]).toBe(30000);
+    const r2 = await putDelays(id, headers, { memberId: "sendspin:esp1", ms: -999999 });
+    expect(((await r2.json()) as any).memberDelays["sendspin:esp1"]).toBe(-30000);
   });
 
-  it("只改一侧时另一侧不受影响", async () => {
+  it("memberId 不在本组成员列表 → 400(越组写入拒绝)", async () => {
     const uid = seedAdmin();
-    const g = getGroupManager().createGroup("客厅组", [], uid);
+    const id = seedGroup(uid);
+    const res = await putDelays(id, adminHeaders(uid), { memberId: "airplay:ghost", ms: 10 });
+    expect(res.status).toBe(400);
+  });
+
+  it("memberId 缺省 → 只动可选的 trackLeadMs,成员表不动(API 隐藏调参口)", async () => {
+    const uid = seedAdmin();
+    const id = seedGroup(uid);
     const headers = adminHeaders(uid);
-    invalidateGroupDelays(g.id);
-    await app.request(`/rest/api/v1/groups/${g.id}/delays`, {
-      method: "PUT",
-      headers,
-      body: JSON.stringify({ airplayMs: 80, sendspinMs: 0 }),
-    });
-    const res = await app.request(`/rest/api/v1/groups/${g.id}/delays`, {
-      method: "PUT",
-      headers,
-      body: JSON.stringify({ sendspinMs: 40 }),
-    });
+    await putDelays(id, headers, { memberId: "airplay:hivi", ms: 5 });
+    const res = await putDelays(id, headers, { trackLeadMs: 1500 });
+    expect(res.status).toBe(200);
     const body = (await res.json()) as any;
-    expect(body.airplayMs).toBe(80);
-    expect(body.sendspinMs).toBe(40);
+    expect(body.memberDelays["airplay:hivi"]).toBe(5);
+    expect(body.trackLeadMs).toBe(1500);
   });
 
   it("组不存在 → 404(读写都是)", async () => {
@@ -180,11 +146,7 @@ describe("/v1/groups/:id/delays", () => {
     const headers = adminHeaders(uid);
     const r1 = await app.request("/rest/api/v1/groups/nope/delays", { headers });
     expect(r1.status).toBe(404);
-    const r2 = await app.request("/rest/api/v1/groups/nope/delays", {
-      method: "PUT",
-      headers,
-      body: JSON.stringify({ airplayMs: 10 }),
-    });
+    const r2 = await putDelays("nope", headers, { memberId: "airplay:hivi", ms: 10 });
     expect(r2.status).toBe(404);
   });
 });

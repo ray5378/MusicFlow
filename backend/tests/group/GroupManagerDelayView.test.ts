@@ -51,7 +51,7 @@ vi.mock("../../src/services/sendspin/peerVolume.js", () => ({
 }));
 
 import { GroupManager, getGroupManager, splitMemberId, DEFAULT_GROUP_VOLUME } from "../../src/services/group/index.js";
-import { setGroupDelays, invalidateGroupDelays } from "../../src/services/group/delayCalib.js";
+import { setMemberDelay } from "../../src/services/group/delayCalib.js";
 import { sqlite } from "../../src/db/index.js";
 
 function apFixture(id: string, over: Record<string, unknown> = {}): void {
@@ -100,51 +100,48 @@ describe("splitMemberId:命名空间解析", () => {
   });
 });
 
-describe("读视图延迟补偿(delayView)", () => {
-  it("getWithMembers 带出 airplayDelayMs/airplay2DelayMs/sendspinDelayMs", () => {
+describe("读视图延迟补偿(delayView,按成员)", () => {
+  it("getWithMembers 带出 memberDelays(member id → ms)", () => {
     const g = gm.createGroup("延迟组", []);
-    setGroupDelays(g.id, { airplayMs: 120, airplay2Ms: -45, sendspinMs: -80 });
+    setMemberDelay(g.id, "airplay:a1", 120);
+    setMemberDelay(g.id, "sendspin:sp1", -80);
     const view = gm.getWithMembers(g.id)!;
-    expect(view.airplayDelayMs).toBe(120);
-    expect(view.airplay2DelayMs).toBe(-45);
-    expect(view.sendspinDelayMs).toBe(-80);
+    expect(view.memberDelays["airplay:a1"]).toBe(120);
+    expect(view.memberDelays["sendspin:sp1"]).toBe(-80);
+    expect(view.trackSwitchLeadMs).toBe(0);
   });
 
   it("PlayerGroup 实体**不含**延迟字段(不污染落库路径)", () => {
     const g = gm.createGroup("干净实体", []);
-    setGroupDelays(g.id, { airplayMs: 50, sendspinMs: 60 });
-    expect(g).not.toHaveProperty("airplayDelayMs");
-    expect(g).not.toHaveProperty("airplay2DelayMs");
-    expect(g).not.toHaveProperty("sendspinDelayMs");
-    expect(gm.get(g.id)).not.toHaveProperty("airplayDelayMs");
-    expect(gm.list()[0]).not.toHaveProperty("sendspinDelayMs");
-    expect(gm.list()[0]).not.toHaveProperty("airplay2DelayMs");
+    setMemberDelay(g.id, "airplay:a1", 50);
+    expect(g).not.toHaveProperty("memberDelays");
+    expect(g).not.toHaveProperty("trackSwitchLeadMs");
+    expect(gm.get(g.id)).not.toHaveProperty("memberDelays");
+    expect(gm.list()[0]).not.toHaveProperty("memberDelays");
     // 读视图才有
-    expect(gm.listWithMembers()[0].airplayDelayMs).toBe(50);
+    expect(gm.listWithMembers()[0].memberDelays["airplay:a1"]).toBe(50);
   });
 
-  it("新组内置默认对齐点:AP1/AP2 两格 300、Sendspin 0(用户定标 2026-10-27)", () => {
-    const g = gm.createGroup("默认对齐", []);
+  it("新组不播种延迟:memberDelays 为空对象(300ms 对齐点已取消,默认全 0)", () => {
+    const g = gm.createGroup("默认全零", []);
     const view = gm.getWithMembers(g.id)!;
-    expect(view.airplayDelayMs).toBe(300);
-    expect(view.airplay2DelayMs).toBe(300);
-    expect(view.sendspinDelayMs).toBe(0);
+    expect(view.memberDelays).toEqual({});
+    expect(view.trackSwitchLeadMs).toBe(0);
   });
 
-  it("显式清零后读视图回 0(默认只在创建时播种,不复活)", () => {
+  it("显式清零后读视图回 0(setMemberDelay 写 0 即落库,不复活)", () => {
     const g = gm.createGroup("显式清零", []);
-    setGroupDelays(g.id, { airplayMs: 0, airplay2Ms: 0, sendspinMs: 0 });
+    setMemberDelay(g.id, "airplay:a1", 300);
+    setMemberDelay(g.id, "airplay:a1", 0);
     const view = gm.getWithMembers(g.id)!;
-    expect(view.airplayDelayMs).toBe(0);
-    expect(view.airplay2DelayMs).toBe(0);
-    expect(view.sendspinDelayMs).toBe(0);
+    expect(view.memberDelays["airplay:a1"]).toBe(0);
   });
 
   it("listWithMembersForOwner 同样带延迟 + 成员详情;未知组 getWithMembers → undefined", () => {
     const g = gm.createGroup("我的组", [], "user-1");
-    setGroupDelays(g.id, { airplayMs: -10 });
+    setMemberDelay(g.id, "sendspin:sp1", -10);
     const [view] = gm.listWithMembersForOwner("user-1");
-    expect(view.airplayDelayMs).toBe(-10);
+    expect(view.memberDelays["sendspin:sp1"]).toBe(-10);
     expect(view.members).toEqual([]);
     expect(gm.getWithMembers("nope")).toBeUndefined();
   });
