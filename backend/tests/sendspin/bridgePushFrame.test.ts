@@ -7,6 +7,9 @@
 //   ③ clearPlayback/finishPlayback → BOUNDARY{track/stop}(§4.4);
 //   ④ encodedBytesPerSec:有桥恒 ≥192000B/s(48k/s16le/2ch),FLAC 实测/名义不得低估桥吞吐;
 //   ⑤ 无桥无成员 → 返回 0(原语义,行为零变化)。
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it, expect, afterEach, beforeAll } from "vitest";
 import "../plugins/_env.js";
 import { initDatabase } from "../../src/db/index.js";
@@ -101,6 +104,10 @@ const PCM = (n = 1200) => new Float32Array(n);
 
 beforeAll(() => {
   if (!process.env.APP_VERSION) process.env.APP_VERSION = "1.0.0";
+  // 隔离 DATA_DIR:本文件 initDatabase 的唯一目的就是给 delayCalib 一个可写库,
+  // 绝不能落在共享/残留目录上 —— 旧 schema 的库会在 CREATE 阶段炸
+  // (no such column: group_key,2026-10-27 实锤)。
+  process.env.DATA_DIR = join(tmpdir(), `mf-bpf-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   initDatabase();
 });
 
@@ -160,6 +167,32 @@ describe("⑥ 投递窗口跟随桥锚点位移(anchorShiftUs)", () => {
     await g.pushFrame(ts1, PCM());
     g.bridgePushTick();
     expect(b.pushed).toHaveLength(1); // 无新增:动态读生效,无需任何重建通知
+  });
+
+  it("切歌垫片:notifyBridgeGeneration 后新代次帧时戳整体 +Δ(esp32 下发与 ring 同源),随内容消耗归零", async () => {
+    const g = new SendspinGroup("g-lead", { log() {} } as any);
+    (g as any).encoders.set("pcm:100", new PhaseEncoder([1000, 1000, 1000]));
+    const b = bridgeStub("ap-1");
+    g.bridges.set("ap-1", b as any);
+    liveGroups.push(g);
+
+    g.notifyBridgeGeneration(1, "track"); // 切歌 ⇒ 垫片 Δ=1s(BRIDGE_TRACK_SWITCH_LEAD_US)
+    const ahead = BigInt(g.commonSendAheadUs());
+    // 打戳时 ts 已含垫片 Δ:落窗值 = ts0+Δ,取 ts0=now+1s ⇒ 落窗 ts0+Δ=now+2s ∈ [now+1.5,now+2.5]+ahead
+    const ts0 = nowUs() + ahead + 1_000_000n;
+    await g.pushFrame(ts0, PCM());
+    g.bridgePushTick();
+    // 首帧投递时戳 = ts(含 Δ) − ahead
+    expect(b.pushed.length).toBeGreaterThan(0);
+    expect(b.pushed[0]!.ts).toBe((ts0 as bigint) + 1_000_000n - ahead);
+
+    // 连续推进:垫片被内容消耗,投递时戳增量逐帧回落(时间线连续,无跳变)
+    const pushed = b.pushed.map((p: { ts: bigint }) => p.ts);
+    for (let i = 1; i < pushed.length; i += 1) {
+      const d = pushed[i]! - pushed[i - 1]!;
+      expect(d).toBeGreaterThan(0n);
+      expect(d).toBeLessThanOrEqual(1_000_000n / (SAMPLE_RATE / 1000n) * 4n); // 每帧间隔 ≤ 4 帧标称时长
+    }
   });
 
   it("负 shift(更早出声):窗口前移 —— 原窗内的帧改为不投,更远的未来帧提前投", async () => {

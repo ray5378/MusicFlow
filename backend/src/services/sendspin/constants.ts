@@ -86,6 +86,12 @@ export const BRIDGE_PUSH_HORIZON_US = 2_500 * 1000;
 /** 投递窗口下沿(µs,原 ts 域):ts < now+1.5s 的帧不再投递 —— 桥(AirPlay
  *  发送侧)来不及为其建立稳定排程,宁可由可达性重锚接手也不喂「马上要响」的帧。 */
 export const BRIDGE_PUSH_FLOOR_US = 1_500_000;
+
+/** 切歌垫片(µs):新内容代次(切歌/seek/rehost)时组时间线整体前移量,随内容推进
+ *  消耗归零。目的:全组(esp32 + AirPlay 桥)统一晚 Δ 起播,给桥的重锚定留窗口,
+ *  消除「esp32 先播、桥内对齐器裁掉新曲开头」的切歌吞音(2026-10-27 真机)。
+ *  仅在有桥的组生效(纯 esp32 组不垫);env `BRIDGE_TRACK_SWITCH_LEAD_MS` 可调/可关(0)。 */
+export const BRIDGE_TRACK_SWITCH_LEAD_US = Number(process.env.BRIDGE_TRACK_SWITCH_LEAD_MS ?? 1000) * 1000;
 /** 混合组(桥 + 直连成员)的锚点 lead 下限(µs)= 桥下沿 + 一个补投周期。
  *  为什么必须有:混合组不能深锚(直连 esp32 硬同步阈值 5ms,见 streamEngine 注释),
  *  历史上回落到 prefill 的 min(sendAhead, 800ms)=500ms;而桥的投递窗口下沿是

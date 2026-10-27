@@ -47,6 +47,7 @@ import { recordSendspinDebug } from "./debugLog.js";
 import { esphomeBridge } from "./esphomeBridge.js";
 import { computeCommonSendAhead, type SendAheadInput } from "./group.js";
 import { bridgeAnchorShiftUsOf, sendspinDelayUsOfGroupName } from "../group/delayCalib.js";
+import { BRIDGE_TRACK_SWITCH_LEAD_US } from "./constants.js";
 import { recordProbedRate } from "../playerRate.js";
 import { b64urlDecode, b64urlEncode } from "./util.js";
 import type { PairingStore } from "./pairingStore.js";
@@ -722,6 +723,9 @@ export class SendspinGroup {
    *  投递时只投当前代次 —— 旧代次帧即使 ts 落在新窗口内也不可信(中途 seek/
    *  rehost 时旧 cursor 可达 now+10s,仅重置水位挡不住)。 */
   private bridgeContentEpoch = 0;
+  /** 切歌垫片(µs):新代次时间线整体 +Δ,随内容推进消耗归零(见 BRIDGE_TRACK_SWITCH_LEAD_US)。
+   *  **只加在打戳/ring/投递时间线上**,deliveredByGroup 计量(样本数口径)不受影响。 */
+  private pendingTrackLeadUs = 0n;
   /** 桥补投定时器(250ms;timer-only 单写者,unref 不阻进程退出)。 */
   private bridgePushTimer: NodeJS.Timeout | undefined;
 
@@ -753,6 +757,9 @@ export class SendspinGroup {
     //  - 水位清零(缺失/0n 哨兵 = 本代次尚未投递):下一 tick 从当前窗口重算。
     this.bridgeContentEpoch++;
     this.bridgeWatermarks.clear();
+    // 切歌垫片:内容代次切换(track/seek/rehost 类)时全组统一晚 Δ 起播,给桥的重
+    // 锚定留窗口 —— 否则 esp32 先播、桥内对齐器裁掉新曲开头(切歌吞音)。
+    this.pendingTrackLeadUs = BigInt(BRIDGE_TRACK_SWITCH_LEAD_US);
     this.ensureBridgePushTimer();
   }
 
@@ -1487,6 +1494,8 @@ export class SendspinGroup {
       let ts =
         BigInt(Math.round(((this.deliveredByGroup.get(key) ?? before) * 1_000_000) / SAMPLE_RATE)) +
         jumpUs;
+      // 切歌垫片(见 pendingTrackLeadUs):新代次开头的时间线前移,随内容推进逐帧消耗。
+      if (this.pendingTrackLeadUs > 0n) ts += this.pendingTrackLeadUs;
       // late-join 回填缓存:逐帧记下**本组真正发出去的 chunk** 及其真实起点时间戳。
       // 只有这里(唯一的下发点)能拿到「未来还没播的音频」,新成员加入时靠它补齐。
       const ring = this.ringFor(key);
@@ -1517,7 +1526,13 @@ export class SendspinGroup {
         // 绝不能全用同一个 `tsUs` —— 第 2 帧的真实起点比第 1 帧晚
         // `frameSamples / SAMPLE_RATE` 秒。共用一个 ts 会让第 2 帧被判「已过期」
         // → 设备立即吐字节 → 缓冲空 → underrun。因此逐帧按 `ck.frameSamples` 推进。
-        if (n > 0) ts += BigInt(Math.round((n * 1_000_000) / SAMPLE_RATE));
+        if (n > 0) {
+          ts += BigInt(Math.round((n * 1_000_000) / SAMPLE_RATE));
+          if (this.pendingTrackLeadUs > 0n) {
+            const dur = BigInt(Math.round((n * 1_000_000) / SAMPLE_RATE));
+            this.pendingTrackLeadUs = this.pendingTrackLeadUs > dur ? this.pendingTrackLeadUs - dur : 0n;
+          }
+        }
       }
 
       // 该组累计交付。新组以**当前峰值**为基线登记 —— 否则播中加入的新成员

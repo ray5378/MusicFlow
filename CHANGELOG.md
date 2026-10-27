@@ -2,6 +2,15 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.7.3] - 2026-10-27
+
+### Feature / 切歌垫片:全组统一晚 Δ 起播,消除 AirPlay 桥切歌吞音
+
+- 现象(用户真机):组切歌时 esp32 立即播新曲,HiVi(AP1 桥)重锚定慢约 1s,桥内对齐器为追组时间线**裁掉新曲开头**一段(吞音)—— 与补偿值无关,是组对齐的固有代价。
+- 修复:内容代次切换(track/seek/rehost)时组时间线整体前移 **Δ=1s**(常量 `BRIDGE_TRACK_SWITCH_LEAD_US`,env `BRIDGE_TRACK_SWITCH_LEAD_MS` 可调/可关),**随内容推进逐帧消耗归零** —— esp32 下发戳、ring、桥投递、桥内对齐全链以同一 ring ts 为基准,一处加 Δ 全链自动跟随:全组统一晚 Δ 起播,HiVi 在垫片窗口内完成重锚定,对齐器从首帧 0 纯净起步,不再裁音。代价:切歌瞬间全组静默约 1 秒。
+- 边界:仅在有桥的组生效(`notifyBridgeGeneration` 开头已对无桥组 early-return),纯 esp32 组零影响;`deliveredByGroup` 计量(样本数口径)不受影响。
+- 验证:bridgePushFrame 新增垫片用例(首帧时戳 = ts+Δ−ahead、增量逐帧回落无跳变);tests/sendspin 63 文件全绿;tests/sendspin|group|routes|airplay|player|source 247 文件全绿;tsc=0;群组守卫 43 条、桥守卫 17 条。
+
 ## [4.7.2] - 2026-10-27
 
 ### Feature / 群组延迟补偿内置默认对齐点 300ms(AP1/AP2 通用)+ 生效语义文档化
