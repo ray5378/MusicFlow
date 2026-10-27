@@ -328,9 +328,12 @@ describe("Sendspin 队列全模式", () => {
 
     await qc.transport(id, "seek", 0.2); // 跳到 200ms
     expect((await p.pollState()).position).toBeCloseTo(0.2, 1);
-    // 跳转后仍处于播放推进(pump 按 position 取帧)。
-    expect((await p.pollState()).playbackState).toBe(PlaybackState.PLAYING);
-    await crank(pc, p, 50);
+    // seek 重建缓冲:可听前报 BUFFERING(v4.8.1),推进越过下界后恢复 PLAYING。
+    expect((await p.pollState()).playbackState).toBe(PlaybackState.BUFFERING);
+    for (let i = 0; i < 12; i++) {
+      await crank(pc, p, 100);
+      if ((await p.pollState()).playbackState === PlaybackState.PLAYING) break;
+    }
     expect((await p.pollState()).playbackState).toBe(PlaybackState.PLAYING);
   });
 

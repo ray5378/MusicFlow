@@ -653,6 +653,8 @@ export class GroupPump {
     // 本轮上报下界 = 起播位置(见 reportedFloorMs 注释:正常起播为 0,
     // 带 seek 起播时为目标位置,防止刚发布的目标被可听位置拉低)。
     this.reportedFloorMs = startMs;
+    // 可听前报 buffering(见 SendspinGroup.audibleStarted):起播即复位。
+    this.group.audibleStarted = false;
     // 起播跳转已由音源工厂的 `-ss` 完成(见 startMsForSource),无需再 seekTo ——
     // 此处若再调一次会 kill 刚 spawn 的 ffmpeg 并重起,白白多一次冷起空窗。
     /** pacing 锚点对:起播位置 ⇄ 现在。带 seek 起播时锚点必须是 startMs,
@@ -1005,6 +1007,8 @@ export class GroupPump {
         //    而声音明明从头开始 —— 已推送量比实际听到的多出整整一个缓冲深度)。
         //  取帧仍用 playCursorMs(已推送),只有对外上报走可听位置。
         this.group.positionMs = this.audiblePositionMs(framePosMs, cursorUs, floorMs);
+        // 首次越过上报下界 ⇒ 已可听,解除 buffering(严格大于:等于 floor 时仍被钳位,不可分辨)。
+        if (!this.group.audibleStarted && this.group.positionMs > floorMs) this.group.audibleStarted = true;
         // ⚠️⚠️ 必须用**绝对时刻调度**,不能用「每轮固定 sleep(FRAME_MS)」(2026-09-17 实锤)。
         //
         // 固定 sleep 的致命缺陷:`await sleep(25)` 之外还有 encode/send/pushFrame 本身的开销,
@@ -1198,6 +1202,7 @@ export class GroupPump {
             ) {
               await sleep(Math.min(drainStepMs, left));
               this.group.positionMs = this.audiblePositionMs(lastPushedMs, cursorUs, floorMs);
+              if (!this.group.audibleStarted && this.group.positionMs > floorMs) this.group.audibleStarted = true;
             }
           }
         }
@@ -1336,6 +1341,7 @@ export class GroupPump {
     // ① 之后还要记住这个下界:新 pushLoop 的首帧会按「可听位置」上报,而刚拖动完
     // 缓冲还没建立,可听位置会低于目标 —— 不设下界 UI 会看到「拖到 40s 却显示 39.2s」。
     this.reportedFloorMs = alignedMs;
+    this.group.audibleStarted = false; // seek 重建缓冲,回到可听前
     if (!this.running || !this.songId) {
       // 泵未运行(空闲/起播窗口):MA 对应 resume_with_position —— 记起播位置,
       // 下一次 play() 起流即带 -ss 消费,无需现在重建。
@@ -1393,6 +1399,7 @@ export class GroupPump {
     this.group = next;
     this.playCursorMs = start;
     next.positionMs = start;
+    next.audibleStarted = false; // 新组需重新建立缓冲,回到可听前
     // 上报下界 = 落点:目标端 UI/歌词立刻显示正确位置(与带 seek 起播同款语义),
     // 由 pushLoop 的重锚分支取用(见 floorMs)。
     this.reportedFloorMs = start;

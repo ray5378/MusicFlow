@@ -794,7 +794,7 @@ describe("armBorrow + group 包装(fork/in-proc 双支)", () => {
   it("sendspinGroupPoll / Muted / PumpActive 双支", async () => {
     H.fork = true;
     H.supervisor.isRunning.mockReturnValue(false);
-    expect(await idx.sendspinGroupPoll("g")).toEqual({ playing: false, paused: false, positionMs: 0, durationMs: 0 });
+    expect(await idx.sendspinGroupPoll("g")).toEqual({ playing: false, paused: false, positionMs: 0, durationMs: 0, buffering: false });
     await expect(idx.sendspinGroupMuted("g", true)).rejects.toThrow("未运行");
     expect(await idx.sendspinGroupPumpActive("g")).toBe(false);
 

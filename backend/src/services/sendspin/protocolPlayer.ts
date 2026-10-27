@@ -156,12 +156,12 @@ export function createSendspinGroupPlayer(userGroupId: string): ProtocolPlayer {
       let unavailable = false;
       const st = await sendspinGroupPoll(groupName).catch(() => {
         unavailable = true;
-        return { playing: false, paused: false, positionMs: 0, durationMs: 0 };
+        return { playing: false, paused: false, positionMs: 0, durationMs: 0, buffering: false };
       });
       return {
         playerId,
         playbackState: st.paused ? PlaybackState.PAUSED
-          : st.playing ? PlaybackState.PLAYING
+          : st.playing ? ((st as any).buffering ? PlaybackState.BUFFERING : PlaybackState.PLAYING)
           : PlaybackState.IDLE,
         position: st.positionMs / 1000,
         duration: st.durationMs / 1000,
@@ -308,7 +308,7 @@ function createSendspinInprocPlayer(clientId: string): ProtocolPlayer {
         // (每轮 poll 前进一步又下一轮回弹),且暂停键常显"播放"。PlaybackTracker 已
         // 把 PAUSED 当瞬态(不计切歌),故不会触发 v1~v4 已修的自动切歌。
         playbackState: st.paused ? PlaybackState.PAUSED
-          : st.playing ? PlaybackState.PLAYING
+          : st.playing ? ((st as any).buffering ? PlaybackState.BUFFERING : PlaybackState.PLAYING)
           : PlaybackState.IDLE,
         position: st.positionMs / 1000,
         duration: st.durationMs / 1000,
@@ -383,12 +383,12 @@ function createSendspinProxyPlayer(clientId: string): ProtocolPlayer {
         .rpc<{ playing: boolean; paused: boolean; positionMs: number; durationMs: number }>("poll", { clientId })
         .catch(() => {
           unavailable = true;
-          return { playing: false, paused: false, positionMs: 0, durationMs: 0 };
+          return { playing: false, paused: false, positionMs: 0, durationMs: 0, buffering: false };
         });
       return {
         playerId,
         playbackState: st.paused ? PlaybackState.PAUSED
-          : st.playing ? PlaybackState.PLAYING
+          : st.playing ? ((st as any).buffering ? PlaybackState.BUFFERING : PlaybackState.PLAYING)
           : PlaybackState.IDLE,
         position: st.positionMs / 1000,
         duration: st.durationMs / 1000,

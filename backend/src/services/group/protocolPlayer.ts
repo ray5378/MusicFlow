@@ -572,11 +572,11 @@ export async function getGroupStatus(groupId: string): Promise<{
   if (leader.kind === "sendspin") {
     const { sendspinGroupPoll } = await import("../sendspin/index.js");
     const gname = sendspinGroupName(groupId);
-    const st = await sendspinGroupPoll(gname).catch(() => ({ playing: false, paused: false, positionMs: 0, durationMs: 0 }));
+    const st = await sendspinGroupPoll(gname).catch(() => ({ playing: false, paused: false, positionMs: 0, durationMs: 0, buffering: false }));
     const front = getSendspinFront();
     const gv = front?.groups.get(gname) as any;
     return {
-      state: st.paused ? "PAUSED" : st.playing ? "PLAYING" : "STOPPED",
+      state: st.paused ? "PAUSED" : st.playing ? ((st as any).buffering ? "BUFFERING" : "PLAYING") : "STOPPED",
       position: Math.floor(st.positionMs / 1000),
       duration: Math.floor(st.durationMs / 1000),
       // 实时组在则回实时(刚调过),否则回持久库值(重启后 / ug 组尚未创建)。
@@ -592,9 +592,9 @@ export async function getGroupStatus(groupId: string): Promise<{
     if (isBridgeOwned(leader.id) && splitGroupMembers(groupId).spin.length > 0) {
       const { sendspinGroupPoll } = await import("../sendspin/index.js");
       const gname = sendspinGroupName(groupId);
-      const gst = await sendspinGroupPoll(gname).catch(() => ({ playing: false, paused: false, positionMs: 0, durationMs: 0 }));
+      const gst = await sendspinGroupPoll(gname).catch(() => ({ playing: false, paused: false, positionMs: 0, durationMs: 0, buffering: false }));
       return {
-        state: gst.paused ? "PAUSED" : gst.playing ? "PLAYING" : "STOPPED",
+        state: gst.paused ? "PAUSED" : gst.playing ? ((gst as any).buffering ? "BUFFERING" : "PLAYING") : "STOPPED",
         position: Math.floor(gst.positionMs / 1000),
         duration: Math.floor(gst.durationMs / 1000),
         volume: persistedVolume,

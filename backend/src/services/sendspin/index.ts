@@ -905,9 +905,9 @@ export async function sendspinBridgeDetach(groupName: string, deviceId: string):
 /** 用户组轮询(播放在播/位置/时长):供组 player pollState 与组状态派生。 */
 export async function sendspinGroupPoll(
   groupName: string,
-): Promise<{ playing: boolean; paused: boolean; positionMs: number; durationMs: number }> {
+): Promise<{ playing: boolean; paused: boolean; positionMs: number; durationMs: number; buffering: boolean }> {
   if (isForkMode()) {
-    if (!sendspinSupervisor.isRunning()) return { playing: false, paused: false, positionMs: 0, durationMs: 0 };
+    if (!sendspinSupervisor.isRunning()) return { playing: false, paused: false, positionMs: 0, durationMs: 0, buffering: false };
     return sendspinSupervisor.rpc("poll", { clientId: groupName });
   }
   const { pollCore } = await import("./playerCore.js");

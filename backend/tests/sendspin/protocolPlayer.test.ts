@@ -41,7 +41,7 @@ describe("Sendspin 服务器权威集成", () => {
     expect(qc["players"].size).toBe(1);
   });
 
-  it("playMedia → pollState 反映 PLAYING 与 duration;setVolume/seek/stop 生效", async () => {
+  it("playMedia → pollState 可听前报 BUFFERING、duration 正确;setVolume/seek/stop 生效", async () => {
     expect(getSendspinServer()).toBeTruthy();
     const p = createSendspinProtocolPlayer("c1");
     const item = { songId: "s1", title: "Test", artist: "A", mime: "audio/opus", duration: 180 };
@@ -49,7 +49,9 @@ describe("Sendspin 服务器权威集成", () => {
     expect(mediaUri).toContain("/rest/dlna/stream/"); // token 流地址(占位上报)
 
     let st = await p.pollState();
-    expect(st.playbackState).toBe(PlaybackState.PLAYING);
+    // 可听前(静默预填充)报 BUFFERING:v4.8.1 起「已注册 current」≠「已可听」,
+    // 客户端据非 PLAYING 停止本地插值,防「前进~2s 又跳回 0」循环。
+    expect(st.playbackState).toBe(PlaybackState.BUFFERING);
     expect(st.duration).toBe(180);
 
     await p.setVolume(60);

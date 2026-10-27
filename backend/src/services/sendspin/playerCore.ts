@@ -303,6 +303,7 @@ export function playCore(
     g.finishPlayback({ silentState: true });
   }
   g.positionMs = seekPositionMs ?? 0;
+  g.audibleStarted = false; // 起播即回可听前,poll 报 buffering 至首帧可听
   // 当前曲元数据进组状态:status.media / queue currentMedia 据此上报,
   // 前端与 HA 靠 media.songId 变化触发歌词/封面刷新(缺了就卡在第一首)。
   g.current = { songId: item.songId, title: item.title, artist: item.artist, album: item.album, coverArt: item.coverArt, mime: item.mime, durationMs: (item.duration ?? 0) * 1000 };
@@ -402,6 +403,7 @@ export function playGroupCore(
     g.finishPlayback({ silentState: true });
   }
   g.positionMs = seekPositionMs ?? 0;
+  g.audibleStarted = false; // 起播即回可听前,poll 报 buffering 至首帧可听
   g.current = { songId: item.songId, title: item.title, artist: item.artist, album: item.album, coverArt: item.coverArt, mime: item.mime, durationMs: (item.duration ?? 0) * 1000 };
   for (const id of memberIds) {
     const conn = srv.clients.get(id);
@@ -828,7 +830,7 @@ export function setMutedCore(srv: SendspinServer | null, clientId: string, muted
 
 /** 轮询核心:逻辑播放状态以「组当前曲」为准(已注册播放器在投/续播即视为播放中);
  *  连接就绪与否只影响推流可达性,不改变 QueueController 的切歌/恢复判定。 */
-export function pollCore(srv: SendspinServer | null, clientId: string): { playing: boolean; paused: boolean; positionMs: number; durationMs: number } {
+export function pollCore(srv: SendspinServer | null, clientId: string): { playing: boolean; paused: boolean; positionMs: number; durationMs: number; buffering: boolean } {
   // ⚠️ 必须读**实际所属**的组(resolveLiveGroup):设备若在用户组内,
   // srv.group(clientId) 是单设备组,其 paused/current 不反映真实播放态 ——
   // 只读它会导致暂停后仍报 playing(HA 卡片进度条不锁帧、暂停键常显"播放")。
@@ -853,6 +855,8 @@ export function pollCore(srv: SendspinServer | null, clientId: string): { playin
     paused: !!g.paused,
     positionMs: g.positionMs,
     durationMs: (g as any).current?.durationMs ?? (g as any).frozenDurationMs ?? 0,
+    // 可听前(静默预填充/seek 重建)报 buffering:stub 组无此字段(undefined)退化 false。
+    buffering: !!g.current && !g.paused && (g as any).audibleStarted === false,
   };
 }
 

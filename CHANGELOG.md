@@ -2,6 +2,15 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.8.1] - 2026-10-27
+
+### Fix / 切歌可听前进度「前进~2s 又跳回 0」循环:可听前上报 BUFFERING 瞬态
+
+- **根因**:切歌(混合组锚点 lead 5s + 预填充水位 ~10s,单设备同理)在真正可听前有静默窗口,期间服务端 `pollCore` 已报 `playing:true`(current 已注册)而 `audiblePositionMs` 把位置钳在下界。三端(HA 卡片 / Web 前端 / MusicFlow 客户端)据此每 2s 轮询 + 本地按 PLAYING 插值前进,轮询拿回下界值又拉回 → 进度「前进 ~2s 跳回 0」无限循环。群组与单设备(sendspin)同源。
+- **修复**:服务端可听前上报 BUFFERING 瞬态 —— `SendspinGroup.audibleStarted` 标志(play()/seek()/rehost()/cast 起播复位,pushLoop 与曲末排空循环首次越过上报下界置位);`pollCore` 返回新增 `buffering`,四处 pollState/getGroupStatus 映射为 `BUFFERING`(可听前 `playing:true` 但状态非 PLAYING)。
+- **三端零改动**:客户端 `playing => state=='PLAYING'`、Web 前端 `statePlaying` 白名单、HA 集成 `STATE_MAP`(早已映射 `BUFFERING`)→ 可听前自动停止本地插值,进度条停在下界(0 / seek 目标)直到真正出声。
+- 安全性:PlaybackTracker 把 BUFFERING 当瞬态(不判自然结束 / 不清 lastPlaying / 不计冻结宽限);fork RPC 透传,旧子进程缺字段退化为旧行为;stub 组(undefined)同样退化。
+
 ## [4.8.0] - 2026-10-27
 
 ### Feature / 延迟补偿从按协议三格改为按组内成员独立设置(每台播放器一格)

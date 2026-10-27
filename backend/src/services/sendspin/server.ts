@@ -645,6 +645,9 @@ export class SendspinGroup {
    *  只写给宣告了 `set_static_delay` 的设备,未宣告一律不发。 */
   staticDelayMs = 0;
   positionMs = 0;
+  /** 可听进度是否已越过上报下界:未越过(静默预填充/seek 重建中)时 pollCore 报 buffering,
+   *  客户端据 playbackState!=PLAYING 停止本地插值,修复「切歌进度前进~2s 又跳回 0」循环。 */
+  audibleStarted = false;
   timelineBaseUs = 0n;
   /** 当前播曲(由 ProtocolPlayer.playMedia 写入,供 pollState/自动切歌判定)。 */
   current: { songId: string; title?: string; artist?: string; album?: string; coverArt?: string; mime?: string; durationMs: number } | null = null;
