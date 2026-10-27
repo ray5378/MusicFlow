@@ -51,14 +51,14 @@ beforeEach(() => {
 });
 
 describe("/v1/groups/:id/delays", () => {
-  it("新组读到 0/0,并带回钳制范围与步进(前端据此渲染 input-number)", async () => {
+  it("新组读到内置默认对齐点 300/300/0,并带回钳制范围与步进(前端据此渲染 input-number)", async () => {
     const uid = seedAdmin();
     const g = getGroupManager().createGroup("客厅组", [], uid);
     const res = await app.request(`/rest/api/v1/groups/${g.id}/delays`, { headers: adminHeaders(uid) });
     expect(res.status).toBe(200);
     const body = (await res.json()) as any;
-    expect(body.airplayMs).toBe(0);
-    expect(body.airplay2Ms).toBe(0);
+    expect(body.airplayMs).toBe(300);
+    expect(body.airplay2Ms).toBe(300);
     expect(body.sendspinMs).toBe(0);
     expect(body.minMs).toBe(-30000);
     expect(body.maxMs).toBe(30000);

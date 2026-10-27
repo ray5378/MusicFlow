@@ -1068,6 +1068,7 @@
     "delayDiffTipEarlier": "To bring Sendspin forward, lower Sendspin or raise {side}",
     "delayRange": "Range ±{sec} s, step {step} ms; AP1 and AP2 apply per member protocol, so mixed groups are fine",
     "delayNoMembers": "No {side} member in this group; this row has no audible effect right now",
+    "delayRestartHint": "AirPlay offsets apply when the next session starts: after saving, restart the MusicFlow container (or stop & replay this group) to take effect immediately; Sendspin is live on save",
     "delayNegativeLimit": "Negative values (earlier) are bounded by device buffering: advancing beyond ~1 s is usually inaudible. To align, prefer a positive value on the late side",
     "delayReset": "Reset to 0",
     "delayApply": "Save and apply",

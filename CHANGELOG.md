@@ -2,6 +2,16 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.7.2] - 2026-10-27
+
+### Feature / 群组延迟补偿内置默认对齐点 300ms(AP1/AP2 通用)+ 生效语义文档化
+
+- 用户定标(2026-10-27 真机 HiVi H5MKII):AirPlay 链路固有偏差(DAC/缓冲/链路)实测 ≈300ms —— 与 Sendspin 对齐的补偿值。固化为**内置默认对齐点** `DEFAULT_AIRPLAY_ALIGN_MS = 300`,**AP1 与 AP2 两格通用**。
+- 生效面:① 新组创建时两格播种 300(`createGroup` 经 `setGroupDelays` 落库,不经 persist —— G11);② 一次性迁移把「从未调过补偿」(三格全 0)的既有组播种到 300,用户调过的组一律不动(settings 键 `group.airplayAlignSeeded` 防重复);③ UI 弹窗补「AirPlay 侧补偿随下一次会话建立生效:保存后建议重启容器(或重新起播该组)」提示。
+- 权威文档同步:`docs/group-权威方案文档.md` §0.4 重写为三格权威口径(分格理由/投递时戳唯一落点/双加教训/重建触发与自愈/默认对齐点),数据模型表补 `airplay2_delay_ms`。
+- 守卫:G10 新增 `DEFAULT_AIRPLAY_ALIGN_MS=300` 单一声明 pin + createGroup 播种断言(43 条);G13 第 5 条「anchorShiftUs 必须恒 0」防双加回归(v4.7.1 引入)。
+- 验证:tests/sendspin|group|routes|airplay|player|source 247 文件 3626+ 用例全绿;tsc=0;群组守卫 43 条、桥守卫 17 条、变异反证 4/4 可打红。
+
 ## [4.7.1] - 2026-10-27
 
 ### Fix / 群组延迟补偿真机不生效(三重根因:锚点双加/投递窗口不跟随/重建自愈缺失)

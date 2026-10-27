@@ -622,6 +622,14 @@ console.log("===== G10 延迟补偿参数域(±30s / 步进 10ms 单一源 + 写
   pin("GROUP_DELAY_MIN_MS", "-30000");
   pin("GROUP_DELAY_MAX_MS", "30000");
   pin("GROUP_DELAY_STEP_MS", "10");
+  // 内置默认对齐点(AP1/AP2 通用,用户定标 2026-10-27):创建默认与一次性播种共用同一常量。
+  pin("DEFAULT_AIRPLAY_ALIGN_MS", "300");
+  const cgB = bodyByName(code(GROUP_INDEX), atLineStart("createGroup"));
+  check(
+    "createGroup 播种内置默认对齐点且经 setGroupDelays(不经 persist —— G11)",
+    cgB !== null && cgB.includes("setGroupDelays(id") && cgB.includes("DEFAULT_AIRPLAY_ALIGN_MS"),
+    cgB === null ? miss("createGroup") : "新组补偿默认丢失 ⇒ 每个新组都要手动摸 300ms",
+  );
   const setB = bodyByName(dc, atLineStart("setGroupDelays"));
   check(
     "setGroupDelays 三侧取值都过 clampGroupDelayMs(绕过即把越界值写进内存+DB)",

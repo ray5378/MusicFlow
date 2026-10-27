@@ -825,6 +825,25 @@ export function initDatabase() {
       } catch { /* 聚合失败 → 保持 0 */ }
       log.info(`player_groups 新增 airplay2_delay_ms 列(继承既有 airplay_delay_ms,峰值 ${carried}ms)`);
     }
+    // 内置默认对齐点一次性播种(2026-10-27):AirPlay 链路固有偏差实测 ≈300ms,
+    // **AP1 与 AP2 两格通用**(用户定标)。只升「从未调过补偿」的组(三格全 0);
+    // 用户调过的组一律不动。settings 标记防重复执行。
+    try {
+      const seeded = sqlite.prepare("SELECT value FROM settings WHERE key = ?").get("group.airplayAlignSeeded");
+      if (!seeded) {
+        const seededRun = sqlite
+          .prepare(
+            "UPDATE player_groups SET airplay_delay_ms = 300, airplay2_delay_ms = 300 WHERE airplay_delay_ms = 0 AND airplay2_delay_ms = 0 AND sendspin_delay_ms = 0",
+          )
+          .run();
+        sqlite
+          .prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)")
+          .run("group.airplayAlignSeeded", String(seededRun.changes));
+        log.info(`内置默认对齐点播种: ${seededRun.changes} 个未标定组的 airplay/airplay2_delay_ms → 300ms`);
+      }
+    } catch (e) {
+      log.warn(`默认对齐点播种失败(不影响启动): ${e instanceof Error ? e.message : e}`);
+    }
   } catch (e) {
     log.warn(`player_groups 补列失败: ${e instanceof Error ? e.message : e}`);
   }

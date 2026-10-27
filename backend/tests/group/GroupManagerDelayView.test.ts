@@ -123,9 +123,17 @@ describe("读视图延迟补偿(delayView)", () => {
     expect(gm.listWithMembers()[0].airplayDelayMs).toBe(50);
   });
 
-  it("未设置过延迟 → 读视图回 0(不抛、不阻断列表)", () => {
-    const g = gm.createGroup("零延迟", []);
-    invalidateGroupDelays(g.id);
+  it("新组内置默认对齐点:AP1/AP2 两格 300、Sendspin 0(用户定标 2026-10-27)", () => {
+    const g = gm.createGroup("默认对齐", []);
+    const view = gm.getWithMembers(g.id)!;
+    expect(view.airplayDelayMs).toBe(300);
+    expect(view.airplay2DelayMs).toBe(300);
+    expect(view.sendspinDelayMs).toBe(0);
+  });
+
+  it("显式清零后读视图回 0(默认只在创建时播种,不复活)", () => {
+    const g = gm.createGroup("显式清零", []);
+    setGroupDelays(g.id, { airplayMs: 0, airplay2Ms: 0, sendspinMs: 0 });
     const view = gm.getWithMembers(g.id)!;
     expect(view.airplayDelayMs).toBe(0);
     expect(view.airplay2DelayMs).toBe(0);

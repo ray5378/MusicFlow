@@ -27,6 +27,12 @@ export const GROUP_DELAY_MAX_MS = 30000;
 /** 前端步进(ms)。 */
 export const GROUP_DELAY_STEP_MS = 10;
 
+/** AirPlay 的**内置默认对齐点**(ms),**AP1 与 AP2 通用**。用户定标(2026-10-27 真机):
+ *  HiVi H5MKII 与 Sendspin 成员对齐 ⇒ 300ms —— 这是 AirPlay 链路的固有偏差实测近似
+ *  (DAC/缓冲/链路),新组与未标定组直接从这里起步,不必每次从 0 摸索。
+ *  仅作**创建默认**与**一次性播种**,不参与运行时钳制/兜底(无组上下文仍为 0)。 */
+export const DEFAULT_AIRPLAY_ALIGN_MS = 300;
+
 export interface GroupDelays {
   /** 正数 = AirPlay 1(RAOP)成员更晚出声,负数 = 更早。 */
   airplayMs: number;

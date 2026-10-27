@@ -869,6 +869,9 @@
       <div style="font-size:12px;color:var(--el-text-color-secondary);line-height:1.6;margin-top:6px;">
         {{ t('groups.delayNegativeLimit') }}
       </div>
+      <div style="font-size:12px;color:var(--el-color-warning);line-height:1.6;margin-top:6px;">
+        {{ t('groups.delayRestartHint') }}
+      </div>
 
       <template #footer>
         <div style="display:flex;align-items:center;">

@@ -62,9 +62,16 @@
 | `legacy-cast` | 无 sendspin 成员，或有 sendspin 但桥全失败 | 各成员各自 cast 拉流 | `protocolPlayer.ts:322-324`（`bridgeRoute` 为 null ⇒ 全组 legacy） |
 | `solo fallback` | 桥路由部分失败 | 失败那台回落普通 cast，成功那台仍走桥 | `protocolPlayer.ts:302-304`（`soloFallback.push`）、`:339-341`（`apSolo` 过滤） |
 
-### 0.4 延迟补偿是什么
+### 0.4 延迟补偿是什么（v4.7.1/v4.7.2 权威口径）
 
-**按组标定的 A/V 偏移，两值互相独立**：`airplayMs` 让 AirPlay 侧整体更晚/更早出声，`sendspinMs` 让 sendspin 侧更晚/更早出声。**正数 = 该侧更晚出声**。范围 ±30000ms、步进 10ms（`services/group/delayCalib.ts:20-23`，接口注释见 `routes/api/groups.ts:103-105`）。AirPlay 侧改动必须重建该组桥才生效（约 1~2s 静音），sendspin 侧是帧级实时（`routes/api/groups.ts:135-145`）。
+**按组标定的 A/V 偏移，三格互相独立（AP1 / AP2 / Sendspin）**：`airplayMs`（AirPlay 1 成员）、`airplay2Ms`（AirPlay 2 realtime 成员）、`sendspinMs`。**正数 = 该侧更晚出声**。范围 ±30000ms、步进 10ms（`services/group/delayCalib.ts`）。AP1 与 AP2 必须分格：44.1k 重采样+明文 RTSP 与 48k 直通+加密链路的抵达延迟不是同一个物理量；取值**逐成员**（`control.ts::bridgePrepareDevice` 按成员桥协议二选一），不是组级开关。
+
+**生效机制（三格不同）**：
+- **AirPlay 两格（桥侧）**：补偿的唯一落点 = **投递时戳**（`sendspin/server.ts` 投递 `ts' = ts − send_ahead + shift`，`shift` 按该桥协议动态读对应格子，PUT 后下一补投 tick 生效）。桥内锚点 `anchorShiftUs` **恒 0** —— 若锚点也平移则双加，对齐器把多出的那份判「内容超前」整段裁掉（v4.7.1 前的真机实锤：切歌吞 2 秒、净补偿归零；守卫 G13-b 钉死恒 0）。补偿随**下一次会话建立**锚定：保存后建议重启容器或重新起播该组确保立即生效（UI 弹窗已提示）。
+- **Sendspin 格**：帧级下发戳偏移（`sendAudio(ts + dspDelayUs)`），真·实时，约 0.5~1s 内听到。
+- **重建触发**：AP1/AP2 任一格变化且组桥在跑 ⇒ 重建该组桥（约 1~2s 静音）。路由登记缺失（重启恢复的桥/历史泄漏）时走 `bridgeJoinMember` 自愈兜底：现场初始化路由 + 新会话（仅当该设备确有桥会话在跑，`isBridgeOwned` 判据，不给空闲组挂孤儿桥）。
+
+**内置默认对齐点（`DEFAULT_AIRPLAY_ALIGN_MS = 300`，AP1/AP2 通用）**：用户定标（2026-10-27 真机 HiVi H5MKII）—— AirPlay 链路固有偏差（DAC/缓冲/链路）实测 ≈300ms。新组创建时两格播种 300（`createGroup` 经 `setGroupDelays` 落库，**不经 persist**，G11）；一次性迁移把「从未调过补偿」（三格全 0）的既有组播种到 300，用户调过的组不动（settings 键 `group.airplayAlignSeeded` 防重复）。负方向受设备缓冲物理天花板限制（提前超过约 1 秒通常无感），UI 已提示。
 
 ---
 
@@ -79,7 +86,8 @@
 | `name` | text | 组名，`trim` 后非空、≤50 字符 | `db/schema.ts:369`、`services/group/index.ts:93`（`GROUP_NAME_MAX = 50`）、`:354-359`（`normalizeName`） |
 | `memberIds` | text（JSON 数组） | **存带命名空间的整条成员字符串** | `db/schema.ts:370` |
 | `volume` | integer default 20 | 组音量，缺省 `DEFAULT_GROUP_VOLUME = 20`（schema 注释：独立于成员设备音量，空组/全离线也持久） | `db/schema.ts:371-372`、`index.ts:55`（`DEFAULT_GROUP_VOLUME`） |
-| `airplayDelayMs` | integer default 0 | v4.6.77 新增：AirPlay 侧补偿（`airplay_delay_ms`） | `db/schema.ts:377`、`db/index.ts:790-803` |
+| `airplayDelayMs` | integer default 0 | v4.6.77 新增：AirPlay 1 侧补偿（`airplay_delay_ms`）；v4.7.2 起**新组创建默认 300**（内置对齐点） | `db/schema.ts:377`、`db/index.ts:790-803` |
+| `airplay2DelayMs` | integer default 0 | v4.7.1 新增：AirPlay 2 realtime 侧补偿（`airplay2_delay_ms`）；v4.7.2 起新组创建默认 300 | `db/schema.ts`、`db/index.ts`（幂等补列 + 非零继承） |
 | `sendspinDelayMs` | integer default 0 | v4.6.77 新增：sendspin 侧补偿（`sendspin_delay_ms`） | `db/schema.ts:378`、`db/index.ts:805-808` |
 | `createdAt`/`updatedAt` | text（ISO） | 审计 | `db/schema.ts:379-380` |
 

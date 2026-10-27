@@ -22,7 +22,7 @@ import { getServer as getSendspinServer } from "../sendspin/runtime.js";
 import { sendspinSupervisor } from "../sendspin/supervisor.js";
 import { getSendspinDeviceVolume } from "../sendspin/peerVolume.js";
 import { createLogger } from "../../utils/logger.js";
-import { getGroupDelays } from "./delayCalib.js";
+import { DEFAULT_AIRPLAY_ALIGN_MS, getGroupDelays, setGroupDelays } from "./delayCalib.js";
 
 /** 成员 kind:airplay / sendspin / dlna(仅历史数据可解析,**新提交一律拒收**,
  *  2026-10-24 起 DLNA 禁止入组 —— 设备自拉流无共享时间线)。 */
@@ -210,6 +210,10 @@ export class GroupManager extends EventEmitter {
     };
     this.persist(g);
     this.groups.set(id, g);
+    // 内置默认对齐点:AP1 与 AP2 两格都从 300ms 起步(用户定标的 AirPlay 链路
+    // 固有偏差实测近似,通用)。**必须经 setGroupDelays 落库**(persist 不得写
+    // 延迟字段 —— G11:整行 upsert 会拿内存旧值覆盖 DB);弹窗回显即见 300。
+    setGroupDelays(id, { airplayMs: DEFAULT_AIRPLAY_ALIGN_MS, airplay2Ms: DEFAULT_AIRPLAY_ALIGN_MS });
     this.emit("group_created", g);
     return g;
   }
