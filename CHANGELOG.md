@@ -2,6 +2,15 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.7.6] - 2026-10-27
+
+### Fix / 混合组锚点 lead 定标 5s:消除切歌时 AirPlay 接收端吞新歌开头(真机 100% 复现)
+
+- **根因(真机实锤)**:track 边界桥会话重启(RAOP 新流首包 0xE0 marker)后,接收端(HiVi)的就绪窗口实测 ≈2~3s —— 新歌开头 1~2s 落在窗口内被接收端跳过(表现:SENDSPIN 正常播放,AP1 出声时进度与 SENDSPIN 齐平,开头内容缺失,100% 复现)。诊断:PUSHDIAG 投递探针证实服务端**零丢帧**(7/7 切歌 dropN=0)、桥内锚定 reAnchored=false —— 内容完整送达,丢失发生在接收端对流重启的反应。
+- **修复**:混合组锚点 lead 1.75s → **5s**(`BRIDGE_MIXED_GROUP_ANCHOR_LEAD_MS` env 可调),把新歌起播调度点推到接收端就绪窗口之外;真机验证 lead 3s 吞量缩短、5s 不吞。代价 = 切歌全组静默 ≈5s(esp32 一致)。
+- 期间两项实验性方案被真机否决并回滚(记录留档):①桥内 aligner 跨空窗续走 —— 空窗被判 2.4s 漂移 skip,1s 正常/1s 无声循环;②排空后不 flush 重启 —— RaopPlayer 发送套接字进入 destroying 态,sendChunk false 无声。**结论:0xE0 流重启是 RAOP 桥在 track 边界的必要动作,lead 必须覆盖接收端就绪窗口**。
+- 测试:bridgePumpGeneration 混合组三用例更新为 5s 定标语义;bridgePhase5 穿透用例随方案回滚移除。
+
 ## [4.7.5] - 2026-10-27
 
 ### Feature / 切歌同步 A+B 对齐 Music Assistant:动态 lead + 桥会话暖复用(切歌零重建零吞音)

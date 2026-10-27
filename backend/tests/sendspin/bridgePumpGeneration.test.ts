@@ -297,10 +297,10 @@ describe("③b 深锚仅纯桥组(E3 判决,2026-10-26)", () => {
     await waitGen(genCalls, 1);
 
     const leadUs = Number(g.timelineBaseUs - nowUs());
-    // 必须覆盖桥投递下沿(1.5s)+ 补投周期(250ms) = 1.75s;扣观测噪声 300ms
+    // 必须覆盖接收端就绪窗口(混合组锚点 lead 5s,2026-10-27 真机定标);扣观测噪声 300ms
     expect(leadUs).toBeGreaterThanOrEqual(BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US - 300_000);
-    // 仍是混合组语义:远小于 cold 深锚 4.5s(直连 esp32 不承受秒级跳变)
-    expect(leadUs).toBeLessThan(3_000_000);
+    // 仍是混合组语义(按 MIXED_LEAD 常量起,非 pure-bridge 深锚分支):上界留 1s 噪声
+    expect(leadUs).toBeLessThan(BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US + 1_000_000);
     releaseSlices(); // EOF 收尾
     await waitInactive(pump, 5000);
   }, 30_000);
@@ -333,7 +333,7 @@ describe("③b 深锚仅纯桥组(E3 判决,2026-10-26)", () => {
     // 2026-10-26 新契约:必须覆盖桥投递下沿(1.5s),否则组一开播就把桥来不及
     // 排程的前段内容推过去 ⇒ 真机「SENDSPIN 已出声、AirPlay 还没声、开头整段丢」。
     expect(leadUs).toBeGreaterThanOrEqual(1_500_000);
-    expect(leadUs).toBeLessThan(3_000_000); // 仍是混合组语义:不是 4.5s cold 深锚
+    expect(leadUs).toBeLessThan(BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US + 1_000_000); // 定标:混合组 lead=5s
     releaseSlices(); // EOF 收尾
     await waitInactive(pump, 5000);
   }, 30_000);
@@ -361,8 +361,8 @@ describe("③b 深锚仅纯桥组(E3 判决,2026-10-26)", () => {
     await waitInactive(pumpPlain, 5000);
 
     // 2026-10-26 契约反转:桥在场时全组等桥(无桥组仍 800ms 截断)。固定差值 ≈
-    // 1.75s − 0.8s = 950ms;上下界留出观测噪声,同时排除「无差异」与「4.5s 深锚」。
-    expect(leadMixed - leadPlain).toBeGreaterThan(500_000);
-    expect(leadMixed - leadPlain).toBeLessThan(1_500_000);
+    // 5s − 0.8s = 4.2s(2026-10-27 定标 MIXED_LEAD=5s);上下界留出观测噪声,排除 runaway。
+    expect(leadMixed - leadPlain).toBeGreaterThan(2_000_000);
+    expect(leadMixed - leadPlain).toBeLessThan(5_000_000);
   }, 30_000);
 });

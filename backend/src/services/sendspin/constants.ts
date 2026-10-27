@@ -103,7 +103,12 @@ export const BRIDGE_TRACK_LEAD_WARM_US = Number(process.env.BRIDGE_TRACK_LEAD_WA
  *  桥只能从窗口下沿接 ⇒ 真机表现「SENDSPIN 已经出声、AirPlay 还没声,整首开头丢」。
  *  抬到 下沿 + 补投周期后,首帧本身即落在窗口内 ⇒ 开头零丢失。
  *  代价 = 每首歌起播多等 ~1.25s(全组一致,不破坏组内同步)。 */
-export const BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US = BRIDGE_PUSH_FLOOR_US + BRIDGE_PUSH_TICK_MS * 1000;
+// 混合组锚点 lead:env BRIDGE_MIXED_GROUP_ANCHOR_LEAD_MS 可调(默认 5000)。
+// 2026-10-27 真机定标:track 边界桥会话重启(0xE0)后,接收端(HiVi)的就绪窗口实测
+// ≈2~3s —— lead 低于窗口时新歌开头落在窗口内被接收端跳过(切歌吞开头 100% 复现,
+// 1.75s 吞 1~2s / 3s 吞缩短 / 5s 不吞)。取 5s 覆盖窗口;代价 = 切歌全组静默 ≈5s,
+// 后续可用「解码前滚」(当前曲播放期预解码下一首)从根上消除。
+export const BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US = Number(process.env.BRIDGE_MIXED_GROUP_ANCHOR_LEAD_MS ?? 5000) * 1000;
 /** 播中回填单桥总量上限(µs)。常态窗口宽仅 1s,远达不到;纯防御异常大帧。 */
 export const BRIDGE_BACKFILL_MAX_US = 6_000_000;
 

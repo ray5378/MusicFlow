@@ -147,6 +147,7 @@ describe("代次与热复用收口(§Phase 5 BLK-02/R1)", () => {
     expect(player.flush).toHaveBeenCalledTimes(3);
   });
 
+
   it("★ rehost(只动 timelineReseed)→ 同样新 generation + 新锚点(R1 防漏判)", async () => {
     const s = mkLifecycleSession();
     injectConnected(s, fakePlayer());
