@@ -264,7 +264,7 @@ DLNA 设备区块仍然渲染在群组页左侧（`index.vue:51-123`，`data-laz
 
 因此下面这套语义对组 100% 适用，且**不允许**为桥接另开捷径：
 
-> 除第一首直接起播外，**第二首起每首必须预下载进内存并经 `judgePrefetchedBuffer` 完整性判定**；不完整 ⇒ `markUnplayable`（TTL 5 分钟）⇒ 跳过 / 组内换源（上限 3）。
+> 除第一首直接起播外，**第二首起每首必须预下载进内存并经 `judgePrefetchedBuffer` 完整性判定**；不完整 ⇒ `markUnplayable`（TTL 读 `negativeTtlSeconds` 配置，默认 2 小时）⇒ 跳过 / 组内换源（上限 3）。
 
 ### 3.2 预取五道闸门
 
@@ -282,20 +282,22 @@ DLNA 设备区块仍然渲染在群组页左侧（`index.vue:51-123`，`data-laz
 
 ### 3.3 完整性判官：四条判死线
 
-`judgePrefetchedBuffer(buf, expectedSec)`（`services/source/prefetchCache.ts:166`）按四档判定（文件头 `:24-33`）：
+`judgePrefetchedBuffer(buf, expectedSec)`（`services/source/prefetchCache.ts:169`）按四档判定（**判据顺序锁**见 `tests/source/integrityOrder.test.ts`；文件头 `:24-33`）：
 
 | 档 | 判据 | 阈值 | 证据 |
 |---|---|---|---|
-| 1 太小 | 整首字节数低于最小合理值 | `PREFETCH_MIN_AUDIO_BYTES = 64 * 1024` | `prefetchCache.ts:110-111` |
-| 2 非音频 | magic/sniff 不认（`sniffMagic`） | — | `prefetchCache.ts:24-33` |
+| 1 非音频 | magic/sniff 不认（`sniffMagic`）——**必须先于体积判**（2026-10-27：几 KB 的 JSON/HTML 错误页是硬结论，不能落进 too-small 弱信号被放行） | — | `prefetchCache.ts:191` |
+| 2 太小 | 整首字节数 < `PREFETCH_MIN_AUDIO_BYTES = 64 * 1024`；**先过硬算术下界**：`buf < expectedSec × PREFETCH_HARD_MIN_BYTES_PER_SEC(=4000，32kbps 地板)` ⇒ `too-small-hard` 硬判死记负缓存；装得下 ⇒ `too-small` 弱信号 | `prefetchCache.ts:111`、`:115-121` | `prefetchCache.ts:195-205` |
 | 3 时长差（metadata 线） | 实际比曲库基准**短超过 15s** | `PREFETCH_INTEGRITY_DELTA_SEC = 15` | `prefetchCache.ts:104-109` |
 | 4 时长差（码率推算线） | `duration` 缺失（ogg 等容器）时用 `bytes*8/bitrate` 推算，判死线放宽到 **80s** | `PREFETCH_INTEGRITY_DELTA_SEC_BITRATE = 80` | `prefetchCache.ts:112-119` |
+
+> 抓取层还有一道**上游截断对账**（v4.8.3，《纵身一跃》事故）：`bufferedFetch.ts` 的 `attemptOnce` 收尾拿响应头 `content-length` 与实收字节对账，实收 < 90% ⇒ 判 `stalled`（上游提前 EOF），残缺字节不再以 `ok:true` 交回判官。chunked（无 content-length）对不了账，由档 2 的硬算术下界兜底。
 
 **保守原则（写在代码注释里的红线）**：
 
 - 无基准（曲库 `duration = 0`）**不杀**；magic 认是音频但 metadata 解析失败**不杀**（防冷门容器误杀）（`:32`）。
 - `ffmpeg` 全解码档（decodable）**故意不做**：抓不到完整短文件，还每首几秒 CPU（`:33`）。
-- `too-small` 是**弱信号**：主链先试完其他源，最后才回来重试一次；重试仍 too-small **也不写负缓存**，交给播放侧 probe 用 404/403 硬判（`:465-474`、`:510-516`）。
+- `too-small` 是**弱信号**：主链先试完其他源，最后才回来重试一次；重试仍 too-small **也不写负缓存**，交给播放侧 probe 用 404/403 硬判（`:465-474`、`:510-516`）。**适用面（2026-10-27 收窄）**：只有「装得下期望时长（≥ expectedSec×4000）」的过小文件才配得上这份宽待；装不下的直接 `too-small-hard` 判死记负缓存——1KB 装不下 200s 是硬结论，不是「这次拿少了」。
 
 ### 3.4 判死之后：先换源，全死才跳下一首
 
@@ -646,13 +648,13 @@ PUT 语义：`memberId` 必须是本组成员（命名空间 id **原样整条**
 |---|---|---|
 | 出流首包等待 | `STREAM_BUFFER_HEAD_WAIT_MS = 8000`；env 同名可覆盖，但**钳 ≤ 8000** | `routes/rest/index.ts:2104`、`:2092`、`:2116` |
 | 可播（正）缓存 | 1 小时 | `services/source/online/streamFallback.ts:58` |
-| 负结果（探测无源） | 45 秒后重探（源恢复即自动复活） | `streamFallback.ts:59` |
+| 负结果（探测无源） | **默认 2 小时**后重探（源恢复即自动复活；`core-pre-probe` 插件 `negativeTtlSeconds` 可覆写，2026-10-27 与插件默认 7200 对齐） | `streamFallback.ts:59` |
 | 网络异常退避 | 5 秒（**不判不可播**：网络抖动 ≠ 没源） | `streamFallback.ts:60` |
-| 内容型判死 `markUnplayable` | **5 分钟** | `streamFallback.ts:61-62`、`:539` |
+| 内容型判死 `markUnplayable` | **同一份可配置 TTL（默认 2 小时）**——2026-10-27 统一，原独立固定 5min 废除 | `streamFallback.ts:539` |
 | 预取索引条目 | 10 分钟（与 membuf 未消费条目对齐） | `prefetchCache.ts:97-98` |
 | 探测超时 | 12 秒（预探测路径可传更短） | `streamFallback.ts:64-65` |
 
-> 为什么内容型判死（5min）比网络型（45s）长：内容问题是「这串字节本身不完整」，短期内重试没意义；网络问题随时可能恢复。
+> 为什么负缓存统一 2 小时（2026-10-27 用户拍板）：内容问题是「这串字节本身不完整」，短期内重试没意义；原 5 分钟过期太快，重复播放场景每 5 分钟重蹈一次坏源。平台版权/VIP/试听策略会变，2 小时过期自动复活重探——开通 VIP 后最多 2 小时即恢复，不会被永久挡住。
 ---
 
 ## 8 失败模式速查（现象 → 根因 → 处置）
@@ -777,12 +779,12 @@ PUT 语义：`memberId` 必须是本组成员（命名空间 id **原样整条**
 `backend/scripts/check-group-invariants.mjs`（2026-10-26 新增并挂 CI；v4.8.0 起 G10/G11 改钉成员级、新增 G13）。实测运行结果（`node backend/scripts/check-group-invariants.mjs`）：
 
 ```
-[群组不变量守卫] 48 条断言全部通过;4 项 TODO 缺口已登记(不阻断 CI,见上);1 项已裁定例外(2026-10-26 裁定,勿当 bug 修)
+[群组不变量守卫] 62 条断言全部通过;4 项 TODO 缺口已登记(不阻断 CI,见上);1 项已裁定例外(2026-10-26 裁定,勿当 bug 修)
 ```
 
 | 类别 | 内容 |
 |---|---|
-| **已通过（G1~G13）** | G1 成员命名空间原样透传 / G2 DLNA 不得入组（后端 kind 校验 + 前端候选过滤）/ G3 起播即落位 / G4 位置基准取真实内容时间线 / G5 单泵（桥侧不得自建选歌）/ G6 换源上限 3 + 判死 TTL 5min / G7 延迟补偿不进 ring 的 `tsUs` / G8 watchdog 走 `qc.resumeActive` / G9 tick 埋点字段仍在 / G10 延迟参数域 ±30s·步进 10·单一源（**v4.8.0 改钉成员级取值口**）/ G11 延迟写路径只走 `delayCalib`（**createGroup 禁播种，成员级默认 0**，不经 `PlayerGroup` 实体与 `persist`）/ G12 重复成员：全量口 `throw`、增量口 `no-op`（语义刻意分叉）/ **G12b** `setMembers` 必须自带重复判定且早于差集过滤（变异 32 条）/ **G13 延迟补偿按成员（v4.8.0）**：取值口按成员 id 查表不串格（`bridgeAnchorShiftUsOf(groupName, deviceId)` / `sendspinDelayUsOfClient`）、select 必须列 `member_delays_json`、写路径落库、**桥内锚点恒 0（G13-b）**、PUT 重建条件覆盖、`trackLeadMs` 隐藏口 |
+| **已通过（G1~G15）** | G1 成员命名空间原样透传 / G2 DLNA 不得入组（后端 kind 校验 + 前端候选过滤）/ G3 起播即落位 / G4 位置基准取真实内容时间线 / G5 单泵（桥侧不得自建选歌）/ G6 换源上限 3 + 负缓存 TTL 统一（`markUnplayable` 读 `negativeTtlSeconds` 配置，默认 2 小时）/ G7 延迟补偿不进 ring 的 `tsUs` / G8 watchdog 走 `qc.resumeActive` / G9 tick 埋点字段仍在 / G10 延迟参数域 ±30s·步进 10·单一源（**v4.8.0 改钉成员级取值口**）/ G11 延迟写路径只走 `delayCalib`（**createGroup 禁播种，成员级默认 0**，不经 `PlayerGroup` 实体与 `persist`）/ G12 重复成员：全量口 `throw`、增量口 `no-op`（语义刻意分叉）/ **G12b** `setMembers` 必须自带重复判定且早于差集过滤（变异 32 条）/ **G13 延迟补偿按成员（v4.8.0）**：取值口按成员 id 查表不串格（`bridgeAnchorShiftUsOf(groupName, deviceId)` / `sendspinDelayUsOfClient`）、select 必须列 `member_delays_json`、写路径落库、**桥内锚点恒 0（G13-b）**、PUT 重建条件覆盖、`trackLeadMs` 隐藏口 / **G14 可听前 BUFFERING 瞬态（v4.8.1）**：`audibleStarted` 声明/复位/置位 + `pollCore.buffering` + 四处映射 + fork 兜底（9 条）/ **G15 预取完整性三闸（v4.8.3）**：`attemptOnce` 上游截断对账（`TRUNCATION_TOLERANCE = 0.9`，实收 < 90% ⇒ stalled）+ 判官硬算术下界（`PREFETCH_HARD_MIN_BYTES_PER_SEC = 4000`，装不下期望时长 ⇒ `too-small-hard`） |
 | **TODO 缺口（4，不阻断 CI）** | G1「`airplay:`/`sendspin:`/`dlna:` 前缀常量只有一处定义」、G3「`castLanding.applied` 语义」的命名、G4「位置基准必须取 `contentClock`」、G9「`stats` 的 `w=`/`m=`/`clock=`/`delta` 四字段」。**四条的共同点：都是旧文档口径与现状不符**（这三个名字在代码里不存在，见 §5.1 术语纠偏与附录 B-1/B-3）；守卫的处置是「登记缺口、要求产品侧确认后再改埋点，不由守卫凭空造」 |
 | **已裁定例外（1）** | G3：**DLNA 路径**的「先起播再校准 seek」属既定例外；AirPlay 路径仍必须把起点经 `startMs`/`seekSec` 一次编入 |
 
@@ -801,7 +803,7 @@ PUT 语义：`memberId` 必须是本组成员（命名空间 id **原样整条**
 | **G3** | **起播即落位**：`playMedia` 里起点必须经 `seekSec` 进 cast，不得出现「先 cast 后 seek」 | 断言 `airplay/protocolPlayer.ts` 的 `playMedia` 内不含 `seekAirPlay(` 调用 | 无守卫 | HiVi 第二次 RECORD 挂死（真机 12s） |
 | **G4** | 组位置基准取**内容时间线**：`audiblePositionMs` 必须是 `pushed − (cursor − now)` 形态并有 floor/pushed 双向夹取 | 钉 `streamEngine.ts` 该函数的三处边界 | 无守卫 | 开播显示 00:10、位置漂移 |
 | **G5** | **单泵、无第二条选歌路径**：桥侧不得出现取流/选源调用 | 断言 `airplay/bridgeSession.ts` + `bridgeChannel.ts` 不含 `fetchWholeSong\|resolvePreferredSong\|spawnDecoder` | 无守卫 | 绕过预取/判完整/跳过 |
-| **G6** | 组内换源**上限 3** + `markUnplayable` TTL 5min | 钉 `PREFETCH_MAX_ALT_SOURCES === 3`、`MARK_UNPLAYABLE_TTL_MS === 300000` | 无守卫（`check-dead-song-purge` 不管这块） | 无限换源 / 永久拉黑 |
+| **G6** | 组内换源**上限 3** + 负缓存 TTL 统一（`markUnplayable` 读 `negativeTtlSeconds` 配置、默认 2 小时，`MARK_UNPLAYABLE_TTL_MS` 废除） | 钉 `PREFETCH_MAX_ALT_SOURCES === 3`、`NEGATIVE_TTL_DEFAULT_MS === 2h`、`markUnplayable` 走 `negativeTtlMs`、`MARK_UNPLAYABLE_TTL_MS` 全仓 0 处 | G6（check-group-invariants，5 条） | 无限换源 / 两套 TTL 再度分叉 |
 | **G7** | **ring 的 tsUs 不被偏移污染**：`dspDelayUs` 只能出现在 `sendAudio(ts + dspDelayUs, ...)`，不得写进 ring 条目 | 断言 `pushFrame` 入 ring 的 `tsUs` 表达式不含 `dspDelayUs` | 无守卫 | 改延迟后回填错位、桥窗口漂 |
 | **G8** | watchdog 恢复走**统一起播路径**：必须 `qc.resumeActive(groupId, baseUrl)`，不得自己拼 cast | 钉 `watchdog.ts` 内存在 `resumeActive(` 且不含 `castToAirPlayDevice(` | 无守卫 | 恢复路径与正常路径语义分叉 |
 | **G9** | `airplay-bridge` `stats` **字段保留**：`ev/dev/gen/state/clock/queueMs/late/realigned/driftUs/deltaUs/deltaP95Us/samples/anchorUs/leadUs` 不得删改 | 钉 `bridgeSession.ts` 的 `emitStatsTick` 字段集（字段被删会让排障判据集体失效） | 无守卫 | §9 的判据全部不可用 |
@@ -918,9 +920,10 @@ PUT 语义：`memberId` 必须是本组成员（命名空间 id **原样整条**
 | `FRAME_HEADER_SIZE` / `MAX_PAYLOAD_BYTES` | 28 / 1 MiB | `airplay/bridgeChannel.ts:32-34` |
 | `STREAM_BUFFER_HEAD_WAIT_MS` | 8000（env 覆盖上限同值） | `routes/rest/index.ts:2104`、`:2116` |
 | `PLAYABLE_TTL_DEFAULT_MS` | 1h | `streamFallback.ts:58` |
-| `NEGATIVE_TTL_DEFAULT_MS` | 45s | `streamFallback.ts:59` |
+| `NEGATIVE_TTL_DEFAULT_MS` | 2h（2026-10-27 统一，原 45s；`negativeTtlSeconds` 插件配置可覆写） | `streamFallback.ts:59` |
 | `TRANSIENT_BACKOFF_DEFAULT_MS` | 5s | `streamFallback.ts:60` |
-| `MARK_UNPLAYABLE_TTL_MS` | 5min | `streamFallback.ts:62` |
+| `TRUNCATION_TOLERANCE` | 0.9（上游截断对账容差，实收 < cl×0.9 ⇒ stalled） | `bufferedFetch.ts` |
+| `PREFETCH_HARD_MIN_BYTES_PER_SEC` | 4000（32kbps 地板，判官硬算术下界） | `prefetchCache.ts` |
 | `PREFETCH_MAX_ALT_SOURCES` | 3 | `prefetchCache.ts:96` |
 | `PREFETCH_ENTRY_TTL_MS` | 10min | `prefetchCache.ts:98` |
 | `PREFETCH_INTEGRITY_DELTA_SEC` | 15 | `prefetchCache.ts:109` |

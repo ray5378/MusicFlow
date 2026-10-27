@@ -2,6 +2,17 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.8.3] - 2026-10-27
+
+### Fix / 预取完整性三闸:上游截断对账 + 判官硬算术下界 + 负缓存 TTL 统一 2 小时
+
+- **根因**（《纵身一跃》240 生产事故）：VIP 源（汽水 soda）对部分曲目只吐几十 KB 就提前断流，`bufferedFetch.attemptOnce` 只看 `reader.read()` 返回 `done` 就以 `ok:true` 交回残缺 buffer——全程没有拿响应头 `content-length` 与实收字节对账；判官只能按 `too-small` 弱信号处理（2026-10-21 策略：重试一次、不写负缓存），坏源的「无源」结论永远建立不起来 → 播 60s 断一次、每次重蹈。
+- **闸 1（抓取层对账）**：`attemptOnce` 收尾校验 `content-length`——实收 < 90%（`TRUNCATION_TOLERANCE = 0.9`）⇒ 判 `stalled`（上游截断），走重试/换源路径，不再产生假成功。chunked（无 content-length）对不了账，由闸 2 兜底。
+- **闸 2（判官硬算术下界）**：`judgePrefetchedBuffer` 的 too-small 档先过 `buf < expectedSec × PREFETCH_HARD_MIN_BYTES_PER_SEC(=4000，32kbps 地板)`——装不下期望时长 ⇒ `too-small-hard` 硬判死记负缓存（不再享受弱信号宽待）；装得下 ⇒ 保持 `too-small` 弱信号（2026-10-21 策略适用面收窄到「只是这次拿少了」）。播放路径（routes/rest）与预取路径同判。
+- **TTL 统一（用户拍板）**：`markUnplayable` 废除独立固定 5 分钟，与探测型负缓存读同一份 `negativeTtlMs`（模块默认 **2 小时**，与 `core-pre-probe` 插件 `negativeTtlSeconds` 默认 7200 对齐，插件配置可覆写）——重复播放场景不再每 5 分钟重蹈坏源；平台版权/VIP 恢复后最多 2 小时自动复活。
+- **守卫**：`check-group-invariants.mjs` G6 重钉（TTL 统一 3 条）+ 新增 **G15 预取完整性三闸**（截断对账容差/判断/错误串 + 硬下界常量唯一性/判断/判死原因），总断言 57 → **62**。
+- **测试**：新增 `tests/source/bufferedFetch.test.ts`（截断对账 3 条）；`integrityOrder.test.ts` 补硬下界贴线边界 2 条；`prefetchCache.test.ts` (e) 改硬判死语义 + 新增 (e2) 弱信号保留；(h) TTL 用例与 `streamFallbackTtl/MarkUnplayable` 同步 2 小时口径；`bufferHeadWait.test.ts` (h) 播放路径按硬判死同步。定向 tests/source 全绿（26 文件 409 用例）。
+
 ## [4.8.2] - 2026-10-27
 
 ### Docs / 群组·AirPlay·Sendspin 三份权威文档对齐 v4.8.x 现状 + G14 回归守卫 + 覆盖率补齐
