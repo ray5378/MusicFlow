@@ -27,7 +27,6 @@
 //   · backend/tests/services/flowEncodeBits.test.ts
 //   · backend/tests/services/playerRateDegrade.test.ts
 //   · backend/tests/services/audioInfoCacheBound.test.ts
-//   · backend/tests/db/legacyRateMigration.test.ts
 // 本脚本补的是「这些动态用例的**前提**还在不在」(函数签名、插入位置、调用点、表名)。
 //
 // 零依赖 node 脚本(与 check-dlna-realtime.mjs / check-seek-granularity.mjs 同款),
@@ -141,15 +140,12 @@ mustLive(AUDIO_INFO, "cache.size >= CACHE_MAX", 1, "缓存必须有界(长跑服
 // ---------------- 3) 位深档位白名单 ----------------
 mustLive(PLAYER_RATE, "export const BITS_OPTIONS", 1, "手动位深白名单必须仍是单一真源(前端下拉与 API 校验同源)");
 
-// ---------------- 4) 表改名 + 老库搬迁(静默失效重灾区) ----------------
+// ---------------- 4) 表改名后的最终形态(v4.9.2 起无迁移代码) ----------------
 mustLive(DB_SCHEMA, 'sqliteTable("player_output_configs"', 1, "表名必须是 player_output_configs(batch49 由 player_rate_configs 改名)");
 mustLive(DB_SCHEMA, 'manualBits: integer("manual_bits")', 1, "schema 必须声明 manual_bits 列");
-mustLive(DB_INDEX, "manual_bits INTEGER NOT NULL DEFAULT 0", 1, "建表语句必须带 manual_bits 列(本仓无迁移框架,新列只能靠这里)");
-mustLive(DB_INDEX, "function migrateLegacyRateConfigs(", 1, "搬迁函数必须在位");
-// 调用点单独钉:只留定义 = 老库永不搬迁,而 CI 测试库是全新的、根本走不到这条分支。
-mustLive(DB_INDEX, "migrateLegacyRateConfigs();", 1, "搬迁必须被 initDatabase() **真的调用**(只留定义 = 老库升级后新列永不出现,保存位深必然 500)");
-mustLive(DB_INDEX, "INSERT OR IGNORE INTO player_output_configs", 1, "搬迁必须 INSERT OR IGNORE(新表已存在的行不能被老库数据覆盖)");
-mustLive(DB_INDEX, "DROP TABLE player_rate_configs;", 1, "搬迁完必须删老表(否则每次启动都重放,且老表永久残留)");
+mustLive(DB_INDEX, "manual_bits INTEGER NOT NULL DEFAULT 0", 1, "建表语句必须带 manual_bits 列(CREATE TABLE 即最终形态)");
+mustNotLive(DB_INDEX, "migrateLegacyRateConfigs", "迁移函数不得回流(v4.9.2 起无迁移代码,老库升级由部署侧手工补迁)");
+mustNotLive(DB_INDEX, "player_rate_configs", "旧表名不得回流(改名已完成且迁移已删)");
 
 // ---------------- 5) 旧标识符不得复活 ----------------
 // 改名后任何漏改的旧 drizzle 标识符都只在运行期炸(no such table)。
@@ -193,4 +189,4 @@ if (failures.length) {
   process.exit(1);
 }
 
-console.log("✅ 音频输出格式链路守卫通过:" + checks + " 条检查(只认非注释行) —— osf 接线与插入位置 / 源位深探测与缓存边界 / 表改名与老库搬迁 / flow 贯通 / 播放器页入口 全部在位");
+console.log("✅ 音频输出格式链路守卫通过:" + checks + " 条检查(只认非注释行) —— osf 接线与插入位置 / 源位深探测与缓存边界 / 表改名最终形态(无迁移代码) / flow 贯通 / 播放器页入口 全部在位");

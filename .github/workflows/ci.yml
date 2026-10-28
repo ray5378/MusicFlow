@@ -20,8 +20,8 @@ name: ci
 #      仓库内路径必须真实存在(路径搬家/文件拆分后最易静默失同步:D13 一次踩了 7 处)
 #  10. 音频输出格式链路守卫(scripts/check-audio-output-format.mjs)——采样率/位深的
 #      「配置 → ffmpeg 命令」接线:osf 插入位置(splice(lnIdx+1,…) 不能被改成 push)、
-#      源位深探测(自动档=跟随源)、player_rate_configs→player_output_configs 改名与
-#      老库搬迁(删了调用线 CI 全绿但线上老库永远缺 manual_bits 列)、flow 位深贯通、
+#      源位深探测(自动档=跟随源)、player_rate_configs→player_output_configs 改名最终形态
+#      (v4.9.2 起无迁移代码,搬迁函数与旧表名不得回流)、flow 位深贯通、
 #      以及「播放器」页的输出配置入口(用户实际报过的缺陷:控件做在「音频」页)
 #  11. 入库即入队守卫(scripts/check-import-trigger.mjs)——任何入库的网络歌曲都必须过
 #      一轮下载流程:导入层广播(importOnlineSongs)/启动挂载(注册制,不挂=永远不下载)/
