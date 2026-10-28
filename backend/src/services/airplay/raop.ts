@@ -747,8 +747,23 @@ export class RaopPlayer {
    *  的桥会话。ts 用 RECORD 协商的 startTs 起点(与真流时间线无关,真流 startTs
    *  由锚点重写);发完复位 started ⇒ 真·首包仍带 marker 位(libraop 语义);
    *  seq 连续不清零(设备侧重序缓冲按 seq 走)。仅实验用,缺省关闭。 */
-  primeSilence(count: number): void {
-    if (!this.audioSocket || this.destroying || count <= 0) return;
+  primeSilence(count: number, session?: RaopSession): boolean {
+    // ★ 端口必须在**本函数内**应用:connect()/doConnect 只把端口装进返回的
+    //   RaopSession,player 自身要到 stream()/streamBridge() 才写回。prime 在
+    //   connect 后立即调用时 serverAudioPort 仍为 0 ⇒ dgram 抛
+    //   "Port should be > 0 and < 65536. Received type number (0)",整段 prime 被吞
+    //   (240 实证 14:11:57 / 14:13:16)。这里与 stream() 同语义自行应用。
+    if (session?.audioPort) this.serverAudioPort = session.audioPort;
+    if (session?.controlPort) this.serverControlPort = session.controlPort;
+    if (count <= 0) return false;
+    if (!this.audioSocket || this.destroying) {
+      log.error(`prime silence skipped: audioSocket=${!!this.audioSocket} destroying=${this.destroying}`);
+      return false;
+    }
+    if (!Number.isFinite(this.serverAudioPort) || this.serverAudioPort <= 0 || this.serverAudioPort > 65535) {
+      log.error(`prime silence skipped: unresolved RTP target port=${this.serverAudioPort}(doConnect/RECORD 未完成?)`);
+      return false;
+    }
     const savedHead = this.headTs;
     const zeros = Buffer.alloc(CHUNK_LEN * 4);
     this.headTs = this.startTs >>> 0;
@@ -761,7 +776,8 @@ export class RaopPlayer {
       this.started = false; // 真·首包保留 marker 位
       this.positionSec = ts2ms((this.headTs - this.baseTs) >>> 0, this.opts.sampleRate) / 1000;
     }
-    log.info(`prime silence: ${count} chunks (MF_BRIDGE_RAOP_CONNECT_PRIME, no SYNC, marker reserved)`);
+    log.info(`prime silence: ${count} chunks -> ${this.opts.host}:${this.serverAudioPort} (MF_BRIDGE_RAOP_CONNECT_PRIME, no SYNC, marker reserved)`);
+    return true;
   }
 
   /** Send one ALAC chunk as an RTP audio packet. Returns false when stopped. */

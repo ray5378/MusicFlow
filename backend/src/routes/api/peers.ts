@@ -1,6 +1,7 @@
 // 自动生成 —— 由 index.ts 物理拆分而来（peers 域，35 条路由）。零逻辑改动。
 import type { Hono } from "hono";
 import { createLogger } from "../../utils/logger.js";
+import { isRecentlyBridgeSettledDlnaPeer, raopSuppressDlnaResetAfterBridge } from "../../services/airplay/bridgeSettleMarks.js";
 import {
   BusinessErrorCode,
   apiErrorStatus,
@@ -759,7 +760,12 @@ app.post("/v1/peers/:peerId/stop", async (c) => {
     getQueueController().stopPlayback(parsed.id);
     let transportError: string | null = null;
     try {
-      if (parsed.kind === "dlna") await stopDevice(parsed.id);
+      if (parsed.kind === "dlna" && raopSuppressDlnaResetAfterBridge() && isRecentlyBridgeSettledDlnaPeer(parsed.id)) {
+        // exp4(E3):该 DLNA peer 刚被桥 cold-settle(桥接管同 host AirPlay)。设备端
+        // Stop 会让固件输入仲裁把通路顶回 DLNA —— RTSP 活着、timing 照答,但音频不
+        // 渲染(240 实证:泵 125/s、loss=0、全程无声)。开关打开时只做服务端复位。
+        log.info("[transfer] 源端 DLNA 重置跳过设备命令(桥占用, MF_BRIDGE_RAOP_SUPPRESS_DLNA_RESET_AFTER_BRIDGE)");
+      } else if (parsed.kind === "dlna") await stopDevice(parsed.id);
       else await getQueueController().transport(parsed.id, "stop");
     } catch (e: any) {
       transportError = e?.message || String(e);
@@ -796,7 +802,12 @@ app.post("/v1/peers/:peerId/reset", async (c) => {
     getQueueController().stopPlayback(parsed.id);
     let transportError: string | null = null;
     try {
-      if (parsed.kind === "dlna") await stopDevice(parsed.id);
+      if (parsed.kind === "dlna" && raopSuppressDlnaResetAfterBridge() && isRecentlyBridgeSettledDlnaPeer(parsed.id)) {
+        // exp4(E3):该 DLNA peer 刚被桥 cold-settle(桥接管同 host AirPlay)。设备端
+        // Stop 会让固件输入仲裁把通路顶回 DLNA —— RTSP 活着、timing 照答,但音频不
+        // 渲染(240 实证:泵 125/s、loss=0、全程无声)。开关打开时只做服务端复位。
+        log.info("[transfer] 源端 DLNA 重置跳过设备命令(桥占用, MF_BRIDGE_RAOP_SUPPRESS_DLNA_RESET_AFTER_BRIDGE)");
+      } else if (parsed.kind === "dlna") await stopDevice(parsed.id);
       else await getQueueController().transport(parsed.id, "stop");
     } catch (e: any) {
       transportError = e?.message || String(e);

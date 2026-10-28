@@ -5,7 +5,7 @@
 // 这样「服务层抛错 → 路由 catch → 500」这条分支才可达 —— 真实环境里要它发生
 // 得让真设备掉线、真 ffmpeg 失败。
 import { Hono } from "hono";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../src/routes/api/shared.js", async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
@@ -24,6 +24,10 @@ vi.mock("../../src/services/group/index.js", async (importOriginal) => {
 });
 
 import { autoDetachedFromGroup, PlaybackState } from "../../src/routes/api/shared.js";
+import {
+  clearBridgeSettleMarks,
+  markBridgeSettledDlnaPeer,
+} from "../../src/services/airplay/bridgeSettleMarks.js";
 import { registerPeers } from "../../src/routes/api/peers.js";
 import {
   eventManager, fns, gm, groupService, pm, queueController, queueManager, resetPeersFakes,
@@ -656,6 +660,44 @@ describe("定时暂停", () => {
 });
 
 // ==================== 传输控制 play / pause / stop ====================
+
+describe("exp4(E3):桥 settle 后源端 DLNA 重置跳过设备命令", () => {
+  afterEach(() => {
+    delete process.env.MF_BRIDGE_RAOP_SUPPRESS_DLNA_RESET_AFTER_BRIDGE;
+    clearBridgeSettleMarks();
+  });
+
+  it("/stop dlna 命中标记 + 开关 ⇒ 不下发设备 stop,队列照停", async () => {
+    process.env.MF_BRIDGE_RAOP_SUPPRESS_DLNA_RESET_AFTER_BRIDGE = "1";
+    markBridgeSettledDlnaPeer("dev1", "ap-1");
+    const b = await json(await post("/v1/peers/dlna:dev1/stop"));
+    expect(b).toEqual({ success: true });
+    expect(fns.stopDevice).not.toHaveBeenCalled();
+    expect(queueController.stopPlayback).toHaveBeenCalledWith("dev1");
+  });
+
+  it("/reset dlna 命中标记 + 开关 ⇒ 不下发设备 stop,队列清空照做", async () => {
+    process.env.MF_BRIDGE_RAOP_SUPPRESS_DLNA_RESET_AFTER_BRIDGE = "1";
+    markBridgeSettledDlnaPeer("dev1", "ap-1");
+    const b = await json(await post("/v1/peers/dlna:dev1/reset"));
+    expect(b).toEqual({ success: true });
+    expect(fns.stopDevice).not.toHaveBeenCalled();
+    expect(queueController.stopPlayback).toHaveBeenCalledWith("dev1");
+    expect(queueController.clear).toHaveBeenCalledWith("dev1");
+  });
+
+  it("开关关闭时即使命中标记也照发设备 stop(缺省行为不变)", async () => {
+    markBridgeSettledDlnaPeer("dev1", "ap-1");
+    await json(await post("/v1/peers/dlna:dev1/stop"));
+    expect(fns.stopDevice).toHaveBeenCalledWith("dev1");
+  });
+
+  it("开关打开但无标记(非桥 settle 的普通 dlna)⇒ 照发设备 stop", async () => {
+    process.env.MF_BRIDGE_RAOP_SUPPRESS_DLNA_RESET_AFTER_BRIDGE = "1";
+    await json(await post("/v1/peers/dlna:dev1/stop"));
+    expect(fns.stopDevice).toHaveBeenCalledWith("dev1");
+  });
+});
 
 describe("传输控制 play / pause / stop", () => {
   it("四种 kind 各自的链路被调到", async () => {

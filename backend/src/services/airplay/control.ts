@@ -21,6 +21,7 @@ import { rpcFireAndForget } from "../rendererHost/front.js";
 import { getAirPlayDevice, getAirPlayDevices, onAirPlayEvent, startAirPlayDiscovery, stopAirPlayDiscovery, setAirPlayPersist, removeAirPlayDevice, type AirPlayDevice } from "./discovery.js";
 import { getBridgeAvShiftUs } from "./bridgeCalib.js";
 import { getEffectiveBaseUrl, getCachedDevices, setDeviceVolume, setDeviceMute, stopDevicePlayback, loopbackBase } from "../dlna/control.js";
+import { markBridgeSettledDlnaPeer } from "./bridgeSettleMarks.js";
 import { sqlite } from "../../db/index.js";
 import { createAirPlaySession } from "./session.js";
 import type { AirplaySessionEndInfo } from "./sessionRuntime.js";
@@ -349,6 +350,10 @@ export async function bridgePrepareDevice(
     if (peer && !peerIsFellowMember) {
       const t = Date.now();
       await yieldSiblingDlnaForAirPlay(deviceId);
+      // exp4(E3):settle **成功之后**才写标记 —— 这张表直接决定 reset/stop 是否跳过
+      // 设备命令;提前写会把 settle 自己(靠 Stop 让位)也跳掉。TTL 20s 覆盖桥建立→
+      // 卡片 resetPeer 的交互窗口。
+      markBridgeSettledDlnaPeer(peer, deviceId);
       log.info(`[bridge-prepare] 同 host DLNA settle 完成,开始建桥会话`, { deviceId, dlnaPeer: peer, ms: Date.now() - t });
     }
   }

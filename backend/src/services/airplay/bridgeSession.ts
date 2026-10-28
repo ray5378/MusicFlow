@@ -643,8 +643,9 @@ export class BridgeSession {
     this.connected = true;
     pushInitialVolume(player, this.opts.deviceId, this.opts.initialVolume, this.opts.sameHostDlnaPeer);
     // exp4:RECORD 后立即灌静音(缺省关闭)—— 把「设备见到 RTP 流」压到 solo 量级。
+    // 必须传 session:端口在这里才被 apply,否则 sendto 目标端口=0(见 primeSilence 注释)。
     if (raopBridgeConnectPrimeEnabled()) {
-      try { player.primeSilence(RAOP_CONNECT_PRIME_CHUNKS); } catch (e: any) { log.warn(`prime silence failed: ${e?.message || e}`); }
+      try { player.primeSilence(RAOP_CONNECT_PRIME_CHUNKS, session); } catch (e: any) { log.error(`prime silence failed: ${e?.message || e}`); }
     }
     // 首帧可能早于 connect 完成 —— 连接就绪后立即补判起流。
     void this.maybeBeginStream();
@@ -1051,7 +1052,7 @@ export class BridgeSession {
       log.info(`[airplay-bridge] raop reconnected: device=${this.deviceId}(新 RECORD,等待新代次首帧重锚)`);
       pushInitialVolume(player, this.deviceId, this.opts.initialVolume, this.opts.sameHostDlnaPeer);
       if (raopBridgeConnectPrimeEnabled()) {
-        try { player.primeSilence(RAOP_CONNECT_PRIME_CHUNKS); } catch { /* 实验功能失败不挡重连 */ }
+        try { player.primeSilence(RAOP_CONNECT_PRIME_CHUNKS, session); } catch (e: any) { log.error(`prime silence failed(reconnect): ${e?.message || e}`); }
       }
       try { oldPlayer?.forceClose(); } catch { /* ignore */ }
     } catch (e) {

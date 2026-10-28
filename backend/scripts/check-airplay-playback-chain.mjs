@@ -1077,6 +1077,13 @@ console.log("===== exp4:桥 RECORD→首包 solo 语义对齐实验开关(缺省
     "同 host DLNA 判据回到了子进程自查(E1 空转根因),或载荷链路断裂",
   );
   check(
+    "exp4(E3):桥 settle 标记只在 settle 成功后写 + reset/stop 消费(开关缺省关)",
+    /MF_BRIDGE_RAOP_SUPPRESS_DLNA_RESET_AFTER_BRIDGE/.test(stripComments(read("backend/src/services/airplay/bridgeSettleMarks.ts")))
+      && /yieldSiblingDlnaForAirPlay\(deviceId\);[\s\S]{0,300}markBridgeSettledDlnaPeer\(peer, deviceId\)/.test(stripComments(read("backend/src/services/airplay/control.ts")))
+      && /isRecentlyBridgeSettledDlnaPeer\(parsed\.id\)/.test(stripComments(read("backend/src/routes/api/peers.ts"))),
+    "E3 标记写入点必须晚于 settle(提前写会跳过 settle 自己的 Stop),或 reset/stop 消费点缺失",
+  );
+  check(
     "exp4:首 SYNC now 语义开关在 streamBridge 首包路径(MF_BRIDGE_RAOP_FIRST_SYNC_NOW)",
     /MF_BRIDGE_RAOP_FIRST_SYNC_NOW/.test(raopG)
       && /raopBridgeFirstSyncNowEnabled\(\)\) \{[\s\S]{0,80}this\.startNtp = ntpNow\(\)/.test(raopG),
@@ -1085,10 +1092,16 @@ console.log("===== exp4:桥 RECORD→首包 solo 语义对齐实验开关(缺省
   check(
     "exp4:RECORD 后静音灌注 prime(MF_BRIDGE_RAOP_CONNECT_PRIME,真·首包保留 marker)",
     /MF_BRIDGE_RAOP_CONNECT_PRIME/.test(raopG)
-      && /primeSilence\(count: number\)/.test(raopG)
+      && /primeSilence\(count: number, session\?: RaopSession\)/.test(raopG)
       && /this\.started = false/.test(raopG)
       && /raopBridgeConnectPrimeEnabled\(\)/.test(bsG),
     "prime 静音灌注缺失或未复位 marker",
+  );
+  check(
+    "exp4:prime 必须在 connect 之后且带 session(端口 0 会整段被吞,240 实证)",
+    /session = await player\.connect\(\);[\s\S]{0,700}primeSilence\(RAOP_CONNECT_PRIME_CHUNKS, session\)/.test(bsG)
+      && /unresolved RTP target port/.test(raopG),
+    "prime 调用点早于 connect/未传 session —— dgram 目标端口=0 会静默吞掉",
   );
 }
 
