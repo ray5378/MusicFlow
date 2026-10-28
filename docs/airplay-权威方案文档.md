@@ -1570,6 +1570,7 @@ routes/api/groups.ts:129  PUT /v1/groups/:id/delays  {memberId, ms}
 
 | # | 变更 | 现状(代码为准) | 位置 |
 |---|------|------------------|------|
+> **exp2 追记(2026-10-28)**:真机实测 now 锚(偏移 0)下设备抖动缓冲≈0 → 「秒级循环卡顿」。forceNow 锚改为 (缺省 400ms=设备抖动缓冲;非法值回退;显式 0=回到到包即播;应 <L+SAFETY 1050ms 保首包立即发)。对齐器零点仍取首帧 tsUs;WARN 日志带偏移量。
 | C-1 | planBridgeAnchor forceNow 分支 | `forceNow: true` ⇒ anchorUs = now(+anchorShiftUs),跳过可达性检查,首包 sendAt(0) = now−L−SAFETY ≤ now ⇒ 立即发;commandedLeadUs=0;锚点四字段照常产出(SYNC 把音频标到「现在」,设备到包即播) | bridgeSession.ts planBridgeAnchor |
 | C-2 | 对齐器零点重锚(关键) | forceNow 时 BridgeTimelineAligner 零点取**首帧 tsUs**(内容序)而非 plan.anchorUs(=now):否则泵 lead 段 target−pos ≈ +2.3s > 2s 补静音上限 ⇒ skip 跳段把 startTs 前移,RTP 重新标回未来,now 锚失效(定向测试 bridgeSessionForceNow 钉住两侧行为) | bridgeSession.ts maybeBeginStream |
 | C-3 | env 开关 | raopNowAnchorEnabled():未设置=ON,0/false=关闭;仅 RAOP 出口透传(`this.ap2Session === null && …`),AP2 出口路径零改动 | bridgeSession.ts |

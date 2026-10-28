@@ -218,6 +218,16 @@ export interface BridgeAnchorPlan {
  *  - 不可达:A = max(now + warmLead, 首帧 tsUs) —— 桥会话刚完成 RECORD,按热启 lead 重锚,
  *    更早的内容(含首帧)由对齐器按 drop 出清,绝不硬塞。
  *  - 群延迟补偿仅重采样路径(48k 直通 resampled=false ⇒ A′ = A)。 */
+/** exp2:now 锚前向偏移(ms→µs)。缺省 400 = 设备抖动缓冲深度 —— 偏移为 0 时
+ *  RTP 时间线=到包即播,设备缓冲≈0,任何网络抖动直接饿流(240 真机「秒级循环
+ *  卡顿」,周期 ≈ L=1s)。非法值回退默认;显式 0 = 回到无偏移的到包即播。
+ *  ⚠️ offset 应 < L+SAFETY(44100 下 1050ms):超过则 sendAt(0) 落到未来,首包不再立即发。 */
+export function raopNowAnchorOffsetUs(): bigint {
+  const v = Number(process.env.MF_BRIDGE_RAOP_NOW_ANCHOR_OFFSET_MS);
+  const ms = Number.isFinite(v) && v >= 0 ? v : 400;
+  return BigInt(Math.round(ms * 1000));
+}
+
 /** E2 实验:RAOP 出口 now 锚开关(MF_BRIDGE_RAOP_NOW_ANCHOR)。
  *  缺省(未设置)= ON;显式 0/false = 关闭回旧路径(未来锚)。
  *  仅作用于 RAOP 出口成员;AP2 出口(maybeBeginStream)不透传 forceNow。 */
@@ -252,7 +262,9 @@ export function planBridgeAnchor(opts: {
     // 路径 now 锚可出声)。now 锚下首包立即发;泵 lead 段相对组时间线提前播;
     // 对齐器以首帧 tsUs 为零点(见 maybeBeginStream)保持内容连续 —— 绝不触发
     // skip 跳段时间线(skip 会把 RTP 重新标回未来,等于没修)。
-    anchorUs = opts.nowUs + BigInt(opts.anchorShiftUs ?? 0);
+    // exp2:+ raopNowAnchorOffsetUs()(缺省 400ms)—— 设备抖动缓冲深度;
+    // 对齐器零点仍取首帧 tsUs(见 maybeBeginStream),lead≈offset ≪ 2s 补静音上限。
+    anchorUs = opts.nowUs + BigInt(opts.anchorShiftUs ?? 0) + raopNowAnchorOffsetUs();
   } else if (anchorUs - lUs - safetyUs < opts.nowUs) {
     const floorUs = opts.nowUs + warmUs;
     if (floorUs > anchorUs) {
@@ -812,7 +824,7 @@ export class BridgeSession {
     // 修 warm-reuse 会话跨 gen 累积导致的恒偏谬值(240 实证 35.68s)。
     this.chunksOutAtPlan = this.stats.chunksOut;
     if (plan.forceNow) {
-      log.warn(`[airplay-bridge] forceNow anchor (MF_BRIDGE_RAOP_NOW_ANCHOR): device=${this.deviceId} anchorUs=now 首包即发(组 lead 内容提前播,E2 实验)`);
+      log.warn(`[airplay-bridge] forceNow anchor (MF_BRIDGE_RAOP_NOW_ANCHOR): device=${this.deviceId} anchorUs=now+${Number(raopNowAnchorOffsetUs())}µs 首包即发(E2/exp2,组 lead 内容按偏移提前播)`);
     }
     // forceNow:对齐器零点取首帧 tsUs(内容序)而非 plan.anchorUs(=now)——
     // 否则泵 lead 段 target−pos ≈ +2.3s > 2s 补静音上限 ⇒ 走 skip 跳段时间线,

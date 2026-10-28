@@ -9,6 +9,7 @@ import {
   BridgeTimelineAligner,
   planBridgeAnchor,
   raopNowAnchorEnabled,
+  raopNowAnchorOffsetUs,
 } from "../../src/services/airplay/bridgeSession.js";
 import { ntpToHostUs } from "../../src/utils/hostClock.js";
 
@@ -44,7 +45,7 @@ describe("raopNowAnchorEnabled(env 开关)", () => {
 });
 
 describe("planBridgeAnchor.forceNow(now 锚)", () => {
-  it("anchorUs = now,首包可达(commandedLeadUs = 0)", () => {
+  it("anchorUs = now+缺省偏移 400ms,首包可达(commandedLeadUs = 400000;offset<L+SAFETY ⇒ sendAt(0) 仍在过去)", () => {
     const plan = planBridgeAnchor({
       firstFrameTsUs: FIRST_FRAME,
       latencyFrames: 44100,
@@ -54,8 +55,8 @@ describe("planBridgeAnchor.forceNow(now 锚)", () => {
       forceNow: true,
     });
     expect(plan.forceNow).toBe(true);
-    expect(plan.anchorUs).toBe(NOW);
-    expect(plan.commandedLeadUs).toBe(0n);
+    expect(plan.anchorUs).toBe(NOW + 400_000n);
+    expect(plan.commandedLeadUs).toBe(400_000n);
     // forceNow 不是可达性重锚:reAnchored 保持 false
     expect(plan.reAnchored).toBe(false);
   });
@@ -70,10 +71,10 @@ describe("planBridgeAnchor.forceNow(now 锚)", () => {
       anchorShiftUs: 150_000,
       forceNow: true,
     });
-    expect(plan.anchorUs).toBe(NOW + 150_000n);
+    expect(plan.anchorUs).toBe(NOW + 150_000n + 400_000n);
   });
 
-  it("now 锚的 SYNC 映射 = 「音频现在开始」:startNtp = ntp(now + 群延迟 − L)", () => {
+  it("now 锚的 SYNC 映射 = 「音频 now+偏移 开始」:startNtp = ntp(now+offset+群延迟 − L)", () => {
     const plan = planBridgeAnchor({
       firstFrameTsUs: FIRST_FRAME,
       latencyFrames: 44100,
@@ -85,7 +86,7 @@ describe("planBridgeAnchor.forceNow(now 锚)", () => {
     // A′ = anchorUs + 0.3627ms(重采样群延迟,44100 下取整 363µs);
     // ntpToHostUs 往返截断误差 ≤1µs(hostClock.ts 文档口径),容差 1。
     const gdUs = Math.round((16 / RATE) * 1e6);
-    const expectUs = NOW + BigInt(gdUs) - 1_000_000n;
+    const expectUs = NOW + 400_000n + BigInt(gdUs) - 1_000_000n;
     const gotUs = ntpToHostUs(plan.anchors.startNtp);
     expect(Number(expectUs - gotUs)).toBeLessThanOrEqual(1);
     expect(Number(expectUs - gotUs)).toBeGreaterThanOrEqual(0);
@@ -131,5 +132,53 @@ describe("forceNow 对齐器零点语义(为何取首帧 tsUs 而非 plan.anchor
     const aligner = new BridgeTimelineAligner(NOW, RATE);
     const act = aligner.onFrame(FIRST_FRAME);
     expect(act.skipFrames).toBeGreaterThan(0);
+  });
+});
+
+describe("raopNowAnchorOffsetUs(exp2 偏移)", () => {
+  const KEY = "MF_BRIDGE_RAOP_NOW_ANCHOR_OFFSET_MS";
+  let saved: string | undefined;
+  beforeEach(() => {
+    saved = process.env[KEY];
+    delete process.env[KEY];
+  });
+  afterEach(() => {
+    if (saved === undefined) delete process.env[KEY];
+    else process.env[KEY] = saved;
+  });
+
+  it("缺省(未设置)= 400ms", () => {
+    expect(raopNowAnchorOffsetUs()).toBe(400_000n);
+  });
+  it("显式数值生效(800 → 800ms)", () => {
+    process.env[KEY] = "800";
+    const plan = planBridgeAnchor({
+      firstFrameTsUs: FIRST_FRAME,
+      latencyFrames: 44100,
+      rate: RATE,
+      resampled: true,
+      nowUs: NOW,
+      forceNow: true,
+    });
+    expect(plan.anchorUs).toBe(NOW + 800_000n);
+  });
+  it("非法值(abc / 负数)回退默认 400", () => {
+    process.env[KEY] = "abc";
+    expect(raopNowAnchorOffsetUs()).toBe(400_000n);
+    process.env[KEY] = "-5";
+    expect(raopNowAnchorOffsetUs()).toBe(400_000n);
+  });
+  it("显式 0 = 回到无偏移的到包即播", () => {
+    process.env[KEY] = "0";
+    expect(raopNowAnchorOffsetUs()).toBe(0n);
+    const plan = planBridgeAnchor({
+      firstFrameTsUs: FIRST_FRAME,
+      latencyFrames: 44100,
+      rate: RATE,
+      resampled: true,
+      nowUs: NOW,
+      forceNow: true,
+    });
+    expect(plan.anchorUs).toBe(NOW);
   });
 });
