@@ -683,10 +683,12 @@ describe("exp4(E3):桥 settle 后源端 DLNA 重置跳过设备命令", () => {
     expect(b).toEqual({ success: true });
     expect(fns.stopDevice).not.toHaveBeenCalled();
     expect(queueController.stopPlayback).toHaveBeenCalledWith("dev1");
-    expect(queueController.clear).toHaveBeenCalledWith("dev1");
+    // E3 固化(2026-10-28 缺省开启):clear 必须带 opts 才不向设备下发 Stop。
+    expect(queueController.clear).toHaveBeenCalledWith("dev1", { skipDeviceStop: true });
   });
 
-  it("开关关闭时即使命中标记也照发设备 stop(缺省行为不变)", async () => {
+  it("kill-switch 关闭(env=0)时即使命中标记也照发设备 stop", async () => {
+    process.env.MF_BRIDGE_RAOP_SUPPRESS_DLNA_RESET_AFTER_BRIDGE = "0";
     markBridgeSettledDlnaPeer("dev1", "ap-1");
     await json(await post("/v1/peers/dlna:dev1/stop"));
     expect(fns.stopDevice).toHaveBeenCalledWith("dev1");
@@ -994,11 +996,11 @@ describe("POST /v1/peers/:peerId/reset", () => {
     await post("/v1/peers/dlna:dev1/reset");
     expect(queueController.stopPlayback).toHaveBeenCalledWith("dev1");
     expect(fns.stopDevice).toHaveBeenCalledWith("dev1");
-    expect(queueController.clear).toHaveBeenCalledWith("dev1");
+    expect(queueController.clear).toHaveBeenCalledWith("dev1", { skipDeviceStop: false });
     resetPeersFakes();
     await post("/v1/peers/sendspin:sc1/reset");
     expect(queueController.transport).toHaveBeenCalledWith("sc1", "stop");
-    expect(queueController.clear).toHaveBeenCalledWith("sc1");
+    expect(queueController.clear).toHaveBeenCalledWith("sc1", { skipDeviceStop: false });
   });
 
   it("local 端:清队列元数据 + 丢弃状态上报(否则 /status 仍叠加旧 state)", async () => {
@@ -1015,7 +1017,7 @@ describe("POST /v1/peers/:peerId/reset", () => {
     const b = await json(await post("/v1/peers/dlna:dev1/reset"));
     expect(b.success).toBe(true);
     expect(String(b.transportError || "")).toContain("停止失败");
-    expect(queueController.clear).toHaveBeenCalledWith("dev1");
+    expect(queueController.clear).toHaveBeenCalledWith("dev1", { skipDeviceStop: false });
   });
 
   it("peerId 非法 → 400", async () => {
