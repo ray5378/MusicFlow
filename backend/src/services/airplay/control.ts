@@ -334,8 +334,11 @@ export async function bridgePrepareDevice(
   // → ③wasActive 时轮询 GetTransportInfo 到 STOPPED + 300ms 宽限再放行建会话。
   // warm 复用(settleDlna=false,编排侧按「同 token 沿用」判定传入)不等待;
   // 同组的历史遗留 DLNA 成员不 settle —— 组自己正要让它出流,settle 等于自杀。
+  // exp4:同 host DLNA renderer 判定**必须在主进程做**(子进程注册表恒空)——
+  // 结果随 bridgePrepare 载荷下发,桥侧 pushInitialVolume 据此走 Linkplay 豁免。
+  const dlnaPeer = dlnaPeerOfAirPlay(deviceId);
   if (opts?.settleDlna !== false) {
-    const peer = dlnaPeerOfAirPlay(deviceId);
+    const peer = dlnaPeer;
     let peerIsFellowMember = false;
     if (peer && groupId) {
       try {
@@ -368,6 +371,8 @@ export async function bridgePrepareDevice(
     anchorShiftUs: 0,
     // v4.9.3(§音量语义):桥会话初始音量(0-100,player_groups 落库值);子进程不碰 DB。
     initialVolume: opts?.initialVolume,
+    // exp4:同 host DLNA renderer(主进程判定;undefined = 无,Linkplay 豁免不生效)。
+    sameHostDlnaPeer: dlnaPeer,
     // AP2 realtime:建链载荷(controllerId + 已切分凭据)。**只在协议确为 AP2 时下发** ——
     // RAOP 载荷逐字节不变(未配对导致 undefined 时桥侧按「AP2 载荷缺失」快速失败,
     // 主进程按 MAJ-07 回落该设备本流 solo cast,不会静默无声)。

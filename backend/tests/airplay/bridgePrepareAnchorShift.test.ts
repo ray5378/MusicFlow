@@ -12,6 +12,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const h = vi.hoisted(() => {
   const devices: Record<string, any> = {};
+  const dlnaDevices: Array<{ id: string; location: string; renderingControlUrl?: string }> = [];
   const rpcCalls: Array<{ method: string; payload: any }> = [];
   const state = {
     rpcResult: null as any,
@@ -21,7 +22,7 @@ const h = vi.hoisted(() => {
     groupShift: new Map<string, number>(),
     group2Shift: new Map<string, number>(),
   };
-  return { devices, rpcCalls, state };
+  return { devices, dlnaDevices, rpcCalls, state };
 });
 
 vi.mock("../../src/services/airplay/discovery.js", () => ({
@@ -44,6 +45,17 @@ vi.mock("../../src/services/airplay/supervisor.js", () => ({
       return h.state.rpcResult;
     },
   },
+}));
+
+// exp4:control.ts 的 dlnaPeerOfAirPlay 走 dlna/control.getCachedDevices ——
+// 默认空表(等价于现状),用例按需填同 host renderer 验证 payload 透传。
+vi.mock("../../src/services/dlna/control.js", () => ({
+  getCachedDevices: () => h.dlnaDevices,
+  getEffectiveBaseUrl: () => "",
+  setDeviceVolume: async () => {},
+  setDeviceMute: async () => {},
+  stopDevicePlayback: async () => {},
+  loopbackBase: () => "",
 }));
 
 vi.mock("../../src/services/airplay/bridgeCalib.js", () => ({
@@ -99,6 +111,27 @@ describe("bridgePrepareDevice:anchorShiftUs 必须恒 0(补偿唯一落点=投�
     await bridgePrepareDevice("a1", "t3", "raop"); // 无组上下文
     await bridgePrepareDevice("a1", "t4", "raop", "g2"); // 负值格
     for (const c of h.rpcCalls) expect(c.payload.anchorShiftUs).toBe(0);
+  });
+});
+
+describe("bridgePrepareDevice:exp4 同 host DLNA renderer 载荷透传", () => {
+  it("同 host 有 DLNA renderer ⇒ payload.sameHostDlnaPeer = 该 renderer id(优先带 RenderingControl)", async () => {
+    h.dlnaDevices.push(
+      { id: "no-rc", location: "http://192.168.1.20:49152/desc.xml" },
+      { id: "with-rc", location: "http://192.168.1.20:49153/desc.xml", renderingControlUrl: "http://192.168.1.20:49153/rc" },
+      { id: "other-host", location: "http://192.168.1.99:49152/desc.xml", renderingControlUrl: "http://192.168.1.99:49152/rc" },
+    );
+    try {
+      await bridgePrepareDevice("a1", "t-peer", "raop", "g1", { settleDlna: false });
+      expect(h.rpcCalls[0].payload.sameHostDlnaPeer).toBe("with-rc");
+    } finally {
+      h.dlnaDevices.length = 0;
+    }
+  });
+
+  it("无同 host DLNA ⇒ payload.sameHostDlnaPeer = undefined(桥侧豁免不生效,照发 SET_PARAMETER)", async () => {
+    await bridgePrepareDevice("a1", "t-none", "raop", "g1", { settleDlna: false });
+    expect(h.rpcCalls[0].payload.sameHostDlnaPeer).toBeUndefined();
   });
 });
 

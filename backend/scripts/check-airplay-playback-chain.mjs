@@ -1064,8 +1064,17 @@ console.log("===== exp4:桥 RECORD→首包 solo 语义对齐实验开关(缺省
   check(
     "exp4:同 host DLNA 豁免开关(MF_BRIDGE_RAOP_SKIP_VOLUME_WITH_DLNA_PEER,solo 对齐)",
     /MF_BRIDGE_RAOP_SKIP_VOLUME_WITH_DLNA_PEER/.test(bsG)
-      && /raopSkipVolumeWithDlnaPeer\(\) && bridgeDlnaPeerOfAirPlay\(deviceId\)/.test(bsG),
+      && /raopSkipVolumeWithDlnaPeer\(\) && sameHostDlnaPeer/.test(bsG)
+      && /shouldSkipBridgeInitialVolume\(sameHostDlnaPeer\?: string\)/.test(bsG),
     "桥对 Linkplay 的 SET_PARAMETER 豁免实验开关缺失",
+  );
+  check(
+    "exp4:豁免判据必须来自主进程载荷(桥侧禁止自查注册表——子进程两表恒空)",
+    !/bridgeDlnaPeerOfAirPlay/.test(bsG)
+      && /sameHostDlnaPeer: dlnaPeer,/.test(stripComments(read("backend/src/services/airplay/control.ts")))
+      && /sameHostDlnaPeer\?: string;/.test(stripComments(read("backend/src/services/airplay/ipcProtocol.ts")))
+      && /sameHostDlnaPeer,/.test(stripComments(read("backend/src/services/airplay/childMain.ts"))),
+    "同 host DLNA 判据回到了子进程自查(E1 空转根因),或载荷链路断裂",
   );
   check(
     "exp4:首 SYNC now 语义开关在 streamBridge 首包路径(MF_BRIDGE_RAOP_FIRST_SYNC_NOW)",

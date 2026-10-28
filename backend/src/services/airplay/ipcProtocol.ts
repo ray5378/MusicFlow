@@ -72,6 +72,12 @@ export interface BridgePrepareArgs {
   /** v4.9.3(§音量语义):桥会话初始音量(0-100,player_groups 落库值,主进程算好)。
    *  undefined = 无组上下文,桥侧回落设备落库值(旧行为)。 */
   initialVolume?: number;
+  /** v4.9.4-exp4:同 host DLNA renderer id(主进程 dlnaPeerOfAirPlay 判定后下发)。
+   *  ⚠️ 子进程**不得**自查注册表 —— airplay discovery 的 devices 与 DLNA
+   *  cachedDevices 都在主进程,子进程里两张表恒空(240 实证:E1 开了
+   *  SKIP_VOLUME_WITH_DLNA_PEER 仍照发 SET_PARAMETER)。pushInitialVolume 的
+   *  Linkplay(RAOP 忽略 SET_PARAMETER)豁免唯一依据。 */
+  sameHostDlnaPeer?: string;
 }
 
 /** bridgePrepare 返回。Phase 3:桥会话已对设备完成 RTSP 握手(或 dry 模式仅 listener);
