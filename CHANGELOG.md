@@ -2,6 +2,16 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.9.2] - 2026-10-28
+
+### Cleanup / 删除全部数据库迁移代码，CREATE TABLE 升为最终形态
+
+- **删了什么**：`db/index.ts` 全部迁移代码——tag_repair_done 补 platform/outcome、airplay_devices 补 hap_credentials、sendspin_device_state 补 hostname、player_groups 补 member_delays_json / DROP 旧三格列 / DROP track_switch_lead_ms / 补 mixed_anchor_lead_ms 共 6 块，以及 batch49 的 `migrateLegacyRateConfigs()`（player_rate_configs → player_output_configs 一次性数据搬迁，生产库已确认无 legacy 表）。`initDatabase` 现在只有 CREATE TABLE IF NOT EXISTS + 种子数据。
+- **新装与已迁移库列级一致**：player_groups 的 member_delays_json / mixed_anchor_lead_ms 已并入 CREATE TABLE；一致性由新增 `tests/db/freshInstallSchema.test.ts` 钉住（新建库四表列集 == 240 生产库 2026-10-28 只读实录）。
+- **⚠️ 旧版本 DB 备份恢复前需手工补列**（v4.9.2 起启动不再自动迁移）：player_groups 缺 `member_delays_json TEXT NOT NULL DEFAULT '{}'` / `mixed_anchor_lead_ms INTEGER`，airplay_devices 缺 `hap_credentials TEXT NOT NULL DEFAULT ''`，sendspin_device_state 缺 `hostname TEXT NOT NULL DEFAULT ''`，tag_repair_done 缺 `platform TEXT` / `outcome TEXT`；v4.8.x 之前的库另有旧三格列 / track_switch_lead_ms 需手工 DROP。
+- **守卫**：G19-e 改写为「新装一致性钉」——CREATE TABLE 必须含两列 + 全文件禁 `ALTER TABLE` / `PRAGMA table_info`（迁移代码不许回来），总断言数不变（83）。
+- **测试**：删 `tests/db/legacyRateMigration.test.ts`（随搬迁代码移除）；mixedAnchorLead 用例改写为新装一致性断言。
+
 ## [4.9.1] - 2026-10-28
 
 ### Cleanup / 删除切歌垫片组值手动口(trackLeadMs)，垫片动态自动挡不变
