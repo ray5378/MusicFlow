@@ -266,8 +266,21 @@ export interface BridgeAnchorPlan {
  *  - 群延迟补偿仅重采样路径(48k 直通 resampled=false ⇒ A′ = A)。 */
 /** exp2:now 锚前向偏移(ms→µs)。缺省 400 = 设备抖动缓冲深度 —— 偏移为 0 时
  *  RTP 时间线=到包即播,设备缓冲≈0,任何网络抖动直接饿流(240 真机「秒级循环
- *  卡顿」,周期 ≈ L=1s)。非法值回退默认;显式 0 = 回到无偏移的到包即播。
- *  ⚠️ offset 应 < L+SAFETY(44100 下 1050ms):超过则 sendAt(0) 落到未来,首包不再立即发。 */
+ *  卡顿」,周期 ≈ L=1s)。非法值回退默认。
+ *
+ *  ⚠️⚠️ 方向修正(2026-10-29,原注释写反了):offset 应 **≥** L+SAFETY,不是 <。
+ *  节拍 sendAt = A′ − L − SAFETY,而 now 锚 A′ = now + offset:
+ *    - offset **<** L+SAFETY ⇒ sendAt(0) 落到**过去**,首包即欠账 (L+SAFETY−offset)。
+ *      该欠账是**常量**:后续每包同额落后,又够不着 BRIDGE_RESUME_REBASE_US(2s)
+ *      ⇒ pacing rebase 永不触发 ⇒ 整首歌每包都「迟到追发」(latePackets≈100%),
+ *      设备有效缓冲被砍到只剩 offset。空档 > offset 即欠载。
+ *      (240 实证:offset=400/L=1s ⇒ 首包欠账 655ms、latePackets 34857/34859、
+ *       设备缓冲仅 400ms;maxGap 1005ms / 切歌饥饿 2.6~3.0s 一来,
+ *       HiVi(MUZO)固件欠载播静音且不自动重缓冲 —— 「播放中死掉后再不出声」。)
+ *    - offset **≥** L+SAFETY ⇒ sendAt(0) 在未来(或恰为 now)。首包仍是**立即发**
+ *      (offset 恰等于 L+SAFETY 时 sendAt(0)=now,零等待),只是可听时刻相应后移;
+ *      设备拿满 L+SAFETY 缓冲。落未来不是问题,落过去才是。
+ *  下限由 planBridgeAnchor 强制(此处无法得知 L);env 只可上调不可下调。 */
 export function raopNowAnchorOffsetUs(): bigint {
   const v = Number(process.env.MF_BRIDGE_RAOP_NOW_ANCHOR_OFFSET_MS);
   const ms = Number.isFinite(v) && v >= 0 ? v : 400;
@@ -310,7 +323,13 @@ export function planBridgeAnchor(opts: {
     // skip 跳段时间线(skip 会把 RTP 重新标回未来,等于没修)。
     // exp2:+ raopNowAnchorOffsetUs()(缺省 400ms)—— 设备抖动缓冲深度;
     // 对齐器零点仍取首帧 tsUs(见 maybeBeginStream),lead≈offset ≪ 2s 补静音上限。
-    anchorUs = opts.nowUs + BigInt(opts.anchorShiftUs ?? 0) + raopNowAnchorOffsetUs();
+    // exp6(2026-10-29):offset 下限钳到 lUs+safetyUs —— sendAt(0) 绝不能落到过去,
+    // 否则首包即欠账且该欠账够不着 rebase 阈值,整首歌带着欠账跑(见函数头注释)。
+    // env 仍可上调(想要更深缓冲时);下调被拒绝,逃生门是关掉 forceNow 本身。
+    const wantLeadUs = raopNowAnchorOffsetUs();
+    const floorLeadUs = lUs + safetyUs;
+    const leadUs = wantLeadUs > floorLeadUs ? wantLeadUs : floorLeadUs;
+    anchorUs = opts.nowUs + BigInt(opts.anchorShiftUs ?? 0) + leadUs;
   } else if (anchorUs - lUs - safetyUs < opts.nowUs) {
     const floorUs = opts.nowUs + warmUs;
     if (floorUs > anchorUs) {

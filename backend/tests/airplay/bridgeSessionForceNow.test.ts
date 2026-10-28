@@ -45,7 +45,7 @@ describe("raopNowAnchorEnabled(env 开关)", () => {
 });
 
 describe("planBridgeAnchor.forceNow(now 锚)", () => {
-  it("anchorUs = now+缺省偏移 400ms,首包可达(commandedLeadUs = 400000;offset<L+SAFETY ⇒ sendAt(0) 仍在过去)", () => {
+  it("anchorUs = now+下限(L+SAFETY=1050ms):缺省 offset 400 被钳上来,sendAt(0) 不落到过去", () => {
     const plan = planBridgeAnchor({
       firstFrameTsUs: FIRST_FRAME,
       latencyFrames: 44100,
@@ -55,8 +55,12 @@ describe("planBridgeAnchor.forceNow(now 锚)", () => {
       forceNow: true,
     });
     expect(plan.forceNow).toBe(true);
-    expect(plan.anchorUs).toBe(NOW + 400_000n);
-    expect(plan.commandedLeadUs).toBe(400_000n);
+    // exp6:offset 缺省 400 < L+SAFETY=1050 ⇒ 被钳到 1050。
+    // 若仍取 400,sendAt(0)=A′−L−SAFETY=now−650ms 落到过去 ⇒ 首包即欠账 650ms,
+    // 且该常量欠账够不着 2s rebase 阈值 ⇒ 整首歌 100% 包迟到追发、设备缓冲只剩 400ms
+    // (240 实证:HiVi 播放中欠载播静音后再不出声)。
+    expect(plan.anchorUs).toBe(NOW + 1_050_000n);
+    expect(plan.commandedLeadUs).toBe(1_050_000n);
     // forceNow 不是可达性重锚:reAnchored 保持 false
     expect(plan.reAnchored).toBe(false);
   });
@@ -71,7 +75,7 @@ describe("planBridgeAnchor.forceNow(now 锚)", () => {
       anchorShiftUs: 150_000,
       forceNow: true,
     });
-    expect(plan.anchorUs).toBe(NOW + 150_000n + 400_000n);
+    expect(plan.anchorUs).toBe(NOW + 150_000n + 1_050_000n);
   });
 
   it("now 锚的 SYNC 映射 = 「音频 now+偏移 开始」:startNtp = ntp(now+offset+群延迟 − L)", () => {
@@ -86,7 +90,7 @@ describe("planBridgeAnchor.forceNow(now 锚)", () => {
     // A′ = anchorUs + 0.3627ms(重采样群延迟,44100 下取整 363µs);
     // ntpToHostUs 往返截断误差 ≤1µs(hostClock.ts 文档口径),容差 1。
     const gdUs = Math.round((16 / RATE) * 1e6);
-    const expectUs = NOW + 400_000n + BigInt(gdUs) - 1_000_000n;
+    const expectUs = NOW + 1_050_000n + BigInt(gdUs) - 1_000_000n;
     const gotUs = ntpToHostUs(plan.anchors.startNtp);
     expect(Number(expectUs - gotUs)).toBeLessThanOrEqual(1);
     expect(Number(expectUs - gotUs)).toBeGreaterThanOrEqual(0);
@@ -150,7 +154,7 @@ describe("raopNowAnchorOffsetUs(exp2 偏移)", () => {
   it("缺省(未设置)= 400ms", () => {
     expect(raopNowAnchorOffsetUs()).toBe(400_000n);
   });
-  it("显式数值生效(800 → 800ms)", () => {
+  it("显式 800 仍被下限钳到 1050(env 只可上调,不可下调)", () => {
     process.env[KEY] = "800";
     const plan = planBridgeAnchor({
       firstFrameTsUs: FIRST_FRAME,
@@ -160,7 +164,20 @@ describe("raopNowAnchorOffsetUs(exp2 偏移)", () => {
       nowUs: NOW,
       forceNow: true,
     });
-    expect(plan.anchorUs).toBe(NOW + 800_000n);
+    expect(plan.anchorUs).toBe(NOW + 1_050_000n);
+  });
+
+  it("显式 1500(> 下限)原样生效:想要更深缓冲时可上调", () => {
+    process.env[KEY] = "1500";
+    const plan = planBridgeAnchor({
+      firstFrameTsUs: FIRST_FRAME,
+      latencyFrames: 44100,
+      rate: RATE,
+      resampled: true,
+      nowUs: NOW,
+      forceNow: true,
+    });
+    expect(plan.anchorUs).toBe(NOW + 1_500_000n);
   });
   it("非法值(abc / 负数)回退默认 400", () => {
     process.env[KEY] = "abc";
@@ -168,7 +185,7 @@ describe("raopNowAnchorOffsetUs(exp2 偏移)", () => {
     process.env[KEY] = "-5";
     expect(raopNowAnchorOffsetUs()).toBe(400_000n);
   });
-  it("显式 0 = 回到无偏移的到包即播", () => {
+  it("显式 0 也被下限钳到 1050:「到包即播/缓冲≈0」在物理上不允许(sendAt(0) 落过去)", () => {
     process.env[KEY] = "0";
     expect(raopNowAnchorOffsetUs()).toBe(0n);
     const plan = planBridgeAnchor({
@@ -179,6 +196,46 @@ describe("raopNowAnchorOffsetUs(exp2 偏移)", () => {
       nowUs: NOW,
       forceNow: true,
     });
-    expect(plan.anchorUs).toBe(NOW);
+    expect(plan.anchorUs).toBe(NOW + 1_050_000n);
   });
+});
+
+describe("exp6 守卫:forceNow 的 sendAt(0) 绝不能落到过去", () => {
+  // 节拍公式(raop.ts streamBridge / bridgeMath):sendAt = A′ + i·352/rate − L − SAFETY。
+  // i=0 时 sendAt(0) = A′ − L − SAFETY;A′−now = commandedLeadUs(受 resampled 群延迟微调)。
+  // sendAt(0) < now ⇒ 首包即欠账,且该欠账为常量、够不着 2s rebase 阈值 ⇒ 整首歌
+  // 每包迟到追发、设备有效缓冲被砍到只剩 commandedLeadUs —— HiVi 欠载播静音的根源。
+  const CASES: Array<{ name: string; latencyFrames: number; rate: number; env?: string }> = [
+    { name: "L=1s@44.1k(HiVi 实测)", latencyFrames: 44100, rate: 44100 },
+    { name: "L=1s@44.1k + env 显式 0", latencyFrames: 44100, rate: 44100, env: "0" },
+    { name: "L=1s@44.1k + env 显式 200", latencyFrames: 44100, rate: 44100, env: "200" },
+    { name: "L=2s@44.1k(更深的接收端保持)", latencyFrames: 88200, rate: 44100 },
+    { name: "L=1s@48k", latencyFrames: 48000, rate: 48000 },
+  ];
+
+  for (const c of CASES) {
+    it(`${c.name}: commandedLeadUs ≥ L+SAFETY ⇒ sendAt(0) ≥ now`, () => {
+      const KEY = "MF_BRIDGE_RAOP_NOW_ANCHOR_OFFSET_MS";
+      const saved = process.env[KEY];
+      if (c.env === undefined) delete process.env[KEY];
+      else process.env[KEY] = c.env;
+      try {
+        const plan = planBridgeAnchor({
+          firstFrameTsUs: FIRST_FRAME,
+          latencyFrames: c.latencyFrames,
+          rate: c.rate,
+          resampled: true,
+          nowUs: NOW,
+          forceNow: true,
+        });
+        const lUs = BigInt(Math.round((c.latencyFrames / c.rate) * 1e6));
+        const safetyUs = 50_000n; // RAOP_SAFETY_MS
+        // 群延迟补偿(resampled)只做微秒级微调,允许 1ms 容差。
+        expect(plan.commandedLeadUs).toBeGreaterThanOrEqual(lUs + safetyUs - 1_000n);
+      } finally {
+        if (saved === undefined) delete process.env[KEY];
+        else process.env[KEY] = saved;
+      }
+    });
+  }
 });
