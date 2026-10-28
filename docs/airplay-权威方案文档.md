@@ -1634,3 +1634,42 @@ DLNA 命令** —— `stopDevice` 跳过、`queue.clear(peerId, { skipDeviceStop
 ### 排查提示
 判断该设备的桥是否"假活":看 tick 是否 deltaUs 稳定、loss=0 但用户无声;再看日志里
 `RECORD` 之后有没有 `[DLNA][Stop]`。有 → 命中本坑;没有 → 转去查固件自身状态机。
+
+## v4.9.4-exp3 增补(流转双缺陷,2026-10-28)
+
+### 1. 源端进度:早读从「同设备特例」放宽为「无条件」
+`srcPosEarly` 原本只在 `sameDevice(from, to)` 为真时读。判据漏了一种情形:**目标是群组**,
+而源端与群内某成员是同 host 双身份设备(主卧 DLNA ↔ HiVi AirPlay)。群组 `playFrom` 的桥
+settle 会先把源端 DLNA 停掉 → 晚读恒 0 → 群组从 0 秒开播且不回 seek(用户看到「进度消失、
+从头播放」)。
+
+修法:`const srcPosEarly = askPosition ?? await readPeerPositionSeconds(fromPeerId)`
+——**在任何 playFrom / detach / 借流之前**无条件定格。红线保持不变:跨设备 DLNA 目标仍是
+「先起播再 seek」,`inCastPos` 收紧为 `sameDevice ? srcPosEarly : null`,早读值不得漏进
+`startMs`;airplay 目标的 `inCastPos`(读当下值)也不动。
+
+### 2. 成员回流:群组 → 设备 → 群组 往返不再丢成员
+`detachFromActiveGroups` 的「显式操控自动摘组」是 cast-to-member 的设计行为,但它会**永久**
+从 `memberIds` 删掉成员;此前反向流转(设备 → 该组)不会把它加回来,于是该设备在之后的每次
+群组播放里都缺席(症状:群组里某台永远不出声)。
+
+修法:`bridgeSettleMarks` 同款思路的模块内 Map `autoDetachedFromGroup`(bare id → {gid,
+memberKey, at},容量 128 LRU)在 `detachFromActiveGroups` 成功摘组后写入;`transfer-from`
+目标为 `group` 且源端是 dlna/airplay/sendspin 时,命中同 gid 就把 memberKey
+`applyMemberDelta({add})` 加回(不调 `alignGroupMembers`,紧跟的 `playFrom` 会全量重算路由,
+把新成员编进桥)。
+
+边界:用户在群编辑里**手动**删的成员没有记录,不会被回流;已在组内则幂等跳过。
+
+### 3. 与 E3 的关系(必须一起看)
+流转成功后卡片会 `resetPeer(源端)`;若源端是 DLNA 且刚被桥 settle 过,那两条 SOAP Stop 会
+打死刚接管的桥(见「v4.9.4-e3 增补」)。两者共同构成「主卧 → 全屋」的完整修复:
+**进度(早读) + 成员(回流) + 出声(E3 抑制)**。
+
+### 4. 验收序列(240 真机口径)
+1. 群组→主卧:`POST /peers/dlna:主卧/queue/transfer-from {from:"group:<gid>"}` → 主卧出声;
+2. 主卧→群组:`POST /peers/group:<gid>/queue/transfer-from {from:"dlna:主卧"}` → 群组进度接续、
+   同 host 的 AirPlay 成员出声;
+3. 模拟卡片收尾:`POST /peers/dlna:主卧/reset` → 日志只出现「源端 DLNA 重置跳过设备命令」,
+   `RECORD` 之后**不得**再出现 `[DLNA][Stop]`;
+4. 往返:群组→HiVi→群组,`GET /v1/groups` 成员表里 HiVi 仍在。

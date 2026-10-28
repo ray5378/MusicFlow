@@ -1056,3 +1056,14 @@ PUT 语义：`memberId` 必须是本组成员（命名空间 id **原样整条**
 修法:主进程 status 出口按 songId 从组队列回填缺字段(`enrichGroupCurrentMedia`,
 `services/group/protocolPlayer.ts`)。子进程(泵)拿不到队列,故只能在出口补;命中即补,
 找不到(队列已换曲/清空)原样返回。
+
+## v4.9.4 流转增补(2026-10-28)
+
+- **进度接续**:`transfer-from` 的源端进度改为无条件早读(起播/互斥前定格);目标为群组且源端
+  与群内成员同 host 时不再从 0 秒开播。跨设备 DLNA 目标保持「先起播再 seek」例外。
+- **成员回流**:群组→设备流转的自动摘组会记账(容量 128 LRU);设备→该群组流转时自动把成员
+  加回成员表,起播路由随即把它编进桥。手动删组不回流。
+- **出声前提**:桥 cold-settle 后对源端 DLNA 的 `reset` 只做服务端复位(见 airplay 文档
+  「v4.9.4-e3 增补」),否则设备输入仲裁被顶回 DLNA,表现为「泵 loss=0 但无声」。
+- **状态元数据**:`/v1/peers/group:<id>/status` 的 `media` 在泵侧只给 `songId+durationMs`
+  时,出口按 songId 从组队列回填 title/artist/album/coverArt(见上方增补段)。
