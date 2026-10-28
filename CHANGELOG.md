@@ -2,6 +2,17 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.9.0] - 2026-10-28
+
+### Feature / 群组切歌等待时间可按组配置（混合组锚点 lead）
+
+- **背景**：混合组（Sendspin 直连设备 + AirPlay 桥并存）切歌时全组统一晚 ~5s 起播（v4.7.6 真机定标 `BRIDGE_MIXED_GROUP_ANCHOR_LEAD_MS`，给桥重锚留窗口、防吞新歌开头），此前是全局常量只能改 env 重启；同协议组（无桥）不走该分支本就不受影响。现改为**按群组实时可配**：前端群组卡片新增「切歌等待」入口，点击弹窗单独设置。
+- **语义**：`player_groups.mixed_anchor_lead_ms`（新列，启动幂等迁移 `PRAGMA` + `ALTER TABLE ADD COLUMN`）——**0/NULL = 自动**（默认 5000ms 常量），>0 = 用户值（0~30000 / 步进 100）。生效 = streamEngine 重锚混合组分支组值优先、回退常量；**PUT 后下一首切歌即生效，无需重建桥、无需重启**。纯桥组深锚与非桥分支零改动。
+- **子进程实时性**：streamEngine 跑在 fork 子进程，delayCalib cache「懒加载 + 写时更新、无失效广播」⇒ 子进程 cache 结构性陈旧（直改库可复现）。消费口 `mixedAnchorLeadUsOf` **绕 cache 直查 db**（读频率 = 每次重锚一次，不在推流热循环，SQLite WAL 直查一致性足够）。
+- **API**：`GET/PUT /v1/groups/:id/delays` 扩展 `mixedAnchorLeadMs` / `mixedAnchorLeadStepMs` / `mixedAnchorLeadMaxMs`，PUT 独立写口、不触发重建。
+- **守卫**：`check-group-invariants.mjs` 新增 **G19**（7 条，总 76 → **83**）：混合组分支唯一表达式 + 纯桥/非桥分支原样 + 读写口钳制 + **绕 cache 直查**（函数体断言含直查且不含 cache 读）+ API 双向 + 迁移幂等 + 前端弹窗范式（`append-to-body` + step-strictly）。
+- **测试**：新增 `tests/group/mixedAnchorLead.test.ts`（clamp 边界 / get-set 往返+落库 / 与 memberDelays·trackLeadMs 互不干扰 / usOf 四种 null 语义 / **直改库复现子进程 cache 陈旧** / API 字段·404·越界钳制·0=自动）。
+
 ## [4.8.5] - 2026-10-28
 
 ### Fix / 试听片段跨进程判死回传 + 起播前完整性预检(第六闸)

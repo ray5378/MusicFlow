@@ -827,6 +827,7 @@ MA 的回填**不是为了对齐**（MA 同样用绝对时间戳），而是为�
 - **铁律**：`ring` 的 `tsUs` 一律不打偏移（时间线唯一基准，§2.6）；桥内锚点恒 0（双加会被对齐器判「内容超前」整段裁掉）。
 - **late-join 回填必须逐客户端带各自偏移**，否则新成员「一进场就错位、后进门」。
 - 接口 `GET/PUT /v1/groups/:id/delays`（PUT 收 `{memberId, ms}`，越组 400）；细节唯一出处 [group-权威方案文档.md](./group-权威方案文档.md) §6。
+- **混合组锚点 lead 组级可配（v4.9.0）**：`player_groups.mixed_anchor_lead_ms`（0/NULL = 自动 = 常量 `BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US` 默认 5000ms；>0 = 用户值，0~30000 / 步进 100）。streamEngine 重锚混合组分支组值优先（`mixedAnchorLeadUsOf` 回退常量）；**读值绕 delayCalib cache 直查 db**——子进程 fork 后 cache「写时更新、无失效广播」结构性陈旧，读频率 = 每次重锚一次，WAL 直查一致性足够；PUT 后**下一首切歌生效**，无重建。纯桥组深锚 `bridgeStartLeadUs` 与非桥分支零改动。
 
 # 第六部分：踩坑记录（**特色错误必须记住**）
 
