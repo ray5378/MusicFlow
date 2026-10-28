@@ -314,11 +314,40 @@ export async function bridgePrepareDevice(
   groupId?: string | null,
   /** v4.9.3(§音量语义):桥会话初始音量(0-100,player_groups 落库值,调用方算好)。
    *  undefined = 无组上下文,桥侧回落设备落库值(旧行为)。 */
-  opts?: { initialVolume?: number },
+  opts?: {
+    initialVolume?: number;
+    /** v4.9.4:是否在冷建 RAOP 会话前对同 host DLNA 做 settle(冻结队列 → SOAP Stop
+     *  →等 STOPPED+宽限)。缺省 = settle(冷建语义);warm 复用由编排侧显式传 false。 */
+    settleDlna?: boolean;
+  },
 ): Promise<{ listening: true; socketPath: string }> {
   const dev = getAirPlayDevice(deviceId);
   if (!dev) throw new Error(`AirPlay 设备不存在: ${deviceId}`);
   const socketPath = bridgeSocketPath(deviceId, token);
+  // v4.9.4:桥 prepare 冷建路径补「同 host DLNA settle」—— 直连路径 2026-10-22 已修
+  // (yieldSiblingDlnaForAirPlay),桥路径漏了:DLNA Stop 后 ~500ms 内即建 RAOP 会话,
+  // MUZO/HiVi 固件还在切输入 ⇒ RTP 全送达但设备不渲染(240 日志实证:28093 chunks
+  // loss=0 全程无声,且 warm-reuse 复用同一哑会话无法自愈)。这里复用同一助手
+  // (互斥单一实现,check-airplay-dlna-mutex.mjs R1/R3 钉定,不得复制第二份):
+  // ①冻结 DLNA 队列(字面形态被守卫钉死)→ ②SOAP Stop(withDeadline 硬上限)
+  // → ③wasActive 时轮询 GetTransportInfo 到 STOPPED + 300ms 宽限再放行建会话。
+  // warm 复用(settleDlna=false,编排侧按「同 token 沿用」判定传入)不等待;
+  // 同组的历史遗留 DLNA 成员不 settle —— 组自己正要让它出流,settle 等于自杀。
+  if (opts?.settleDlna !== false) {
+    const peer = dlnaPeerOfAirPlay(deviceId);
+    let peerIsFellowMember = false;
+    if (peer && groupId) {
+      try {
+        const { getGroupManager } = await import("../group/index.js");
+        peerIsFellowMember = getGroupManager().get(groupId)?.memberIds.includes(`dlna:${peer}`) === true;
+      } catch { /* 判不了按非同组处理 */ }
+    }
+    if (peer && !peerIsFellowMember) {
+      const t = Date.now();
+      await yieldSiblingDlnaForAirPlay(deviceId);
+      log.info(`[bridge-prepare] 同 host DLNA settle 完成,开始建桥会话`, { deviceId, dlnaPeer: peer, ms: Date.now() - t });
+    }
+  }
   const r = await airplaySupervisor.rpc<{ listening: true; socketPath: string }>("bridgePrepare", {
     deviceId,
     socketPath,

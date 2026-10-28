@@ -423,7 +423,9 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
       try {
         // socketPath 在主进程按同一实现计算(bridgeSocketPath,<100B 断言在此抛)。
         bridgeSocketPath(d, token);
-        await bridgePrepareDevice(d, token, protocol, groupId, { initialVolume: groupInitialVolume });
+        // v4.9.4:settle 只在冷建(新 token)时做;warm 复用(同 token 哑会话)不等待 ——
+        // 快路径,DLNA 早已让位(本组上一首即在播)。
+        await bridgePrepareDevice(d, token, protocol, groupId, { initialVolume: groupInitialVolume, settleDlna: !prevSpec });
         sockets.push({ deviceId: d, socketPath: bridgeSocketPath(d, token), token, protocol });
       } catch (e) {
         log.warn(`[group][bridge] ${groupId}: bridgePrepare 失败 device=${d} → 本流回落 solo cast: ${(e as Error)?.message || e}`);

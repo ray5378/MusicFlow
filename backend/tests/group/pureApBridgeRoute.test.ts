@@ -169,6 +169,7 @@ import {
   createGroupProtocolPlayer,
   getGroupStatus,
   isGroupBridgeSessionAttached,
+  setBridgeRoutesForTest,
 } from "../../src/services/group/protocolPlayer.js";
 
 function makeItem(songId = "s1"): any { return { songId, title: "t", mime: "audio/mpeg", duration: 100 }; }
@@ -177,7 +178,12 @@ function apOn(id: string): void {
   h.apStatus[id] = { available: true, name: id, playbackState: "PLAYING", position: 5, duration: 100, volume: 50, muted: false };
 }
 
-beforeEach(() => h.reset());
+beforeEach(() => {
+  h.reset();
+  // activeBridgeRoutes 是模块级事实源:不清会让上一用例的残留路由把本用例的首播
+  // 判成 warm 复用(settleDlna=false),冷建语义断言失真。
+  setBridgeRoutesForTest(new Map());
+});
 
 describe("v4.9.3 方向 A:纯 AirPlay 组强制走桥", () => {
   it("spin=0 且 ap>0:prepareBridgeRoute 照走,组泵带桥规格起推,桥成员不 solo cast,组落库音量随 prepare 下发", async () => {
@@ -189,6 +195,8 @@ describe("v4.9.3 方向 A:纯 AirPlay 组强制走桥", () => {
     expect(h.prepareCalls[0].groupId).toBe("g1");
     // 组落库音量(getVolume=37)作为 initialVolume 随 prepare 下发(§音量语义)
     expect(h.prepareCalls[0].opts?.initialVolume).toBe(37);
+    // 冷建(新 token)⇒ settleDlna=true(v4.9.4:桥 prepare 先 settle 同 host DLNA)
+    expect(h.prepareCalls[0].opts?.settleDlna).toBe(true);
     // 组泵起推且桥规格透传
     expect(h.spinPlayCalls).toHaveLength(1);
     expect(h.spinPlayCalls[0].songId).toBe("s1");
@@ -218,6 +226,9 @@ describe("v4.9.3 方向 A:纯 AirPlay 组强制走桥", () => {
     expect(h.prepareCalls).toHaveLength(2);
     expect(h.prepareCalls[1].token).toBe(h.prepareCalls[0].token);
     expect(h.bridgeStopCalls).toHaveLength(0);
+    // 冷建 settle、暖复用不 settle(v4.9.4)
+    expect(h.prepareCalls[0].opts?.settleDlna).toBe(true);
+    expect(h.prepareCalls[1].opts?.settleDlna).toBe(false);
   });
 
   it("纯 AP 桥组传输 op 落泵:pause/stop 经 spinOp 下发组泵(spinOp 不再对 sp=0 早退)", async () => {

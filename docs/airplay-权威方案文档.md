@@ -1547,3 +1547,17 @@ routes/api/groups.ts:129  PUT /v1/groups/:id/delays  {memberId, ms}
 | A-2 | 同 host DLNA 互斥豁免细化(接管语义) | stopAirPlaySessionsForHost 对桥占用设备:归属组仍存在且设备仍是成员(含 bridgePrepare 进行中窗口)⇒ 豁免;组已解散/设备已移出 ⇒ 孤儿桥会话,走 bridgeStopDevice 回收并计入 stopped;无组上下文守旧豁免。MAJ-06 原语义(活跃组桥不杀)不变,孤儿不再永久挡同 host DLNA cast | airplay/control.ts stopAirPlaySessionsForHost;group/protocolPlayer.ts isGroupBridgeSessionAttached(动态 import,避免静态环) |
 | A-3 | 桥会话初始音量 = player_groups 落库值 | bridgePrepare RPC 载荷新增 initialVolume(0-100,主进程 prepareBridgeRoute 从 GroupManager 取好下发,子进程不碰 DB);pushInitialVolume 优先用之(0→-144dB),无组上下文回落 airplay_device_state(旧行为);RAOP 重连路径同样带组值。用户裁定语义:流转/起播绝不采用成员设备自身音量 | control.ts bridgePrepareDevice;ipcProtocol.ts BridgePrepareArgs;childMain.ts prepareBridge;bridgeSession.ts(pushInitialVolume/BridgeSessionOpts/两处调用点) |
 | A-4 | 纯 AP 组全量走桥后本模块的联动 | 纯 AirPlay 桥组(无 sendspin 成员)同享「活跃组桥会话」豁免 —— 组内对齐由组泵承担,DLNA cast 不再能杀掉组桥会话 | airplay/control.ts;sendspin/index.ts reclaimSendspinOrphans(有桥组不回收) |
+
+
+---
+
+## v4.9.4 增补(桥 prepare DLNA settle,2026-10-28)
+
+> 仅热补丁(240),未发版。互斥章节补充:**桥路径也走同一 settle 助手**。
+
+| # | 变更 | 现状(代码为准) | 位置 |
+|---|------|------------------|------|
+| B-1 | 双协议互斥第三入口 | 互斥 settle 原有两个入口(startSession in-proc / castViaChild fork,直连 cast);v4.9.4 起桥 prepare 冷建为第三入口 —— `bridgePrepareDevice` 缺省对同 host DLNA peer 调用**同一个** `yieldSiblingDlnaForAirPlay`(无第二份实现;守卫 R2 的两处 `opts.deviceId` 计数不受影响,桥路径传参为 `deviceId`) | airplay/control.ts |
+| B-2 | warm/cold 分流 | 编排侧 prepareBridgeRoute 以「token 是否沿用」为判据传 `settleDlna: !prevSpec`:冷建 settle(等设备切完输入),warm 复用跳过(快路径);流内加入/子进程重启重建走缺省 settle | group/protocolPlayer.ts;airplay/control.ts |
+| B-3 | 同组 DLNA 成员豁免 | `dlna:<peer>` 是同一用户组成员(历史遗留组)时不 settle,防组内自杀;经动态 import group/index 判成员 | airplay/control.ts bridgePrepareDevice |
+| B-4 | 实证根因 | 240 真机日志:`bridge stream done: 28093 chunks / 230.5s, loss=0` 全程送达但无声 —— 会话建立在 DLNA→AirPlay 输入切换完成之前;直连路径 2026-10-22 已修同款问题(yieldSiblingDlnaForAirPlay 注释段),本次补齐桥路径 | 本文件互斥章节 |

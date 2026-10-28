@@ -12,10 +12,15 @@ const h = vi.hoisted(() => {
   const mirrorSessions = new Set<string>();
   const groups = new Map<string, { id: string; name: string; memberIds: string[] }>();
   const frozen: string[] = [];
+  const seq: string[] = [];
+  const dlnaDevices: Array<{ id: string; location: string; renderingControlUrl?: string }> = [];
+  let transportState: string | null = "STOPPED";
   const devices = [
     { id: "ap-x", name: "ap-x", host: "192.168.10.55", port: 7000, available: true },
   ];
-  return { rpcCalls, mirrorSessions, groups, frozen, devices };
+  return { rpcCalls, mirrorSessions, groups, frozen, seq, dlnaDevices, transportState, devices,
+    get transport(): string | null { return transportState; },
+    set transport(v: string | null) { transportState = v; } };
 });
 
 vi.mock("../../src/services/airplay/mode.js", () => ({ isAirPlayForkMode: () => true }));
@@ -24,7 +29,7 @@ vi.mock("../../src/services/airplay/supervisor.js", () => ({
   airplaySupervisor: {
     isRunning: () => true,
     mirror: { sessions: h.mirrorSessions },
-    rpc: async (op: string, payload?: any) => { h.rpcCalls.push({ op, payload }); return null; },
+    rpc: async (op: string, payload?: any) => { h.rpcCalls.push({ op, payload }); h.seq.push(`rpc:${op}`); return null; },
   },
 }));
 
@@ -48,10 +53,23 @@ vi.mock("../../src/services/group/protocolPlayer.js", () => ({
 
 vi.mock("../../src/services/player/index.js", () => ({
   getQueueController: () => ({
-    stopPlayback: (id: string) => { h.frozen.push(id); },
+    stopPlayback: (id: string) => { h.frozen.push(id); h.seq.push(`freeze:${id}`); },
     snapshot: () => null,
   }),
   getPlayerController: () => ({ reportState: () => {} }),
+}));
+
+vi.mock("../../src/services/dlna/control.js", async (importOriginal) => ({
+  ...(await importOriginal<any>()),
+  getCachedDevices: () => h.dlnaDevices,
+  stopDevicePlayback: async (id: string) => { h.seq.push(`stop:${id}`); },
+  getTransportState: async () => h.transport,
+}));
+
+// 桥 settle 的同组成员判定走 getGroupManager —— 用 h.groups 替身(其余导出保持真实)。
+vi.mock("../../src/services/group/index.js", async (importOriginal) => ({
+  ...(await importOriginal<any>()),
+  getGroupManager: () => ({ get: (id: string) => h.groups.get(id) }),
 }));
 
 import { sqlite } from "../../src/db/index.js";
@@ -75,6 +93,9 @@ beforeEach(() => {
   h.mirrorSessions.clear();
   h.groups.clear();
   h.frozen.length = 0;
+  h.seq.length = 0;
+  h.dlnaDevices.length = 0;
+  h.transport = "STOPPED";
   clearBridgeOwner("ap-x");
 });
 
@@ -132,5 +153,44 @@ describe("v4.9.3 桥会话初始音量:bridgePrepare 透传组落库值", () => 
     const prep = h.rpcCalls.find((r) => r.op === "bridgePrepare");
     expect(prep!.payload.initialVolume).toBeUndefined();
     expect(bridgeOwnerGroupOf("ap-x")).toBeNull();
+  });
+});
+
+describe("v4.9.4 桥 prepare 冷建补同 host DLNA settle", () => {
+  it("冷 prepare:settle 三步(冻结队列→SOAP Stop→)先于 bridgePrepare RPC", async () => {
+    h.dlnaDevices.push({ id: "dl-y", location: "http://192.168.10.55/desc.xml", renderingControlUrl: "http://192.168.10.55/rc" });
+    h.groups.set("g1", { id: "g1", name: "组", memberIds: [] });
+    await bridgePrepareDevice("ap-x", "tok-c", "raop", "g1");
+    // 顺序:冻结 DLNA 队列 → SOAP Stop → 才建会话(守卫 R1 的顺序语义在桥路径同样成立)
+    const iFreeze = h.seq.indexOf("freeze:dlna:dl-y");
+    const iStop = h.seq.indexOf("stop:dl-y");
+    const iRpc = h.seq.indexOf("rpc:bridgePrepare");
+    expect(iFreeze).toBeGreaterThanOrEqual(0);
+    expect(iStop).toBeGreaterThan(iFreeze);
+    expect(iRpc).toBeGreaterThan(iStop);
+    expect(h.frozen).toContain("dlna:dl-y");
+    expect(h.rpcCalls.find((r) => r.op === "bridgePrepare")?.payload?.token).toBe("tok-c");
+    expect(bridgeOwnerGroupOf("ap-x")).toBe("g1");
+  });
+
+  it("warm 复用(settleDlna=false)→ 不 settle,直接建会话", async () => {
+    h.dlnaDevices.push({ id: "dl-y", location: "http://192.168.10.55/desc.xml", renderingControlUrl: "http://192.168.10.55/rc" });
+    await bridgePrepareDevice("ap-x", "tok-w", "raop", "g1", { settleDlna: false });
+    expect(h.seq.filter((s) => s.startsWith("freeze:") || s.startsWith("stop:"))).toEqual([]);
+    expect(h.rpcCalls.find((r) => r.op === "bridgePrepare")?.payload?.token).toBe("tok-w");
+  });
+
+  it("同组历史遗留 DLNA 成员 → 不 settle(组自己要让它出流,防自杀)", async () => {
+    h.dlnaDevices.push({ id: "dl-y", location: "http://192.168.10.55/desc.xml", renderingControlUrl: "http://192.168.10.55/rc" });
+    h.groups.set("g1", { id: "g1", name: "组", memberIds: ["dlna:dl-y"] });
+    await bridgePrepareDevice("ap-x", "tok-m", "raop", "g1");
+    expect(h.seq.filter((s) => s.startsWith("freeze:") || s.startsWith("stop:"))).toEqual([]);
+    expect(h.rpcCalls.find((r) => r.op === "bridgePrepare")).toBeDefined();
+  });
+
+  it("无同 host DLNA peer → 不 settle 不拖慢 prepare", async () => {
+    await bridgePrepareDevice("ap-x", "tok-n", "raop", "g1");
+    expect(h.seq.filter((s) => s.startsWith("freeze:") || s.startsWith("stop:"))).toEqual([]);
+    expect(h.rpcCalls.find((r) => r.op === "bridgePrepare")).toBeDefined();
   });
 });

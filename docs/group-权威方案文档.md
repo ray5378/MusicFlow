@@ -1020,3 +1020,17 @@ PUT 语义：`memberId` 必须是本组成员（命名空间 id **原样整条**
 | E-5 | 同 host DLNA 互斥豁免细化 | bridgeOwners 升级 deviceId→{token,groupId};stopAirPlaySessionsForHost 对桥占用设备:组存在且设备仍是成员(含 prepare 窗口)⇒ 豁免(接管语义);组已解散/设备已移出 ⇒ 孤儿,bridgeStopDevice 回收;无组上下文守旧豁免 | airplay/control.ts(stopAirPlaySessionsForHost/registerBridgeOwner/bridgeOwnerGroupOf);group/protocolPlayer.ts isGroupBridgeSessionAttached |
 | E-6 | 桥会话初始音量 = 组落库值 | prepareBridgeRoute 取 player_groups 落库值随 bridgePrepare.initialVolume 下发;pushInitialVolume 优先用之(0→-144dB),无组上下文才回落设备落库值 —— 流转/起播绝不把成员设备旧音量带给接收端;运行时变更仍走 fanOut setVolume → setAirPlayVolume | group/protocolPlayer.ts;airplay/control.ts;ipcProtocol.ts;childMain.ts;bridgeSession.ts |
 | E-7 | 纯 AP 桥组锚点 lead(核实,无改码) | 深锚分支判据是运行时 hasBridges()/hasDirectMembers():纯 AP 桥组 hasBridges=true、hasDirectMembers=false → 自动落入纯桥深锚 bridgeStartLeadUs 分支,不落入 min(aheadUs,ANCHOR_SAFE_LEAD_US) | sendspin/streamEngine.ts anchorLead;sendspin/server.ts hasBridges/hasDirectMembers |
+
+
+---
+
+## 附 F v4.9.4 增补(桥 prepare DLNA settle,2026-10-28)
+
+> 仅热补丁(240),未发版;用户真机确认后随下版入 tag。与正文冲突处以本节为准。
+
+| # | 变更 | 现状(代码为准) | 位置 |
+|---|------|------------------|------|
+| F-1 | 桥 prepare 冷建补 DLNA settle | 根因:DLNA Stop 后 ~500ms 内即建 RAOP 会话,MUZO/HiVi 固件还在切输入 ⇒ RTP 全送达但设备不渲染(240 日志:28093 chunks / 230.5s, loss=0, 无声),且 warm-reuse 复用同一哑会话无法自愈。修复:bridgePrepareDevice 冷建(缺省)时对同 host 有 DLNA peer 的设备复用 `yieldSiblingDlnaForAirPlay`(①冻结 DLNA 队列字面形态→②SOAP Stop withDeadline→③wasActive 时轮询 STOPPED+300ms 宽限)再放行建会话;互斥保持单一实现(守卫 R1/R3 钉定,无第二份 stopDevicePlayback) | airplay/control.ts bridgePrepareDevice |
+| F-2 | warm 复用不等待 | prepareBridgeRoute 按「同 token 沿用 = warm」判定:`settleDlna: !prevSpec` —— warm 路径 DLNA 早已让位,不拖慢快路径;bridgeJoinMember/rebuildBridgeRoutes(冷建)缺省 settle | group/protocolPlayer.ts prepareBridgeRoute |
+| F-3 | 同组遗留 DLNA 成员防自杀 | 历史遗留组内 `dlna:<peer>` 若与该 AirPlay 同组,不 settle(组自己正要让它出流);新组本就禁 DLNA 入组,该分支只护遗留组 | airplay/control.ts bridgePrepareDevice(动态 import group/index 判成员) |
+| F-4 | 锚点 lead 覆盖核实 | 冷桥深锚 `BRIDGE_COLD_START_LEAD_US`=4.5s、混合组默认 5000ms(组级可配):settle 典型增量 = SOAP Stop(<0.5s)+轮询 ≤2.5s+宽限 0.3s ≈ ≤3.3s,叠加 prepare ~1.7s ≈ 5s,lead 覆盖;极端(SOAP 挂到 6s 硬顶)由桥投递窗口水位/hold chunk 兜底,不产生额外吞音 | rates.ts BRIDGE_COLD_START_LEAD_US;streamEngine 混合组分支;group/delayCalib mixed_anchor_lead_ms |

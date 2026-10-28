@@ -1620,3 +1620,15 @@ prev、音量/静音、自然结束自动下一首、停止）+ 组播 6 项（`
 | S-2 | 空成员组不被空闲回收 | reclaimSendspinOrphans 跳过 hasBridges() 的组 —— 纯 AP 桥组 members=0 但桥在出声,回收即断粮静默 | sendspin/index.ts reclaimSendspinOrphans |
 | S-3 | 深锚分支核实 | anchorLead 判据 = hasBridges()/hasDirectMembers() 运行时状态,与「组内是否有 sendspin 成员」无关:纯 AP 桥组自动落入纯桥深锚 bridgeStartLeadUs 分支(2026-10-26 E3 判决语义扩展到纯 AP 桥组),不落入 min(aheadUs, ANCHOR_SAFE_LEAD_US) | streamEngine.ts anchorLead;server.ts hasBridges/hasDirectMembers |
 | S-4 | 桥会话初始音量 | prepareBridge 下发 initialVolume = player_groups 落库值;组 playMedia 起播前既有「灌组音量」路径(sendspinGroupTransport volume)不变,两层口径一致(都取组落库值) | group/protocolPlayer.ts prepareBridgeRoute;sendspin/protocolPlayer.ts playMedia |
+
+
+---
+
+## v4.9.4 增补(桥 prepare DLNA settle,2026-10-28)
+
+> 仅热补丁(240),未发版。Sendspin 侧零改码;本节记录锚点 lead 对 settle 延迟的覆盖核实。
+
+| # | 变更 | 现状(代码为准) | 位置 |
+|---|------|------------------|------|
+| S-5 | 锚点 lead 覆盖 settle 延迟 | 桥 prepare 冷建最多叠加 settle ~3.3s(SOAP Stop 典型 <0.5s + 轮询 ≤2.5s + 宽限 0.3s);冷桥深锚 4.5s(BRIDGE_COLD_START_LEAD_US)/混合组 5s(mixed_anchor_lead_ms 默认,组级可配)覆盖典型路径;极端 SOAP 挂住由 DLNA_YIELD_DEADLINE_MS=6s 硬顶 + 桥投递窗口水位/hold chunk 兜底,不产生额外吞音 | airplay/rates.ts;streamEngine.ts anchorLead;airplay/control.ts 常量区 |
+| S-6 | 组泵/路由零改动 | 本补丁不动 playMedia 路由、组泵、回收与状态派生(v4.9.3 方向 A 语义不变);仅 bridgePrepareDevice 编排侧在 RPC bridgePrepare 之前插入 settle 等待 | group/protocolPlayer.ts prepareBridgeRoute(仅加 settleDlna 标志) |
