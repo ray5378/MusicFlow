@@ -2,6 +2,18 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.9.3] - 2026-10-28
+
+### Fix / 流转后群组音量被旧端污染;桥会话初始音量改用群组落库值
+
+- **流转/切端音量污染(前端)**:DLNA 流转到群组后音量变 ~98 的根因——音量单例跨播放端共享,DLNA 设备轮询把设备 0-100 标度音量写进单例,切到群组后该值不被重置,用户一碰滑条就 POST 旧值落库 `player_groups` 并全员扇出。修复:流转/切换播放端后从新目标端**重新拉取真实音量**回填单例,流转动作本身绝不 POST 音量。
+- **桥会话初始音量(后端)**:`bridgePrepare` 新增 `initialVolume`(0-100),主进程从 `player_groups` 落库值取好随桥准备下发;`pushInitialVolume` 组上下文优先用之,无组上下文才回落设备落库值(旧行为)——流转/起播绝不把成员设备旧音量带给接收端。
+
+### Feature / 纯 AirPlay 群组强制走 Sendspin 桥 + 同 host 互斥豁免活跃群组桥会话
+
+- **纯 AP 组走桥**:组内无 Sendspin 成员时过去回落直连 solo cast(无组内时间线对齐);现在只要有在线 AirPlay 成员即 `prepareBridgeRoute` 走桥——组泵空成员合法化(带桥规格放行、有桥组不空闲回收),传输/音量 op 与状态派生同步落到组泵,prepare 失败仍按 MAJ-07 逐设备回落 solo cast。
+- **互斥豁免(接管语义)**:`bridgeOwners` 升级携带组归属;同 host DLNA cast 的 `stopAirPlaySessionsForHost` 对活跃群组桥会话豁免(组内出声由组桥路由承担),孤儿桥会话(组已解散/设备已移出)照常回收——纯 AP 桥组不再被同 host DLNA cast 杀掉成员会话。
+
 ## [4.9.2] - 2026-10-28
 
 ### Cleanup / 删除全部数据库迁移代码，CREATE TABLE 升为最终形态
