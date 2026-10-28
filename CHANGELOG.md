@@ -2,6 +2,20 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.9.5] - 2026-10-29
+
+### Fix / 群组播放一段时间后 HiVi（MUZO 类固件）永久无声
+
+- **现象**：群组「全屋」里 HiVi（AirPlay 身份）播着播着就没声了，之后**再也不恢复**；切到下一首也只是短暂有声。同组的 sendspin 成员（esp32）一直正常。
+- **根因**：桥推流节拍 `sendAt = A′ − L − SAFETY`（`L`=设备接收缓冲，`SAFETY`=50ms，44100 下合计 **1050ms**），而 v4.9.4 的 forceNow（now 锚，为修 MUZO「按秒卡顿」引入）把 `A′ = now + 400ms` —— 该偏移未与 `L+SAFETY` 对齐，于是：
+  1. `sendAt(0) = now − 650ms`，**首包的应发时刻落在过去**。实测 `bridge first packet: deviationUs=655862`，吻合。
+  2. 这 650ms 是**常量欠账**（后续每包同额落后），且够不着 `BRIDGE_RESUME_REBASE_US`(2s) ⇒ pacing 重锚**永不触发**，整首歌每包都「迟到追发」——实测 `latePackets=34857/34859`（≈100%）、`late` 计数 125/s。
+  3. 设备端**有效缓冲被砍到只剩 offset=400ms**（`1050−650`）。实测 `maxGap=1005ms`、切歌饥饿 rebase 2.6~3.0s，一旦空档 >400ms 缓冲见底 ⇒ 固件欠载播静音，且**不自动重缓冲**（RTP 时间线不重锚，设备侧仍自报 `status:play`、`curpos` 正常推进、`mute:0`，就是没声音，并发出 659 次重传请求）。
+- **修法**：`planBridgeAnchor` 的 forceNow 分支用上已算好的 `lUs + safetyUs` 做**下限钳制**（`offset = max(配置值, L+SAFETY)`）。`MF_BRIDGE_RAOP_NOW_ANCHOR_OFFSET_MS` 仍可**上调**（想要更深缓冲），**下调被拒**；逃生门是关掉 forceNow 本身（`MF_BRIDGE_RAOP_NOW_ANCHOR=0`）。
+- **权衡**：起播首包的可听时刻由 `now+400ms` 后移到 `now+1050ms`（**+650ms**），换取抗抖动缓冲由 400ms 提到 1050ms。
+- **240 实测（修复后同一台 HiVi）**：`leadUs` 400000→**1050000**；首包 `deviationUs` 655ms→**41ms**；`late` 增长率 125/s→**6/s**（−95%）；`deltaUs`（内容前沿超前量）330ms→**~1050ms**；`silenceChunks` 归 0。
+- 守卫：新增「forceNow 的 `sendAt(0)` 绝不能落到过去」5 例（钉 `commandedLeadUs ≥ L+SAFETY`，覆盖 L=1s/2s、44.1k/48k、env 显式 0/200）；同步 `bridgeSessionForceNow.test.ts` 原有 4 例——此前它们把「`offset<L+SAFETY ⇒ sendAt(0)` 在过去」当**正确行为**钉住了，是本次缺陷长期未暴露的原因。源码注释中「offset 应 `<` L+SAFETY」的方向警告一并改正（落到未来只推迟首包且缓冲满额，落到过去才致命）。
+
 ## [4.9.4] - 2026-10-28
 
 ### Fix / 主卧 DLNA 流转到全屋后 HiVi 无声（桥占用期抑制 DLNA 源端 reset）
