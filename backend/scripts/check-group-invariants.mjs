@@ -250,6 +250,11 @@ const FALLBACK = "backend/src/services/source/online/streamFallback.ts";
 const BFETCH = "backend/src/services/source/bufferedFetch.ts";
 const GROUP_PROTOCOL_PLAYER = "backend/src/services/group/protocolPlayer.ts";
 const SPIN_BRIDGE_ATTACH = "backend/src/services/sendspin/bridgeAttach.ts";
+const SPIN_STREAM_ENGINE = "backend/src/services/sendspin/streamEngine.ts";
+const SPIN_IPC = "backend/src/services/sendspin/ipcProtocol.ts";
+const SPIN_SUPERVISOR = "backend/src/services/sendspin/supervisor.ts";
+const SPIN_CHILD_MAIN = "backend/src/services/sendspin/childMain.ts";
+const SPIN_INDEX = "backend/src/services/sendspin/index.ts";
 const GROUPS_VUE = "frontend/src/views/Groups/index.vue";
 
 // ===========================================================================
@@ -1021,6 +1026,95 @@ console.log("===== G17 判官中段缓冲兜底:够小也不许凭体积蒙混�
     "解析失败走 catch 保守放行(冷门容器/怪 tag 不得被误判成试听)",
     /catch \{/.test(seg) && /parseBuffer\(buf/.test(seg),
     `catch 兜底=${/catch \{/.test(seg)} 解析调用=${/parseBuffer\(buf/.test(seg)} ⇒ 无 catch = 解析抛异常直接炸预取`,
+  );
+}
+
+// ===========================================================================
+// G18 试听片段跨进程判死回传 + 起播前第六闸(v4.8.5):《等你飞奔而来》事故
+// 子进程(streamEngine)判死只写子进程内 streamFallback 的 module-local Map,
+// 主进程 QueueController 判跳读的是自己那份 ⇒ 「已判死却还能重播」。
+// 且 judgePlayable 在 unknown 时只看 URL 能否探测、不判内容 ⇒ 首次必播出。
+// ===========================================================================
+console.log("===== G18 跨进程判死回传 + 起播前完整性预检(第六闸) =====");
+{
+  const se = code(SPIN_STREAM_ENGINE);
+  const pc = code(SPIN_CORE);
+  const ipc = code(SPIN_IPC);
+  const sup = code(SPIN_SUPERVISOR);
+  const qc = code(QUEUE_CTL);
+  const pfG18 = code(PREFETCH);
+  const childMainTxt = code(SPIN_CHILD_MAIN);
+  const spinIdx = code(SPIN_INDEX);
+  // --- a) 判死回传口 ---
+  const sinkDecl = /export type SongUnplayableSink = \(songId: string, reason: string\) => void;/.test(se);
+  const fieldDecl = /onUnplayable: SongUnplayableSink \| null = null;/.test(se);
+  const callSite = /this\.onUnplayable\?\.\(\s*this\.songId,/.test(se);
+  check(
+    "GroupPump 判死回传口:SongUnplayableSink 类型 + onUnplayable 字段 + stream-truncated 判死拍回传",
+    sinkDecl && fieldDecl && callSite,
+    `类型=${sinkDecl} 字段=${fieldDecl} 回传调用=${callSite} ⇒ 缺任一 = 子进程判死主进程永远不知道`,
+  );
+  const pumpFill = /if \(onUnplayable\) p\.onUnplayable = onUnplayable;/.test(se);
+  check(
+    "pumpFor 装填语义 = 不传则沿用已有(seek 重建/泵复用不得把回传口抹掉)",
+    pumpFill,
+    `装填判断=${pumpFill} ⇒ 改成无条件赋 null = seek 一次回传口就丢`,
+  );
+  const noSinkWarn = count(se, "判死回传口未装填") === 1 && /warnedNoSink/.test(se);
+  check(
+    "回传口未装填不得静默(必须打告警且去重) —— 静默 = bug 无声复现",
+    noSinkWarn,
+    `告警串=${count(se, "判死回传口未装填")} 处(应恰 1) + 去重=${/warnedNoSink/.test(se)}`,
+  );
+  // --- b) IPC 事件 + 主进程落地 ---
+  const evDecl = /\{ t: "songUnplayable"; clientId: string; songId: string; reason: string \}/.test(ipc);
+  const supCase = /case "songUnplayable":/.test(sup);
+  const mainFn = /export function markSongUnplayableInMain\(songId: string\): void \{/.test(sup)
+    && /markUnplayable\(songId\);/.test(sup);
+  const hookCall = /onSongUnplayable: \(songId, reason\) => \{/.test(spinIdx)
+    && /markSongUnplayableInMain\(songId\);/.test(spinIdx);
+  check(
+    "IPC songUnplayable 事件 + supervisor 分发 + 主进程 markSongUnplayableInMain ⇒ markUnplayable",
+    evDecl && supCase && mainFn && hookCall,
+    `事件=${evDecl} 分发=${supCase} 主进程函数=${mainFn} index hook 接线=${hookCall}`,
+  );
+  const childSinkN = count(childMainTxt, 't: "songUnplayable"');
+  check(
+    "childMain 两个分支(playMedia/groupPlay)都装填 sink(漏一条 = 该路径判死不回传)",
+    childSinkN >= 2,
+    `childMain 回传 ${childSinkN} 处(应 ≥2)`,
+  );
+  // --- c) 起播前第六闸(保守四条 + 有界等待) ---
+  const preBody = bodyByName(qc, /private async precheckIntegrity\(songId: string, songRow: any/);
+  const gateCond = !!preBody
+    && /known === "unplayable"/.test(preBody)
+    && /known !== "unknown" && known !== "transient"/.test(preBody)
+    && /!\(dur > 0\)/.test(preBody)
+    && /startsWith\("web:"\)/.test(preBody);
+  const bounded = !!preBody
+    && /withTimeout\(prefetchSong\(songId\), waitMs/.test(preBody)
+    && /Math\.min\(9000, Number\(cfg\.precheckWaitMs\)/.test(preBody)
+    && /catch \{/.test(preBody);
+  check(
+    "第六闸四条保守条件齐(已有结论不重复/无基准不杀/仅网络源/判官开)且等待有界(≤9000 < 10s 外层)",
+    gateCond && bounded,
+    `四条=${gateCond} 有界+兜底=${bounded} ⇒ 缺保守条件 = 误杀正常歌;无上界 = playCurrent 被永久占用(2026-10-21 事故)`,
+  );
+  const iPre = qc.indexOf("this.precheckIntegrity(item.songId, songRow)");
+  const iRes = qc.indexOf("resolvePlayableRow(item.songId)");
+  check(
+    "第六闸挂在 judgePlayable 内且先于 resolvePlayableRow(判死就不必再走换源探测)",
+    iPre >= 0 && iRes > iPre,
+    `预检@${iPre} 换源@${iRes}`,
+  );
+  // --- d) 预取闸门 0:已判死不下字节 ---
+  const g0Sync = /if \(playabilityReader\?\.\(songId\) === "unplayable"\) return Promise\.resolve\(\);/.test(pfG18);
+  const g0Auth = /playabilityReader = sf0\.getCachedPlayability;/.test(pfG18)
+    && count(pfG18, "已判死(unplayable),跳过预取") >= 1;
+  check(
+    "预取闸门 0:已判死 ⇒ 一个字节都不下(同步入口 + doPrefetch 权威版双闸)",
+    g0Sync && g0Auth,
+    `同步闸=${g0Sync} 权威闸=${g0Auth} ⇒ 缺闸 = 已知死歌每次轮到重下一遍字节`,
   );
 }
 

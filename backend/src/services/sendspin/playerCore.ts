@@ -10,7 +10,7 @@
 //  - announceCore: TTS 拉取解码 → 按组时间线逐帧推 → flush 尾帧 → 音量/成员还原
 import type { QueueItem } from "../player/types.js";
 import type { SendspinServer, SendspinConnection, SendspinGroup } from "./server.js";
-import { pumpFor, peekPump, transferPumpTo, stopGroupPump } from "./streamEngine.js";
+import { pumpFor, peekPump, transferPumpTo, stopGroupPump, type SongUnplayableSink } from "./streamEngine.js";
 import { syncGroupBridges, clearGroupBridges, type BridgeSocketSpec } from "./bridgeAttach.js";
 import { FIRST_FRAME_LEAD_US, FRAME_MS } from "./streamEngine.js";
 import { nowUs } from "./clock.js";
@@ -258,6 +258,11 @@ export function playCore(
    *  undefined = 不动既有桥(旧调用方零变化);传数组 = 同步到该集合(幂等,
    *  规格未变热复用 —— seek 重建路径靠它保持桥连接,BLK-02)。 */
   bridge?: BridgeSocketSpec[],
+  /** 判死回传(2026-10-28 事故修复):推流侧把某首歌判死(`stream-truncated` 提前
+   *  EOF / 完整性判官)时回调,让**主进程**也能记一次负缓存 —— 子进程的 streamFallback
+   *  负缓存是 module-local Map,主进程看不见(详见 streamEngine「判死跨进程回传」段)。
+   *  undefined = 沿用泵上既有回传口(seek 重建路径不重复传),与 `bridge?` 同款范式。 */
+  onUnplayable?: SongUnplayableSink,
 ): void {
   clearPauseState(srv, clientId);
   if (!srv) return; // 无 server 时无推流可言(原 playMedia 在 !srv 时 throw,由调用方处理)
@@ -274,7 +279,7 @@ export function playCore(
     if (r.ok) return;
     log.info(`[Sendspin][handover] ${clientId} ← ${arm.fromGroup} 借流放弃(${r.reason}),走完整起播`);
   }
-  const pump = pumpFor(srv, g);
+  const pump = pumpFor(srv, g, onUnplayable);
   pump.stop(); // 打断上一首,避免重叠推流(MA:track change 丢弃旧 PushStream)
   // MA seek_position 属于**新**流:stop 之后装填,play() 起流即带 -ss 起点。
   if (seekPositionMs != null) pump.armSeek(seekPositionMs);
@@ -372,6 +377,11 @@ export function playGroupCore(
   seekPositionMs?: number,
   /** Phase 3 桥接:主进程 bridgePrepare 好的 socket 规格集合(语义同 playCore)。 */
   bridge?: BridgeSocketSpec[],
+  /** 判死回传(2026-10-28 事故修复):推流侧把某首歌判死(`stream-truncated` 提前
+   *  EOF / 完整性判官)时回调,让**主进程**也能记一次负缓存 —— 子进程的 streamFallback
+   *  负缓存是 module-local Map,主进程看不见(详见 streamEngine「判死跨进程回传」段)。
+   *  undefined = 沿用泵上既有回传口(seek 重建路径不重复传),与 `bridge?` 同款范式。 */
+  onUnplayable?: SongUnplayableSink,
 ): void {
   clearPauseState(srv, groupName);
   if (!srv) return;
@@ -389,7 +399,7 @@ export function playGroupCore(
     if (r.ok) return;
     log.info(`[Sendspin][handover] ${groupName} ← ${arm.fromGroup} 借流放弃(${r.reason}),走完整起播`);
   }
-  const pump = pumpFor(srv, g);
+  const pump = pumpFor(srv, g, onUnplayable);
   pump.stop(); // 打断上一首,避免重叠推流
   if (seekPositionMs != null) pump.armSeek(seekPositionMs);
   // 关旧编码器清残留分段(与 playCore 同因:无声事故)—— 两种路径都要。

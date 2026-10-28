@@ -15,7 +15,8 @@ import { createAirPlayProtocolPlayer } from "../airplay/protocolPlayer.js";
 import { createSendspinProtocolPlayer } from "../sendspin/protocolPlayer.js";
 import { getCachedPlayability } from "../source/online/streamFallback.js";
 import { getPreProbeScheduler } from "./preProbeScheduler.js";
-import { prefetchUpcoming } from "../source/prefetchCache.js";
+import { prefetchSong, prefetchUpcoming } from "../source/prefetchCache.js";
+import { getPrefetchSettings } from "../source/prefetchConfig.js";
 import { createGroupProtocolPlayer, getGroupStatus, hasOnlineMember } from "../group/protocolPlayer.js";
 import { checkPlayTarget } from "../playTarget.js";
 import { getGroupManager } from "../group/index.js";
@@ -971,6 +972,14 @@ export class QueueController extends EventEmitter {
     //    快缓存 → 优选换行(含验证) → 本行探测 → 本行复核。
     //    definitive(本地文件确死)直接判 skip;未知走宽容尾巴(旧语义不变)。
     const { resolvePlayableRow } = await import("../source/resolveAudio.js");
+    // ---- 第六闸:起播前完整性预检(2026-10-28 240 事故) ----
+    // 事故:预取 lookahead=1 只覆盖「下一首」,而 auto-advance 连跳两首死歌后落到的那首
+    // **首次不在预取窗口** ⇒ 负缓存 unknown ⇒ 直接播 ⇒ 用户听到 60s 试听片段;要等
+    // 18:29:06 主进程自己的预取跑完才判死。这一闸补的就是「落点歌首次起播前先判一次」。
+    if ((await this.precheckIntegrity(item.songId, songRow)) === "skip") {
+      log.info(`[QueueController][judge] ${item.songId}: 起播前完整性预检判死,跳过`);
+      return "skip";
+    }
     const r = await resolvePlayableRow(item.songId);
     if (r.row) return "play";
     if (r.definitive) {
@@ -980,6 +989,42 @@ export class QueueController extends EventEmitter {
     log.info(`[QueueController][judge] ${item.songId}: 无可播行(${r.reason}),进宽容尾巴`);
     // 返回 null 时再确认是「没有源」还是「网络抖动」—— 抖动不跳,照常试播。
     return getCachedPlayability(item.songId) === "unplayable" ? "skip" : "play";
+  }
+
+  /** 起播前完整性预检(第六闸,2026-10-28):负缓存 unknown 的**网络源**在起播前先触发
+   *  一次预取,**有界等**它的判官结论 —— 判死 ⇒ skip。
+   *
+   *  四条触发条件缺一不可(保守,绝不误杀):
+   *    ① 负缓存 unknown —— 已有结论的不重复劳动(正/负都由别处负责);
+   *    ② 网络源(`type==="web"` 或 `path` 以 `web:` 开头)—— 本地文件不存在试听片段;
+   *    ③ 曲库 `duration > 0` —— **无基准不杀**,与判官自身同一条原则;
+   *    ④ 完整性判官开着。
+   *
+   *  等待上界 `precheckWaitMs`(默认 3000ms,`0` = 关闸),**严格小于** playCurrent 外层
+   *  `withTimeout(...,10_000,...)`;超时 / 预取异常 / 仍判定不出 ⇒ 一律返回 "play"。
+   *  2026-10-21 240 事故就是 playCurrent 被一次 await 永久占用(HiVi 卡在《亲爱的你啊》),
+   *  所以这里复用 withTimeout:超时必然继续,且不新增任何无兜底的 await。 */
+  private async precheckIntegrity(songId: string, songRow: any): Promise<"skip" | "play"> {
+    try {
+      const cfg = getPrefetchSettings();
+      const waitMs = Math.max(0, Math.min(9000, Number(cfg.precheckWaitMs) || 0));
+      if (waitMs <= 0 || !cfg.integrityEnabled) return "play";
+      // ① 负缓存:已有**确定**结论的不重复劳动 —— playable 直接放行(否则每首都要等
+      //   一次预取,把起播白白拖慢 3s);unplayable 直接跳过(与 judgePlayable 尾巴同判)。
+      //   只有 unknown / transient(弱信号的软失败)才值得在起播前再判一次。
+      const known = getCachedPlayability(songId);
+      if (known === "unplayable") return "skip";
+      if (known !== "unknown" && known !== "transient") return "play";
+      const dur = Number(songRow?.duration || 0);
+      if (!(dur > 0)) return "play"; // 无基准不杀
+      const isNet = songRow?.type === "web" || String(songRow?.path || "").startsWith("web:");
+      if (!isNet) return "play";
+      // 复用预取自己的 single-flight(同一首不会起第二份下载),只等它落地。
+      await withTimeout(prefetchSong(songId), waitMs, `precheck ${songId}`, () => undefined);
+      return getCachedPlayability(songId) === "unplayable" ? "skip" : "play";
+    } catch {
+      return "play"; // 预检绝不阻断起播
+    }
   }
 
   /** 就地恢复当前首:重投(cast)+ 把播放位置拉回 `pos` 秒。

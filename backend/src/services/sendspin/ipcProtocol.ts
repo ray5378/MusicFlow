@@ -83,6 +83,10 @@ export type SendspinChildEvent =
   | { t: "activated"; clientId: string; name: string; legacy: boolean }
   | { t: "closed"; clientId: string }
   | { t: "playFailed"; clientId: string; songId: string; message: string }
+  /** 子进程把某首歌判死(提前 EOF / 完整性判官) —— 主进程必须**自己**再记一次负缓存。
+   *  子进程的 streamFallback 缓存是 module-local Map,主进程读不到(2026-10-28 事故:
+   *  子进程 18:28:22 已判死,主进程 18:28:46 重播时仍读到 unknown ⇒ 又播一遍试听片段)。 */
+  | { t: "songUnplayable"; clientId: string; songId: string; reason: string }
   | { t: "pauseStopIssued"; clientId: string };
 
 /** 主进程 → child。 */

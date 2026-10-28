@@ -123,7 +123,11 @@ export class SendspinChildController extends ChildRpcHost<SendspinChildToParent,
         const item = p.item as QueueItem;
         playCore(srv, clientId, item, (cid, songId, message) => {
           this.emit({ t: "playFailed", clientId: cid, songId, message });
-        }, p.seekPositionMs as number | undefined);
+        }, p.seekPositionMs as number | undefined, undefined, (songId, reason) => {
+          // ★ 判死跨进程回传:子进程这份负缓存主进程读不到,必须让主进程自己再记一次
+          //   (主进程收到 songUnplayable 后写 markUnplayable)。与 playFailed 共用 emit 出口。
+          this.emit({ t: "songUnplayable", clientId, songId, reason });
+        });
         this.requestSnapshot(true); // current 元数据变化立即可见(前端歌词/封面跟随)
         return null; // pump 异步起播,不等待解码
       }
@@ -179,7 +183,10 @@ export class SendspinChildController extends ChildRpcHost<SendspinChildToParent,
             : undefined;
         playGroupCore(srv, String(p.group), members, p.item as QueueItem, (cid, songId, message) => {
           this.emit({ t: "playFailed", clientId: cid, songId, message });
-        }, p.seekPositionMs as number | undefined, bridgeSockets);
+        }, p.seekPositionMs as number | undefined, bridgeSockets, (songId, reason) => {
+          // ★ 同上:用户组起播的判死同样要回传主进程。
+          this.emit({ t: "songUnplayable", clientId: String(p.group), songId, reason });
+        });
         this.requestSnapshot(true);
         return null;
       }

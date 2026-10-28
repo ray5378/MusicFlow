@@ -41,6 +41,14 @@ vi.stubGlobal("fetch", async (url: string) => {
   if (u.includes("/dead/")) return new Response("gone", { status: 404 });
   return new Response("bytes", { status: 206, headers: { "content-type": "audio/mpeg" } });
 });
+// ⚠ 起播前完整性预检（第六闸，2026-10-28）在本文件**显式关闸**（0 = 关）：
+// 这里的 fetch 桩用 5 字节 "bytes" 冒充音频，只模拟「URL 可达性」；任何基于真实字节的
+// 内容判官都会按「装不下期望时长的硬算术下界」判死（G17 的 too-small-hard），于是每一首
+// 都在起播前被跳过 —— 那会把本文件真正要测的「预探测调度 / 留队列跳过 / 洗牌序物化」
+// 语义完全盖掉。真实字节下的内容判官由 tests/source/prefetchCache.test.ts 与
+// tests/player/precheckIntegrity.test.ts 覆盖。
+process.env.PREFETCH_PRECHECK_WAIT_MS = "0";
+
 
 // ---- 可控的探测:预热阶段决定每首歌的"命运",扫描阶段全部命中缓存(0 次真实探测) ----
 const PROVIDER = "preprobe-test";

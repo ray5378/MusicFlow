@@ -67,6 +67,10 @@ export interface PrefetchSettings {
   integrityBitrateDeltaSec: number;
   /** 音频文件的最小合理字节数(KB,低于此判 too-small)。 */
   minAudioKB: number;
+  /** 起播前完整性预检的等待上限(ms):judgePlayable 在「负缓存 unknown + 网络源 +
+   *  曲库 duration>0 + 判官开」时触发一次预取并**有界等**它的判官结论;判死 ⇒ 跳过。
+   *  0 = 关闭这一闸。超时 / 预取异常 / 仍判不出 ⇒ 一律放行(绝不卡住起播)。 */
+  precheckWaitMs: number;
 }
 
 interface NumSpec {
@@ -92,6 +96,9 @@ export const PREFETCH_NUM_SPECS: Record<string, NumSpec> = {
     min: 5, max: 1800, def: 80, int: true, env: "PREFETCH_INTEGRITY_DELTA_SEC_BITRATE",
   },
   minAudioKB: { min: 8, max: 4096, def: 64, int: true },
+  // 上界 9000 是硬约束:playCurrent 外层 withTimeout 是 10s,这一闸必须严格小于它
+  // (2026-10-21 240 事故 = playCurrent 被一次 await 永久占用)。env 兜底便于真机调参。
+  precheckWaitMs: { min: 0, max: 9000, def: 3000, int: true, env: "PREFETCH_PRECHECK_WAIT_MS" },
 };
 
 function clamp(n: number, spec: NumSpec): number {

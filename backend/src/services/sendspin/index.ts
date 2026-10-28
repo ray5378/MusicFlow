@@ -61,7 +61,7 @@ async function ensureControllers(): Promise<void> {
 }
 import { setServer, getServer } from "./runtime.js";
 import { getSendspinFront as getSendspinFrontImpl } from "./proxy.js";
-import { sendspinSupervisor } from "./supervisor.js";
+import { sendspinSupervisor, markSongUnplayableInMain } from "./supervisor.js";
 import { isForkMode } from "./mode.js";
 import type { BridgeSocketSpec } from "./bridgeAttach.js";
 import { markPauseStopIssued } from "../player/pauseStopSettle.js";
@@ -420,6 +420,13 @@ export async function startSendspinService(port?: number): Promise<SendspinRunti
     // (idle_early 复查在本进程 QueueController,见 services/player/pauseStopSettle.ts)。
     onPauseStopIssued: (clientId) => {
       markPauseStopIssued(clientId);
+    },
+    // 子进程判死(提前 EOF / 试听片段)→ 主进程**自己**补记负缓存。子进程那一份是
+    // module-local Map,主进程的 judgePlayable 读不到(2026-10-28 事故:子进程 18:28:22
+    // 判死,主进程 18:28:46 重播仍读 unknown ⇒ 又播一遍 60s 片段)。
+    onSongUnplayable: (songId, reason) => {
+      log.warn(`sendspin 判死回传: ${songId} (${reason}) ⇒ 主进程记负缓存`);
+      markSongUnplayableInMain(songId);
     },
   });
   await sendspinSupervisor.start(port ?? pluginCfg.port);

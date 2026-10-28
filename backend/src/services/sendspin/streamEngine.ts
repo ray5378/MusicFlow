@@ -45,6 +45,21 @@ export interface GroupAudio {
 /** 插件配置重读缓存间隔(5s):「解码窗口上限」等配置的最大生效延迟。 */
 const STREAM_SOURCE_CACHE_MS = 5000;
 
+// ---------------- 判死跨进程回传(2026-10-28 240 生产事故) ----------------
+//
+// 事故:`stream-truncated`(提前 EOF 判死)发生在 **Sendspin 子进程**,而 `markUnplayable`
+// 写的 `streamFallback` 负缓存是 module-local Map —— 子进程只改自己那份,主进程完全看不见。
+// 后果:子进程 18:28:22 已判死,主进程 18:28:46 重播时 `judgePlayable` 仍读到 unknown ⇒
+// 又把 60s 试听片段播了一遍(要等 18:29:06 主进程自己的预取判死才跳过)。
+//
+// 修法:子进程判死这一拍**同时**把事实上报主进程(IPC 事件 songUnplayable),由主进程
+// supervisor 分发后自己写负缓存。
+//
+// 回传口挂在 GroupPump 实例上(`onUnplayable`),经 `pumpFor(_, _, sink)` 装填 —— 与
+// playCore 的 `bridge?` 同款范式:可选参数 + 默认空,旧调用方零变化。泵实例在组内复用
+// (WeakMap 池)且 rehost/移交搬运的是同一个对象,回传口随泵一起走。
+export type SongUnplayableSink = (songId: string, reason: string) => void;
+
 let windowSecCache: { value: number; at: number } | null = null;
 
 /** 读插件配置的「解码窗口上限」(秒;5s 缓存)。
@@ -479,6 +494,13 @@ export class GroupPump {
   private resumeWaiter: (() => void) | null = null;
   // 上一首是否已"自然播完"(用于结束时置空 current 触发 auto-advance)。
   private endedNaturally = false;
+
+  /** 判死后回传(子进程 → 主进程负缓存同步):由 `pumpFor(_, _, sink)` 装填。
+   *  未装填 = 静默丢弃(单测 / 主进程内起播都不受影响)。
+   *  回传失败绝不影响推流收尾(调用点整段 try/catch)。 */
+  onUnplayable: SongUnplayableSink | null = null;
+  /** 「回传口未装填」已报过的 songId:每首最多一条 warn,同一首反复播不刷屏。 */
+  private warnedNoSink = new Set<string>();
 
   constructor(server: SendspinServer, group: SendspinGroup) {
     this.server = server;
@@ -1167,6 +1189,27 @@ export class GroupPump {
             } catch (e: any) {
               logSafe(this.server, "warn", `sendspin stream-truncated: 记负缓存失败(已忽略): ${String(e?.message || e).slice(0, 120)}`);
             }
+            // ★ 跨进程回传:子进程这份负缓存主进程看不见,必须经 IPC 让主进程再记一次
+            //   (详见本文件「判死跨进程回传」段)。clientId 取组名:单设备组名就是裸 clientId,
+            //   用户组则是 `ug:<gid>` —— 主进程侧只用 songId/reason,组名仅供日志溯源。
+            // ★ 跨进程回传:子进程这份负缓存主进程看不见,必须经 IPC 让主进程再记一次
+            //   (详见本文件「判死跨进程回传」段)。回传口由 pumpFor 装填。
+            try {
+              if (!this.onUnplayable) {
+                // 🔴 最危险的失败模式:判死了但**没人回传** ⇒ 主进程永远不知道,bug 原样复现
+                //   (与 2026-10-28 事故同型)。绝不静默 —— 每首歌最多报一次。
+                if (!this.warnedNoSink.has(this.songId)) {
+                  this.warnedNoSink.add(this.songId);
+                  logSafe(this.server, "warn", `sendspin stream-truncated: 判死回传口未装填,主进程不会同步记负缓存 song=${this.songId}`);
+                }
+              }
+              this.onUnplayable?.(
+                this.songId,
+                `stream-truncated 期望${Math.round(expectedSec)}s 实际${Math.round(deliveredSec)}s`,
+              );
+            } catch (e: any) {
+              logSafe(this.server, "warn", `sendspin stream-truncated: 判死回传失败(已忽略): ${String(e?.message || e).slice(0, 120)}`);
+            }
           }
         }
 
@@ -1420,17 +1463,25 @@ export class GroupPump {
 const pumpByGroup = new WeakMap<SendspinGroup, GroupPump>();
 
 /** 取(或建)该组的 pump。 */
-export function pumpFor(server: SendspinServer, group: SendspinGroup): GroupPump {
+/** 取(或建)该组的 pump。
+ *
+ *  `onUnplayable`(2026-10-28 事故修复):本次起播的判死回传口,装填到泵实例上。
+ *  **不传 = 不动泵上已有的回传口** —— seek 重建路径(seekCore 内部再调 playCore)
+ *  不重复传,泵沿用初始起播时那个,语义一致。 */
+export function pumpFor(
+  server: SendspinServer,
+  group: SendspinGroup,
+  onUnplayable?: SongUnplayableSink | null,
+): GroupPump {
   let p = pumpByGroup.get(group);
   if (!p) {
     p = new GroupPump(server, group);
     pumpByGroup.set(group, p);
   }
+  if (onUnplayable) p.onUnplayable = onUnplayable;
   return p;
 }
 
-/** 停掉某组的 pump 并摘除(组空/断开清理用)。停后重播走 pumpFor 重建。
- *  注意只停音频生产,不碰队列(重连恢复靠队列,见 QueueController)。 */
 export function stopGroupPump(group: SendspinGroup): void {
   const p = pumpByGroup.get(group);
   if (p) {

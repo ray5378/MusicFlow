@@ -388,6 +388,11 @@ export function prefetchHit(songId: string): string | null {
 
 // ---------------- 触发 ----------------
 
+/** `streamFallback.getCachedPlayability` 的**同步**句柄:首次预取时惰性装载并缓存,
+ *  供 `prefetchSong` 的同步闸门 0 使用。未装载 ⇒ 闸门未生效(等价「不知道」,放行)。
+ *  之所以要句柄而不是每次 await import:闸门 0 必须在**同步**入口就能拦下排队的请求。 */
+let playabilityReader: ((songId: string) => string) | null = null;
+
 /** 该队列行 id 的「解析后 id」是否已有存活条目（= 去重命中）。 */
 function aliasLive(queueId: string): boolean {
   const resolved = alias.get(queueId);
@@ -408,6 +413,9 @@ function dropAliasesFor(resolvedId: string): void {
  */
 export function prefetchSong(songId: string): Promise<void> {
   if (!songId) return Promise.resolve();
+  // 闸门 0(2026-10-28):已判死 ⇒ 一个字节都不下。此前只有「已缓存 / 在途 / 并发上限」
+  // 三道闸门,一首试听片段每次轮到都重新下一遍(240 实测同一首 972KB / 6h 内 5 次)。
+  if (playabilityReader?.(songId) === "unplayable") return Promise.resolve();
   if (aliasLive(songId)) return Promise.resolve(); // 闸门 1（已缓存）
   const pending = inflight.get(songId);
   if (pending) return pending; // 闸门 1（在途）
@@ -469,6 +477,14 @@ async function doPrefetch(songId: string): Promise<void> {
   if (aliasLive(songId)) return; // 闸门 1（排队期间可能已被填上）
   const row = db.select().from(songs).where(eq(songs.id, songId)).get() as any;
   if (!row) return;
+  // 闸门 0 的**权威版**（同步版本可能因句柄未装载而漏判，这里补一次，且装载句柄）：
+  // 已判死的歌直接返回，连 resolvePreferredSong / 换源链都不跑 —— 不产生任何上游字节。
+  const sf0 = await import("./online/streamFallback.js");
+  playabilityReader = sf0.getCachedPlayability;
+  if (playabilityReader(songId) === "unplayable") {
+    log.debug(`[prefetch] ${songId} 已判死(unplayable),跳过预取(不下字节)`);
+    return;
+  }
 
   // 出流侧（/rest/stream、cast、flow 三处）都先过 resolvePreferredSong —— 预取必须登记在
   // **解析后**的 id 上。否则「队列行是 webId、实际出流是组内 localId」时，

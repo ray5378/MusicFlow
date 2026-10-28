@@ -43,6 +43,9 @@ export interface SupervisorHooks {
   /** 看门狗「暂停转 stop」已下发(主进程据此 markPauseStopIssued —— idle_early
    *  复查在主进程 QueueController,见 services/player/pauseStopSettle.ts)。 */
   onPauseStopIssued?: (clientId: string) => void;
+  /** 子进程把某首歌判死(提前 EOF / 完整性判官) —— 主进程据此自己写负缓存。
+   *  子进程那份 streamFallback 缓存是 module-local,主进程读不到(2026-10-28 事故)。 */
+  onSongUnplayable?: (songId: string, reason: string) => void;
 }
 
 /** 子进程业务事件 → hooks 分发(纯函数抽出,便于单测)。
@@ -61,9 +64,34 @@ export function dispatchSendspinChildEvent(ev: SendspinChildEvent, hooks: Superv
     case "pauseStopIssued":
       try { hooks.onPauseStopIssued?.(ev.clientId); } catch { /* ignore */ }
       return;
+    case "songUnplayable":
+      try { hooks.onSongUnplayable?.(ev.songId, ev.reason); } catch { /* ignore */ }
+      return;
     default:
       return;
   }
+}
+
+/** 子进程判死 → **主进程**自己补记一次负缓存(index.ts 的 onSongUnplayable 落地动作)。
+ *
+ *  为什么必须再记一次:子进程 `markUnplayable` 写的是**它自己进程里** streamFallback 的
+ *  module-local Map,而 `QueueController.judgePlayable` 读的是主进程那份 —— 两个进程各
+ *  有一份,互不可见。2026-10-28 240 事故:子进程 18:28:22 已判死,主进程 18:28:46 重播
+ *  时仍读到 unknown ⇒ 又把 60s 试听片段播了一遍(要等 18:29:06 主进程自己的预取跑完
+ *  才判死)。
+ *
+ *  动态 import 与 index.ts 内联版本一致(静态引入会把 registry/plugins 拉进来成环)。
+ *  记缓存失败**绝不影响**推流,故整段吞异常;fire-and-forget,不返回 promise。 */
+export function markSongUnplayableInMain(songId: string): void {
+  if (!songId) return;
+  void (async () => {
+    try {
+      const { markUnplayable } = await import("../source/online/streamFallback.js");
+      markUnplayable(songId);
+    } catch {
+      /* 记缓存失败不影响推流 */
+    }
+  })();
 }
 
 class SendspinSupervisor extends RendererHostSupervisor<
