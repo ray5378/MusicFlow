@@ -1003,3 +1003,20 @@ PUT 语义：`memberId` 必须是本组成员（命名空间 id **原样整条**
 ---
 
 *（本文档为纯文档产出，未修改任何代码。事实基线见文首「代码基线」；如代码变动，请以 `文件:行号` 重新核对后更新本文。）*
+
+
+---
+
+## 附 E v4.9.3 增补(方向 A,2026-10-28)
+
+> 正文各章保持 v4.8.x 事实;与正文冲突处以本节为准(代码为准)。
+
+| # | 变更 | 现状(代码为准) | 位置 |
+|---|------|------------------|------|
+| E-1 | 纯 AirPlay 组强制走桥(方向 A) | playMedia 路由条件由「spin>0」改为「ap>0」:组内有在线 AirPlay 成员即 prepareBridgeRoute,不再要求组内有 sendspin 成员;暖复用判据同步改 ap 集合比对 | group/protocolPlayer.ts playMedia(routeReusable/bridgeRoute) |
+| E-2 | 纯 AP 桥组照常起组泵 | 泵是桥唯一 PCM 源:spin job 条件改「spinOnline>0 ‖ bridgeRoute」;sendspin 组 playMedia 空成员+带桥规格放行(不再抛「无在线 sendspin 成员」) | group/protocolPlayer.ts jobs;sendspin/protocolPlayer.ts playMedia |
+| E-3 | 纯 AP 桥组传输/音量/状态派生 | spinOp 对「无 spin 成员但有活跃桥路由」照常落泵(暂停/恢复/seek/音量/停);pollState 与 getGroupStatus 的「leader=airplay 且 isBridgeOwned」分支不再要求组内有 sendspin 成员(否则 solo 视图恒空 → 恒 STOPPED → idle_early 无限重启) | group/protocolPlayer.ts spinOp/pollState/getGroupStatus |
+| E-4 | 纯 AP 桥组不回收 | reclaimSendspinOrphans 跳过 hasBridges() 的组(members=0 不是孤儿),回收即桥断粮静默 | sendspin/index.ts reclaimSendspinOrphans |
+| E-5 | 同 host DLNA 互斥豁免细化 | bridgeOwners 升级 deviceId→{token,groupId};stopAirPlaySessionsForHost 对桥占用设备:组存在且设备仍是成员(含 prepare 窗口)⇒ 豁免(接管语义);组已解散/设备已移出 ⇒ 孤儿,bridgeStopDevice 回收;无组上下文守旧豁免 | airplay/control.ts(stopAirPlaySessionsForHost/registerBridgeOwner/bridgeOwnerGroupOf);group/protocolPlayer.ts isGroupBridgeSessionAttached |
+| E-6 | 桥会话初始音量 = 组落库值 | prepareBridgeRoute 取 player_groups 落库值随 bridgePrepare.initialVolume 下发;pushInitialVolume 优先用之(0→-144dB),无组上下文才回落设备落库值 —— 流转/起播绝不把成员设备旧音量带给接收端;运行时变更仍走 fanOut setVolume → setAirPlayVolume | group/protocolPlayer.ts;airplay/control.ts;ipcProtocol.ts;childMain.ts;bridgeSession.ts |
+| E-7 | 纯 AP 桥组锚点 lead(核实,无改码) | 深锚分支判据是运行时 hasBridges()/hasDirectMembers():纯 AP 桥组 hasBridges=true、hasDirectMembers=false → 自动落入纯桥深锚 bridgeStartLeadUs 分支,不落入 min(aheadUs,ANCHOR_SAFE_LEAD_US) | sendspin/streamEngine.ts anchorLead;sendspin/server.ts hasBridges/hasDirectMembers |

@@ -1608,3 +1608,15 @@ prev、音量/静音、自然结束自动下一首、停止）+ 组播 6 项（`
 - HA 社区 `Time message timed out` + 卡顿：<https://community.home-assistant.io/t/sendspin-time-message-timeouts-and-bad-stuttering-no-audio/1008262>
 - Music Assistant：provider 在 `music_assistant/providers/sendspin/`，节奏/背压在 `aiosendspin==9.1.1`
 - MusicFlow 发版报告：`CHANGELOG.md`（`[4.0.19]` 为三处修复的完整实证）
+
+
+---
+
+## v4.9.3 增补(方向 A:纯 AirPlay 桥组,2026-10-28)
+
+| # | 变更 | 现状(代码为准) | 位置 |
+|---|------|------------------|------|
+| S-1 | 组泵合法空成员化 | 用户组 playMedia 空直连成员 + 带 bridge 规格 ⇒ 放行起泵(桥是唯一消费者);无桥仍抛「无在线 sendspin 成员」 | sendspin/protocolPlayer.ts playMedia |
+| S-2 | 空成员组不被空闲回收 | reclaimSendspinOrphans 跳过 hasBridges() 的组 —— 纯 AP 桥组 members=0 但桥在出声,回收即断粮静默 | sendspin/index.ts reclaimSendspinOrphans |
+| S-3 | 深锚分支核实 | anchorLead 判据 = hasBridges()/hasDirectMembers() 运行时状态,与「组内是否有 sendspin 成员」无关:纯 AP 桥组自动落入纯桥深锚 bridgeStartLeadUs 分支(2026-10-26 E3 判决语义扩展到纯 AP 桥组),不落入 min(aheadUs, ANCHOR_SAFE_LEAD_US) | streamEngine.ts anchorLead;server.ts hasBridges/hasDirectMembers |
+| S-4 | 桥会话初始音量 | prepareBridge 下发 initialVolume = player_groups 落库值;组 playMedia 起播前既有「灌组音量」路径(sendspinGroupTransport volume)不变,两层口径一致(都取组落库值) | group/protocolPlayer.ts prepareBridgeRoute;sendspin/protocolPlayer.ts playMedia |

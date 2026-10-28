@@ -280,10 +280,17 @@ export function isAirplayBridgeEnabled(): boolean {
  *  语义:owner={kind:"bridge", token} 与 native cast 互斥 —— stop 路径必须跳过
  *  桥占用的设备(MAJ-06,否则 DLNA 互斥等 stop 链路会误杀桥会话),native cast
  *  到桥占用设备直接拒绝。登记点 = bridgePrepareDevice 成功后;清除点 = bridgeStopDevice。 */
-const bridgeOwners = new Map<string, string>();
+const bridgeOwners = new Map<string, { token: string; groupId: string | null }>();
 
-export function registerBridgeOwner(deviceId: string, token: string): void {
-  bridgeOwners.set(deviceId, token);
+/** 登记桥会话 owner;v4.9.3 起携带归属组 id(null = 无组上下文),供同 host DLNA
+ *  互斥区分「活跃组桥会话(豁免,接管语义)」与「孤儿桥会话(可回收)」。 */
+export function registerBridgeOwner(deviceId: string, token: string, groupId?: string | null): void {
+  bridgeOwners.set(deviceId, { token, groupId: groupId ?? null });
+}
+
+/** 桥会话归属组 id(未登记/无组上下文 = null)。 */
+export function bridgeOwnerGroupOf(deviceId: string): string | null {
+  return bridgeOwners.get(deviceId)?.groupId ?? null;
 }
 
 export function clearBridgeOwner(deviceId: string): void {
@@ -305,6 +312,9 @@ export async function bridgePrepareDevice(
   /** 所属用户组 id:用于取**按组**的 A/V 延迟补偿(正数=AirPlay更晚出声)。
    *  缺省(null/undefined)= 无组上下文,回落到旧的全局 bridge.avShiftMs。 */
   groupId?: string | null,
+  /** v4.9.3(§音量语义):桥会话初始音量(0-100,player_groups 落库值,调用方算好)。
+   *  undefined = 无组上下文,桥侧回落设备落库值(旧行为)。 */
+  opts?: { initialVolume?: number },
 ): Promise<{ listening: true; socketPath: string }> {
   const dev = getAirPlayDevice(deviceId);
   if (!dev) throw new Error(`AirPlay 设备不存在: ${deviceId}`);
@@ -326,12 +336,14 @@ export async function bridgePrepareDevice(
     // + 锚点平移 = 双份 shift ⇒ 对齐器把多出的那份判「内容超前」整段裁掉
     // (2026-10-27 双加实锤:切歌被吞 2 秒、净补偿归零)。
     anchorShiftUs: 0,
+    // v4.9.3(§音量语义):桥会话初始音量(0-100,player_groups 落库值);子进程不碰 DB。
+    initialVolume: opts?.initialVolume,
     // AP2 realtime:建链载荷(controllerId + 已切分凭据)。**只在协议确为 AP2 时下发** ——
     // RAOP 载荷逐字节不变(未配对导致 undefined 时桥侧按「AP2 载荷缺失」快速失败,
     // 主进程按 MAJ-07 回落该设备本流 solo cast,不会静默无声)。
     ap2: isAp2BridgeProtocol(protocol) ? buildAp2BridgePayload(deviceId) : undefined,
   });
-  registerBridgeOwner(deviceId, token);
+  registerBridgeOwner(deviceId, token, groupId ?? null);
   return r;
 }
 
@@ -390,7 +402,23 @@ export async function stopAirPlaySessionsForHost(host: string): Promise<string[]
   for (const d of getAirPlayDevices()) {
     if (d.host && d.host.toLowerCase() === h && hasActiveSession(d.id)) {
       // MAJ-06:桥会话(owner=bridge)不归 DLNA 互斥管 —— 误杀会让整组桥静默。
+      // v4.9.3(§互斥豁免):owner 带组归属后细化 —— 组仍存在且设备仍是成员(含
+      // bridgePrepare 进行中窗口,activeBridgeRoutes 尚未登记)⇒ 豁免(接管语义:
+      // 组内出声由方向 A 的组桥路由承担);组已解散/设备已移出 ⇒ 孤儿桥会话,走桥
+      // 回收原语拆掉,不再永久挡同 host DLNA cast。无组上下文守旧豁免(防御)。
       if (isBridgeOwned(d.id)) {
+        const gid = bridgeOwnerGroupOf(d.id);
+        if (gid) {
+          const { isGroupBridgeSessionAttached } = await import("../group/protocolPlayer.js");
+          if (isGroupBridgeSessionAttached(gid, d.id)) {
+            log.debug(`双协议互斥:豁免活跃组桥会话(group=${gid}) ${d.id}`);
+            continue;
+          }
+          log.info(`双协议互斥:回收孤儿桥会话(group=${gid} 已不存在/设备已移出) ${d.id}`);
+          await bridgeStopDevice(bridgeOwners.get(d.id)!.token, d.id);
+          stopped.push(d.id);
+          continue;
+        }
         log.debug(`双协议互斥:跳过桥占用设备(owner=bridge) ${d.id}`);
         continue;
       }

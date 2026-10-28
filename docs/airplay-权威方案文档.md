@@ -1535,3 +1535,15 @@ routes/api/groups.ts:129  PUT /v1/groups/:id/delays  {memberId, ms}
 | D-2 | `group/protocolPlayer.ts::playMedia` 每次起播**无条件**先 `teardownBridgeRoute()` 再 `prepareBridgeRoute()`（`:320-324`），即使路由存在、deviceId 集合与 `apOnline` 完全一致、每个设备都 `isBridgeOwned` | 每首歌拆一次桥：① 设备侧 TEARDOWN/SETUP/RECORD 重握手（现场约 1~2s 静音）② 新 token ⇒ 新桥会话 ⇒ 音量走 `pushInitialVolume` 而非「保持当前值」（D-1 修好后不再表现为**音量丢失**，只剩**重建开销**）③ `maybeBeginStream` 的锚点一次性算死（`:498` `if (this.aligner !== null) return`），重建必然重锚 | **已修（v4.7.x 暖复用）**：复用条件 = 路由存在 + deviceId 集合与 `apOnline` 完全一致 + 每个 device `isBridgeOwned`；命中则跳过 teardown/prepare，并打 debug `[group][bridge] <gid>: 复用既有桥路由(切歌不重建)` | `group/protocolPlayer.ts:313`（`playMedia`）、`:320-324`（无条件拆/建：`:321` teardown、`:324` prepare）、`teardownBridgeRoute`(:278)、`prepareBridgeRoute`(:289)、`bridgeSession.ts:498` |
 
 **D-2 与 D-1 的关系（别混）**：D-2 是**性能/重锚**问题，D-1 是**功能**问题（音量落不到设备）。两者均已修复：D-1 见上；D-2 由 v4.7.x「桥路由暖复用」修复（`routeReusable` 判据，`group/protocolPlayer.ts:437-443`，守卫 G13 钉死）——成员集合与桥参数未变时切歌复用既有路由与 token，不再无条件拆建桥。
+
+
+---
+
+## v4.9.3 增补(方向 A,2026-10-28)
+
+| # | 变更 | 现状(代码为准) | 位置 |
+|---|------|------------------|------|
+| A-1 | 桥 owner 带组归属 | bridgeOwners 由 deviceId→token 升级为 deviceId→{token,groupId};registerBridgeOwner 增第三参(groupId 缺省 null);新增 bridgeOwnerGroupOf 读取 | airplay/control.ts |
+| A-2 | 同 host DLNA 互斥豁免细化(接管语义) | stopAirPlaySessionsForHost 对桥占用设备:归属组仍存在且设备仍是成员(含 bridgePrepare 进行中窗口)⇒ 豁免;组已解散/设备已移出 ⇒ 孤儿桥会话,走 bridgeStopDevice 回收并计入 stopped;无组上下文守旧豁免。MAJ-06 原语义(活跃组桥不杀)不变,孤儿不再永久挡同 host DLNA cast | airplay/control.ts stopAirPlaySessionsForHost;group/protocolPlayer.ts isGroupBridgeSessionAttached(动态 import,避免静态环) |
+| A-3 | 桥会话初始音量 = player_groups 落库值 | bridgePrepare RPC 载荷新增 initialVolume(0-100,主进程 prepareBridgeRoute 从 GroupManager 取好下发,子进程不碰 DB);pushInitialVolume 优先用之(0→-144dB),无组上下文回落 airplay_device_state(旧行为);RAOP 重连路径同样带组值。用户裁定语义:流转/起播绝不采用成员设备自身音量 | control.ts bridgePrepareDevice;ipcProtocol.ts BridgePrepareArgs;childMain.ts prepareBridge;bridgeSession.ts(pushInitialVolume/BridgeSessionOpts/两处调用点) |
+| A-4 | 纯 AP 组全量走桥后本模块的联动 | 纯 AirPlay 桥组(无 sendspin 成员)同享「活跃组桥会话」豁免 —— 组内对齐由组泵承担,DLNA cast 不再能杀掉组桥会话 | airplay/control.ts;sendspin/index.ts reclaimSendspinOrphans(有桥组不回收) |

@@ -1294,7 +1294,9 @@ export function reclaimSendspinOrphans(): string {
   let groups = 0;
   let encoders = 0;
   for (const g of [...srv.groups.values()]) {
-    if (g.members.size > 0) continue;
+    // v4.9.3 方向 A:纯 AirPlay 桥组(0 直连成员)靠桥出声 —— 有桥的组不是孤儿,
+    // 回收会让桥断粮静默。
+    if (g.members.size > 0 || (typeof g.hasBridges === "function" && g.hasBridges())) continue;
     stopGroupPump(g);
     encoders += g.close();
     srv.groups.delete(g.name);

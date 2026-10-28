@@ -54,8 +54,17 @@ import { createLogger } from "../../utils/logger.js";
  *  起播/重连会话从不推,接收端落默认初始音量(shairport-sync -18dB ⇒ loopback
  *  实测 -50.8dB 峰值,近乎无声)。音量以 airplay_device_state 落库值为准
  *  (读失败回退 80),0-100 标尺映射 -30..0dB;失败只记日志,不阻断起流。 */
-function pushInitialVolume(player: RaopPlayer, deviceId: string): void {
+function pushInitialVolume(player: RaopPlayer, deviceId: string, groupVolume?: number): void {
   try {
+    // v4.9.3(§音量语义):组上下文桥会话初始音量 = player_groups 落库值(用户裁定:
+    // 流转/起播绝不采用成员设备自身音量,否则「流转后组音量变成员旧值」);
+    // 无组上下文(undefined)回落 airplay_device_state 设备落库值(旧行为)。
+    if (typeof groupVolume === "number") {
+      const gdb = groupVolume === 0 ? -144 : degreesToDb(groupVolume);
+      player.setVolumeDb(gdb);
+      log.info(`push initial volume: ${gdb.toFixed(2)}dB (groupVol=${groupVolume}%) device=${deviceId}`);
+      return;
+    }
     const saved = getAirPlayVolumeState(deviceId);
     const vol = saved?.volume ?? DEFAULT_AIRPLAY_VOLUME;
     const db = saved?.muted || vol === 0 ? -144 : degreesToDb(vol);
@@ -404,6 +413,9 @@ export interface BridgeSessionOpts {
   dry?: boolean;
   /** A/V 标定位移(微秒,正 = 桥延后;主进程按 settings 下发)。见 bridgeCalib.ts。 */
   anchorShiftUs?: number;
+  /** v4.9.3(§音量语义):桥会话初始音量(0-100,player_groups 落库值,主进程下发)。
+   *  undefined = 无组上下文,pushInitialVolume 回落设备落库值(旧行为)。 */
+  initialVolume?: number;
   /** producer 等料超时(ms),超时补静音块。默认 1000。 */
   waitDataMs?: number;
   /** stats tick 周期(ms,§10.5 每设备一行 JSON)。默认 2000;≤0 关闭。 */
@@ -545,7 +557,7 @@ export class BridgeSession {
     this.raopSession = session;
     this.player = player;
     this.connected = true;
-    pushInitialVolume(player, this.opts.deviceId);
+    pushInitialVolume(player, this.opts.deviceId, this.opts.initialVolume);
     // 首帧可能早于 connect 完成 —— 连接就绪后立即补判起流。
     void this.maybeBeginStream();
   }
@@ -939,7 +951,7 @@ export class BridgeSession {
       this.player = player;
       this.raopReconnectAttempt = 0;
       log.info(`[airplay-bridge] raop reconnected: device=${this.deviceId}(新 RECORD,等待新代次首帧重锚)`);
-      pushInitialVolume(player, this.deviceId);
+      pushInitialVolume(player, this.deviceId, this.opts.initialVolume);
       try { oldPlayer?.forceClose(); } catch { /* ignore */ }
     } catch (e) {
       try { player.forceClose(); } catch { /* ignore */ }

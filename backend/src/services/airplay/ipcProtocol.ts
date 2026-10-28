@@ -69,6 +69,9 @@ export interface BridgePrepareArgs {
   anchorShiftUs?: number;
   /** AP2 realtime 建链载荷(仅 protocol 为 ap2-* 时出现)。 */
   ap2?: BridgeAp2Payload;
+  /** v4.9.3(§音量语义):桥会话初始音量(0-100,player_groups 落库值,主进程算好)。
+   *  undefined = 无组上下文,桥侧回落设备落库值(旧行为)。 */
+  initialVolume?: number;
 }
 
 /** bridgePrepare 返回。Phase 3:桥会话已对设备完成 RTSP 握手(或 dry 模式仅 listener);

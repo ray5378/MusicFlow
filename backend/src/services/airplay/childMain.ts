@@ -165,7 +165,7 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
   // ------------------------- Phase 3:桥会话管理 -------------------------
 
   private async prepareBridge(args: BridgePrepareArgs): Promise<BridgePreparedResult> {
-    const { deviceId, socketPath, token, protocol, host, port, pk, et, anchorShiftUs, ap2 } = args;
+    const { deviceId, socketPath, token, protocol, host, port, pk, et, anchorShiftUs, ap2, initialVolume } = args;
     if (!deviceId || !socketPath || !token) {
       throw new Error("bridgePrepare: deviceId/socketPath/token 必填");
     }
@@ -185,6 +185,8 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
         pk,
         et,
         anchorShiftUs,
+        // v4.9.3(§音量语义):桥会话初始音量透传(0-100;undefined 回落设备落库值)。
+        initialVolume,
         // AP2 realtime 建链载荷(仅 ap2-* 协议时非空;RAOP 传 undefined ⇒ 行为不变)。
         ap2,
         dry: !host,

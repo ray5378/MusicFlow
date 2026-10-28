@@ -92,7 +92,9 @@ export function createSendspinGroupPlayer(userGroupId: string): ProtocolPlayer {
     playerId,
     async playMedia(item: QueueItem, baseUrl: string, startMs = 0, bridge?: { sockets: BridgeSocketSpec[] }) {
       const members = await onlineSendspinMembers(userGroupId);
-      if (members.length === 0) {
+      // v4.9.3 方向 A:纯 AirPlay 桥组(无直连 sendspin 成员)也起泵 —— 桥是唯一
+      // 消费者;带 bridge 规格时空成员放行,不再抛「无在线 sendspin 成员」。
+      if (members.length === 0 && !bridge) {
         throw new Error(`组 ${userGroupId} 无在线 sendspin 成员,无法播放`);
       }
       // castSession/token 是主进程状态(track_changed 检测用),必须本侧生成。
