@@ -28,6 +28,7 @@ import { bridgeStartLeadUs } from "../airplay/bridgeMath.js";
 import { ANCHOR_SAFE_LEAD_US } from "../airplay/rates.js";
 import { createLogger } from "../../utils/logger.js";
 import { ap2TruncateMissingSec } from "../source/prefetchConfig.js";
+import { mixedAnchorLeadUsOf } from "../group/delayCalib.js";
 
 const log = createLogger("Sendspin");
 
@@ -918,7 +919,9 @@ export class GroupPump {
           const anchorLead = this.group.hasBridges?.() === true
             ? this.group.hasDirectMembers?.() !== true
               ? Math.max(aheadUs, bridgeStartLeadUs([{ warm: false }])) // 纯桥组:深锚
-              : Math.max(aheadUs, BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US) // 混合组:覆盖桥下沿
+              // 混合组:组值优先(前端弹窗可配,子进程直查 db,下一首即生效),
+              //              未配(0/NULL/设备组)⇒ 回退全局默认(v4.7.6 真机定标 5s)。
+              : Math.max(aheadUs, mixedAnchorLeadUsOf(this.group?.name ?? "") ?? BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US)
             : prefillEnabled()
               ? Math.min(aheadUs, ANCHOR_SAFE_LEAD_US)
               : (reseed ? reseedLead : aheadUs);

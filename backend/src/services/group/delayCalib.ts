@@ -25,6 +25,15 @@ export const GROUP_DELAY_MAX_MS = 30000;
 /** 前端步进(ms)。 */
 export const GROUP_DELAY_STEP_MS = 10;
 
+/** 混合组切歌等待的组级覆盖上限(ms,v4.8.6)。30s 足以覆盖任何接收端就绪窗口,
+ *  再大就是配置错误而非调参。 */
+export const MIXED_ANCHOR_LEAD_MAX_MS = 30000;
+/** 前端步进(ms)。 */
+export const MIXED_ANCHOR_LEAD_STEP_MS = 100;
+/** 「自动」语义值:0 或未设(NULL)⇒ 用全局默认(sendspin/constants.ts 的
+ *  BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US,env BRIDGE_MIXED_GROUP_ANCHOR_LEAD_MS,默认 5000ms)。 */
+export const MIXED_ANCHOR_LEAD_AUTO_MS = 0;
+
 /** 切歌垫片的组级默认(ms):**0 = 完全自动**(A 方案:生效 lead = max(组值, 冷/暖动态))。
  *  组值保留为 API 隐藏调参口(前端弹窗已移除);动态口径见 sendspin/constants.ts 的
  *  BRIDGE_TRACK_LEAD_COLD/WARM_US。 */
@@ -36,6 +45,8 @@ export type MemberDelays = Record<string, number>;
 interface GroupDelayCache {
   memberDelays: MemberDelays;
   trackLeadMs: number;
+  /** 混合组切歌等待组值(ms;0 = 自动,v4.8.6)。 */
+  mixedAnchorLeadMs: number;
 }
 
 const cache = new Map<string, GroupDelayCache>();
@@ -44,7 +55,7 @@ const cache = new Map<string, GroupDelayCache>();
  *  常量(或把它塞进 cache),任一调用方改写返回值就会污染「全局默认 + 所有无行组」的读值
  *  —— 表现为别处莫名多出补偿,且刷新页面也复现不一致。 */
 function zeroCache(): GroupDelayCache {
-  return { memberDelays: {}, trackLeadMs: DEFAULT_TRACK_LEAD_MS };
+  return { memberDelays: {}, trackLeadMs: DEFAULT_TRACK_LEAD_MS, mixedAnchorLeadMs: MIXED_ANCHOR_LEAD_AUTO_MS };
 }
 
 /** 钳制到 ±30000ms 的整数;非数字 → 0。 */
@@ -52,6 +63,14 @@ export function clampGroupDelayMs(v: unknown): number {
   const n = typeof v === "number" ? v : Number(v);
   if (!Number.isFinite(n)) return 0;
   return Math.min(GROUP_DELAY_MAX_MS, Math.max(GROUP_DELAY_MIN_MS, Math.round(n)));
+}
+
+/** 钳制到 0~30000ms 的整数;非数字/负数 → 0(= 自动)。负数无物理意义(提前起播),
+ *  归到「自动」而不是报错 —— 弹窗里用户拖过头不该炸接口。 */
+export function clampMixedAnchorLeadMs(v: unknown): number {
+  const n = typeof v === "number" ? v : Number(v);
+  if (!Number.isFinite(n)) return MIXED_ANCHOR_LEAD_AUTO_MS;
+  return Math.min(MIXED_ANCHOR_LEAD_MAX_MS, Math.max(0, Math.round(n)));
 }
 
 /** 从 member_delays_json 文本解析成员延迟表(非法/缺失 → {};逐项钳制)。 */
@@ -81,12 +100,16 @@ export function getMemberDelays(groupId: string | null | undefined): MemberDelay
   let v: GroupDelayCache = zeroCache();
   try {
     const row = db
-      .select({ md: playerGroups.memberDelaysJson, tl: playerGroups.trackSwitchLeadMs })
+      .select({ md: playerGroups.memberDelaysJson, tl: playerGroups.trackSwitchLeadMs, mal: playerGroups.mixedAnchorLeadMs })
       .from(playerGroups)
       .where(eq(playerGroups.id, groupId))
       .get();
     if (row) {
-      v = { memberDelays: parseMemberDelays(row.md), trackLeadMs: clampGroupDelayMs(row.tl) };
+      v = {
+        memberDelays: parseMemberDelays(row.md),
+        trackLeadMs: clampGroupDelayMs(row.tl),
+        mixedAnchorLeadMs: clampMixedAnchorLeadMs(row.mal),
+      };
     }
   } catch { /* 库不可用 → {} */ }
   cache.set(groupId, v);
@@ -108,6 +131,16 @@ export function getTrackLeadMs(groupId: string | null | undefined): number {
   return cache.get(groupId)?.trackLeadMs ?? DEFAULT_TRACK_LEAD_MS;
 }
 
+/** 读混合组切歌等待组值(ms;0 = 自动)。**仅主进程/测试用** —— 子进程消费点
+ *  (streamEngine 重锚)必须走 `mixedAnchorLeadUsOf`(绕过 cache 直查,见其注释)。 */
+export function getMixedAnchorLeadMs(groupId: string | null | undefined): number {
+  if (!groupId) return MIXED_ANCHOR_LEAD_AUTO_MS;
+  const hit = cache.get(groupId);
+  if (hit) return hit.mixedAnchorLeadMs;
+  getMemberDelays(groupId); // 触发懒加载,把整条缓存填上
+  return cache.get(groupId)?.mixedAnchorLeadMs ?? MIXED_ANCHOR_LEAD_AUTO_MS;
+}
+
 /** 写单个成员的补偿:**内存先更新(立即生效),再落库**(member_delays_json 整表回写)。
  *  @returns 实际生效值(已钳制)。 */
 export function setMemberDelay(groupId: string, memberId: string, ms: unknown): number {
@@ -115,7 +148,7 @@ export function setMemberDelay(groupId: string, memberId: string, ms: unknown): 
   const v = clampGroupDelayMs(ms);
   const cur = cache.get(groupId) ?? { ...zeroCache(), memberDelays: getMemberDelays(groupId) };
   const next: MemberDelays = { ...cur.memberDelays, [memberId]: v };
-  cache.set(groupId, { memberDelays: next, trackLeadMs: cur.trackLeadMs });
+  cache.set(groupId, { memberDelays: next, trackLeadMs: cur.trackLeadMs, mixedAnchorLeadMs: cur.mixedAnchorLeadMs });
   try {
     db.update(playerGroups)
       .set({ memberDelaysJson: JSON.stringify(next), updatedAt: new Date().toISOString() })
@@ -129,10 +162,25 @@ export function setMemberDelay(groupId: string, memberId: string, ms: unknown): 
 export function setTrackLeadMs(groupId: string, ms: unknown): number {
   const v = clampGroupDelayMs(ms);
   const cur = cache.get(groupId) ?? { ...zeroCache(), memberDelays: getMemberDelays(groupId) };
-  cache.set(groupId, { memberDelays: cur.memberDelays, trackLeadMs: v });
+  cache.set(groupId, { memberDelays: cur.memberDelays, trackLeadMs: v, mixedAnchorLeadMs: cur.mixedAnchorLeadMs });
   try {
     db.update(playerGroups)
       .set({ trackSwitchLeadMs: v, updatedAt: new Date().toISOString() })
+      .where(eq(playerGroups.id, groupId))
+      .run();
+  } catch { /* 落库失败不回滚内存 */ }
+  return v;
+}
+
+/** 写混合组切歌等待组值(ms;0 = 自动):内存先更新,再落库。@returns 实际生效值。
+ *  下一首切歌即生效(子进程每次重锚直查 db,无需重建/重启)。 */
+export function setMixedAnchorLeadMs(groupId: string, ms: unknown): number {
+  const v = clampMixedAnchorLeadMs(ms);
+  const cur = cache.get(groupId) ?? { ...zeroCache(), memberDelays: getMemberDelays(groupId) };
+  cache.set(groupId, { memberDelays: cur.memberDelays, trackLeadMs: cur.trackLeadMs, mixedAnchorLeadMs: v });
+  try {
+    db.update(playerGroups)
+      .set({ mixedAnchorLeadMs: v, updatedAt: new Date().toISOString() })
       .where(eq(playerGroups.id, groupId))
       .run();
   } catch { /* 落库失败不回滚内存 */ }
@@ -175,4 +223,35 @@ export function sendspinDelayUsOfClient(groupName: string, clientId: string): bi
 export function trackSwitchLeadUsOf(groupId: string | null | undefined): bigint {
   if (!groupId) return 0n; // 无组上下文(单测桩/设备组):无垫片
   return BigInt(getTrackLeadMs(groupId) * 1000);
+}
+
+/** 混合组锚点 lead 的组级覆盖(µs):**绕过 cache 直查 db**。返回 null = 用自动
+ *  (调用方回退全局默认 BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US);>0n = 用户覆盖值。
+ *
+ *  为什么不走 cache:本函数的唯一消费点在 **Sendspin fork 子进程**(streamEngine 重锚
+ *  分支),而 delayCalib 的 cache 是懒加载 + 写时更新、**无失效广播** —— 写发生在主进程
+ *  (setMixedAnchorLeadMs),子进程收不到任何通知;子进程一旦读过一次,cache 就固化,
+ *  之后用户改值 ⇒ 子进程永远读旧值 ⇒ 「改了不生效」。(trackSwitchLeadUsOf 同样有这个
+ *  洞,但它默认 0 且是 API 隐藏调参口,从未咬人;本值是**前端弹窗可改**的,必须真·实时。)
+ *
+ *  读频率 = 每次重锚/切歌一次(不在推流热循环里),SQLite WAL 直查一致性足够。
+ *  组名非 ug: ⇒ null(设备组无组级配置,回退全局默认)。 */
+export function mixedAnchorLeadUsOf(groupName: string): number | null {
+  const id = parseUserGroupId(groupName);
+  if (!id) return null;
+  let ms = 0;
+  try {
+    const row = db
+      .select({ mal: playerGroups.mixedAnchorLeadMs })
+      .from(playerGroups)
+      .where(eq(playerGroups.id, id))
+      .get();
+    ms = clampMixedAnchorLeadMs(row?.mal ?? 0);
+  } catch { /* 库不可用 → 自动 */ }
+  // 返回 **number** 而非 bigint:唯一消费点是 streamEngine 锚点分支的
+  // `Math.max(aheadUs, ... ?? BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US)`,那边全部是
+  // number 型 µs(aheadUs = commonSendAheadUs()、bridgeStartLeadUs() 都返回 number)。
+  // delayCalib 其他 *Of 返回 bigint 是因为它们的消费点(pushAudio 戳偏移)要 bigint;
+  // 本值的消费点不要 bigint —— 同型才不会在锚点表达式里混出 number|bigint。
+  return ms > 0 ? ms * 1000 : null;
 }

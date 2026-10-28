@@ -535,6 +535,13 @@
             :disabled="groupMemberPeerIds(g).length === 0"
             @click="openOutputConfig(groupMemberPeerIds(g), g.name)"
           ><MfIcon name="SlidersHorizontal" />{{ t('groups.outputConfig') }}</el-button>
+          <!-- 切歌等待（混合组锚点 lead，组级）：混合组切歌前全组统一等待的时长。0 = 自动。
+               只影响混合组（桥 + 直连成员并存），纯桥组 / 同协议组不读此值。 -->
+          <el-button
+            v-if="canUse"
+            size="small"
+            @click="openMixedLead(g)"
+          ><MfIcon name="Clock" />{{ t('groups.mixedLeadEntry') }}<span class="member-delay-badge">{{ mixedLeadLabel(g) }}</span></el-button>
           <div class="device-hide-toggle" :title="t('groups.hideToggleGroupTitle')">
             <el-switch
               :model-value="isHidden(`group:${g.id}`)"
@@ -821,6 +828,38 @@
         <el-button size="small" type="primary" :loading="memberDelaySaving" @click="saveMemberDelay">{{ t('groups.delayApply') }}</el-button>
       </template>
     </el-dialog>
+
+    <!-- 切歌等待（混合组锚点 lead，组级，v4.8.6）。
+         0 = 自动（全局默认 5000ms，v4.7.6 真机定标）；>0 = 用户值。
+         生效时机：下一首切歌即生效（后端子进程每次重锚直查 db，无需重启/重建）；
+         同协议组（无 AirPlay 成员）不走该分支，不受此值影响。 -->
+    <el-dialog
+      v-model="showMixedLead"
+      :title="t('groups.mixedLeadTitle')"
+      width="460px"
+      :append-to-body="true"
+      destroy-on-close
+    >
+      <div style="font-size:12px;color:var(--el-text-color-secondary);margin:-8px 0 14px;">
+        {{ mixedLeadGroup?.name || '' }}
+      </div>
+      <div style="display:flex;align-items:center;gap:12px;">
+        <div style="width:96px;font-size:13px;">{{ t('groups.mixedLeadLabel') }}</div>
+        <el-input-number
+          v-model="mixedLeadVal"
+          :min="0" :max="mixedLeadMax" :step="mixedLeadStep" :step-strictly="true"
+          style="width:150px;"
+        />
+        <span style="font-size:13px;">ms</span>
+      </div>
+      <div style="font-size:12px;color:var(--el-text-color-secondary);line-height:1.6;margin:12px 0 0;">
+        {{ t('groups.mixedLeadHint') }}
+      </div>
+      <template #footer>
+        <el-button size="small" @click="resetMixedLead">{{ t('groups.mixedLeadReset') }}</el-button>
+        <el-button size="small" type="primary" :loading="mixedLeadSaving" @click="saveMixedLead">{{ t('groups.delayApply') }}</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -1076,6 +1115,7 @@ async function loadGroups(): Promise<boolean> {
     const res = await api.get("/rest/api/v1/groups");
     groups.value = res.data?.groups || [];
     groupsError.value = "";
+    void loadMixedLeads(); // 卡片「切歌等待」徽标回显（canUse 才拉；失败静默）
     return true;
   } catch (e: unknown) {
     groupsError.value = apiErrorText(e, t("groups.loadFailed"));
@@ -1168,6 +1208,77 @@ async function saveMemberDelay(): Promise<void> {
     ElMessage.error(apiErrorText(e, t("groups.delaySaveFailed")));
   } finally {
     memberDelaySaving.value = false;
+  }
+}
+
+// ---- 切歌等待（混合组锚点 lead，组级，v4.8.6）----
+// 0 = 自动（全局默认 5000ms）；>0 = 用户值。保存后**下一首切歌即生效**：
+// 后端消费点在 Sendspin 子进程的重锚分支，每次重锚绕过缓存直查 db，无需重启/重建。
+// 只影响混合组（桥 + 直连成员并存）；纯桥组深锚与同协议组分支不读此值。
+const showMixedLead = ref(false);
+const mixedLeadGroup = ref<any>(null);
+const mixedLeadVal = ref(0);
+const mixedLeadMax = ref(30000);
+const mixedLeadStep = ref(100);
+const mixedLeadSaving = ref(false);
+/** 组 id → 当前生效值(ms)：卡片徽标回显。列表加载后批量拉一次。 */
+const mixedLeadVals = ref<Record<string, number>>({});
+
+/** 卡片上的回显文案：未拉到 / 0 = 自动；>0 = `8000ms`。 */
+function mixedLeadLabel(g: any): string {
+  const v = mixedLeadVals.value[g?.id];
+  return v !== undefined && v > 0 ? `${v}ms` : t("groups.mixedLeadAuto");
+}
+
+/** 批量拉各组切歌等待值（卡片徽标回显）。失败静默：回退「自动」，不拦列表。 */
+async function loadMixedLeads(): Promise<void> {
+  if (!canUse.value) return;
+  const list: any[] = groups.value || [];
+  await Promise.all(list.map(async (g: any) => {
+    try {
+      const r = await api.get(`/rest/api/v1/groups/${g.id}/delays`);
+      mixedLeadVals.value[g.id] = Number(r.data?.mixedAnchorLeadMs ?? 0);
+      if (typeof r.data?.mixedAnchorLeadStepMs === "number" && r.data.mixedAnchorLeadStepMs > 0) {
+        mixedLeadStep.value = r.data.mixedAnchorLeadStepMs;
+      }
+    } catch { /* 拉不到就回退「自动」 */ }
+  }));
+}
+
+async function openMixedLead(g: any): Promise<void> {
+  mixedLeadGroup.value = g;
+  mixedLeadVal.value = Number(mixedLeadVals.value[g?.id] ?? 0);
+  try {
+    const r = await api.get(`/rest/api/v1/groups/${g.id}/delays`);
+    mixedLeadVal.value = Number(r.data?.mixedAnchorLeadMs ?? 0);
+    if (typeof r.data?.mixedAnchorLeadMaxMs === "number" && r.data.mixedAnchorLeadMaxMs > 0) {
+      mixedLeadMax.value = r.data.mixedAnchorLeadMaxMs;
+    }
+    if (typeof r.data?.mixedAnchorLeadStepMs === "number" && r.data.mixedAnchorLeadStepMs > 0) {
+      mixedLeadStep.value = r.data.mixedAnchorLeadStepMs;
+    }
+  } catch { /* 拉不到就用本地回显值，不拦弹窗 */ }
+  showMixedLead.value = true;
+}
+
+/** 0 = 自动（后端语义：NULL/0 都走全局默认）。 */
+function resetMixedLead(): void {
+  mixedLeadVal.value = 0;
+}
+
+async function saveMixedLead(): Promise<void> {
+  const g = mixedLeadGroup.value;
+  if (!g) return;
+  mixedLeadSaving.value = true;
+  try {
+    const r = await api.put(`/rest/api/v1/groups/${g.id}/delays`, { mixedAnchorLeadMs: mixedLeadVal.value });
+    mixedLeadVals.value[g.id] = Number(r.data?.mixedAnchorLeadMs ?? mixedLeadVal.value);
+    showMixedLead.value = false;
+    ElMessage.success(t("groups.mixedLeadSaved"));
+  } catch (e) {
+    ElMessage.error(apiErrorText(e, t("groups.delaySaveFailed")));
+  } finally {
+    mixedLeadSaving.value = false;
   }
 }
 

@@ -381,6 +381,12 @@ export const playerGroups = sqliteTable("player_groups", {
   // 切歌垫片的手动覆盖(ms):生效 = max(组值, 冷/暖动态 lead —— A 方案,见
   // sendspin/constants.ts BRIDGE_TRACK_LEAD_COLD/WARM_US)。0 = 完全自动(默认)。
   trackSwitchLeadMs: integer("track_switch_lead_ms").notNull().default(0),
+  // 混合组切歌等待的组级覆盖(ms,v4.8.6):混合组(桥 + 直连成员并存)锚点 lead 的
+  // **用户覆盖值**。NULL/0 = 自动(全局默认 BRIDGE_MIXED_GROUP_ANCHOR_LEAD_MS,env 可调,
+  // 见 sendspin/constants.ts);>0 = 用户值。只被混合组锚点分支消费(streamEngine 重锚),
+  // 纯桥组深锚分支与非桥分支不读它。子进程读它**绕过 cache 直查**(见 delayCalib.
+  // mixedAnchorLeadUsOf 的注释:delayCalib cache 无失效广播,子进程会陈旧)。
+  mixedAnchorLeadMs: integer("mixed_anchor_lead_ms"),
   createdAt: text("created_at").default(""),
   updatedAt: text("updated_at").default(""),
 });

@@ -1059,6 +1059,13 @@
     "delayMemberHint": "Positive = this device sounds later, negative = earlier. AirPlay members rebuild the bridge session on save (~1-2 s of silence); Sendspin members apply live per frame. Each device in the group is set independently",
     "delayReset": "Reset to 0",
     "delayApply": "Save and apply",
+    "mixedLeadEntry": "Track switch wait",
+    "mixedLeadAuto": "Auto",
+    "mixedLeadTitle": "Track switch wait (mixed group)",
+    "mixedLeadLabel": "Wait",
+    "mixedLeadHint": "How long the whole group waits before a track switch in a mixed group (gives AirPlay members time to get ready so the start of the next track is not clipped). 0 = auto (default 5000 ms); lower values may clip the track start; single-protocol groups (no AirPlay member) are unaffected. Applies from the next track switch",
+    "mixedLeadReset": "Reset to 0 (auto)",
+    "mixedLeadSaved": "Saved — applies from the next track switch",
     "delaySaved": "Saved",
     "delaySavedReconnect": "Saved, AirPlay members reconnecting",
     "delaySaveFailed": "Failed to save delay offset"

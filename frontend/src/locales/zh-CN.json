@@ -1059,6 +1059,13 @@
     "delayMemberHint": "正数 = 这台设备更晚出声，负数 = 更早。AirPlay 成员保存后自动重建桥会话生效（约 1–2 秒静音）；Sendspin 成员帧级实时生效。组内每台设备独立设置，互不影响",
     "delayReset": "重置为 0",
     "delayApply": "保存并生效",
+    "mixedLeadEntry": "切歌等待",
+    "mixedLeadAuto": "自动",
+    "mixedLeadTitle": "切歌等待（混合组）",
+    "mixedLeadLabel": "等待",
+    "mixedLeadHint": "混合组切歌前全组统一等待的时长（给 AirPlay 成员留出就绪窗口，避免吞掉新歌开头）。0 = 自动（默认 5000ms）；调小可能吞歌开头；同协议组（无 AirPlay 成员）不受此值影响。保存后下一首切歌即生效",
+    "mixedLeadReset": "重置为 0（自动）",
+    "mixedLeadSaved": "已保存，下一首切歌生效",
     "delaySaved": "已保存",
     "delaySavedReconnect": "已保存，AirPlay 成员正在重连",
     "delaySaveFailed": "保存延迟补偿失败"

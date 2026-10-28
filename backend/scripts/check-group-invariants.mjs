@@ -1118,6 +1118,95 @@ console.log("===== G18 跨进程判死回传 + 起播前完整性预检(第六�
   );
 }
 
+// ===========================================================================
+// G19 混合组切歌等待按组可配(v4.8.6):固定 5s → 组级实时覆盖
+// 混合组锚点 lead(代价 = 切歌全组静默 ~5s)过去是全局常量,现在前端可逐组调。
+// 🔴 只许动混合组分支 —— 纯桥组深锚 / 非桥分支 / trackLeadMs 语义零改动。
+// 🔴 子进程实时性:streamEngine 跑在 fork 子进程,delayCalib cache 无失效广播,
+//    消费点必须绕过 cache 直查 db,否则「改了不生效」。
+// ===========================================================================
+console.log("===== G19 混合组切歌等待按组可配 =====");
+{
+  const se = code(SPIN_STREAM_ENGINE);
+  const dc = code(DELAY_CALIB);
+  const apiTxt = code(API_GROUPS);
+  const dbIdx = code("backend/src/db/index.ts");
+  const schemaTxt = code("backend/src/db/schema.ts");
+  // --- a) 消费点:混合组分支组值优先,回退全局常量(唯一表达式) ---
+  const mixedLines = se.split("\n").filter((l) => l.includes("mixedAnchorLeadUsOf("));
+  const mixedExpr = mixedLines.length === 1
+    && mixedLines[0].includes('Math.max(aheadUs, mixedAnchorLeadUsOf(this.group?.name ?? "") ?? BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US)');
+  check(
+    "混合组分支 = 组值优先(mixedAnchorLeadUsOf)且回退全局常量,且为唯一表达式",
+    mixedExpr,
+    `命中 ${mixedLines.length} 处(应恰 1) ⇒ 缺回退 = 未配组直接失效;写死常量 = 改值不生效`,
+  );
+  check(
+    "纯桥组深锚与非桥分支原样保留(只许动混合组分支)",
+    se.includes("bridgeStartLeadUs([{ warm: false }])")
+      && se.includes("Math.min(aheadUs, ANCHOR_SAFE_LEAD_US)")
+      && se.includes("reseed ? reseedLead : aheadUs"),
+    `深锚=${se.includes("bridgeStartLeadUs([{ warm: false }])")} 非桥=${se.includes("Math.min(aheadUs, ANCHOR_SAFE_LEAD_US)")} ⇒ 深锚进了混合组 = 直连 esp32 秒级跳变(硬同步阈值 5ms)`,
+  );
+  // --- b) delayCalib:读写口 + 钳制 + 前端常量 ---
+  const dcOk = dc.includes("export function getMixedAnchorLeadMs(groupId: string | null | undefined): number")
+    && dc.includes("export function setMixedAnchorLeadMs(groupId: string, ms: unknown): number")
+    && dc.includes("export function clampMixedAnchorLeadMs(v: unknown): number")
+    && dc.includes("export const MIXED_ANCHOR_LEAD_MAX_MS = 30000")
+    && dc.includes("export const MIXED_ANCHOR_LEAD_STEP_MS = 100")
+    && dc.includes("Math.min(MIXED_ANCHOR_LEAD_MAX_MS, Math.max(0, Math.round(n)))");
+  check(
+    "delayCalib 读写口 + 钳制(0~30000) + 前端常量齐备",
+    dcOk,
+    `齐备=${dcOk} ⇒ 缺钳制 = 负数/超大值直写库,切歌等待被拉成无意义静默`,
+  );
+  // --- c) 子进程实时性:消费点绕过 cache 直查 db ---
+  const usofBody = bodyByHead(dc, /export function mixedAnchorLeadUsOf/);
+  const usofOk = !!usofBody
+    && usofBody.includes("playerGroups.mixedAnchorLeadMs")
+    && usofBody.includes(".get()")
+    && !usofBody.includes("getMixedAnchorLeadMs(")
+    && !usofBody.includes("cache.get(");
+  check(
+    "mixedAnchorLeadUsOf 绕过 cache 直查 db(子进程 cache 无失效广播,走 cache = 改了不生效)",
+    usofOk,
+    `直查=${usofOk} ⇒ 用 getMixedAnchorLeadMs(cache) = 子进程读陈旧值,PUT 后下一首不生效`,
+  );
+  // --- d) API 双向 ---
+  const apiOk = apiTxt.includes("mixedAnchorLeadMs: getMixedAnchorLeadMs(id)")
+    && apiTxt.includes("mixedAnchorLeadStepMs: MIXED_ANCHOR_LEAD_STEP_MS")
+    && apiTxt.includes("mixedAnchorLeadMaxMs: MIXED_ANCHOR_LEAD_MAX_MS")
+    && apiTxt.includes("if (body.mixedAnchorLeadMs !== undefined) setMixedAnchorLeadMs(id, body.mixedAnchorLeadMs);");
+  check(
+    "GET/PUT /v1/groups/:id/delays 双向收发 mixedAnchorLeadMs + 前端渲染常量",
+    apiOk,
+    `双向=${apiOk} ⇒ 缺 GET = 前端无回显;缺 PUT = 弹窗保存空转`,
+  );
+  // --- e) 迁移幂等 + schema 声明 ---
+  const dbOk = dbIdx.includes('if (!cols.includes("mixed_anchor_lead_ms"))')
+    && dbIdx.includes("ALTER TABLE player_groups ADD COLUMN mixed_anchor_lead_ms INTEGER");
+  const schemaOk = schemaTxt.includes('mixedAnchorLeadMs: integer("mixed_anchor_lead_ms")');
+  check(
+    "player_groups.mixed_anchor_lead_ms 可空列 + PRAGMA 幂等迁移 + schema 声明",
+    dbOk && schemaOk,
+    `迁移=${dbOk} schema=${schemaOk} ⇒ 非幂等 = 二次启动 ALTER 报错`,
+  );
+  // --- f) 前端弹窗:append-to-body 铁律 + input-number 步进严格 ---
+  const fe = read("frontend/src/views/Groups/index.vue");
+  const dlgStart = fe.indexOf('v-model="showMixedLead"');
+  const dlgEnd = dlgStart >= 0 ? fe.indexOf("</el-dialog>", dlgStart) : -1;
+  const dlg = dlgStart >= 0 && dlgEnd > dlgStart ? fe.slice(dlgStart, dlgEnd) : "";
+  const feOk = dlg.includes(':append-to-body="true"')
+    && dlg.includes("el-input-number")
+    && dlg.includes(':step-strictly="true"')
+    && fe.includes("mixedAnchorLeadMs");
+  check(
+    "前端弹窗 append-to-body=true + input-number 步进严格(照成员延迟弹窗范式)",
+    feOk,
+    `弹窗=${feOk} ⇒ 缺 append-to-body = 弹窗被卡片层叠遮挡(前端铁律)`,
+  );
+}
+
 // ---------------------------------------------------------------------------
 if (failures.length) {
   console.error(`\n[群组不变量守卫] FAIL:${failures.length} 项(通过 ${passed} 项)`);

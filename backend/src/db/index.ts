@@ -803,6 +803,13 @@ export function initDatabase() {
       sqlite.exec("ALTER TABLE player_groups ADD COLUMN track_switch_lead_ms INTEGER NOT NULL DEFAULT 1000");
       log.info("player_groups 新增 track_switch_lead_ms 列(切歌垫片)");
     }
+    // 结构升级(v4.8.6):混合组切歌等待的组级覆盖。**可空列**(无 DEFAULT):
+    // NULL/0 = 自动(全局默认 BRIDGE_MIXED_GROUP_ANCHOR_LEAD_MS),>0 = 用户值。
+    // 幂等:PRAGMA table_info 检查后再 ALTER,重复启动/升级路径都安全。
+    if (!cols.includes("mixed_anchor_lead_ms")) {
+      sqlite.exec("ALTER TABLE player_groups ADD COLUMN mixed_anchor_lead_ms INTEGER");
+      log.info("player_groups 新增 mixed_anchor_lead_ms 列(混合组切歌等待,可空=自动)");
+    }
   } catch (e) {
     log.warn(`player_groups 补列失败: ${e instanceof Error ? e.message : e}`);
   }
