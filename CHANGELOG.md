@@ -2,6 +2,31 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.9.4] - 2026-10-28
+
+### Fix / 主卧 DLNA 流转到全屋后 HiVi 无声（桥占用期抑制 DLNA 源端 reset）
+
+- **根因（240 真机时序实证）**：卡片流转链是 `transferFrom(to, from)` + 成功后 `resetPeer(from)`。`resetPeer(主卧 DLNA)` 会向**同一台物理设备**（HiVi H5MKII 的 DLNA 身份与 AirPlay 身份）下发 SOAP `Stop`，且落在桥会话 `RECORD` 之后 0.1~0.2 秒（`reset` 路由的 `stopDevice` 一次、`queue.clear()` 内 `player.stop()` 又一次）。固件输入仲裁被顶回 DLNA：RTSP/TCP 仍活着、timing reply 照答、RTP 全收 `loss=0`、泵 125 包/秒，但音频不渲染。所有出声实例（群组直接播放、源端是 AirPlay 的流转）在 `RECORD` 之后都没有任何 DLNA 命令。
+- **修法**：桥 cold-settle 成功后写「该 DLNA peer 刚被桥接管」标记（TTL 20s / 容量 64 LRU）；`/stop` 与 `/reset` 命中标记时**只做服务端复位**——`stopDevice` 跳过、`queue.clear(peerId, { skipDeviceStop: true })` 跳过 `player.stop()`，不再向设备下发任何 DLNA 命令。应急回滚：`MF_BRIDGE_RAOP_SUPPRESS_DLNA_RESET_AFTER_BRIDGE=0`（缺省开启）。
+- 守卫：`check-airplay-playback-chain.mjs` 的 reset-clear 断言允许带 `{ skipDeviceStop }` 这一种带参形态；`bridgeSettleMarks` 单测新增 TTL/容量/kill-switch 四例。
+
+### Fix / 群组状态偶发缺歌名与封面（流转后首曲最常见）
+
+- **根因**：泵起播（`streamEngine.play`）把**上一首**的 title/artist/album/coverArt 继承给新 current；上一首为空或恰好换曲时，新 current 只剩 `songId + durationMs`，HA 卡片即显示「未知」且无封面。子进程（泵）拿不到队列，无从补。
+- **修法**：主进程 `getGroupStatus` 出口按 songId 从组队列回填缺字段（`enrichGroupCurrentMedia`），命中即补、找不到原样返回。
+
+### Fix / 流转进度丢失与成员被静默摘除
+
+- **进度**：`transfer-from` 的源端进度改为**无条件早读**（在任何 playFrom / detach / 借流之前定格）。此前只有「目标本身是同 host 双身份设备」才早读，目标是群组且源与群内成员同 host 时会被互斥先停掉源、晚读恒 0 → 群组从 0 秒开播。跨设备 DLNA 目标仍保持「先起播再 seek」例外。
+- **成员回流**：`detachFromActiveGroups` 的自动摘组会记账（容量 128 LRU）；「设备 → 群组」流转时若目标组正是摘除来源组，自动把成员加回成员表，起播路由随即把它编进桥。手动在群编辑里删的成员没有记录，不会被回流。
+
+### Feature / MUZO/Linkplay 类固件的桥出声与流畅度
+
+- **now 锚 + 400ms 前向偏移**（`MF_BRIDGE_RAOP_NOW_ANCHOR_OFFSET_MS`，缺省 400）：该类固件只认「到包即播」，未来锚永不渲染（无声）；纯 now 锚又因设备抖动缓冲≈0 而每秒饿流。偏移让首包仍立即发、设备手里握 400ms 余量。
+- **同 host DLNA settle 三步**：冻结 DLNA 队列 → Stop → 轮询至 STOPPED + 300ms 宽限，冷建桥会话前让音频输入让位（warm-reuse 不等）。
+- **起播在线判定容忍 mDNS staleness**：90s 内静默的 AirPlay 设备仍进桥（stale < 10min 容错，≥10min 真离线剔除，全 stale 先 300ms 快刷发现），路由决策单行日志转正。
+- 实验余量（缺省全关，A/B 用）：`MF_BRIDGE_RAOP_SUPPRESS_INITIAL_VOLUME`、`MF_BRIDGE_RAOP_SKIP_VOLUME_WITH_DLNA_PEER`、`MF_BRIDGE_RAOP_FIRST_SYNC_NOW`、`MF_BRIDGE_RAOP_CONNECT_PRIME`。
+
 ## [4.9.3] - 2026-10-28
 
 ### Fix / 流转后群组音量被旧端污染;桥会话初始音量改用群组落库值
