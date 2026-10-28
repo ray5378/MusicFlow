@@ -108,7 +108,6 @@ describe("读视图延迟补偿(delayView,按成员)", () => {
     const view = gm.getWithMembers(g.id)!;
     expect(view.memberDelays["airplay:a1"]).toBe(120);
     expect(view.memberDelays["sendspin:sp1"]).toBe(-80);
-    expect(view.trackSwitchLeadMs).toBe(0);
   });
 
   it("PlayerGroup 实体**不含**延迟字段(不污染落库路径)", () => {
@@ -126,7 +125,6 @@ describe("读视图延迟补偿(delayView,按成员)", () => {
     const g = gm.createGroup("默认全零", []);
     const view = gm.getWithMembers(g.id)!;
     expect(view.memberDelays).toEqual({});
-    expect(view.trackSwitchLeadMs).toBe(0);
   });
 
   it("显式清零后读视图回 0(setMemberDelay 写 0 即落库,不复活)", () => {

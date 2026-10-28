@@ -78,7 +78,6 @@ describe("/v1/groups/:id/delays(按成员)", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as any;
     expect(body.memberDelays).toEqual({});
-    expect(body.trackLeadMs).toBe(0);
     expect(body.minMs).toBe(-30000);
     expect(body.maxMs).toBe(30000);
     expect(body.stepMs).toBe(10);
@@ -129,7 +128,7 @@ describe("/v1/groups/:id/delays(按成员)", () => {
     expect(res.status).toBe(400);
   });
 
-  it("memberId 缺省 → 只动可选的 trackLeadMs,成员表不动(API 隐藏调参口)", async () => {
+  it("PUT body 带 trackLeadMs(已移除的手动口) → 未知字段忽略:响应不含该字段且不生效", async () => {
     const uid = seedAdmin();
     const id = seedGroup(uid);
     const headers = adminHeaders(uid);
@@ -137,8 +136,9 @@ describe("/v1/groups/:id/delays(按成员)", () => {
     const res = await putDelays(id, headers, { trackLeadMs: 1500 });
     expect(res.status).toBe(200);
     const body = (await res.json()) as any;
-    expect(body.memberDelays["airplay:hivi"]).toBe(5);
-    expect(body.trackLeadMs).toBe(1500);
+    expect(body.memberDelays["airplay:hivi"]).toBe(5); // 成员表不受影响
+    expect(body.trackLeadMs).toBeUndefined(); // v4.9.1 手动口已删,响应不再回显
+    expect(body.mixedAnchorLeadMs).toBe(0); // mixedAnchor 三件套不受影响
   });
 
   it("组不存在 → 404(读写都是)", async () => {

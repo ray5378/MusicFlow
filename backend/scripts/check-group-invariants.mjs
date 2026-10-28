@@ -688,10 +688,10 @@ console.log("===== G11 延迟只在读视图,不得进 PlayerGroup 实体 / pers
   );
   const viewB = bodyByHead(gi, /(?:^|\n)export\s+interface\s+PlayerGroupWithMembers\b/);
   check(
-    "读视图 PlayerGroupWithMembers 必须带按成员延迟表与切歌垫片(前端回显不能丢)",
+    "读视图 PlayerGroupWithMembers 必须带按成员延迟表;切歌垫片组值手动口已删(v4.9.1 防复活钉)",
     viewB !== null &&
       viewB.includes("memberDelays") &&
-      viewB.includes("trackSwitchLeadMs") &&
+      count(viewB, "trackSwitchLeadMs") === 0 &&
       count(viewB, "airplayDelayMs") === 0 &&
       count(viewB, "airplay2DelayMs") === 0 &&
       count(viewB, "sendspinDelayMs") === 0,
@@ -769,9 +769,9 @@ console.log("===== G13 延迟补偿按成员(取值口按成员 id 查表,不再
   // AP2 侧同样是把锚点在会话建立时算死 ⇒ 第三格变了不重建桥 = 「只改 AP2」调了没反应。
   const genB = bodyByName(code(SPIN_SERVER), atLineStart("notifyBridgeGeneration"));
   check(
-    "切歌垫片动态 lead(A 方案):max(组值, 冷/暖动态) —— track 冷启才用冷 lead",
+    "切歌垫片动态 lead(A 方案):只走冷/暖动态自动挡(组值手动口已删 v4.9.1,防复活钉) —— track 冷启才用冷 lead",
     genB !== null
-      && genB.includes("trackSwitchLeadUsOf(")
+      && count(genB, "trackSwitchLeadUsOf(") === 0
       && genB.includes("BRIDGE_TRACK_LEAD_COLD_US")
       && genB.includes("BRIDGE_TRACK_LEAD_WARM_US")
       && genB.includes('reason === "track"')
@@ -1121,7 +1121,7 @@ console.log("===== G18 跨进程判死回传 + 起播前完整性预检(第六�
 // ===========================================================================
 // G19 混合组切歌等待按组可配(v4.8.6):固定 5s → 组级实时覆盖
 // 混合组锚点 lead(代价 = 切歌全组静默 ~5s)过去是全局常量,现在前端可逐组调。
-// 🔴 只许动混合组分支 —— 纯桥组深锚 / 非桥分支 / trackLeadMs 语义零改动。
+// 🔴 只许动混合组分支 —— 纯桥组深锚 / 非桥分支 / 垫片动态语义零改动(trackLeadMs 手动口已删 v4.9.1)。
 // 🔴 子进程实时性:streamEngine 跑在 fork 子进程,delayCalib cache 无失效广播,
 //    消费点必须绕过 cache 直查 db,否则「改了不生效」。
 // ===========================================================================

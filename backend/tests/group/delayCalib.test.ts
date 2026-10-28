@@ -8,7 +8,6 @@ import { eq } from "drizzle-orm";
 import { db, initDatabase } from "../../src/db/index.js";
 import { playerGroups } from "../../src/db/schema.js";
 import {
-  DEFAULT_TRACK_LEAD_MS,
   GROUP_DELAY_MAX_MS,
   GROUP_DELAY_MIN_MS,
   GROUP_DELAY_STEP_MS,
@@ -16,13 +15,10 @@ import {
   clampGroupDelayMs,
   getMemberDelayMs,
   getMemberDelays,
-  getTrackLeadMs,
   invalidateGroupDelays,
   parseUserGroupId,
   sendspinDelayUsOfClient,
   setMemberDelay,
-  setTrackLeadMs,
-  trackSwitchLeadUsOf,
 } from "../../src/services/group/delayCalib.js";
 
 const GID = "g-delay-1";
@@ -70,7 +66,6 @@ describe("getMemberDelays / setMemberDelay(按成员)", () => {
   it("新组默认空表(300ms 对齐点已取消,不补偿)", () => {
     expect(getMemberDelays(GID)).toEqual({});
     expect(getMemberDelayMs(GID, "airplay:hivi")).toBe(0);
-    expect(getTrackLeadMs(GID)).toBe(DEFAULT_TRACK_LEAD_MS);
   });
 
   it("写入后立即读到(内存先更新,真·实时依赖这一点)", () => {
@@ -165,22 +160,6 @@ describe("单位换算与组名解析", () => {
     expect(parseUserGroupId(`ug:${GID}`)).toBe(GID);
     expect(parseUserGroupId("ug:")).toBeNull();
     expect(parseUserGroupId("client-1")).toBeNull();
-  });
-});
-
-describe("切歌垫片(组级,API 隐藏调参口)", () => {
-  it("默认 0 = 完全自动(A 方案动态 lead 生效)", () => {
-    expect(getTrackLeadMs(GID)).toBe(0);
-    expect(trackSwitchLeadUsOf(`ug:${GID}`)).toBe(0n);
-    expect(trackSwitchLeadUsOf("client-1")).toBe(0n);
-  });
-
-  it("setTrackLeadMs 写入+落库(清缓存后仍读到),不影响成员格", () => {
-    setMemberDelay(GID, "airplay:hivi", 300);
-    expect(setTrackLeadMs(GID, 1500)).toBe(1500);
-    invalidateGroupDelays(GID);
-    expect(getTrackLeadMs(GID)).toBe(1500);
-    expect(getMemberDelayMs(GID, "airplay:hivi")).toBe(300);
   });
 });
 

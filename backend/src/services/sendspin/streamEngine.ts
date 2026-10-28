@@ -919,6 +919,13 @@ export class GroupPump {
           const anchorLead = this.group.hasBridges?.() === true
             ? this.group.hasDirectMembers?.() !== true
               ? Math.max(aheadUs, bridgeStartLeadUs([{ warm: false }])) // 纯桥组:深锚
+              // 两道防线分工(勿混,不可互相替代):
+              //  - 切歌等待(本分支,混合组锚点 lead):重锚时窗口里**有货可取** —— 新代次
+              //    锚点抬高到接收端就绪窗口之上,代价 = 全组新歌晚几秒出声(静默的直接
+              //    来源);混合组专用、组级可配(mixed_anchor_lead_ms,前端弹窗)。
+              //  - 切歌垫片(pendingTrackLeadUs,server.ts):治 0xE0 就绪窗口 2~3s 内
+              //    「收到了也接不住」—— 桥投递时戳整体后移整形,影响**所有带桥的组**,
+              //    冷/暖动态自动挡(组值手动口已删 v4.9.1)。
               // 混合组:组值优先(前端弹窗可配,子进程直查 db,下一首即生效),
               //              未配(0/NULL/设备组)⇒ 回退全局默认(v4.7.6 真机定标 5s)。
               : Math.max(aheadUs, mixedAnchorLeadUsOf(this.group?.name ?? "") ?? BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US)

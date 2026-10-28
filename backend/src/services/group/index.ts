@@ -22,7 +22,7 @@ import { getServer as getSendspinServer } from "../sendspin/runtime.js";
 import { sendspinSupervisor } from "../sendspin/supervisor.js";
 import { getSendspinDeviceVolume } from "../sendspin/peerVolume.js";
 import { createLogger } from "../../utils/logger.js";
-import { getMemberDelays, getTrackLeadMs } from "./delayCalib.js";
+import { getMemberDelays } from "./delayCalib.js";
 
 /** 成员 kind:airplay / sendspin / dlna(仅历史数据可解析,**新提交一律拒收**,
  *  2026-10-24 起 DLNA 禁止入组 —— 设备自拉流无共享时间线)。 */
@@ -109,17 +109,14 @@ export interface PlayerGroupWithMembers extends PlayerGroup {
    *  只在「读视图」里带出(不写进 PlayerGroup/persist),避免与落库路径耦合 ——
    *  见 G11:实体带上延迟字段会被 persist 的整行 upsert 冲回默认值。 */
   memberDelays: Record<string, number>;
-  trackSwitchLeadMs: number;
 }
 
 /** 读视图附加的延迟补偿字段(供前端回显;按成员,没设过的成员不在 map 里)。 */
 function delayView(id: string): {
   memberDelays: Record<string, number>;
-  trackSwitchLeadMs: number;
 } {
   return {
     memberDelays: getMemberDelays(id),
-    trackSwitchLeadMs: getTrackLeadMs(id),
   };
 }
 

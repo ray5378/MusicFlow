@@ -49,7 +49,6 @@ import { recordSendspinDebug } from "./debugLog.js";
 import { esphomeBridge } from "./esphomeBridge.js";
 import { computeCommonSendAhead, type SendAheadInput } from "./group.js";
 import { bridgeAnchorShiftUsOf, parseUserGroupId, sendspinDelayUsOfClient } from "../group/delayCalib.js";
-import { trackSwitchLeadUsOf } from "../group/delayCalib.js";
 import { recordProbedRate } from "../playerRate.js";
 import { b64urlDecode, b64urlEncode } from "./util.js";
 import type { PairingStore } from "./pairingStore.js";
@@ -729,7 +728,13 @@ export class SendspinGroup {
    *  rehost 时旧 cursor 可达 now+10s,仅重置水位挡不住)。 */
   private bridgeContentEpoch = 0;
   /** 切歌垫片(µs):新代次时间线整体 +Δ,随内容推进消耗归零(动态 lead 见 notifyBridgeGeneration)。
-   *  **只加在打戳/ring/投递时间线上**,deliveredByGroup 计量(样本数口径)不受影响。 */
+   *  **只加在打戳/ring/投递时间线上**,deliveredByGroup 计量(样本数口径)不受影响。
+   *  与「切歌等待」(混合组锚点 lead,streamEngine 重锚分支 / mixed_anchor_lead_ms)是
+   *  **两道不同的防线,不可互相替代**:锚点 lead = 窗口里有货可取(全组新歌晚几秒出声,
+   *  静默的直接来源,混合组专用、组级可配);垫片 = 桥侧接得住(治 0xE0 就绪窗口 2~3s 内
+   *  「收到了也接不住」,投递时戳后移整形,影响所有带桥的组)。v4.9.1 起组值手动口
+   *  已删(v4.9.1),只走冷/暖动态自动挡;恢复手动口前必须真机回归
+   *  (0xE0 雷区,捷径曾被真机否决)。 */
   private pendingTrackLeadUs = 0n;
   /** 本次桥挂载是否全暖复用(B 方案,对齐 MA warm reuse):syncGroupBridges 无句柄
    *  重建时置 true;notifyBridgeGeneration 的 track 边界据此选暖/冷 lead。 */
@@ -769,11 +774,10 @@ export class SendspinGroup {
     // 起播,给桥的重锚定留窗口 —— 否则 esp32 先播、桥内对齐器裁掉新曲开头(切歌吞音)。
     //  - reason=track 且本次路由冷启(句柄重建,RAOP 握手+设备缓冲)⇒ 冷 lead;
     //  - reason=track 且路由暖复用(B 方案)/seek/rehost(会话原地续用,仅重锚)⇒ 暖 lead;
-    //  - 生效 = max(组值 track_switch_lead_ms(API 隐藏调参口,默认 0), 动态 lead)。
-    const manualLeadUs = trackSwitchLeadUsOf(parseUserGroupId(this.name));
+    //  - 生效 = 冷/暖动态自动挡(v4.9.1 起组值手动口已删;垫片与混合组锚点 lead 是
+    //    两道独立防线,分工见 pendingTrackLeadUs 注释)。
     const coldBoundary = reason === "track" && !this.bridgeWarmAttach;
-    const dynamicLeadUs = BigInt(coldBoundary ? BRIDGE_TRACK_LEAD_COLD_US : BRIDGE_TRACK_LEAD_WARM_US);
-    this.pendingTrackLeadUs = manualLeadUs > dynamicLeadUs ? manualLeadUs : dynamicLeadUs;
+    this.pendingTrackLeadUs = BigInt(coldBoundary ? BRIDGE_TRACK_LEAD_COLD_US : BRIDGE_TRACK_LEAD_WARM_US);
     this.ensureBridgePushTimer();
   }
 

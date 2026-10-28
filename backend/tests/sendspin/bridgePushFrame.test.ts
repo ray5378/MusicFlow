@@ -16,7 +16,7 @@ vi.hoisted(() => {
 });
 import "../plugins/_env.js";
 import { initDatabase } from "../../src/db/index.js";
-import { setMemberDelay, setTrackLeadMs } from "../../src/services/group/delayCalib.js";
+import { setMemberDelay } from "../../src/services/group/delayCalib.js";
 import { SendspinGroup } from "../../src/services/sendspin/server.js";
 import { SAMPLE_RATE, type EncodedChunk } from "../../src/services/sendspin/encoding.js";
 import { nowUs } from "../../src/services/sendspin/clock.js";
@@ -172,32 +172,6 @@ describe("⑥ 投递窗口跟随桥锚点位移(anchorShiftUs)", () => {
     await g.pushFrame(ts1, PCM());
     g.bridgePushTick();
     expect(b.pushed).toHaveLength(1); // 无新增:动态读生效,无需任何重建通知
-  });
-
-  it("切歌垫片按组配置:ug 组设 trackLeadMs ⇒ 新代次帧时戳整体 +Δ(esp32 下发与 ring 同源),随内容消耗归零", async () => {
-    setTrackLeadMs("lead-g1", 1500);
-    const g = new SendspinGroup("ug:lead-g1", { log() {} } as any);
-    (g as any).encoders.set("pcm:100", new PhaseEncoder([1000, 1000, 1000]));
-    const b = bridgeStub("ap-1");
-    g.bridges.set("ap-1", b as any);
-    liveGroups.push(g);
-
-    g.notifyBridgeGeneration(1, "track"); // 切歌 ⇒ 垫片 Δ=1500ms(按组)
-    const ahead = BigInt(g.commonSendAheadUs());
-    // 打戳时 ts 已含垫片 Δ:落窗值 = ts0+Δ,取 ts0=now+1s ⇒ 落窗 now+2.5s ∈ [now+1.5,now+2.5]+ahead
-    const ts0 = nowUs() + ahead + 1_000_000n;
-    await g.pushFrame(ts0, PCM());
-    g.bridgePushTick();
-    expect(b.pushed.length).toBeGreaterThan(0);
-    expect(b.pushed[0]!.ts).toBe((ts0 as bigint) + 1_500_000n - ahead);
-
-    // 垫片被内容消耗:投递时戳增量逐帧回落(时间线连续,无跳变)
-    const pushed = b.pushed.map((p: { ts: bigint }) => p.ts);
-    for (let i = 1; i < pushed.length; i += 1) {
-      const d = pushed[i]! - pushed[i - 1]!;
-      expect(d).toBeGreaterThan(0n);
-      expect(d).toBeLessThanOrEqual(1_000_000n / (SAMPLE_RATE / 1000n) * 4n);
-    }
   });
 
   it("切歌垫片动态·冷边界(A 方案):未配置组 + track 冷启 ⇒ 动态冷 lead(测试 env=1000ms),投递时戳整体 +Δ", async () => {

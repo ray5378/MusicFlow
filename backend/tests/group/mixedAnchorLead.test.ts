@@ -6,7 +6,7 @@
 //
 // 语义铁律：
 //   ① 0 或 NULL = **自动**（全局默认 5000ms）；>0 = 用户值；负数 = 钳到 0（无物理意义）。
-//   ② 只影响混合组分支；纯桥组深锚 / 非桥分支 / trackLeadMs 既有语义零改动。
+//   ② 只影响混合组分支；纯桥组深锚 / 非桥分支零改动（垫片组值手动口已删 v4.9.1）。
 //   ③ 🔴 子进程实时性：消费点在 Sendspin fork 子进程（streamEngine 重锚分支），而
 //      delayCalib 的 cache 是懒加载 + 写时更新、**无失效广播**（写在主进程）⇒ 子进程
 //      一旦读过一次 cache 就固化。所以消费点 `mixedAnchorLeadUsOf` **必须绕过 cache
@@ -14,7 +14,7 @@
 //      「主进程写库、子进程 cache 陈旧」的场景钉死这一点。
 import "../plugins/_env.js";
 import { describe, it, expect, beforeAll, beforeEach } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { v4 as uuidv4 } from "uuid";
 import { db, initDatabase, encryptPassword } from "../../src/db/index.js";
@@ -90,13 +90,15 @@ describe("getMixedAnchorLeadMs / setMixedAnchorLeadMs（组级往返）", () => 
     expect(getMixedAnchorLeadMs(GID)).toBe(1200);
   });
 
-  it("与既有成员延迟/trackLeadMs 互不干扰（各写各的列）", () => {
+  it("与既有成员延迟互不干扰（各写各的列）；v4.9.1 起垫片组值列已由迁移 DROP", () => {
     setMixedAnchorLeadMs(GID, 3000);
     expect(getMixedAnchorLeadMs(GID)).toBe(3000);
-    // 成员格子与切歌垫片列没有被顺带改写
+    // 成员格子没有被顺带改写
     const row = db.select().from(playerGroups).where(eq(playerGroups.id, GID)).get() as any;
     expect(row.memberDelaysJson).toBe("{}");
-    expect(Number(row.trackSwitchLeadMs ?? 0)).toBe(0);
+    // 旧手动口 track_switch_lead_ms 已被幂等迁移删除(防复活:列必须不在)
+    const cols = (db as any).all(sql`SELECT name FROM pragma_table_info('player_groups')`) as Array<{ name: string }>;
+    expect(cols.some((c: { name: string }) => c.name === "track_switch_lead_ms")).toBe(false);
   });
 });
 
