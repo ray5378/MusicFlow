@@ -1491,13 +1491,16 @@ export class QueueController extends EventEmitter {
     } finally { this.advancing.delete(playerId); }
   }
 
-  clear(playerId: string): void {
+  /** opts.skipDeviceStop(E3):只清服务端队列,不下发设备端 Stop。
+   *  用于「桥刚接管同 host AirPlay」后卡片对源端 DLNA 的 reset —— 设备端 Stop 会
+   *  让固件输入仲裁把通路顶回 DLNA(RTSP 活着、timing 照答,但音频不渲染,240 实证)。 */
+  clear(playerId: string, opts?: { skipDeviceStop?: boolean }): void {
     playerId = stripPlayerPrefix(playerId);
     this.flowOwned.delete(playerId); // 队列清空 → 进行中的 flow 会话作废
     const q = this.queues.get(playerId); if (!q) return;
     // 清空队列同时停止实际播放(dlna=stopDevice,group=扇出各成员)。
     // 成员设备个人清空不打断归属的进行中群组播放。
-    if (!this.isMemberOfActiveGroup(playerId)) {
+    if (!opts?.skipDeviceStop && !this.isMemberOfActiveGroup(playerId)) {
       this.players.get(playerId)?.stop().catch(() => {});
     }
     q.items = []; q.currentIndex = -1; q.isActive = false; q.ended = false;

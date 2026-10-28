@@ -36,13 +36,13 @@ describe("bridgeSettleMarks(exp4 E3)", () => {
     expect(isRecentlyBridgeSettledDlnaPeer("d64", 1_000_100)).toBe(true); // 最新在
   });
 
-  it("env 开关:缺省关;1/true 开;其余关", () => {
-    expect(raopSuppressDlnaResetAfterBridge()).toBe(false);
-    process.env.MF_BRIDGE_RAOP_SUPPRESS_DLNA_RESET_AFTER_BRIDGE = "1";
-    expect(raopSuppressDlnaResetAfterBridge()).toBe(true);
-    process.env.MF_BRIDGE_RAOP_SUPPRESS_DLNA_RESET_AFTER_BRIDGE = "true";
+  it("env kill-switch:缺省开(2026-10-28 固化);0/false 关;其余值仍开", () => {
     expect(raopSuppressDlnaResetAfterBridge()).toBe(true);
     process.env.MF_BRIDGE_RAOP_SUPPRESS_DLNA_RESET_AFTER_BRIDGE = "0";
     expect(raopSuppressDlnaResetAfterBridge()).toBe(false);
+    process.env.MF_BRIDGE_RAOP_SUPPRESS_DLNA_RESET_AFTER_BRIDGE = "false";
+    expect(raopSuppressDlnaResetAfterBridge()).toBe(false);
+    process.env.MF_BRIDGE_RAOP_SUPPRESS_DLNA_RESET_AFTER_BRIDGE = "1";
+    expect(raopSuppressDlnaResetAfterBridge()).toBe(true);
   });
 });

@@ -799,10 +799,12 @@ app.post("/v1/peers/:peerId/reset", async (c) => {
     // 并广播 media_changed 让所有客户端立刻清掉封面与歌词,不必等下一轮轮询。
     // 与 /stop 同口径:传输 stop 是 best-effort,队列**必须**清掉。
     // 离线设备(播放器未注册)在这里曾经回 500 并跳过 clear,导致幽灵队列常驻。
+    const suppressDlnaDevice =
+      parsed.kind === "dlna" && raopSuppressDlnaResetAfterBridge() && isRecentlyBridgeSettledDlnaPeer(parsed.id);
     getQueueController().stopPlayback(parsed.id);
     let transportError: string | null = null;
     try {
-      if (parsed.kind === "dlna" && raopSuppressDlnaResetAfterBridge() && isRecentlyBridgeSettledDlnaPeer(parsed.id)) {
+      if (suppressDlnaDevice) {
         // exp4(E3):该 DLNA peer 刚被桥 cold-settle(桥接管同 host AirPlay)。设备端
         // Stop 会让固件输入仲裁把通路顶回 DLNA —— RTSP 活着、timing 照答,但音频不
         // 渲染(240 实证:泵 125/s、loss=0、全程无声)。开关打开时只做服务端复位。
@@ -813,7 +815,7 @@ app.post("/v1/peers/:peerId/reset", async (c) => {
       transportError = e?.message || String(e);
       log.warn(`[reset] ${parsed.kind} ${parsed.id} 停传输失败(仍清队列): ${transportError}`);
     }
-    getQueueController().clear(parsed.id);
+    getQueueController().clear(parsed.id, { skipDeviceStop: suppressDlnaDevice });
     return c.json({ success: true, ...(transportError ? { transportError } : {}) });
   }
 

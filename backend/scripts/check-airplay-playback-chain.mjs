@@ -474,7 +474,9 @@ console.log("===== R14 stop/reset 容错:离线设备也必须停得掉、清得
   );
   check(
     "reset:传输失败后仍执行 clear(不得在 catch 里 return 500 跳过 clear)",
-    /reset[\s\S]{0,2600}?transportError[\s\S]{0,600}?getQueueController\(\)\.clear\(parsed\.id\)/.test(peers),
+    // E3(2026-10-28):桥 cold-settle 后的 DLNA 源端 reset 需带 opts 跳过设备命令,
+    // 故允许 clear(parsed.id, { skipDeviceStop: suppressDlnaDevice }) 这一种带参形态。
+    /reset[\s\S]{0,2600}?transportError[\s\S]{0,600}?getQueueController\(\)\.clear\(parsed\.id(?:, \{ skipDeviceStop: suppressDlnaDevice \})?\)/.test(peers),
     "reset 在传输抛错时跳过了 clear → 离线端 isActive 队列常驻",
   );
   check(

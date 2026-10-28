@@ -1593,3 +1593,44 @@ routes/api/groups.ts:129  PUT /v1/groups/:id/delays  {memberId, ms}
 | D-4 | F2 路由决策日志 | playMedia 每次起播打一行 `[group][route] <gid> dlna=N spin=N ap=N apDetail=[{id,ageMs,online}…]`(守卫 check-group-invariants ㉓ 钉格式);临时诊断 [diag-v494ex] 已移除 | group/protocolPlayer.ts |
 
 > 语义分工:sync 版 `getOnlineAirplayIds` 仅供 watchdog/leader 判定(零 IO,不拖慢周期路径);起播路径独占 async 容错版。测试:tests/group/airplayOnlineTolerant.test.ts(七用例:fresh 直返/刷新恢复/5min 容错/10min 剔除/双 F4 豁免/disabled 剔除)。
+
+## v4.9.4-e3 增补(桥占用期抑制 DLNA 源端 reset,2026-10-28)
+
+### 症状
+主卧(HiVi H5MKII 的 DLNA 身份)流转到含同 host AirPlay 成员(HiVi AirPlay 身份)的群组后,
+桥泵一切健康(125.3 包/秒、loss=0、可跑满 240s),**但该设备一点声音都没有**。
+同一流转改成 solo 直投(主卧→HiVi 单设备)则正常出声 —— 差别只在「solo 会话」与「桥会话」。
+
+### 根因(240 真机时序实证)
+卡片流转链是 `transferFrom(to, from)` + 成功后 `resetPeer(from)`。`resetPeer(主卧)` 会向
+**同一台物理设备**下发 SOAP `Stop`(先经 `reset` 路由的 `stopDevice`,再经 `queue.clear()`
+内 `player.stop()`),而这两条 Stop 落在桥会话 `RECORD` 之后 0.1~0.2 秒:
+
+```
+22:18:22.64  prime silence 10 chunks -> 192.168.10.30:47435   (桥已建会话)
+22:18:22.64  sessions: prepare token=a59d7e88... sessions=1
+22:18:22.80  [DLNA][Stop] 主卧 发起 tid=4eaf1fe6               ← 卡片 reset 的设备命令
+22:18:23.84  [DLNA][Stop] 成功;23.847 再次发起;23.907 成功
+22:18:27.53  bridge first packet
+```
+
+设备固件的输入仲裁被这两条 Stop 顶回 DLNA:AirPlay 的 RTSP/TCP 仍活着、timing reply 照答、
+RTP 全收(loss=0),但音频不渲染。所有出声实例(群组直接播放、源端是 AirPlay 的流转)在
+`RECORD` 之后都**没有任何 DLNA 命令**,与该结论完全对应。
+
+### 修法(常开)
+`services/airplay/bridgeSettleMarks.ts` 记录「DLNA peer 刚被桥 cold-settle」标记
+(TTL 20s、容量 64 LRU,写点在 `control.bridgePrepareDevice` 的同 host settle **成功之后**)。
+`routes/api/peers.ts` 的 `/stop` 与 `/reset` 命中标记时:**只做服务端复位,不下发任何设备端
+DLNA 命令** —— `stopDevice` 跳过、`queue.clear(peerId, { skipDeviceStop: true })` 跳过
+`player.stop()`(否则 clear 内部那条 Stop 会漏出去,exp5b 实测过一轮)。
+
+- 设备端并非完全不停:settle 阶段(桥接管前)已经 Stop 过一次,那次是必要的让位动作;
+  被抑制的只是**桥已经接管之后**的重置副作用。
+- 应急回滚:容器环境变量 `MF_BRIDGE_RAOP_SUPPRESS_DLNA_RESET_AFTER_BRIDGE=0`(缺省开启)。
+- 守卫:`check-airplay-playback-chain.mjs` 的 reset-clear 断言允许带
+  `{ skipDeviceStop: suppressDlnaDevice }` 一种带参形态(见 R15 段注释)。
+
+### 排查提示
+判断该设备的桥是否"假活":看 tick 是否 deltaUs 稳定、loss=0 但用户无声;再看日志里
+`RECORD` 之后有没有 `[DLNA][Stop]`。有 → 命中本坑;没有 → 转去查固件自身状态机。

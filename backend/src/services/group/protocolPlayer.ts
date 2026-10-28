@@ -618,6 +618,29 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
   };
 }
 
+/** 群组 status 的 media 元数据兜底(2026-10-28 真机:流转后首曲偶发 title/cover 缺失)。
+ *  根因:泵侧起播(streamEngine.play)把**上一首**的 title/artist/album/coverArt 继承给新
+ *  current;上一首为空或恰好换曲时,新 current 只剩 songId+durationMs(子进程拿不到队列,
+ *  无从补)。故在主进程 status 出口按 songId 从组队列回填 —— 命中即补缺字段,找不到原样返回。 */
+async function enrichGroupCurrentMedia(groupId: string, media: any): Promise<any> {
+  if (!media || typeof media.songId !== "string") return media;
+  if (media.title && media.coverArt) return media;
+  try {
+    // 动态 import 与文件内其它队列访问同款(避免 group↔player 静态环)。
+    const { getQueueController } = await import("../player/index.js");
+    const snap = getQueueController().snapshot(`group:${groupId}`);
+    const item = (snap?.items ?? []).find((it: any) => it?.songId === media.songId);
+    if (!item) return media;
+    return {
+      ...media,
+      title: media.title ?? item.title,
+      artist: media.artist ?? item.artist,
+      album: media.album ?? item.album,
+      coverArt: media.coverArt ?? item.coverArt,
+    };
+  } catch { return media; }
+}
+
 /** 组状态(路由层 /v1/peers/group:<id>/status 用):leader 派生;无在线成员 STOPPED 默认值。
  *  leader 是 sendspin 成员时从共享组 pump 派生(位置/时长走组时间线,音量走组标度)。 */
 export async function getGroupStatus(groupId: string): Promise<{
@@ -643,7 +666,7 @@ export async function getGroupStatus(groupId: string): Promise<{
       // 实时组在则回实时(刚调过),否则回持久库值(重启后 / ug 组尚未创建)。
       volume: typeof gv?.volume === "number" ? gv.volume : persistedVolume,
       muted: !!gv?.muted,
-      media: gv?.current ?? undefined,
+      media: await enrichGroupCurrentMedia(groupId, gv?.current),
       updatedAt: Date.now(),
     };
   }

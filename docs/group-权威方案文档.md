@@ -1046,3 +1046,13 @@ PUT 语义：`memberId` 必须是本组成员（命名空间 id **原样整条**
 ## v4.9.4-f1 增补(mDNS staleness 与群组桥在线判定,2026-10-28)
 
 > playMedia 起播对 airplay 成员改走 `getOnlineAirplayIdsTolerant`(F1):全 stale 先 300ms 快速刷新;stale <10min 容错进桥(MAJ-07 兜底);≥10min 真离线照旧剔除;F4 活跃会话/桥 owner 豁免。sync 版判定仅供 watchdog/leader。动机与细节见 airplay 权威文档 v4.9.4-f1 节。
+
+## v4.9.4-e3 增补(群组 status 的 media 元数据兜底,2026-10-28)
+
+`getGroupStatus` 的 media 直接取泵侧 `gv.current`。泵起播(`streamEngine.play`)会把
+**上一首**的 title/artist/album/coverArt 继承给新 current;上一首为空或恰好换曲时(流转后
+首曲最常见),新 current 只剩 `songId + durationMs` → HA 卡片显示「未知」且无封面(偶发)。
+
+修法:主进程 status 出口按 songId 从组队列回填缺字段(`enrichGroupCurrentMedia`,
+`services/group/protocolPlayer.ts`)。子进程(泵)拿不到队列,故只能在出口补;命中即补,
+找不到(队列已换曲/清空)原样返回。

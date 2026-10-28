@@ -19,10 +19,12 @@ export const BRIDGE_SETTLE_MARK_TTL_MS = 20_000;
 /** 容量上限(老条目按插入序淘汰;桥数量远小于此,纯保险)。 */
 const MAX_MARKS = 64;
 
-/** exp4(E3)开关:命中标记时跳过设备端 DLNA Stop(缺省关 = 现行为)。 */
+/** E3(2026-10-28 真机确认,常开):命中标记时跳过设备端 DLNA Stop。
+   *  HiVi 出声的最后一环 —— 之前 exp4 期间它是 opt-in 实验开关。
+   *  应急回滚:容器环境变量 MF_BRIDGE_RAOP_SUPPRESS_DLNA_RESET_AFTER_BRIDGE=0 关闭。 */
 export function raopSuppressDlnaResetAfterBridge(): boolean {
   const v = process.env.MF_BRIDGE_RAOP_SUPPRESS_DLNA_RESET_AFTER_BRIDGE;
-  return v === "1" || v === "true";
+  return v !== "0" && v !== "false";
 }
 
 /** 记录「dlnaPeerId 刚被 airplayDeviceId 的桥 cold-settle 过」。nowMs 注入供单测。 */
