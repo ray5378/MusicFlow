@@ -4,14 +4,14 @@
 
 ## [4.9.0] - 2026-10-28
 
-### Feature / 群组切歌等待时间可按组配置（混合组锚点 lead）
+### Feature / 群组切歌等待时间可按组配置（混合组锚点 lead，默认自动 5000ms）
 
-- **背景**：混合组（Sendspin 直连设备 + AirPlay 桥并存）切歌时全组统一晚 ~5s 起播（v4.7.6 真机定标 `BRIDGE_MIXED_GROUP_ANCHOR_LEAD_MS`，给桥重锚留窗口、防吞新歌开头），此前是全局常量只能改 env 重启；同协议组（无桥）不走该分支本就不受影响。现改为**按群组实时可配**：前端群组卡片新增「切歌等待」入口，点击弹窗单独设置。
-- **语义**：`player_groups.mixed_anchor_lead_ms`（新列，启动幂等迁移 `PRAGMA` + `ALTER TABLE ADD COLUMN`）——**0/NULL = 自动**（默认 5000ms 常量），>0 = 用户值（0~30000 / 步进 100）。生效 = streamEngine 重锚混合组分支组值优先、回退常量；**PUT 后下一首切歌即生效，无需重建桥、无需重启**。纯桥组深锚与非桥分支零改动。
-- **子进程实时性**：streamEngine 跑在 fork 子进程，delayCalib cache「懒加载 + 写时更新、无失效广播」⇒ 子进程 cache 结构性陈旧（直改库可复现）。消费口 `mixedAnchorLeadUsOf` **绕 cache 直查 db**（读频率 = 每次重锚一次，不在推流热循环，SQLite WAL 直查一致性足够）。
-- **API**：`GET/PUT /v1/groups/:id/delays` 扩展 `mixedAnchorLeadMs` / `mixedAnchorLeadStepMs` / `mixedAnchorLeadMaxMs`，PUT 独立写口、不触发重建。
-- **守卫**：`check-group-invariants.mjs` 新增 **G19**（7 条，总 76 → **83**）：混合组分支唯一表达式 + 纯桥/非桥分支原样 + 读写口钳制 + **绕 cache 直查**（函数体断言含直查且不含 cache 读）+ API 双向 + 迁移幂等 + 前端弹窗范式（`append-to-body` + step-strictly）。
-- **测试**：新增 `tests/group/mixedAnchorLead.test.ts`（clamp 边界 / get-set 往返+落库 / 与 memberDelays·trackLeadMs 互不干扰 / usOf 四种 null 语义 / **直改库复现子进程 cache 陈旧** / API 字段·404·越界钳制·0=自动）。
+- **是什么**：混合组（AirPlay 桥 + 直连 Sendspin 成员并存）切歌前全组统一静默 ~5s——那是混合组锚点 lead `BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US`（v4.7.6 真机定标：低于 AirPlay 接收端就绪窗口 ≈2~3s 必吞新歌开头，5s 覆盖；代价 = 全组静默 ~5s）。过去是全局常量，无法按组调；本版改为 `player_groups.mixed_anchor_lead_ms` **组级实时可配**，前端群组卡片新增「切歌等待」入口 + 弹窗（0~30000ms，步进 100）。
+- **语义**：NULL/0 = **自动**（沿用全局默认 5000ms）；>0 = 用户值。只影响混合组锚点分支——纯桥组深锚（`bridgeStartLeadUs`）与非桥分支（800ms 截断 / reseed）**一行未动**（守卫 G19 钉住）。
+- **消费点与实时性**：`streamEngine` 混合组分支 `Math.max(aheadUs, mixedAnchorLeadUsOf(group) ?? BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US)`。子进程读值**绕过 delayCalib cache 直查 db**——cache 懒加载 + 写时更新、无失效广播，子进程结构性陈旧（`trackSwitchLeadUsOf` 同型旧洞，因其 0 默认 + API 隐藏调参口从未咬人）。**PUT 后下一首切歌即生效，无需重建/重启**。
+- **接口与存储**：`GET/PUT /v1/groups/:id/delays` 双向收发 `mixedAnchorLeadMs`（响应另带 `mixedAnchorLeadStepMs/MaxMs` 供前端渲染）；`player_groups.mixed_anchor_lead_ms` 可空列 + PRAGMA 幂等迁移。
+- **守卫**：`check-group-invariants.mjs` 新增 **G19**（混合组分支唯一表达式组值优先回退常量 / 纯桥深锚与非桥分支原样 / delayCalib 读写口+钳制+常量 / 消费点绕 cache 直查 / API 双向 / 迁移幂等+schema / 前端弹窗 append-to-body），总断言 76 → **83**。
+- **测试**：新增 `tests/group/mixedAnchorLead.test.ts`——clamp、组级往返+落库、与 `memberDelays`/`trackLeadMs` 互不干扰、`mixedAnchorLeadUsOf` 四种 null 语义、**直改库复现「主进程写库、子进程 cache 陈旧」**（钉死为什么消费点必须直查）、API GET/PUT/404。
 
 ## [4.8.5] - 2026-10-28
 

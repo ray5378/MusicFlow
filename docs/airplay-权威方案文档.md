@@ -1288,7 +1288,7 @@ streamEngine.ts:880-903
 | 组形态 | `lead` | 代码 | 为什么 |
 |---|---|---|---|
 | 纯桥组(`hasBridges && !hasDirectMembers`) | `max(sendAhead, bridgeStartLeadUs([{warm:false}]))` = 4.5s | `streamEngine.ts:888` / `bridgeMath.ts:132` | 单成员就足够深,深锚收益最大 |
-| **混合组**(桥 + 直连 sendspin) | `max(sendAhead, BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US)` = 1.75s | `streamEngine.ts:889` / `sendspin/constants.ts:96` | 桥投递下沿 1.5s + 一个补投周期 250ms;低于它首帧必被窗口跳过 ⇒ 每首歌开头丢 1s |
+| **混合组**(桥 + 直连 sendspin) | `max(sendAhead, mixedAnchorLeadUsOf(group) ?? BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US)` = 自动 5s(**v4.9.0 起组级可配**) | `streamEngine.ts:921` / `sendspin/constants.ts:111` / `group/delayCalib.ts`(`mixed_anchor_lead_ms`) | 桥会话重启(0xE0)后接收端就绪窗口实测 ≈2~3s,lead 低于窗口 ⇒ 切歌吞开头 100% 复现(1.75s 吞 1~2s / 3s 吞缩短 / 5s 不吞,v4.7.6 定标取 5s);代价 = 切歌全组静默 ~5s ⇒ **v4.9.0 起前端按组调**:`player_groups.mixed_anchor_lead_ms`(NULL/0 = 自动 5000ms,>0 = 用户值,0~30000 步进 100),子进程绕 delayCalib cache 直查 db(cache 无失效广播,结构性陈旧),PUT 后下一首切歌生效、无需重建;纯桥组深锚与非桥分支不变 |
 | 无桥 + 预填充开 | `min(sendAhead, ANCHOR_SAFE_LEAD_US)` = 800ms | `streamEngine.ts:891` | 起播延迟与缓冲深度解耦 |
 | 其余 / seek 重锚 | `reseedLead ?? aheadUs` | `streamEngine.ts:892` | 保时间轴单调 |
 
@@ -1520,6 +1520,7 @@ routes/api/groups.ts:129  PUT /v1/groups/:id/delays  {memberId, ms}
 | 4.6.77 同时 | 混合组锚点 lead 由 `min(sendAhead,800ms)=500ms` 抬到 `BRIDGE_PUSH_FLOOR_US + BRIDGE_PUSH_TICK_MS*1000 = 1.75s`(修「每首歌开头丢 1s」,`sendspin/constants.ts:96`);桥投递恢复 `ts' = ts − sendAhead` 并把窗口边界整体 +sendAhead 搬回原 ts 域(修桥恒晚 500ms + 首帧自锚 2.5s) |
 | 4.7.x | 延迟三格化(AP1/AP2/Sendspin 独立格)+ 补偿落点改**投递时戳位移**(桥内锚点恒 0,G13-b,修「锚点双加被对齐器裁掉」)+ join 兜底自愈 + 混合组锚点 lead 抬到 5s(`BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US`,修切歌吞新歌开头) |
 | **4.8.0** | **延迟补偿改按成员**:`member_delays_json`(成员 id → ms)取代三格列(旧列 DROP,值不迁移);取消 300ms 播种;取值口 `bridgeAnchorShiftUsOf(groupName, deviceId)` / `sendspinDelayUsOfClient`;PUT 改 `{memberId, ms}`(越组 400);前端改成员弹窗(§11 全节重写) |
+| **4.9.0** | **混合组切歌等待按组可配**:`player_groups.mixed_anchor_lead_ms`(可空;NULL/0 = 自动 5000ms,>0 = 用户值,0~30000 步进 100)取代混合组锚点 lead 的全局常量;消费点 `streamEngine` 混合组分支组值优先回退 `BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US`,读值**绕 delayCalib cache 直查 db**(cache 懒加载+写时更新、无失效广播 ⇒ 子进程结构性陈旧);`GET/PUT /v1/groups/:id/delays` 收发 `mixedAnchorLeadMs`,前端群组卡片「切歌等待」弹窗;PUT 后下一首切歌生效、无需重建;纯桥组深锚与非桥分支不变;守卫 G19(+7 条,76→83) |
 | 未发布(本文同批) | 桥会话音量回落修复(缺陷 **D-1**):`BridgeSession.setVolumeDb`(`bridgeSession.ts:773`)+`BridgeSessionManager.setVolumeDb`(`:833`)+`childMain.ts:119` 的「native 未命中回落桥」——桥占用设备的volume RPC 不再恒落空;回归用例 `tests/airplay/bridgeVolumeRouting.test.ts`(7 个 `it`);缺陷 **D-2**(每首歌无条件 teardown+prepare 桥路由)明确**留待下一轮**,见附录 D |
 
 # 附录 D：已知缺陷 / 待排期（2026-10-26 盘点）
