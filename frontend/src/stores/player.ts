@@ -1228,6 +1228,7 @@ export const usePlayerStore = defineStore("player", () => {
     // If the cleared peer was the active one, fall back to本机.
     if (activeRemotePeerId.value === st.peerId) {
       currentPeerId.value = localPeerId.value;
+      resyncVolumeForPeer(localPeerId.value);
     }
   }
 
@@ -1435,6 +1436,8 @@ export const usePlayerStore = defineStore("player", () => {
     st.lastCastState = "PLAYING";
     st.lastScrobbledSongId = song?.id || "";
     currentPeerId.value = `dlna:${deviceId}`;
+    // 投屏接管:滑条立即对齐设备真实音量,不带本机/旧端的单例值过去。
+    resyncVolumeForPeer(`dlna:${deviceId}`);
     startCastPoll(st);
   }
 
@@ -1452,6 +1455,7 @@ export const usePlayerStore = defineStore("player", () => {
     stopCastPoll(st);
     removeRemoteState(st.peerId);
     currentPeerId.value = localPeerId.value;
+    resyncVolumeForPeer(localPeerId.value);
   }
 
   // On Web tab reopen: restore every peer whose queue is still active (dlna /
@@ -1487,6 +1491,8 @@ export const usePlayerStore = defineStore("player", () => {
         startCastPoll(st);
         if (!firstRestored) {
           currentPeerId.value = p.peerId;
+          // 重开标签页恢复控制:滑条对齐该端真实音量,不用 localStorage 残留值。
+          resyncVolumeForPeer(p.peerId);
           firstRestored = true;
         }
       }
@@ -1606,8 +1612,34 @@ export const usePlayerStore = defineStore("player", () => {
   // 与 castSeek 一致,用 250ms trailing debounce:本地 UI/Howler 即时响应,
   // 远程请求只发拖拽停止后的最后一次。
   const volumeTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  // 音量单例的跨端隔离:volume.value 是跨播放端共享的单例,DLNA 轮询会把设备
+  // 音量写进来;若流转/切换受控目标后不复位,用户一碰音量滑条就会把旧端的音量
+  // POST 给新目标端(v4.9.2 缺陷:DLNA≈98 流转到群组后,群组音量被顶成 98)。
+  // 所有「受控目标切换」点(switchPeer/startCast/stopCast/restoreCast/
+  // castClearQueue/dropCurrentIfStaleLocal/设备离线回退)统一走这里重新拉取:
+  //   - 远端目标:立即 GET /status 采纳目标端真实音量(群组=群组音量,设备=设备
+  //     音量),与 startCastPoll 共用同一套 volumeIssuedAt 陈旧保护——窗口内用户
+  //     刚拖过的读数不回顶;只 GET,绝不主动 POST,流转动作本身不碰目标端音量;
+  //   - 回本机:恢复本机 Howl 的真实音量(Howl 是本机音量真相;localStorage 只
+  //     记本机音量,见 setVolume)。
+  function resyncVolumeForPeer(peerId: string): void {
+    if (peerId === localPeerId.value) {
+      volume.value = howl ? howl.volume() : parseFloat(localStorage.getItem("volume") || "0.8");
+      return;
+    }
+    void api.get(peerApi(peerId, "/status"), { timeout: 5000 }).then((res: any) => {
+      if (currentPeerId.value !== peerId) return; // 已切走:不写单例
+      const s = res.data || {};
+      if (typeof s.volume !== "number") return;
+      // 与轮询同一套陈旧判定:命令窗口内的采样不采纳,避免顶掉用户的即时拖拽。
+      if (isStaleSample(s, volumeIssuedAt.get(peerId) || 0)) return;
+      volume.value = Math.max(0, Math.min(100, s.volume)) / 100;
+    }).catch(() => { /* 拉取失败不阻塞切换,现值暂留,轮询会随后纠正 */ });
+  }
   function setVolume(v: number) {
-    volume.value = v; localStorage.setItem("volume", String(v));
+    // localStorage 只记「本机音量」:远端拖拽若也写入,回本机时会把设备音量
+    // 当成本机音量恢复(单例污染的另一半)。远端音量以后端 /status 为准。
+    volume.value = v;
     if (isRemotePeer.value && activeRemote.value) {
       const peerId = activeRemote.value.peerId;
       const timer = volumeTimers.get(peerId);
@@ -1620,6 +1652,7 @@ export const usePlayerStore = defineStore("player", () => {
       }, 250));
       return;
     }
+    localStorage.setItem("volume", String(v));
     if (howl) howl.volume(v);
   }
   function cyclePlayMode() {
@@ -1758,6 +1791,7 @@ export const usePlayerStore = defineStore("player", () => {
     if (!cur || !isStaleLocalPeer(cur)) return;
     removeRemoteState(cur.peerId);
     currentPeerId.value = localPeerId.value;
+    resyncVolumeForPeer(localPeerId.value);
   }
 
   async function refreshLocalPeersOnce(): Promise<void> {
@@ -2010,6 +2044,8 @@ export const usePlayerStore = defineStore("player", () => {
         startCastPoll(st);
       }
       currentPeerId.value = peerId;
+      // 流转/切换受控目标:立即从新目标端重新拉取音量,消除跨端单例污染。
+      resyncVolumeForPeer(peerId);
       // If the player we switched to is already playing, mirror the queue panel.
       if (isRemotePeer.value && activeRemote.value?.isPlaying) autoshowQueue();
     } else {
@@ -2018,6 +2054,8 @@ export const usePlayerStore = defineStore("player", () => {
       // playing). Just flip the UI pointer — the computed properties will
       // show本机 state again.
       currentPeerId.value = peerId;
+      // 回本机:恢复本机音量(控制远端期间单例被远端读数占用过)。
+      resyncVolumeForPeer(localPeerId.value);
       if (localIsPlaying.value) autoshowQueue();
     }
   }
@@ -2131,7 +2169,10 @@ export const usePlayerStore = defineStore("player", () => {
           if (currentPeerId.value === p.peerId) {
             const next = peers.value.find(x => x.available && x.peerId !== localPeerId.value);
             if (next) void switchPeer(next.peerId).catch(() => {});
-            else currentPeerId.value = localPeerId.value;
+            else {
+              currentPeerId.value = localPeerId.value;
+              resyncVolumeForPeer(localPeerId.value);
+            }
           }
           // 回收离线设备残留的 RemoteState(pollTimer 2s + tickTimer 250ms),
           // 与 castClearQueue/stopCast 同款清理,避免定时器永久空转与状态泄漏。
