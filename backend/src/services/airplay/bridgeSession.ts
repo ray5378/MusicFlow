@@ -206,6 +206,8 @@ export interface BridgeAnchorPlan {
   anchors: BridgeAnchors;
   /** 是否触发了可达性重锚(A − L − SAFETY < now)。 */
   reAnchored: boolean;
+  /** E2 实验:now 锚(MF_BRIDGE_RAOP_NOW_ANCHOR)生效 —— anchorUs = now(+shift)。 */
+  forceNow: boolean;
   /** 指令提前量 = A − now(锚点确定时刻;§3.5 commandedLeadUs)。 */
   commandedLeadUs: bigint;
 }
@@ -216,6 +218,14 @@ export interface BridgeAnchorPlan {
  *  - 不可达:A = max(now + warmLead, 首帧 tsUs) —— 桥会话刚完成 RECORD,按热启 lead 重锚,
  *    更早的内容(含首帧)由对齐器按 drop 出清,绝不硬塞。
  *  - 群延迟补偿仅重采样路径(48k 直通 resampled=false ⇒ A′ = A)。 */
+/** E2 实验:RAOP 出口 now 锚开关(MF_BRIDGE_RAOP_NOW_ANCHOR)。
+ *  缺省(未设置)= ON;显式 0/false = 关闭回旧路径(未来锚)。
+ *  仅作用于 RAOP 出口成员;AP2 出口(maybeBeginStream)不透传 forceNow。 */
+export function raopNowAnchorEnabled(): boolean {
+  const v = process.env.MF_BRIDGE_RAOP_NOW_ANCHOR;
+  return !(v === "0" || v === "false");
+}
+
 export function planBridgeAnchor(opts: {
   firstFrameTsUs: bigint;
   latencyFrames: number;
@@ -226,13 +236,24 @@ export function planBridgeAnchor(opts: {
   warmLeadUs?: number;
   /** A/V 标定位移(µs,正 = 内容落点整体后移 = 桥延后)。缺省 0(历史行为)。 */
   anchorShiftUs?: number;
+  /** E2 实验:forceNow = now 锚(anchorUs = now(+shift)),首包即发;
+   *  泵 lead 段相对组时间线提前播,对齐器以首帧 tsUs 为零点(见 maybeBeginStream)。 */
+  forceNow?: boolean;
 }): BridgeAnchorPlan {
   let anchorUs = opts.firstFrameTsUs + BigInt(opts.anchorShiftUs ?? 0);
   const warmUs = BigInt(opts.warmLeadUs ?? BRIDGE_WARM_START_LEAD_US);
   const lUs = BigInt(Math.round((opts.latencyFrames / opts.rate) * 1e6));
   const safetyUs = BigInt(RAOP_SAFETY_MS * 1000);
   let reAnchored = false;
-  if (anchorUs - lUs - safetyUs < opts.nowUs) {
+  if (opts.forceNow === true) {
+    // E2 实验(MF_BRIDGE_RAOP_NOW_ANCHOR,缺省 ON):now 锚 —— anchorUs = now(+shift)。
+    // 背景(2026-10-28 240 实证):MUZO 类固件只支持「到包即播」语义,对
+    // 「SYNC 未来锚 2.3s + 首包延迟 1.25s」的桥会话永不开始渲染(solo 旧墙钟
+    // 路径 now 锚可出声)。now 锚下首包立即发;泵 lead 段相对组时间线提前播;
+    // 对齐器以首帧 tsUs 为零点(见 maybeBeginStream)保持内容连续 —— 绝不触发
+    // skip 跳段时间线(skip 会把 RTP 重新标回未来,等于没修)。
+    anchorUs = opts.nowUs + BigInt(opts.anchorShiftUs ?? 0);
+  } else if (anchorUs - lUs - safetyUs < opts.nowUs) {
     const floorUs = opts.nowUs + warmUs;
     if (floorUs > anchorUs) {
       anchorUs = floorUs;
@@ -246,7 +267,7 @@ export function planBridgeAnchor(opts: {
     chunkLen: CHUNK_LEN,
     compensateGroupDelay: opts.resampled,
   });
-  return { anchorUs, anchors, reAnchored, commandedLeadUs: anchorUs - opts.nowUs };
+  return { anchorUs, anchors, reAnchored, commandedLeadUs: anchorUs - opts.nowUs, forceNow: opts.forceNow === true };
 }
 
 // ---------------------------------------------------------------------------
@@ -480,6 +501,8 @@ export class BridgeSession {
   private anchors: BridgeAnchors | null = null;
   private anchorUs: bigint | null = null;
   private commandedLeadUs: bigint | null = null;
+  /** E3:锚点落定时刻的 chunksOut 快照(tick deltaUs 用增量)。 */
+  private chunksOutAtPlan = 0;
   private generation = 0;
   private maxQueueMs = 0;
   private deltaSamples: number[] = [];
@@ -777,6 +800,7 @@ export class BridgeSession {
       resampled: this.resampler !== null,
       nowUs: nowUs(),
       anchorShiftUs: this.opts.anchorShiftUs ?? 0,
+      forceNow: this.ap2Session === null && raopNowAnchorEnabled(),
     });
     if (plan.reAnchored) {
       log.warn(`[airplay-bridge] anchor unreachable: device=${this.deviceId} commanded=${this.firstFrameTsUs} now=${nowUs()} → re-anchor ${plan.anchorUs}(丢弃更早内容)`);
@@ -784,7 +808,16 @@ export class BridgeSession {
     this.anchorUs = plan.anchorUs;
     this.commandedLeadUs = plan.commandedLeadUs;
     this.anchors = plan.anchors;
-    this.aligner = new BridgeTimelineAligner(plan.anchorUs, rate);
+    // E3:锚点落定时刻的 chunksOut 快照 —— tick deltaUs 用本次 plan 起的增量,
+    // 修 warm-reuse 会话跨 gen 累积导致的恒偏谬值(240 实证 35.68s)。
+    this.chunksOutAtPlan = this.stats.chunksOut;
+    if (plan.forceNow) {
+      log.warn(`[airplay-bridge] forceNow anchor (MF_BRIDGE_RAOP_NOW_ANCHOR): device=${this.deviceId} anchorUs=now 首包即发(组 lead 内容提前播,E2 实验)`);
+    }
+    // forceNow:对齐器零点取首帧 tsUs(内容序)而非 plan.anchorUs(=now)——
+    // 否则泵 lead 段 target−pos ≈ +2.3s > 2s 补静音上限 ⇒ 走 skip 跳段时间线,
+    // startTs 前移把 RTP 重新标回未来,now 锚失效。
+    this.aligner = new BridgeTimelineAligner(plan.forceNow && this.firstFrameTsUs !== null ? this.firstFrameTsUs : plan.anchorUs, rate);
     this.streamAborted = false;
     this.emitAnchorReport(plan, latencyFrames);
     // ---- 双出口(Phase 6b · T03):同一个 plan.anchorUs,只是出口不同 ----
@@ -976,6 +1009,7 @@ export class BridgeSession {
       rate: this.outRate,
       resampled: this.resampler !== null,
       reAnchored: plan.reAnchored,
+      forceNow: plan.forceNow,
     })}`);
   }
 
@@ -997,7 +1031,7 @@ export class BridgeSession {
     if (anchors) {
       // deltaUs(§10.5):已写入 RAOP 的内容前沿相对 A′ 的超前量 ≈ L + 队列 + 在途。
       // 锚点错 X ⇒ 恒偏 X;与 driftUs(对齐残差)/ late(lead 不足)可区分。
-      const writtenFrames = this.stats.chunksOut * CHUNK_LEN;
+      const writtenFrames = (this.stats.chunksOut - this.chunksOutAtPlan) * CHUNK_LEN;
       const frontier = anchors.anchorUsShifted + BigInt(Math.round((writtenFrames / rate) * 1e6));
       deltaUs = Number(frontier - nowUs());
       this.deltaSamples.push(deltaUs);
@@ -1019,6 +1053,10 @@ export class BridgeSession {
       ap2LateSkips: this.ap2LateSkips,
       ap2Degraded: this.ap2LinkLoss !== null,
       realigned: this.stats.realignments,
+      silenceChunks: this.stats.silenceChunks,
+      insertedFrames: this.stats.insertedFrames,
+      droppedFrames: this.stats.droppedFrames,
+      skippedFrames: this.stats.skippedFrames,
       driftUs: this.aligner?.lastDriftUs ?? 0,
       deltaUs,
       deltaP95Us: p95,

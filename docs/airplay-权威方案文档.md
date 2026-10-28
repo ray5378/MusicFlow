@@ -1561,3 +1561,19 @@ routes/api/groups.ts:129  PUT /v1/groups/:id/delays  {memberId, ms}
 | B-2 | warm/cold 分流 | 编排侧 prepareBridgeRoute 以「token 是否沿用」为判据传 `settleDlna: !prevSpec`:冷建 settle(等设备切完输入),warm 复用跳过(快路径);流内加入/子进程重启重建走缺省 settle | group/protocolPlayer.ts;airplay/control.ts |
 | B-3 | 同组 DLNA 成员豁免 | `dlna:<peer>` 是同一用户组成员(历史遗留组)时不 settle,防组内自杀;经动态 import group/index 判成员 | airplay/control.ts bridgePrepareDevice |
 | B-4 | 实证根因 | 240 真机日志:`bridge stream done: 28093 chunks / 230.5s, loss=0` 全程送达但无声 —— 会话建立在 DLNA→AirPlay 输入切换完成之前;直连路径 2026-10-22 已修同款问题(yieldSiblingDlnaForAirPlay 注释段),本次补齐桥路径 | 本文件互斥章节 |
+
+---
+
+## v4.9.4-ex 增补(RAOP now 锚实验,2026-10-28)
+
+> **实验性质**:env `MF_BRIDGE_RAOP_NOW_ANCHOR` 门控(缺省 ON,显式 0/false 关闭回旧路径);仅热补丁(240),未发版。根因定性(240 实证 + 代码考古):MUZO/Linkplay 类固件只支持「到包即播/now 锚」语义,对「SYNC 未来锚 2.3s + 首包延迟 1.25s」的桥会话永不开始渲染;v4.7 时代出声的桥路径即 Phase 3 旧墙钟 stream()(now 锚),Phase 4 四锚点改造后无出声实证。
+
+| # | 变更 | 现状(代码为准) | 位置 |
+|---|------|------------------|------|
+| C-1 | planBridgeAnchor forceNow 分支 | `forceNow: true` ⇒ anchorUs = now(+anchorShiftUs),跳过可达性检查,首包 sendAt(0) = now−L−SAFETY ≤ now ⇒ 立即发;commandedLeadUs=0;锚点四字段照常产出(SYNC 把音频标到「现在」,设备到包即播) | bridgeSession.ts planBridgeAnchor |
+| C-2 | 对齐器零点重锚(关键) | forceNow 时 BridgeTimelineAligner 零点取**首帧 tsUs**(内容序)而非 plan.anchorUs(=now):否则泵 lead 段 target−pos ≈ +2.3s > 2s 补静音上限 ⇒ skip 跳段把 startTs 前移,RTP 重新标回未来,now 锚失效(定向测试 bridgeSessionForceNow 钉住两侧行为) | bridgeSession.ts maybeBeginStream |
+| C-3 | env 开关 | raopNowAnchorEnabled():未设置=ON,0/false=关闭;仅 RAOP 出口透传(`this.ap2Session === null && …`),AP2 出口路径零改动 | bridgeSession.ts |
+| C-4 | 已知代价 | 组 lead 段(~2.3s)相对组时间线**提前播**(MUZO 不缓冲未来锚的必然结果);单成员组无感;混合组同步待实验定论后定最终形态(候选:首传延迟吸收 lead / 组级补偿) | 本节 |
+| C-5 | E3 观测性修复 | ① tick JSON 补 silenceChunks/insertedFrames/droppedFrames/skippedFrames 四字段;② deltaUs 改用 plan 落定时刻 chunksOut 快照的**增量**(修 warm-reuse 会话跨 gen 累积的恒偏谬值,240 曾见 35.68s) | bridgeSession.ts emitStatsTick |
+
+> 影响面排查:守卫 ⑮(锚点一次性/对齐器全仓唯一 ctor)⑬(scheduledAnchorUs 字段名)⑯(firstFrameTsUs+anchorShiftUs 落点)全部保持;raop.ts streamBridge 零改动(headTs 每包按 startTs+idx 重算,天然兼容锚点前移)。

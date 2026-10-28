@@ -1034,3 +1034,9 @@ PUT 语义：`memberId` 必须是本组成员（命名空间 id **原样整条**
 | F-2 | warm 复用不等待 | prepareBridgeRoute 按「同 token 沿用 = warm」判定:`settleDlna: !prevSpec` —— warm 路径 DLNA 早已让位,不拖慢快路径;bridgeJoinMember/rebuildBridgeRoutes(冷建)缺省 settle | group/protocolPlayer.ts prepareBridgeRoute |
 | F-3 | 同组遗留 DLNA 成员防自杀 | 历史遗留组内 `dlna:<peer>` 若与该 AirPlay 同组,不 settle(组自己正要让它出流);新组本就禁 DLNA 入组,该分支只护遗留组 | airplay/control.ts bridgePrepareDevice(动态 import group/index 判成员) |
 | F-4 | 锚点 lead 覆盖核实 | 冷桥深锚 `BRIDGE_COLD_START_LEAD_US`=4.5s、混合组默认 5000ms(组级可配):settle 典型增量 = SOAP Stop(<0.5s)+轮询 ≤2.5s+宽限 0.3s ≈ ≤3.3s,叠加 prepare ~1.7s ≈ 5s,lead 覆盖;极端(SOAP 挂到 6s 硬顶)由桥投递窗口水位/hold chunk 兜底,不产生额外吞音 | rates.ts BRIDGE_COLD_START_LEAD_US;streamEngine 混合组分支;group/delayCalib mixed_anchor_lead_ms |
+
+---
+
+## v4.9.4-ex 增补(RAOP now 锚实验,2026-10-28)
+
+> **实验性质**:env `MF_BRIDGE_RAOP_NOW_ANCHOR`(缺省 ON,0/false 关闭);仅热补丁(240),未发版。桥 RAOP 出口对 MUZO 类固件改 now 锚:`planBridgeAnchor` 增 forceNow 分支(anchorUs=now,首包即发;对齐器零点取首帧 tsUs,防 skip 跳段把 RTP 标回未来)。组语义影响:该成员的组 lead 段(~2.3s)相对组时间线**提前播** —— 单成员组无感;混合组同步待实验定论后定最终形态。泵侧投递与 AP2 出口零改动;`MF_BRIDGE_RAOP_NOW_ANCHOR=0` 一键回旧路径。详见 airplay 权威文档 v4.9.4-ex 节。
