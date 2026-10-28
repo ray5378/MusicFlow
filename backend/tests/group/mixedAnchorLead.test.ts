@@ -90,15 +90,19 @@ describe("getMixedAnchorLeadMs / setMixedAnchorLeadMs（组级往返）", () => 
     expect(getMixedAnchorLeadMs(GID)).toBe(1200);
   });
 
-  it("与既有成员延迟互不干扰（各写各的列）；v4.9.1 起垫片组值列已由迁移 DROP", () => {
+  it("与既有成员延迟互不干扰（各写各的列）；新装库 player_groups 列级一致（v4.9.2 无迁移代码）", () => {
     setMixedAnchorLeadMs(GID, 3000);
     expect(getMixedAnchorLeadMs(GID)).toBe(3000);
     // 成员格子没有被顺带改写
     const row = db.select().from(playerGroups).where(eq(playerGroups.id, GID)).get() as any;
     expect(row.memberDelaysJson).toBe("{}");
-    // 旧手动口 track_switch_lead_ms 已被幂等迁移删除(防复活:列必须不在)
+    // 新装一致性:测试库是 initDatabase 从零建的(v4.9.2 起 CREATE TABLE 即最终形态),
+    // 必须含两列且不含已删的垫片手动口列(四表全量比对见 tests/db/freshInstallSchema.test.ts)
     const cols = (db as any).all(sql`SELECT name FROM pragma_table_info('player_groups')`) as Array<{ name: string }>;
-    expect(cols.some((c: { name: string }) => c.name === "track_switch_lead_ms")).toBe(false);
+    const names = cols.map((c: { name: string }) => c.name);
+    expect(names).toContain("member_delays_json");
+    expect(names).toContain("mixed_anchor_lead_ms");
+    expect(names).not.toContain("track_switch_lead_ms");
   });
 });
 

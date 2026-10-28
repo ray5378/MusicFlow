@@ -1182,14 +1182,17 @@ console.log("===== G19 混合组切歌等待按组可配 =====");
     apiOk,
     `双向=${apiOk} ⇒ 缺 GET = 前端无回显;缺 PUT = 弹窗保存空转`,
   );
-  // --- e) 迁移幂等 + schema 声明 ---
-  const dbOk = dbIdx.includes('if (!cols.includes("mixed_anchor_lead_ms"))')
-    && dbIdx.includes("ALTER TABLE player_groups ADD COLUMN mixed_anchor_lead_ms INTEGER");
+  // --- e) 新装一致性钉(v4.9.2):CREATE TABLE 即最终形态,迁移代码禁复活 ---
+  const pgB = dbIdx.indexOf("CREATE TABLE IF NOT EXISTS player_groups");
+  const pgE = pgB >= 0 ? dbIdx.indexOf("CREATE TABLE IF NOT EXISTS group_queues", pgB) : -1;
+  const pgBod = pgB >= 0 && pgE > pgB ? dbIdx.slice(pgB, pgE) : "";
+  const dbOk = pgBod.includes("member_delays_json") && pgBod.includes("mixed_anchor_lead_ms");
+  const noMig = !dbIdx.includes("ALTER TABLE") && !dbIdx.includes("PRAGMA table_info");
   const schemaOk = schemaTxt.includes('mixedAnchorLeadMs: integer("mixed_anchor_lead_ms")');
   check(
-    "player_groups.mixed_anchor_lead_ms 可空列 + PRAGMA 幂等迁移 + schema 声明",
-    dbOk && schemaOk,
-    `迁移=${dbOk} schema=${schemaOk} ⇒ 非幂等 = 二次启动 ALTER 报错`,
+    "player_groups CREATE TABLE 含 member_delays_json+mixed_anchor_lead_ms(v4.9.2 新装=最终形态)+ schema 声明;全文件禁 ALTER TABLE/PRAGMA table_info(迁移代码不许回来)",
+    dbOk && noMig && schemaOk,
+    `create=${dbOk} noMigrate=${noMig} schema=${schemaOk} ⇒ CREATE 缺列 = 新装库与已迁移库不一致;迁移代码回归 = 双源漂移`,
   );
   // --- f) 前端弹窗:append-to-body 铁律 + input-number 步进严格 ---
   const fe = read("frontend/src/views/Groups/index.vue");

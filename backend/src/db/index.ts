@@ -84,32 +84,11 @@ export function decryptPassword(enc: string | null | undefined): string | null {
 }
 
 /**
- * 一次性数据搬迁(batch49):v4.2.4 的 `player_rate_configs`(只有采样率两列)
- * 并入 `player_output_configs`(多了位深列)。
- *
- * 为什么手写:本仓没有迁移框架 —— 全仓只有 `CREATE TABLE IF NOT EXISTS`,
- * 加列不会自动落到已有库上。所以改名 + 加列都靠这一步,**幂等**:
- * 老表在(老库)就搬完删掉;不在(全新库 / 已经搬过)就整个跳过。
- * `INSERT OR IGNORE`:新表 peer_id 是主键,已存在的行不会被覆盖。
- * 搬迁失败不能拦住启动 —— 老表里最多是「自动探测到的采样率」,设备重连时
- * 会重新 hello 写回,丢了也只是晚一轮生效。
+ * 本仓**无迁移代码**(v4.9.2 起全部移除):CREATE TABLE 即最终形态;schema 变更 =
+ * 改 CREATE TABLE + schema.ts,既有库由运维手工补列,旧备份恢复前须核对列结构。
+ * 「新装容器从零建库 == 已迁移生产库」的列级一致由 tests/db/freshInstallSchema.test.ts
+ * 钉住(新建库列集 == 生产库实录);本文件出现任何加列/删列语句即违规(守卫 G19-e 防复活)。
  */
-function migrateLegacyRateConfigs(): void {
-  try {
-    const legacy = sqlite
-      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='player_rate_configs'")
-      .get();
-    if (!legacy) return;
-    sqlite.exec(`
-      INSERT OR IGNORE INTO player_output_configs (peer_id, manual_rate, probed_rate, updated_at)
-        SELECT peer_id, manual_rate, probed_rate, updated_at FROM player_rate_configs;
-      DROP TABLE player_rate_configs;
-    `);
-    log.info("[DB] player_rate_configs 已并入 player_output_configs(位深列上线)");
-  } catch (e: any) {
-    log.warn("[DB] player_rate_configs 搬迁跳过: " + (e?.message || e));
-  }
-}
 
 export function initDatabase() {
   // Create tables if they don't exist
@@ -509,7 +488,11 @@ export function initDatabase() {
       member_ids TEXT NOT NULL DEFAULT '[]',
       volume INTEGER NOT NULL DEFAULT 20,
       created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-      updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+      updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      -- 按成员 A/V 延迟补偿(v4.8.0):命名空间成员 id → ms 的 JSON map,正 = 更晚 / 负 = 更早。
+      member_delays_json TEXT NOT NULL DEFAULT '{}',
+      -- 混合组切歌等待组级值(v4.9.0):可空 = 自动(全局默认 5000ms),>0 = 用户值 ms。
+      mixed_anchor_lead_ms INTEGER
     );
 
     CREATE TABLE IF NOT EXISTS group_queues (
@@ -727,99 +710,6 @@ export function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_tag_repair_done_at ON tag_repair_done(at);
   `);
 
-  // 结构升级(2026-10-18):tag_repair_done 新增 platform 列(标签来源平台,qq/netease)。
-  // 结构升级(2026-10-17 修正6):新增 outcome 列('fixed' 已达标 / 'unobtainable' 终态不可得)。
-  // CREATE TABLE IF NOT EXISTS 不会给既有表补列,故显式幂等补列(ALTER TABLE ADD COLUMN)。
-  // 旧库既有行 platform 为 NULL → 管理端「标签来源分布」归入「历史(未记录来源)」,不回填;
-  // 旧库既有行语义全为「已达标」→ outcome 回填 'fixed',让「已修复」计数口径与旧库一致。
-  try {
-    const cols = (sqlite.prepare("PRAGMA table_info(tag_repair_done)").all() as { name?: unknown }[]).map((c) =>
-      String(c?.name ?? ""),
-    );
-    if (!cols.includes("platform")) {
-      sqlite.exec("ALTER TABLE tag_repair_done ADD COLUMN platform TEXT");
-      log.info("tag_repair_done 新增 platform 列(标签来源平台)");
-    }
-    if (!cols.includes("outcome")) {
-      sqlite.exec("ALTER TABLE tag_repair_done ADD COLUMN outcome TEXT");
-      sqlite.exec("UPDATE tag_repair_done SET outcome = 'fixed' WHERE outcome IS NULL");
-      log.info("tag_repair_done 新增 outcome 列(修复结果)并回填旧行为 fixed");
-    }
-  } catch (e) {
-    log.warn(`tag_repair_done 补列失败: ${e instanceof Error ? e.message : e}`);
-  }
-
-  // 结构升级(2026-10-23):airplay_devices 新增 hap_credentials 列。
-  // AP2 native 需要 pair-verify 凭据(192 hex),存在设备行上 ⇒ 跨重启/重发现保留,
-  // 不必每次投屏重新配对(Apple TV / HomePod 的 PIN 配对对用户是强打扰)。
-  try {
-    const cols = (sqlite.prepare("PRAGMA table_info(airplay_devices)").all() as { name?: unknown }[]).map((c) =>
-      String(c?.name ?? ""),
-    );
-    if (!cols.includes("hap_credentials")) {
-      sqlite.exec("ALTER TABLE airplay_devices ADD COLUMN hap_credentials TEXT NOT NULL DEFAULT ''");
-      log.info("airplay_devices 新增 hap_credentials 列(AP2 配对凭据)");
-    }
-  } catch (e) {
-    log.warn(`airplay_devices 补列失败: ${e instanceof Error ? e.message : e}`);
-  }
-
-  // 结构升级(2026-10-24):sendspin_device_state 新增 hostname 列。
-  // ESPHome 固件 2026.10.0 起 client_id 不再取 MAC(改随机串),固件一升级同一台
-  // 设备就成了「新设备」。hostname 由 6053 deviceInfo 上报,跨固件稳定的身份锚点。
-  try {
-    const cols = (sqlite.prepare("PRAGMA table_info(sendspin_device_state)").all() as { name?: unknown }[]).map((c) =>
-      String(c?.name ?? ""),
-    );
-    if (!cols.includes("hostname")) {
-      sqlite.exec("ALTER TABLE sendspin_device_state ADD COLUMN hostname TEXT NOT NULL DEFAULT ''");
-      log.info("sendspin_device_state 新增 hostname 列(设备身份锚点)");
-    }
-  } catch (e) {
-    log.warn(`sendspin_device_state 补列失败: ${e instanceof Error ? e.message : e}`);
-  }
-
-  // 结构升级(v4.8.0):player_groups 延迟补偿改**按成员**存 —— 新增 member_delays_json
-  // (member id → ms 的 JSON map),并删除旧的按协议三格(airplay/airplay2/sendspin_delay_ms)。
-  // 旧值**不迁移**(用户裁定:全部归零重调,一步到位不留兜底)。
-  try {
-    const cols = (sqlite.prepare("PRAGMA table_info(player_groups)").all() as { name?: unknown }[]).map((c) =>
-      String(c?.name ?? ""),
-    );
-    if (!cols.includes("member_delays_json")) {
-      sqlite.exec("ALTER TABLE player_groups ADD COLUMN member_delays_json TEXT NOT NULL DEFAULT '{}'");
-      log.info("player_groups 新增 member_delays_json 列(按成员延迟补偿)");
-    }
-    for (const col of ["airplay_delay_ms", "airplay2_delay_ms", "sendspin_delay_ms"]) {
-      if (!cols.includes(col)) continue;
-      try {
-        sqlite.exec(`ALTER TABLE player_groups DROP COLUMN ${col}`);
-        log.info(`player_groups 删除旧延迟列 ${col}(按协议三格 → 按成员 member_delays_json)`);
-      } catch (e) {
-        log.warn(`player_groups DROP COLUMN ${col} 失败(不影响启动): ${e instanceof Error ? e.message : e}`);
-      }
-    }
-    // v4.9.1:切歌垫片组值手动口移除 → 删列幂等迁移(照 v4.8.0 删旧三格列的既有范式)。
-    // 垫片机制本身(pendingTrackLeadUs 冷/暖动态 + 逐帧消耗)不变,只是不再有组级手动覆盖。
-    if (cols.includes("track_switch_lead_ms")) {
-      try {
-        sqlite.exec("ALTER TABLE player_groups DROP COLUMN track_switch_lead_ms");
-        log.info("player_groups 删除 track_switch_lead_ms 列(切歌垫片组值手动口已移除,动态自动挡)");
-      } catch (e) {
-        log.warn(`player_groups DROP COLUMN track_switch_lead_ms 失败(不影响启动): ${e instanceof Error ? e.message : e}`);
-      }
-    }
-    // 结构升级(v4.8.6):混合组切歌等待的组级覆盖。**可空列**(无 DEFAULT):
-    // NULL/0 = 自动(全局默认 BRIDGE_MIXED_GROUP_ANCHOR_LEAD_MS),>0 = 用户值。
-    // 幂等:PRAGMA table_info 检查后再 ALTER,重复启动/升级路径都安全。
-    if (!cols.includes("mixed_anchor_lead_ms")) {
-      sqlite.exec("ALTER TABLE player_groups ADD COLUMN mixed_anchor_lead_ms INTEGER");
-      log.info("player_groups 新增 mixed_anchor_lead_ms 列(混合组切歌等待,可空=自动)");
-    }
-  } catch (e) {
-    log.warn(`player_groups 补列失败: ${e instanceof Error ? e.message : e}`);
-  }
-
   // Plugins (built-in and external drop-ins) are seeded from the unified catalog
   // at boot via registerBuiltinPlugins() — see plugins/registry.ts.
   // No hardcoded plugin names live here.
@@ -851,9 +741,6 @@ export function initDatabase() {
   sqlite.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run("daily_recommend_enabled", "true");
   sqlite.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run("daily_recommend_hour", "3");
   sqlite.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run("daily_recommend_local_enabled", "true");
-
-  // batch49:老表(player_rate_configs)→ 新表(player_output_configs)一次性搬迁。
-  migrateLegacyRateConfigs();
 
   // Seed DB rows for every registered plugin (manifest-driven, idempotent).
   // Deferred require-style import: the registry imports `db` from this module,
