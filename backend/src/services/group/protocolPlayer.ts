@@ -9,9 +9,9 @@
 import { getGroupManager, splitMemberId } from "./index.js";
 import { createDlnaProtocolPlayer, getDevice, getDeviceStatus, isDeviceAvailable } from "../dlna/control.js";
 import { createAirPlayProtocolPlayer } from "../airplay/protocolPlayer.js";
-import { getAirPlayStatus, isAirPlayDeviceDisabled, isAirplayBridgeEnabled, isBridgeOwned, bridgePrepareDevice, bridgeStopDevice, selectAirPlayBridgeProtocol } from "../airplay/control.js";
+import { getAirPlayStatus, isAirPlayDeviceDisabled, isAirplayBridgeEnabled, isBridgeOwned, hasActiveSession, bridgePrepareDevice, bridgeStopDevice, selectAirPlayBridgeProtocol } from "../airplay/control.js";
 import { bridgeSocketPath } from "../airplay/bridgeChannel.js";
-import { getAirPlayDevice } from "../airplay/discovery.js";
+import { getAirPlayDevice, rescanAirPlayDevices } from "../airplay/discovery.js";
 import type { BridgeSocketSpec } from "../sendspin/bridgeAttach.js";
 import { getSendspinFront } from "../sendspin/index.js";
 import { sendspinGroupName } from "../sendspin/playerCore.js";
@@ -273,24 +273,42 @@ export function getOnlineSendspinIds(groupId: string): string[] {
 /** 组内在线 airplay 成员(裸 deviceId):设备未禁用且 status.available 判定。
  *  available 来自设备档案 + 发现态(与 /v1/airplay 同源),会话不存在时回档案值。 */
 export function getOnlineAirplayIds(groupId: string): string[] {
-  const ids = splitGroupMembers(groupId).airplay;
-  // [diag-v494ex] 临时诊断(待根因确认后移除):playMedia 时刻 airplay 成员在线判定明细
-  if (ids.length > 0) {
-    const detail = ids.map((id) => {
-      const dev = getAirPlayDevice(id);
-      return {
-        id,
-        disabled: isAirPlayDeviceDisabled(id),
-        statusAvailable: getAirPlayStatus(id).available,
-        devFound: !!dev,
-        devAvailable: dev ? dev.available : null,
-        lastSeenAgeMs: dev ? Date.now() - dev.lastSeen : null,
-      };
-    });
-    log.info(`[diag-v494ex] apOnline group=${groupId} members=${JSON.stringify(getGroupManager().get(groupId)?.memberIds ?? [])} detail=${JSON.stringify(detail)}`);
-  }
-  return ids
+  return splitGroupMembers(groupId).airplay
     .filter(id => !isAirPlayDeviceDisabled(id) && getAirPlayStatus(id).available);
+}
+
+/** F1 容错窗上限:stale 超过此时长 = 真离线(起播剔除,不拖慢)。 */
+export const AIRPLAY_STALE_TOLERANT_MS = 10 * 60 * 1000;
+
+/** F1(2026-10-28):组 airplay 成员在线判定(stale 容错版,playMedia 起播专用)。
+ *  背景(240 实证):MUZO/HiVi 类接收端空闲期停止应答 mDNS,90s staleness
+ *  (discovery 读时判定)会把刚离手几分钟的设备错标 offline → getOnlineAirplayIds
+ *  剔除 → prepareBridgeRoute 静默返回 null(群组 play 11ms 完成、零桥日志)。
+ *  - 组含 airplay 成员但 strict 判定全部离线 ⇒ 先快速刷新一次(rescanAirPlayDevices(300))再判;
+ *  - 仍不可用但 lastSeen < AIRPLAY_STALE_TOLERANT_MS ⇒ 容错按在线进桥
+ *    (桥 prepare 的握手预算兜底,失败按 MAJ-07 逐设备回落 solo);
+ *  - F4:桥 owner(isBridgeOwned)或有活跃投屏会话的设备豁免 staleness(会话在播 = 在线事实);
+ *  - lastSeen ≥ 10min(真离线,如长期下线成员)⇒ 照旧剔除,不拖慢起播。 */
+export async function getOnlineAirplayIdsTolerant(groupId: string): Promise<string[]> {
+  const ids = splitGroupMembers(groupId).airplay;
+  if (ids.length === 0) return [];
+  const strictOnline = (): string[] =>
+    ids.filter((id) => !isAirPlayDeviceDisabled(id) && getAirPlayStatus(id).available);
+  let online = strictOnline();
+  if (online.length === 0) {
+    // 全部 strict 离线:快速刷新一次(≤300ms 窗),给「空闲静默但仍在网」的设备一次应答机会。
+    await rescanAirPlayDevices(300);
+    online = strictOnline();
+  }
+  const now = Date.now();
+  return ids.filter((id) => {
+    if (online.includes(id)) return true;
+    if (isAirPlayDeviceDisabled(id)) return false;
+    if (isBridgeOwned(id) || hasActiveSession(id)) return true; // F4 豁免
+    const dev = getAirPlayDevice(id);
+    if (!dev) return false;
+    return now - dev.lastSeen < AIRPLAY_STALE_TOLERANT_MS;
+  });
 }
 
 /** 组是否有任一在线成员(dlna / airplay / sendspin 任一)。QC 结束抑制/看门狗悬挂判定用。 */
@@ -457,8 +475,13 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
     playerId,
     async playMedia(item: QueueItem, baseUrl: string) {
       const dlnaOnline = getOnlineMemberIds(groupId);
-      const apOnline = getOnlineAirplayIds(groupId);
+      const apOnline = await getOnlineAirplayIdsTolerant(groupId);
       const spinOnline = getOnlineSendspinIds(groupId);
+      // F2:路由决策单行日志(格式由 check-group-invariants 钉住;ageMs 供 staleness 误判追查)。
+      log.info(`[group][route] ${groupId} dlna=${dlnaOnline.length} spin=${spinOnline.length} ap=${apOnline.length} apDetail=${JSON.stringify(splitGroupMembers(groupId).airplay.map((id) => {
+        const dev = getAirPlayDevice(id);
+        return { id, ageMs: dev ? Date.now() - dev.lastSeen : null, online: apOnline.includes(id) };
+      }))}`);
       if (dlnaOnline.length === 0 && apOnline.length === 0 && spinOnline.length === 0) {
         throw new Error(`组 ${groupId} 无在线成员,无法播放`);
       }

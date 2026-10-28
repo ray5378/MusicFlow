@@ -263,7 +263,8 @@ async function withDeadline<T>(
 }
 
 /** 该设备是否有活跃推流会话(fork 看子进程镜像的会话表;in-proc 看本地 sessions)。 */
-function hasActiveSession(deviceId: string): boolean {
+/** F4(2026-10-28):是否有活跃投屏会话(导出供群组在线判定豁免 staleness —— 会话在播 = 在线事实)。 */
+export function hasActiveSession(deviceId: string): boolean {
   if (isAirPlayForkMode()) return airplaySupervisor.mirror.sessions.has(deviceId);
   return sessions.has(deviceId);
 }

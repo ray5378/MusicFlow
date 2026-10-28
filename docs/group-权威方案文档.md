@@ -1040,3 +1040,9 @@ PUT 语义：`memberId` 必须是本组成员（命名空间 id **原样整条**
 ## v4.9.4-ex 增补(RAOP now 锚实验,2026-10-28)
 
 > **实验性质**:env `MF_BRIDGE_RAOP_NOW_ANCHOR`(缺省 ON,0/false 关闭);仅热补丁(240),未发版。桥 RAOP 出口对 MUZO 类固件改 now 锚:`planBridgeAnchor` 增 forceNow 分支(anchorUs=now,首包即发;对齐器零点取首帧 tsUs,防 skip 跳段把 RTP 标回未来)。组语义影响:该成员的组 lead 段(~2.3s)相对组时间线**提前播** —— 单成员组无感;混合组同步待实验定论后定最终形态。泵侧投递与 AP2 出口零改动;`MF_BRIDGE_RAOP_NOW_ANCHOR=0` 一键回旧路径。详见 airplay 权威文档 v4.9.4-ex 节。
+
+---
+
+## v4.9.4-f1 增补(mDNS staleness 与群组桥在线判定,2026-10-28)
+
+> playMedia 起播对 airplay 成员改走 `getOnlineAirplayIdsTolerant`(F1):全 stale 先 300ms 快速刷新;stale <10min 容错进桥(MAJ-07 兜底);≥10min 真离线照旧剔除;F4 活跃会话/桥 owner 豁免。sync 版判定仅供 watchdog/leader。动机与细节见 airplay 权威文档 v4.9.4-f1 节。

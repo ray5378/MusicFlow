@@ -128,6 +128,7 @@ vi.mock("../../src/services/airplay/control.js", () => ({
   isAirPlayDeviceDisabled: (id: string) => h.apDisabled.has(id),
   isAirplayBridgeEnabled: () => h.state.bridgeEnabled,
   isBridgeOwned: (id: string) => h.bridgeOwned.has(id),
+  hasActiveSession: () => false,
   // Phase 6b:桥协议逐成员选。本文件默认全部按 AP1(raop)走 —— 与改动前逐字节同行为;
   // AP2 分流矩阵在 tests/group/groupAp2Route.test.ts 覆盖。
   selectAirPlayBridgeProtocol: () => "raop" as const,

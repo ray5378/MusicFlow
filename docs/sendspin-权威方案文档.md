@@ -1638,3 +1638,9 @@ prev、音量/静音、自然结束自动下一首、停止）+ 组播 6 项（`
 ## v4.9.4-ex 增补(RAOP now 锚实验,2026-10-28)
 
 > **实验性质**:env `MF_BRIDGE_RAOP_NOW_ANCHOR`(缺省 ON,0/false 关闭);仅热补丁(240),未发版。sendspin 泵与桥投递协议**零改动**(帧/tsUs/generation/BOUNDARY 原样);变化全部在 airplay 侧 RAOP 出口:now 锚(forceNow)让 MUZO 类固件到包即播,泵 lead 段相对组时间线提前播,对齐器以首帧 tsUs 为零点持续对齐。详见 airplay 权威文档 v4.9.4-ex 节。
+
+---
+
+## v4.9.4-f1 增补(mDNS staleness 与群组桥在线判定,2026-10-28)
+
+> sendspin 侧零改动。群组起播的 airplay 在线判定改走容错版(F1/F4,见 airplay 权威文档 v4.9.4-f1 节);spin 成员 ready 判定与组泵不受影响。

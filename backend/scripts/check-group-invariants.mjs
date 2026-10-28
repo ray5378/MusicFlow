@@ -1211,6 +1211,50 @@ console.log("===== G19 混合组切歌等待按组可配 =====");
 }
 
 // ---------------------------------------------------------------------------
+// ㉓ mDNS staleness 与群组桥在线判定(F1/F2/F4,2026-10-28)
+// ---------------------------------------------------------------------------
+{
+  const ppF1 = read("backend/src/services/group/protocolPlayer.ts");
+  const has = (s) => ppF1.includes(s);
+  check(
+    "playMedia 起播走容错判定 await getOnlineAirplayIdsTolerant(groupId)(sync 版仅供 watchdog/leader)",
+    has("const apOnline = await getOnlineAirplayIdsTolerant(groupId);"),
+    "playMedia 未接入 F1 容错判定 —— stale 设备会被静默剔除(240 实证 11ms 假播放)",
+  );
+  check(
+    "F1 快速刷新 ≤300ms:rescanAirPlayDevices(300) 在全离线分支",
+    has("await rescanAirPlayDevices(300);"),
+    "快速刷新缺失或窗口被改大(起播延迟失控)",
+  );
+  check(
+    "F1 容错窗常量唯一:export const AIRPLAY_STALE_TOLERANT_MS = 10 * 60 * 1000",
+    has("export const AIRPLAY_STALE_TOLERANT_MS = 10 * 60 * 1000"),
+    "容错窗常量缺失/被改 —— 真离线设备会拖慢起播或被错收",
+  );
+  check(
+    "F4 豁免:isBridgeOwned(id) || hasActiveSession(id) 视为在线",
+    has("if (isBridgeOwned(id) || hasActiveSession(id)) return true;"),
+    "F4 豁免缺失 —— 播放中设备可能因 mDNS 静默被桥摘除",
+  );
+  check(
+    "F2 路由决策单行日志 [group][route] 含 dlna=/spin=/ap=/apDetail=",
+    has("[group][route] ") && has("dlna=${dlnaOnline.length} spin=${spinOnline.length} ap=${apOnline.length}"),
+    "路由决策日志缺失/格式被改 —— staleness 误判无法事后追查",
+  );
+  const diagN = (ppF1.match(/\[diag-v494ex\]/g) || []).length;
+  check(
+    "临时诊断 [diag-v494ex] 已移除(F2 转正)",
+    diagN === 0,
+    `残留 ${diagN} 处临时诊断`,
+  );
+  check(
+    "hasActiveSession 已由 control.ts 导出(F4 依赖)",
+    read("backend/src/services/airplay/control.ts").includes("export function hasActiveSession("),
+    "hasActiveSession 未导出 —— F4 编译期即失败",
+  );
+}
+
+// ---------------------------------------------------------------------------
 if (failures.length) {
   console.error(`\n[群组不变量守卫] FAIL:${failures.length} 项(通过 ${passed} 项)`);
   for (const f of failures) console.error("  · " + f);

@@ -1577,3 +1577,18 @@ routes/api/groups.ts:129  PUT /v1/groups/:id/delays  {memberId, ms}
 | C-5 | E3 观测性修复 | ① tick JSON 补 silenceChunks/insertedFrames/droppedFrames/skippedFrames 四字段;② deltaUs 改用 plan 落定时刻 chunksOut 快照的**增量**(修 warm-reuse 会话跨 gen 累积的恒偏谬值,240 曾见 35.68s) | bridgeSession.ts emitStatsTick |
 
 > 影响面排查:守卫 ⑮(锚点一次性/对齐器全仓唯一 ctor)⑬(scheduledAnchorUs 字段名)⑯(firstFrameTsUs+anchorShiftUs 落点)全部保持;raop.ts streamBridge 零改动(headTs 每包按 startTs+idx 重算,天然兼容锚点前移)。
+
+---
+
+## v4.9.4-f1 增补(mDNS staleness 与群组桥在线判定,2026-10-28)
+
+> 背景(240 实证):MUZO/HiVi 类接收端**空闲期停止应答 mDNS**,90s staleness(`STALENESS_MS`,discovery 读时判定)会把刚离手几分钟的设备错标 offline → `getOnlineAirplayIds` 剔除 → `prepareBridgeRoute` 静默返回 null(群组 play 11ms 完成、零桥日志,用户视角 =「群组播放器坏了」)。API 视图与 playMedia 同源同规则,矛盾纯系采样时刻差。
+
+| # | 变更 | 现状(代码为准) | 位置 |
+|---|------|------------------|------|
+| D-1 | F1 快速刷新 | playMedia 起播改走 `getOnlineAirplayIdsTolerant`:组含 airplay 成员但 strict 判定全部离线 ⇒ 先 `rescanAirPlayDevices(300)`(≤300ms 窗,给「空闲静默但仍在网」设备一次应答机会)再判 | group/protocolPlayer.ts |
+| D-2 | F1 容错进桥 | 刷新后仍 stale 但 `lastSeen < AIRPLAY_STALE_TOLERANT_MS`(10min,常量唯一出处)⇒ 容错按在线进桥;桥 prepare 的握手预算兜底,失败按 MAJ-07 逐设备回落 solo。`lastSeen ≥ 10min`(真离线,如长期下线成员)照旧剔除,不拖慢起播 | group/protocolPlayer.ts |
+| D-3 | F4 会话豁免 | 桥 owner(`isBridgeOwned`)或有活跃投屏会话(`hasActiveSession`,本次从 control.ts 导出)的设备豁免 staleness —— 会话在播 = 在线的事实 | group/protocolPlayer.ts;airplay/control.ts |
+| D-4 | F2 路由决策日志 | playMedia 每次起播打一行 `[group][route] <gid> dlna=N spin=N ap=N apDetail=[{id,ageMs,online}…]`(守卫 check-group-invariants ㉓ 钉格式);临时诊断 [diag-v494ex] 已移除 | group/protocolPlayer.ts |
+
+> 语义分工:sync 版 `getOnlineAirplayIds` 仅供 watchdog/leader 判定(零 IO,不拖慢周期路径);起播路径独占 async 容错版。测试:tests/group/airplayOnlineTolerant.test.ts(七用例:fresh 直返/刷新恢复/5min 容错/10min 剔除/双 F4 豁免/disabled 剔除)。
