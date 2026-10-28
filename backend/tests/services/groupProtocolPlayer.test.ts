@@ -121,6 +121,7 @@ vi.mock("../../src/services/airplay/control.js", () => ({
   // isBridgeOwned 走 H.apBridgeOwned 事实表(默认空 → airplay 成员原样扇出)。
   isAirplayBridgeEnabled: () => false,
   isBridgeOwned: (id: string) => H.apBridgeOwned.has(id),
+  hasActiveSession: () => false,
   bridgePrepareDevice: async () => {
     throw new Error("bridgePrepareDevice 不应在桥接开关关闭时被调用");
   },

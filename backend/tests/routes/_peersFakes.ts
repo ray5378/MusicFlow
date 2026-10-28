@@ -44,6 +44,13 @@ export const gm = {
   removeDeviceFromAllGroups: vi.fn(),
 };
 
+/** services/group/index.js 假体 —— peers.ts 的动态 import(exp3 回流 add / sendspin 队列键)走这里。 */
+export const groupService = {
+  list: vi.fn(() => [] as Any[]),
+  get: vi.fn(() => null as Any),
+  applyMemberDelta: vi.fn(),
+};
+
 export const queueManager = {
   playFrom: vi.fn(async () => 0),
   jumpTo: vi.fn(async () => undefined),
@@ -154,6 +161,9 @@ const MANAGER_DEFAULTS: Array<[Any, string, Any]> = [
   [pm, "resolveMaskedLocalPeerId", () => null as Any],
   [gm, "setVolume", () => undefined],
   [gm, "get", () => null as Any],
+  [groupService, "list", () => [] as Any[]],
+  [groupService, "get", () => null as Any],
+  [groupService, "applyMemberDelta", () => undefined],
   [queueManager, "playFrom", async () => 0],
   [queueManager, "jumpTo", async () => undefined],
   [queueManager, "enqueue", async () => undefined],

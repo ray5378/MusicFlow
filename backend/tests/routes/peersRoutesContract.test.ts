@@ -15,10 +15,18 @@ vi.mock("../../src/routes/api/shared.js", async (importOriginal) => {
   return { ...actual, ...overrides, ...peersFakes };
 });
 
-import { PlaybackState } from "../../src/routes/api/shared.js";
+// peers.ts 的动态 import("../../services/group/index.js")(sendspin 队列键映射、
+// exp3 回流 add)默认打到真实单例 —— 换成可断言假体,其余导出保持真实。
+vi.mock("../../src/services/group/index.js", async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  const { groupService } = await import("./_peersFakes.js");
+  return { ...actual, getGroupManager: () => groupService };
+});
+
+import { autoDetachedFromGroup, PlaybackState } from "../../src/routes/api/shared.js";
 import { registerPeers } from "../../src/routes/api/peers.js";
 import {
-  eventManager, fns, gm, pm, queueController, queueManager, resetPeersFakes,
+  eventManager, fns, gm, groupService, pm, queueController, queueManager, resetPeersFakes,
 } from "./_peersFakes.js";
 
 type Any = any;
@@ -396,7 +404,7 @@ describe("POST /v1/peers/:peerId/queue/transfer-from", () => {
   it("cast 目标:移交不成立 → 走常规对齐(读源端实时进度再 seek)", async () => {
     pm.getQueueSnapshot.mockReturnValueOnce({ items: [{ songId: "a" }, { songId: "b" }], currentIndex: 1 });
     fns.tryArmSendspinBorrow.mockResolvedValueOnce({ armed: true, songId: "a", positionSeconds: 5 });
-    fns.readPeerPositionSeconds.mockResolvedValueOnce(33.5);
+    fns.readPeerPositionSeconds.mockResolvedValue(33.5);
     fns.seekPeerToSeconds.mockResolvedValueOnce(true);
     const b = await json(await post("/v1/peers/dlna:dev1/queue/transfer-from", { from: "dlna:src" }));
     expect(b.startIndex).toBe(1);
@@ -414,7 +422,7 @@ describe("POST /v1/peers/:peerId/queue/transfer-from", () => {
 
   it("cast 目标:position 为 0 → 不 seek(0 秒无需落位),position 为 null", async () => {
     pm.getQueueSnapshot.mockReturnValueOnce({ items: [{ songId: "a" }], currentIndex: 0 });
-    fns.readPeerPositionSeconds.mockResolvedValueOnce(0);
+    fns.readPeerPositionSeconds.mockResolvedValue(0);
     const b = await json(await post("/v1/peers/dlna:dev1/queue/transfer-from", { from: "dlna:src" }));
     expect(fns.seekPeerToSeconds).not.toHaveBeenCalled();
     expect(b.position).toBeNull();
@@ -422,7 +430,7 @@ describe("POST /v1/peers/:peerId/queue/transfer-from", () => {
 
   it("local 目标:起点随起播交出,不 seek", async () => {
     pm.getQueueSnapshot.mockReturnValueOnce({ items: [{ songId: "a" }], currentIndex: 0, playMode: "shuffle" });
-    fns.readPeerPositionSeconds.mockResolvedValueOnce(8);
+    fns.readPeerPositionSeconds.mockResolvedValue(8);
     const b = await json(await post("/v1/peers/local:u1/queue/transfer-from", { from: "dlna:src" }));
     expect(pm.localPlayFrom).toHaveBeenCalledWith("local:u1", "u1", [{ songId: "a" }], 0, 8);
     expect(fns.seekPeerToSeconds).not.toHaveBeenCalled();
@@ -432,10 +440,41 @@ describe("POST /v1/peers/:peerId/queue/transfer-from", () => {
 
   it("local 目标:进度为 0 → 不带起点(at=undefined)", async () => {
     pm.getQueueSnapshot.mockReturnValueOnce({ items: [{ songId: "a" }], currentIndex: 0 });
-    fns.readPeerPositionSeconds.mockResolvedValueOnce(0);
+    fns.readPeerPositionSeconds.mockResolvedValue(0);
     const b = await json(await post("/v1/peers/local:u1/queue/transfer-from", { from: "dlna:src" }));
     expect(pm.localPlayFrom.mock.calls[0][4]).toBeUndefined();
     expect(b.position).toBeNull();
+  });
+
+  it("exp3:跨设备流转无条件早读 —— 晚读恒 0 时 seek 用早读值(case 2 救回)", async () => {
+    pm.getQueueSnapshot.mockReturnValueOnce({ items: [{ songId: "a" }], currentIndex: 0 });
+    fns.readPeerPositionSeconds.mockResolvedValueOnce(33.5).mockResolvedValueOnce(0);
+    fns.seekPeerToSeconds.mockResolvedValueOnce(true);
+    const b = await json(await post("/v1/peers/dlna:dev1/queue/transfer-from", { from: "dlna:src" }));
+    // 跨设备 DLNA 目标:inCastPos=null(先起播再 seek 红线);起播后源端已被
+    // 互斥/群组 settle 停掉 → 晚读 0 → 必须回落到起播前定格的早读值。
+    expect(b.position).toBe(33.5);
+    expect(fns.seekPeerToSeconds).toHaveBeenCalledWith("dlna:dev1", 33.5);
+  });
+
+  it("exp3:DLNA 跨设备目标 inCastPos 仍为 null(startMs 不带早读值,保持先起播再 seek)", async () => {
+    pm.getQueueSnapshot.mockReturnValueOnce({ items: [{ songId: "a" }], currentIndex: 0 });
+    fns.readPeerPositionSeconds.mockResolvedValue(33.5);
+    await json(await post("/v1/peers/dlna:dev1/queue/transfer-from", { from: "dlna:src" }));
+    // 红线:早读值不得漏进跨设备 DLNA 的 startMs(记忆铁律:DLNA 刻意例外不得统一)。
+    expect(queueManager.playFrom.mock.calls[0][5]).toBeUndefined();
+  });
+
+  it("exp3:自动摘组回流 —— detach 记录后 transfer 回同组重新 add 成员(case 3)", async () => {
+    pm.getQueueSnapshot.mockReturnValueOnce({ items: [{ songId: "a" }], currentIndex: 0 });
+    autoDetachedFromGroup.set("src", { gid: "g1", memberKey: "dlna:src", at: Date.now() });
+    groupService.get.mockReturnValueOnce({ id: "g1", memberIds: [] });
+    try {
+      await json(await post("/v1/peers/group:g1/queue/transfer-from", { from: "dlna:src" }));
+      expect(groupService.applyMemberDelta).toHaveBeenCalledWith("g1", { add: ["dlna:src"] });
+    } finally {
+      autoDetachedFromGroup.delete("src");
+    }
   });
 
   it("currentIndex 越界/非数值 → 起点回落 0", async () => {

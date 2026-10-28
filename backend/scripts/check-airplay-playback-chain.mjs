@@ -774,6 +774,7 @@ console.log("===== R25 同设备双协议流转(AirPlay <-> DLNA):落点/互斥/
 {
   const peersG = stripComments(read("backend/src/routes/api/peers.ts"));
   const dlnaG = stripComments(read("backend/src/services/dlna/control.ts"));
+  const sharedG = stripComments(read("backend/src/routes/api/shared.ts"));
   const restG = stripComments(read("backend/src/routes/rest/index.ts"));
   check(
     "流转识别同设备双身份(AirPlay host == DLNA location host)",
@@ -781,10 +782,19 @@ console.log("===== R25 同设备双协议流转(AirPlay <-> DLNA):落点/互斥/
     "同设备流转会被当成两台设备:起播互斥停掉源端后读不到进度",
   );
   check(
-    "流转起点在任何起播/互斥动作之前定格(srcPosEarly)",
-    /const srcPosEarly = askPosition \?\? \(sameDevice \? await readPeerPositionSeconds/.test(peersG)
-      && /const inCastPos = !borrow\.armed[\s\S]{0,260}srcPosEarly/.test(peersG),
-    "落点在源端被互斥停掉之后才读:会恒为 0(真机=流转后从头播)",
+    "流转起点在任何起播/互斥动作之前定格(srcPosEarly 无条件早读,exp3)",
+    /const srcPosEarly = askPosition \?\? await readPeerPositionSeconds\(fromPeerId\);/.test(peersG)
+      && /const inCastPos = !borrow\.armed[\s\S]{0,300}sameDevice \? srcPosEarly : null/.test(peersG)
+      && /const pos = late !== null && late > 0 \? late : srcPosEarly;/.test(peersG),
+    "落点在源端被互斥停掉之后才读:会恒为 0(真机=流转后从头播);或 DLNA 跨设备红线例外被破坏(早读值漏进 startMs)",
+  );
+  check(
+    "自动摘组回流记录与回加(exp3):detachFromActiveGroups 记 autoDetachedFromGroup;transfer-to-group 回加成员",
+    /export const autoDetachedFromGroup = new Map</.test(sharedG)
+      && /autoDetachedFromGroup\.set\(bare, \{ gid, memberKey, at: Date\.now\(\) \}\);/.test(sharedG)
+      && /autoDetachedFromGroup\.get\(srcBare\)/.test(peersG)
+      && /applyMemberDelta\(parsedTo\.id, \{ add: \[rec\.memberKey\] \}\)/.test(peersG),
+    "回流链缺失:群组→设备流转后设备被永久摘出组,再流转回组即无声(case 3)",
   );
   check(
     "DLNA playMedia 把 startMs 编进 timeOffset(起播即落位)",

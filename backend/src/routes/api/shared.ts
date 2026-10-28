@@ -648,6 +648,11 @@ export async function borrowLandingConfirmed(toPeerId: string, expectSeconds: nu
   return back !== null && Math.abs(back - expectSeconds) <= 1.5;
 }
 
+/** exp3(2026-10-28):显式操控导致的**自动**摘组记录(裸设备 id → 组/成员原样写法/时刻)。
+ *  transfer-to-group 回流判据:用户手动在群编辑删除的成员没有记录 → 不会被回流
+ *  (尊重用户配置意图);重复 add 幂等;超上限淘汰最旧,防无界增长。 */
+export const autoDetachedFromGroup = new Map<string, { gid: string; memberKey: string; at: number }>();
+
 export async function detachFromActiveGroups(parsed: { kind: string; id: string }): Promise<void> {
   // Phase 5(§5.2):airplay 也允许 —— 显式操控 AirPlay 成员先摘组(否则是 no-op,
   // 桥上留孤儿成员),摘除链路经 alignGroupMembers 按 bridge/legacy 路由分别处置。
@@ -661,6 +666,11 @@ export async function detachFromActiveGroups(parsed: { kind: string; id: string 
   try {
     gm.applyMemberDelta(gid, { remove: [memberKey] });
     await alignGroupMembers(gid, [], [memberKey]);
+    autoDetachedFromGroup.set(bare, { gid, memberKey, at: Date.now() });
+    if (autoDetachedFromGroup.size > 128) {
+      const oldest = autoDetachedFromGroup.keys().next().value as string;
+      autoDetachedFromGroup.delete(oldest);
+    }
     log.info(`[group] ${gid}: 成员 ${memberKey} 因被显式操控自动脱离组`);
   } catch (e: any) {
     log.warn(`[group] ${gid}: 成员 ${memberKey} 自动脱离失败: ${e?.message || e}`);

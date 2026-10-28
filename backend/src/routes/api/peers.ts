@@ -12,6 +12,7 @@ import {
   announceOnPeer,
   apiError,
   apiInternalError,
+  autoDetachedFromGroup,
   borrowLandingConfirmed,
   broadcastSendspinVolume,
   canControlPeer,
@@ -334,12 +335,35 @@ app.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
   // ★ 同一台设备的双协议流转(AirPlay ↔ DLNA):目标端起播时的互斥会**停掉源端**
   //   (AirPlay→DLNA 停同 host AirPlay;DLNA→AirPlay 冻结同 host DLNA 队列),
   //   之后再读源端进度只会读到 0 —— 落点必须在任何起播动作之前定格。
-  //   跨设备流转仍按旧口径:AirPlay 目标在起播前读一次;DLNA 目标在起播后读
-  //   (起播要 1~3s,读得越晚越贴近目标端真正出声的时刻)。
+  //   跨设备流转也**无条件早读**(exp3):目标是群组且源与群内成员同 host(或源
+  //   本身会被互斥接管)时,晚读恒 0 —— 早读是唯一救命值(case 2:主卧 DLNA →
+  //   全屋组,群组 playFrom 的桥 settle 把主卧停了 → 晚读 0 → 群组从 0 播)。
   const sameDevice = await isSamePhysicalDevice(fromPeerId, toPeerId);
-  const srcPosEarly = askPosition ?? (sameDevice ? await readPeerPositionSeconds(fromPeerId) : null);
+  const srcPosEarly = askPosition ?? await readPeerPositionSeconds(fromPeerId);
   let landedPosition: number | null = null;
   if (isCastPeer(parsedTo)) {
+    // exp3 回流:源端设备此前因「群组→设备」流转被**自动**摘组(autoDetachedFromGroup
+    // 记录),现在又流转回**同一个组** ⇒ 先把成员加回去 —— 否则群组路由不含该成员
+    // (case 3:HiVi→全屋组 → ap=0 桥无从建 → HiVi 无声)。紧跟的 playFrom 全量
+    // 重算路由会把新成员编进桥,故不调 alignGroupMembers。用户手动删组无记录 →
+    // 不回流(尊重配置意图);成员已在组内 → 跳过(幂等)。
+    if (parsedTo.kind === "group") {
+      const srcParsed = parsePeerId(fromPeerId);
+      const srcKind = srcParsed?.kind;
+      if (srcParsed && (srcKind === "dlna" || srcKind === "airplay" || srcKind === "sendspin")) {
+        const srcBare = splitMemberId(srcKind === "sendspin" ? `sendspin:${srcParsed.id}` : srcParsed.id)?.id ?? srcParsed.id;
+        const rec = autoDetachedFromGroup.get(srcBare);
+        if (rec && rec.gid === parsedTo.id) {
+          try {
+            const { getGroupManager } = await import("../../services/group/index.js");
+            if (!(getGroupManager().get(parsedTo.id)?.memberIds ?? []).includes(rec.memberKey)) {
+              getGroupManager().applyMemberDelta(parsedTo.id, { add: [rec.memberKey] });
+              log.info(`[transfer] 源端设备回流群组 ${parsedTo.id}: ${rec.memberKey}(自动摘组回加)`);
+            }
+          } catch (e: any) { log.warn(`[transfer] 回流群组失败(忽略): ${e?.message || e}`); }
+        }
+      }
+    }
     // 流转目标是被托管成员 → 先脱离活跃组(MA ensure_player_ungrouped)。
     await detachFromActiveGroups(parsedTo);
     // ★ sendspin → sendspin:源端那条流在服务端是**现成解码好**的(泵 + PCM 窗口),
@@ -354,7 +378,10 @@ app.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
     const inCastPos = !borrow.armed
       ? (parsedTo.kind === "airplay"
           ? (askPosition ?? await readPeerPositionSeconds(fromPeerId))
-          : srcPosEarly)
+          // ⚠️ 红线:跨设备 DLNA 目标必须保持「先起播再 seek」例外,早读值不得
+          //    漏进 startMs(记忆铁律:DLNA 刻意例外不得统一);同设备 DLNA
+          //    早读=唯一救命值(源端已被互斥停掉,晚读恒 0)。
+          : (sameDevice ? srcPosEarly : null))
       : null;
     // ★ AirPlay 目标 + 带起点:先把源曲灌进服务端整曲缓冲(membuf)再 cast。
     //   sendspin 泵源是自拉流,**不经过** /rest/stream 的 membuf —— 转到 AirPlay 时
@@ -397,8 +424,9 @@ app.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
       // 起播即落位(AirPlay / 同设备 DLNA):**不再补 seek**,避免第二次建会话。
       landedPosition = inCastPos;
     } else {
-      // 晚读数优先(跨设备时更贴近目标端真正出声的时刻);同设备场景源端已被互斥
-      // 停掉、晚读数恒为 0 → 用起播前的定格值兜底。
+      // 晚读数优先(跨设备时更贴近目标端真正出声的时刻);源端已被互斥停掉/被群组
+      // settle 停掉(同 host 或群内成员同 host)时晚读恒 0 → 起播前的定格值兜底
+      // (exp3:srcPosEarly 恒有值,自动救回)。
       const late = askPosition ?? await readPeerPositionSeconds(fromPeerId);
       const pos = late !== null && late > 0 ? late : srcPosEarly;
       if (pos !== null && pos > 0 && await seekPeerToSeconds(toPeerId, pos)) landedPosition = pos;
