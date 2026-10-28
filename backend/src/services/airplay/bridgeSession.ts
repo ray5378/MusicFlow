@@ -43,11 +43,56 @@ import { computeBridgeBackoffMs } from "./bridgeSource.js";
 import { PolyphaseResampler, floatToPcmS16, pcmS16ToFloat } from "./resampler.js";
 import { audibleAtUs, computeBridgeAnchors, driftCorrection, type BridgeAnchors } from "./bridgeMath.js";
 import { nowUs } from "../../utils/hostClock.js";
-import { RaopPlayer, CHUNK_LEN, type RaopSession } from "./raop.js";
+import { RaopPlayer, CHUNK_LEN, raopBridgeConnectPrimeEnabled, type RaopSession } from "./raop.js";
 import { getAirPlayVolumeState, DEFAULT_AIRPLAY_VOLUME } from "./deviceState.js";
+import { getAirPlayDevice } from "./discovery.js";
+import { getCachedDevices } from "../dlna/control.js";
 import { degreesToDb } from "./decoder.js";
 import { AP2_SEND_ERROR_LIMIT, Ap2StreamSession, type Ap2StreamOptions, type Ap2StreamState } from "./ap2/ap2Stream.js";
 import { createLogger } from "../../utils/logger.js";
+
+/**
+ * exp4 实验开关(全部缺省关闭 = 现行为):
+ *  - MF_BRIDGE_RAOP_SUPPRESS_INITIAL_VOLUME:桥完全不发初始 SET_PARAMETER volume
+ *    (solo 从不在「非变更」路径发这条?不 —— solo v4.9.3 Fix-1 也发,但有同 host
+ *    DLNA 渲染器豁免;本开关用于验证「SET_PARAMETER 本身」是否为无声触发器)。
+ *  - MF_BRIDGE_RAOP_SKIP_VOLUME_WITH_DLNA_PEER:桥对齐 solo 豁免 —— 同 host 存在
+ *    DLNA 渲染器(Linkplay 类:HiVi H5MKII 的 RAOP 忽略 SET_PARAMETER,音量走
+ *    RenderingControl)时跳过初始 SET_PARAMETER。主卧 DLNA 停播后桥无声的头号嫌疑。
+ */
+export function raopSuppressInitialVolume(): boolean {
+  const v = process.env.MF_BRIDGE_RAOP_SUPPRESS_INITIAL_VOLUME;
+  return v === "1" || v === "true";
+}
+
+export function raopSkipVolumeWithDlnaPeer(): boolean {
+  const v = process.env.MF_BRIDGE_RAOP_SKIP_VOLUME_WITH_DLNA_PEER;
+  return v === "1" || v === "true";
+}
+
+/** 与 control.ts dlnaPeerOfAirPlay 同判据的桥侧副本(不 import control.ts 防环):
+ *  同 IP 下任选一个 DLNA 设备,优先带 RenderingControl 的 renderer。 */
+function bridgeDlnaPeerOfAirPlay(deviceId: string): string | undefined {
+  try {
+    const ap = getAirPlayDevice(deviceId);
+    if (!ap?.host) return undefined;
+    const apHost = ap.host.toLowerCase();
+    let fallback: string | undefined;
+    for (const d of getCachedDevices() as Array<{ id: string; location: string; renderingControlUrl?: string }>) {
+      let dHost = "";
+      try { dHost = new URL(d.location).hostname.toLowerCase(); } catch { continue; }
+      if (dHost !== apHost) continue;
+      if (d.renderingControlUrl) return d.id;
+      if (!fallback) fallback = d.id;
+    }
+    return fallback;
+  } catch {
+    return undefined;
+  }
+}
+
+/** exp4:prime 灌包数量(10 包 ≈ 80ms,足够建立 RTP 流存在感)。 */
+const RAOP_CONNECT_PRIME_CHUNKS = 10;
 
 /** Fix-1: 桥会话建立(RECORD 完成)后主动推一次初始音量。此前桥会话只在音量
  *  **变更**事件时才有 SET_PARAMETER(cast 路径 control.applyVolumeDb 不覆盖桥),
@@ -56,6 +101,14 @@ import { createLogger } from "../../utils/logger.js";
  *  (读失败回退 80),0-100 标尺映射 -30..0dB;失败只记日志,不阻断起流。 */
 function pushInitialVolume(player: RaopPlayer, deviceId: string, groupVolume?: number): void {
   try {
+    if (raopSuppressInitialVolume()) {
+      log.info(`push initial volume skipped (MF_BRIDGE_RAOP_SUPPRESS_INITIAL_VOLUME) device=${deviceId}`);
+      return;
+    }
+    if (raopSkipVolumeWithDlnaPeer() && bridgeDlnaPeerOfAirPlay(deviceId)) {
+      log.info(`push initial volume skipped: same-host DLNA peer(对齐 solo 豁免, MF_BRIDGE_RAOP_SKIP_VOLUME_WITH_DLNA_PEER) device=${deviceId}`);
+      return;
+    }
     // v4.9.3(§音量语义):组上下文桥会话初始音量 = player_groups 落库值(用户裁定:
     // 流转/起播绝不采用成员设备自身音量,否则「流转后组音量变成员旧值」);
     // 无组上下文(undefined)回落 airplay_device_state 设备落库值(旧行为)。
@@ -593,6 +646,10 @@ export class BridgeSession {
     this.player = player;
     this.connected = true;
     pushInitialVolume(player, this.opts.deviceId, this.opts.initialVolume);
+    // exp4:RECORD 后立即灌静音(缺省关闭)—— 把「设备见到 RTP 流」压到 solo 量级。
+    if (raopBridgeConnectPrimeEnabled()) {
+      try { player.primeSilence(RAOP_CONNECT_PRIME_CHUNKS); } catch (e: any) { log.warn(`prime silence failed: ${e?.message || e}`); }
+    }
     // 首帧可能早于 connect 完成 —— 连接就绪后立即补判起流。
     void this.maybeBeginStream();
   }
@@ -997,6 +1054,9 @@ export class BridgeSession {
       this.raopReconnectAttempt = 0;
       log.info(`[airplay-bridge] raop reconnected: device=${this.deviceId}(新 RECORD,等待新代次首帧重锚)`);
       pushInitialVolume(player, this.deviceId, this.opts.initialVolume);
+      if (raopBridgeConnectPrimeEnabled()) {
+        try { player.primeSilence(RAOP_CONNECT_PRIME_CHUNKS); } catch { /* 实验功能失败不挡重连 */ }
+      }
       try { oldPlayer?.forceClose(); } catch { /* ignore */ }
     } catch (e) {
       try { player.forceClose(); } catch { /* ignore */ }

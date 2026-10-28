@@ -283,6 +283,23 @@ export interface RaopBridgeAnchor {
 // ---------------------------------------------------------------------------
 // RTSP request builder
 // ---------------------------------------------------------------------------
+/**
+ * exp4 实验开关(全部缺省关闭 = 现行为):桥 RECORD→首包段对齐 solo 语义。
+ *  - MF_BRIDGE_RAOP_CONNECT_PRIME:RECORD 后立即灌静音包(无 SYNC),把「设备见到
+ *    RTP 流」的间隔压到 solo 量级,验证 MUZO/Linkplay 是否因长静默期拒绝渲染。
+ *  - MF_BRIDGE_RAOP_FIRST_SYNC_NOW:首包时刻 startNtp=now(与 solo 同语义),
+ *    验证接收端对 anchor−L 映射的接受度;只动 NTP 锚,RTP 节拍/pacing 不变。
+ */
+export function raopBridgeConnectPrimeEnabled(): boolean {
+  const v = process.env.MF_BRIDGE_RAOP_CONNECT_PRIME;
+  return v === "1" || v === "true";
+}
+
+export function raopBridgeFirstSyncNowEnabled(): boolean {
+  const v = process.env.MF_BRIDGE_RAOP_FIRST_SYNC_NOW;
+  return v === "1" || v === "true";
+}
+
 export class RaopPlayer {
   opts: RaopConnectOptions & { host: string; port: number; sampleRate: number };
   private rsa = false;
@@ -724,6 +741,29 @@ export class RaopPlayer {
   private audioBacklog = new Map<number, Buffer>();
   private backlogSeq = 0;
 
+  /** exp4 实验开关(MF_BRIDGE_RAOP_CONNECT_PRIME):RECORD 后立即向设备灌 n 包
+   *  静音(**无 SYNC**),把「RECORD → 设备见到 RTP 流」的间隔从桥的泵预热 6-7s
+   *  压到 solo 量级 —— 验证 MUZO/Linkplay 是否因长静默期拒绝渲染主卧 DLNA 停播后
+   *  的桥会话。ts 用 RECORD 协商的 startTs 起点(与真流时间线无关,真流 startTs
+   *  由锚点重写);发完复位 started ⇒ 真·首包仍带 marker 位(libraop 语义);
+   *  seq 连续不清零(设备侧重序缓冲按 seq 走)。仅实验用,缺省关闭。 */
+  primeSilence(count: number): void {
+    if (!this.audioSocket || this.destroying || count <= 0) return;
+    const savedHead = this.headTs;
+    const zeros = Buffer.alloc(CHUNK_LEN * 4);
+    this.headTs = this.startTs >>> 0;
+    try {
+      for (let i = 0; i < count; i++) {
+        if (!this.sendChunk(zeros)) break;
+      }
+    } finally {
+      this.headTs = savedHead;
+      this.started = false; // 真·首包保留 marker 位
+      this.positionSec = ts2ms((this.headTs - this.baseTs) >>> 0, this.opts.sampleRate) / 1000;
+    }
+    log.info(`prime silence: ${count} chunks (MF_BRIDGE_RAOP_CONNECT_PRIME, no SYNC, marker reserved)`);
+  }
+
   /** Send one ALAC chunk as an RTP audio packet. Returns false when stopped. */
   sendChunk(pcm: Buffer): boolean {
     if (!this.audioSocket || this.destroying) return false;
@@ -982,7 +1022,16 @@ export class RaopPlayer {
       // libraop 语义:首包发出后才发首条 SYNC(接收端有真实数据可锚定)。
       // 此刻 headTs 已被 sendChunk 推进一包 ⇒ SYNC 映射恒定带 ≤8ms 共模滞后
       // (与旧 stream()/libraop 同一口径;同组各设备一致,不影响互相对齐)。
-      if (!firstSyncSent) { firstSyncSent = true; this.sendSync(true); }
+      if (!firstSyncSent) {
+        firstSyncSent = true;
+        // exp4:首 SYNC 对齐 solo 语义(首个 RTP 出包时刻 startNtp=now)—— 验证
+        // MUZO 对 anchor−L 映射的接受度;只动 NTP 锚,RTP 节拍/pacing 不变。缺省关闭。
+        if (raopBridgeFirstSyncNowEnabled()) {
+          this.startNtp = ntpNow();
+          log.info("bridge first SYNC now-semantics (MF_BRIDGE_RAOP_FIRST_SYNC_NOW)");
+        }
+        this.sendSync(true);
+      }
       idx++;
       this.stats.chunks++;
       const nowSend = performance.now();

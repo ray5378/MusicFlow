@@ -1050,6 +1050,39 @@ console.log("===== R30 AirPlay 独立子进程(与 sendspin 对齐):默认 fork 
   );
 }
 console.log("");
+console.log("===== exp4:桥 RECORD→首包 solo 语义对齐实验开关(缺省关闭) =====");
+{
+  const raopG = stripComments(read("backend/src/services/airplay/raop.ts"));
+  const bsG = stripComments(read("backend/src/services/airplay/bridgeSession.ts"));
+  check(
+    "exp4:MF_BRIDGE_RAOP_SUPPRESS_INITIAL_VOLUME 缺省关闭且 pushInitialVolume 尊重之",
+    /MF_BRIDGE_RAOP_SUPPRESS_INITIAL_VOLUME/.test(bsG)
+      && /if \(raopSuppressInitialVolume\(\)\)/.test(bsG)
+      && /v === "1" \|\| v === "true"/.test(bsG),
+    "桥初始音量抑制开关缺失或语义被改",
+  );
+  check(
+    "exp4:同 host DLNA 豁免开关(MF_BRIDGE_RAOP_SKIP_VOLUME_WITH_DLNA_PEER,solo 对齐)",
+    /MF_BRIDGE_RAOP_SKIP_VOLUME_WITH_DLNA_PEER/.test(bsG)
+      && /raopSkipVolumeWithDlnaPeer\(\) && bridgeDlnaPeerOfAirPlay\(deviceId\)/.test(bsG),
+    "桥对 Linkplay 的 SET_PARAMETER 豁免实验开关缺失",
+  );
+  check(
+    "exp4:首 SYNC now 语义开关在 streamBridge 首包路径(MF_BRIDGE_RAOP_FIRST_SYNC_NOW)",
+    /MF_BRIDGE_RAOP_FIRST_SYNC_NOW/.test(raopG)
+      && /raopBridgeFirstSyncNowEnabled\(\)\) \{[\s\S]{0,80}this\.startNtp = ntpNow\(\)/.test(raopG),
+    "首 SYNC now 语义开关缺失",
+  );
+  check(
+    "exp4:RECORD 后静音灌注 prime(MF_BRIDGE_RAOP_CONNECT_PRIME,真·首包保留 marker)",
+    /MF_BRIDGE_RAOP_CONNECT_PRIME/.test(raopG)
+      && /primeSilence\(count: number\)/.test(raopG)
+      && /this\.started = false/.test(raopG)
+      && /raopBridgeConnectPrimeEnabled\(\)/.test(bsG),
+    "prime 静音灌注缺失或未复位 marker",
+  );
+}
+
 if (failures.length) {
   console.log(`✗ AirPlay 播放链路时序守卫失败 ${failures.length} 项:`);
   for (const f of failures) console.log("   - " + f);
