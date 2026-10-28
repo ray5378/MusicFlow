@@ -2,6 +2,18 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.8.5] - 2026-10-28
+
+### Fix / 试听片段跨进程判死回传 + 起播前完整性预检(第六闸)
+
+- **根因续（《等你飞奔而来》240 生产事故）**：v4.8.4 的五闸全部落在**主进程**，而 Sendspin 流泵跑在 fork 子进程里——`streamEngine` 的 `stream-truncated` 判死 `markUnplayable(songId)` 只写子进程内 `streamFallback` 的 module-local Map，主进程 QueueController 判跳读的是自己那份 ⇒ 子进程 18:28:22 已判死，用户 18:28:46 重播照样播出。且起播决策 `judgePlayable` 在可播性 unknown 时只找「URL 探测能过」的行就 play、不判内容，而预取 `lookahead=1` 覆盖不到「跨过两首死歌后的落点」⇒ **首次必播出**（生产实测首次起播后 100.2s 主进程才知道它死，期间两次播出 60s 试听）。
+- **跨进程判死回传**：IPC 事件面新增 `{ t: "songUnplayable"; clientId; songId; reason }`，`GroupPump` 挂 `onUnplayable` 回传口（`pumpFor` 装填，**不传 = 沿用已有**，seek 重建/泵复用/rehost 移交都不丢），判死拍回传主进程 `markSongUnplayableInMain` ⇒ `markUnplayable`。**回传口未装填不得静默**：判死时打告警（每首歌最多一条）——静默 = bug 无声复现。`playCore`/`playGroupCore` 末尾可选参数注入（与 `bridge?` 同款范式），旧调用零变化。
+- **起播前完整性预检（第六闸）**：`judgePlayable` 在 `resolvePlayableRow` **之前**补 `precheckIntegrity`——四条保守条件缺一不可（可播性 unknown/transient、网络源、曲库 duration>0 **无基准不杀**、判官开），动作 = 复用预取 single-flight **有界等待** `precheckWaitMs`（默认 3000ms，0=关闸，钳 ≤9000 严格小于 playCurrent 外层 `withTimeout(…,10_000)`），判死 ⇒ skip；**超时 / 预取抛错 / 仍 unknown ⇒ 一律 play**（预检绝不阻断起播，2026-10-21 `playCurrent` 被永久占用的事故防线不破）。
+- **预取闸门 0**：`prefetchSong` 同步入口 + `doPrefetch` 权威版双闸——已判死 ⇒ **一个字节都不下**（此前只有「已缓存/在途/并发上限」三道闸，已知死歌每次轮到重下一遍，240 实测 6h 内同一首 972KB 重复 5 次）。
+- **守卫**：`check-group-invariants.mjs` 新增 **G18**（回传口三件套 / pumpFor 装填语义 / 未装填告警 / IPC 事件+分发+主进程落地 / childMain 双分支 / 第六闸四条保守条件+有界上界 / 先于换源 / 闸门 0 双闸），总断言 68 → **76**。
+- **测试**：新增 8 文件 47 条——实现者 4 文件 27 条 + **QA 独立反证 4 文件 20 条**（用**真** streamFallback 不 mock，断言直接落 `getCachedPlayability === "unplayable"`，补上实现者 mock 掉 streamFallback 后「markUnplayable 写错 key 也照样全绿」的盲区；从排程入口 `prefetchUpcoming` 验证闸门 0 真零字节；预取**抛错**（非 hang）也放行；`precheckWaitMs` 的 settings > env 优先级钉死）。
+- **既有 flake（非本次引入）**：`preProbeScheduler.test.ts > 死源被跳过但留在队列`（`expected 3 to be 2`）在满负荷全量下偶发，同 seed 纯基线（stash 掉全部改动）同样 FAIL 同一断言，已对照证明与本次无关。
+
 ## [4.8.4] - 2026-10-27
 
 ### Fix / 预取完整性四五闸:中段缓冲按真实时长判死 + 正缓存不得盖负缓存

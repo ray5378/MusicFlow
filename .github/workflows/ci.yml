@@ -107,7 +107,7 @@ name: ci
 #      2026-10-26 追加 ⑮⑯⑰:锚点一次性(aligner 非空必须早退 —— 改群组延迟只能重建桥)、
 #      群延迟补偿只有一个落点(firstFrameTsUs + anchorShiftUs,不得两头各加一次 = 双倍补偿)、
 #      RAOP 重连退避双层封顶(指数项不封顶 ⇒ 永不重连;抖动项不封顶 ⇒ 重连风暴)。
-#  26. 群组不变量守卫(scripts/check-group-invariants.mjs)——G1–G17(68 条):成员命名空间原样透传
+#  26. 群组不变量守卫(scripts/check-group-invariants.mjs)——G1–G18(76 条):成员命名空间原样透传
 #      (剥 dlna: 前缀 ⇒ 服务端按裸 id 比对、成员删不掉)、DLNA 禁入组(设备自拉流、组内没有
 #      共享时间线)、起播即落位(AirPlay 新成员起点必须编进本次 cast,先起播再 seek 会让
 #      单会话设备永久等待)、成员位置取 leader 真实落点(不得用墙钟/会话时长推算)、出流单泵
@@ -350,11 +350,11 @@ jobs:
       - name: 校验 workflow 与守卫脚本引用的仓库内路径均存在
         run: node backend/scripts/check-workflow-paths.mjs
 
-  # 群组维度(2026-10-26 新增):G1–G17 全部是**静默失效**类契约 —— 断了不报错,只表现为
+  # 群组维度(2026-10-26 新增):G1–G18 全部是**静默失效**类契约 —— 断了不报错,只表现为
   # 「成员删不掉」「两台机器各放各的」「延迟调了没反应 / 偏一倍」「整组飘音」「一首坏源整组循环」。
   # 与 airplay-*-guard 同构:零依赖 node 脚本,只读源码文本(先剥注释),不启动服务、不连设备。
   group-invariants-guard:
-    name: "群组不变量守卫(G1–G17:成员前缀/DLNA 禁入/起播即落位/单泵/延迟补偿口径/预取完整性五闸)"
+    name: "群组不变量守卫(G1–G18:成员前缀/DLNA 禁入/起播即落位/单泵/延迟补偿口径/预取完整性六闸)"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
