@@ -11,6 +11,7 @@ import { createDlnaProtocolPlayer, getDevice, getDeviceStatus, isDeviceAvailable
 import { createAirPlayProtocolPlayer } from "../airplay/protocolPlayer.js";
 import { getAirPlayStatus, isAirPlayDeviceDisabled, isAirplayBridgeEnabled, isBridgeOwned, bridgePrepareDevice, bridgeStopDevice, selectAirPlayBridgeProtocol } from "../airplay/control.js";
 import { bridgeSocketPath } from "../airplay/bridgeChannel.js";
+import { getAirPlayDevice } from "../airplay/discovery.js";
 import type { BridgeSocketSpec } from "../sendspin/bridgeAttach.js";
 import { getSendspinFront } from "../sendspin/index.js";
 import { sendspinGroupName } from "../sendspin/playerCore.js";
@@ -272,7 +273,23 @@ export function getOnlineSendspinIds(groupId: string): string[] {
 /** 组内在线 airplay 成员(裸 deviceId):设备未禁用且 status.available 判定。
  *  available 来自设备档案 + 发现态(与 /v1/airplay 同源),会话不存在时回档案值。 */
 export function getOnlineAirplayIds(groupId: string): string[] {
-  return splitGroupMembers(groupId).airplay
+  const ids = splitGroupMembers(groupId).airplay;
+  // [diag-v494ex] 临时诊断(待根因确认后移除):playMedia 时刻 airplay 成员在线判定明细
+  if (ids.length > 0) {
+    const detail = ids.map((id) => {
+      const dev = getAirPlayDevice(id);
+      return {
+        id,
+        disabled: isAirPlayDeviceDisabled(id),
+        statusAvailable: getAirPlayStatus(id).available,
+        devFound: !!dev,
+        devAvailable: dev ? dev.available : null,
+        lastSeenAgeMs: dev ? Date.now() - dev.lastSeen : null,
+      };
+    });
+    log.info(`[diag-v494ex] apOnline group=${groupId} members=${JSON.stringify(getGroupManager().get(groupId)?.memberIds ?? [])} detail=${JSON.stringify(detail)}`);
+  }
+  return ids
     .filter(id => !isAirPlayDeviceDisabled(id) && getAirPlayStatus(id).available);
 }
 
