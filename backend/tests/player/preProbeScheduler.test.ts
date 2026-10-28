@@ -53,6 +53,11 @@ process.env.PREFETCH_PRECHECK_WAIT_MS = "0";
 // ---- 可控的探测:预热阶段决定每首歌的"命运",扫描阶段全部命中缓存(0 次真实探测) ----
 const PROVIDER = "preprobe-test";
 let providerCands: any[] = [];
+// 按歌锁定的候选表(2026-10-29 修 flaky):providerCands 是**模块级共享可变全局**,
+// 任何晚到的异步任务(seed 的预热、起播 lookahead 的 fire-and-forget 预取)读到的都可能是
+// "被别的用例/别的歌改写后的值" ⇒ 死歌被判活、活歌被判死。改成**按歌 id 取候选**后,
+// 桩 provider 的回答只取决于这首歌本身,与调用时刻无关。
+const candsById = new Map<string, any[]>();
 const searchCalls: string[] = [];
 
 const manifestOf = {
@@ -71,8 +76,10 @@ const provider = {
   id: PROVIDER,
   manifest: manifestOf,
   search: async (_c: any, p: any) => {
+    const key = String(p?.id ?? p?.query ?? "");
     searchCalls.push(String(p?.query || p?.id || ""));
-    return { songs: providerCands };
+    // 这首歌在 seed() 时已锁定候选 ⇒ 答案与调用时刻无关;未 seed 的歌走全局兜底。
+    return { songs: candsById.get(key) ?? providerCands };
   },
   streamUrl: (_c: any, song: any) => `http://gm:18080/m?id=${song.id}`,
 };
@@ -110,6 +117,7 @@ beforeAll(() => {
 beforeEach(() => {
   nowShift = 0;
   providerCands = [];
+  candsById.clear();
   searchCalls.length = 0;
   clearStreamFallbackCache();
   // 模块负缓存 TTL 是全局态(schedule() 会按当时配置覆写,现默认 7200s);
@@ -151,10 +159,12 @@ function seed(id: string, dead: boolean, duration?: number) {
   }).run();
   if (dead) {
     providerCands = [];
+    candsById.set(id, []);
     // 原链也 404 → 换源搜索同样空 → 负缓存 unplayable
     db.update(songs).set({ url: `http://gm:18080/dead/${id}.mp3` }).where(eq(songs.id, id)).run();
   } else {
     providerCands = [{ id, name: `t-${id}`, artist: "a", source: "netease" }];
+    candsById.set(id, providerCands);
     db.update(songs).set({ url: `http://gm:18080/alive/${id}.mp3` }).where(eq(songs.id, id)).run();
   }
   // 必须在 url 更新**之后**取行(含 url),否则预热用的是 insert 时的 orig URL
@@ -325,6 +335,7 @@ describe("扫描:连续无源计数(命中即归零)", () => {
     // 直链变死 + 无替代:酷狗直链 404、组内无兄弟源、重搜候选为空。
     db.update(songs).set({ url: "http://gm:18080/dead/x2.mp3" }).where(eq(songs.id, "x2")).run();
     providerCands = []; // 门禁认可候选为空 → ensurePlayableStream 真查写负缓存
+    candsById.delete("x2"); // 同义:这首歌此刻**确认**无任何替代(否则回落按歌表会拿到它自己)
 
     // 先过同曲冷却(默认 60s)让复核真正触发;仍远在正缓存 TTL(1h)内,
     // 否则冷却不过直接判 playable、TTL 过期才轮到重探 —— 都测不到本次修复。
@@ -366,6 +377,13 @@ describe("触底一律静默", () => {
 
 // ==================== D. playCurrent 留队列跳过 + 绕圈上限 ====================
 describe("QueueController:留队列跳过与绕圈上限", () => {
+  // 每轮(含 --repeats 的每次迭代)用**唯一**歌曲 id(2026-10-29):
+  // 起播后的 lookahead 预取是 fire-and-forget,它的异步尾巴可能越过用例边界落到下一轮 ——
+  // 复用同一批 id 时,尾巴会按"当时的候选表"给**下一轮那首歌**写负缓存(本文件历史 flaky
+  // 的第二种形态:起播前 r2 已被判 unplayable)。唯一 id ⇒ 尾巴只能落到已作废的 id 上。
+  let uidSeq = 0;
+  const uid = () => `u${++uidSeq}`;
+
   function makePlayer(id: string): UniversalPlayer & { calls: string[] } {
     const calls: string[] = [];
     return {
@@ -385,11 +403,23 @@ describe("QueueController:留队列跳过与绕圈上限", () => {
     reportState: () => {}, resetTracker: () => {}, setExpectedDuration: () => {},
   };
 
-  function setup(items: Array<{ id: string; dead: boolean }>, mode: "all" | "order" | "shuffle") {
+  // ⚠ 必须 async 且**逐首 await**(2026-10-29 修 flaky):
+  // seed() 内部的 ensurePlayableStream() 是异步的,而 providerCands 是**模块级共享可变全局**
+  // (每首歌的"命运"由它当时的值决定)。若像旧实现那样用 map 同步连发 N 首,所有 in-flight
+  // 预热真正读到 providerCands 时都已是「最后一首」的值 ⇒ 死歌被判活 / 活歌被判死,
+  // playCurrent 的跳过格数随机漂移(CI 上表现为 currentIndex 期望 2 得 3)。
+  // 逐首 await 让每首的预落在 providerCands 被下一首改写之前**完整结束**。
+  async function setup(items: Array<{ id: string; dead: boolean }>, mode: "all" | "order" | "shuffle") {
     const qc = new QueueController();
     const player = makePlayer("dd");
     qc.registerPlayer("dd", player, ctrl as any);
-    const seeded = items.map(it => { seed(it.id, it.dead); return { songId: it.id, title: it.id, mime: "audio/mpeg" }; });
+    const seeded: Array<{ songId: string; title: string; mime: string }> = [];
+    const tag = uid();
+    for (const it of items) {
+      const id = `${it.id}-${tag}`;
+      await seed(id, it.dead);
+      seeded.push({ songId: id, title: id, mime: "audio/mpeg" });
+    }
     qc.setQueue("dd", seeded, 0, "http://base");
     qc.setPlayMode("dd", mode);
     return { qc, player, seeded };
@@ -397,7 +427,7 @@ describe("QueueController:留队列跳过与绕圈上限", () => {
 
   it("死源被跳过但**留在队列**(items.length 不变,shuffleOrder 不重建)", async () => {
     // 全部提前预热(含死歌),playCurrent 只消费缓存
-    const { qc, player, seeded } = setup(
+    const { qc, player, seeded } = await setup(
       [{ id: "k1", dead: true }, { id: "k2", dead: true }, { id: "k3", dead: false }, { id: "k4", dead: false }],
       "order",
     );
@@ -411,16 +441,20 @@ describe("QueueController:留队列跳过与绕圈上限", () => {
 
   it("正缓存命中但直链已死404 → judge 复核 gone、无替代则跳过(不推给播放器)", async () => {
     // seed 活歌写正缓存,随后把直链掐成 404 并掐掉换源替代,模拟"扫描时活、播时死"
-    seed("r1", false);
-    seed("r2", false);
+    const tag = uid();
+    const r1 = `r1-${tag}`;
+    const r2 = `r2-${tag}`;
+    await seed(r1, false);
+    await seed(r2, false);
     providerCands = [];
-    db.update(songs).set({ url: `http://gm:18080/dead/r1.mp3` }).where(eq(songs.id, "r1")).run();
+    candsById.delete(r1); // 掐掉 r1 的换源替代(留 r2 自己的候选不动)
+    db.update(songs).set({ url: `http://gm:18080/dead/${r1}.mp3` }).where(eq(songs.id, r1)).run();
     const qc = new QueueController();
     const player = makePlayer("dd");
     qc.registerPlayer("dd", player, ctrl as any);
     qc.setQueue("dd", [
-      { songId: "r1", title: "r1", mime: "audio/mpeg" },
-      { songId: "r2", title: "r2", mime: "audio/mpeg" },
+      { songId: r1, title: r1, mime: "audio/mpeg" },
+      { songId: r2, title: r2, mime: "audio/mpeg" },
     ], 0, "http://base");
     qc.setPlayMode("dd", "order");
     await qc.next("dd", "http://base");
@@ -430,7 +464,7 @@ describe("QueueController:留队列跳过与绕圈上限", () => {
   }, 20000);
 
   it("整队死源 + all 模式:绕过圈上限(= 队列长度)内停止,不 markEnded、不删队列", async () => {    const items = Array.from({ length: 4 }, (_, i) => ({ id: `z${i}`, dead: true }));
-    const { qc, player } = setup(items, "all");
+    const { qc, player } = await setup(items, "all");
     const snapBefore = qc.snapshot("dd");
     searchCalls.length = 0;
     // 带超时守护:若绕圈上限缺失,这里会无限循环,test 自己挂到 timeout
