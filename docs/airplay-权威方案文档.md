@@ -1521,6 +1521,7 @@ routes/api/groups.ts:129  PUT /v1/groups/:id/delays  {memberId, ms}
 | 4.7.x | 延迟三格化(AP1/AP2/Sendspin 独立格)+ 补偿落点改**投递时戳位移**(桥内锚点恒 0,G13-b,修「锚点双加被对齐器裁掉」)+ join 兜底自愈 + 混合组锚点 lead 抬到 5s(`BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US`,修切歌吞新歌开头) |
 | **4.8.0** | **延迟补偿改按成员**:`member_delays_json`(成员 id → ms)取代三格列(旧列 DROP,值不迁移);取消 300ms 播种;取值口 `bridgeAnchorShiftUsOf(groupName, deviceId)` / `sendspinDelayUsOfClient`;PUT 改 `{memberId, ms}`(越组 400);前端改成员弹窗(§11 全节重写) |
 | **4.9.0** | **混合组切歌等待按组可配**:`player_groups.mixed_anchor_lead_ms`(可空;NULL/0 = 自动 5000ms,>0 = 用户值,0~30000 步进 100)取代混合组锚点 lead 的全局常量;消费点 `streamEngine` 混合组分支组值优先回退 `BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US`,读值**绕 delayCalib cache 直查 db**(cache 懒加载+写时更新、无失效广播 ⇒ 子进程结构性陈旧);`GET/PUT /v1/groups/:id/delays` 收发 `mixedAnchorLeadMs`,前端群组卡片「切歌等待」弹窗;PUT 后下一首切歌生效、无需重建;纯桥组深锚与非桥分支不变;守卫 G19(+7 条,76→83) |
+| **4.9.1** | **删除切歌垫片组值手动口**:`player_groups.track_switch_lead_ms`(幂等 DROP 迁移)+ `getTrackLeadMs`/`setTrackLeadMs`/`trackSwitchLeadUsOf` + API 收发 `trackLeadMs` 全部移除;垫片机制本身(pendingTrackLeadUs 冷/暖动态 + 逐帧消耗)一行不动,动态自动挡不变(默认 0=自动从未生效,前端零引用);守卫相关断言反转为不存在性防复活;与混合组锚点 lead(4.9.0)是两道独立防线,分工注释已补 |
 | 未发布(本文同批) | 桥会话音量回落修复(缺陷 **D-1**):`BridgeSession.setVolumeDb`(`bridgeSession.ts:773`)+`BridgeSessionManager.setVolumeDb`(`:833`)+`childMain.ts:119` 的「native 未命中回落桥」——桥占用设备的volume RPC 不再恒落空;回归用例 `tests/airplay/bridgeVolumeRouting.test.ts`(7 个 `it`);缺陷 **D-2**(每首歌无条件 teardown+prepare 桥路由)明确**留待下一轮**,见附录 D |
 
 # 附录 D：已知缺陷 / 待排期（2026-10-26 盘点）

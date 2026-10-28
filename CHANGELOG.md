@@ -2,6 +2,15 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.9.1] - 2026-10-28
+
+### Cleanup / 删除切歌垫片组值手动口(trackLeadMs)，垫片动态自动挡不变
+
+- **只删手动口、垫片机制一行不动**:切歌垫片(pendingTrackLeadUs)的冷/暖动态 lead 与逐帧消耗**零改动**;删除的是从没人用过的组值手动覆盖——`player_groups.track_switch_lead_ms` 列(幂等 DROP 迁移)+ `getTrackLeadMs`/`setTrackLeadMs`/`trackSwitchLeadUsOf` + API GET/PUT 收发 `trackLeadMs` + 读视图字段。默认 0 = 自动语义下从未生效,前端零引用。
+- **两道防线注释已补**:streamEngine 混合组分支与 server.ts pendingTrackLeadUs 处写清「切歌等待(锚点 lead,窗口里有货可取,全组静默来源,混合组专用、组级可配)」vs「切歌垫片(桥侧接得住,投递时戳后移整形,影响所有带桥的组,动态自动挡)」的分工,**不可互相替代**;恢复手动口前必须真机回归(0xE0 雷区,捷径曾被真机否决)。
+- **守卫**:G11 读视图断言与 notifyBridgeGeneration 动态 lead 断言反转为**不存在性**(防复活钉),总断言数不变(83)。
+- **测试**:API 负向用例(PUT 带 trackLeadMs → 未知字段忽略、响应不含该字段且不生效)、delayCalib 删垫片组值用例、mixedAnchorLead 改为钉迁移删列、bridgePushFrame 删按组配置用例(动态冷/暖用例保留)。
+
 ## [4.9.0] - 2026-10-28
 
 ### Feature / 群组切歌等待时间可按组配置（混合组锚点 lead，默认自动 5000ms）
