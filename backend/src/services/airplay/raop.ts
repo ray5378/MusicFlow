@@ -300,6 +300,14 @@ export function raopBridgeFirstSyncNowEnabled(): boolean {
   return v === "1" || v === "true";
 }
 
+/** 桥出口 streamBridge 的结束原因(v4.9.7)。
+ *  - `producer`:producer() 返回 null —— 即 `pullChunk` 的 `closed || streamAborted`
+ *    分支,**曲目播完 / 上层主动停流**都走这里。⚠️ 绝不可当成设备断连去重连。
+ *  - `send`:sendChunk 返 false(会话已销毁 / 无 audio socket)—— 设备侧断连。
+ *  - `destroy`:`destroying` 被置位(主动销毁)。
+ *  - `stopped`:`streaming` 被外部置 false(flush / 换代)。 */
+export type BridgeStreamEndReason = "producer" | "send" | "destroy" | "stopped";
+
 export class RaopPlayer {
   opts: RaopConnectOptions & { host: string; port: number; sampleRate: number };
   private rsa = false;
@@ -995,7 +1003,7 @@ export class RaopPlayer {
    *   - 🔉 bridge 路径禁用 prepareSeek()/setStartPosition()/cast seekSec(AirPlay 无 seek,
    *     seek = 重建会话/换代次,§5.4)。
    */
-  async streamBridge(producer: PcmProducer, session: RaopSession, anchor: RaopBridgeAnchor): Promise<void> {
+  async streamBridge(producer: PcmProducer, session: RaopSession, anchor: RaopBridgeAnchor): Promise<BridgeStreamEndReason> {
     if (session.audioPort) this.serverAudioPort = session.audioPort;
     if (session.controlPort) this.serverControlPort = session.controlPort;
     this.producer = producer;
@@ -1017,6 +1025,7 @@ export class RaopPlayer {
     this.bridgeLatePackets = 0;
     const rate = this.opts.sampleRate;
     let idx = 0; // 已发包数(内容样本 [idx·352, (idx+1)·352) 的序号)
+    let endedBy: BridgeStreamEndReason = "stopped";
     let firstSyncSent = false;
     let burst = 0;
     /** pacing 重锚偏移(§5.4 暂停恢复):只影响 sendAt,RTP 映射不动。 */
@@ -1030,6 +1039,7 @@ export class RaopPlayer {
       // 先取料再等节拍:producer 阻塞(欠料)期间越过 sendAt ⇒ 记 latePackets,追发不改映射。
       const pcm = await this.producer();
       if (pcm === null || this.destroying) {
+        endedBy = pcm === null ? "producer" : "destroy";
         log.warn(`bridge stream break: pcm=${pcm !== null} destroying=${this.destroying} streaming=${this.streaming}`);
         break;
       }
@@ -1066,6 +1076,7 @@ export class RaopPlayer {
       // headTs 每包按 startTs + idx·CHUNK_LEN 重算:裁头(bridgeSkipFrames)前移 startTs 后自动跟随。
       this.headTs = (this.startTs + idx * CHUNK_LEN) >>> 0;
       if (!this.sendChunk(pcm)) {
+        endedBy = "send";
         log.warn(`bridge stream break: sendChunk false, audioSocket=${!!this.audioSocket} destroying=${this.destroying}`);
         break;
       }
@@ -1091,11 +1102,14 @@ export class RaopPlayer {
       if (idx === 1) log.info(`bridge first packet: deviationUs=${Number(nowUs() - sendAt)} (>=0 means not earlier than sendAt)`);
     }
     this.streaming = false;
+    // v4.9.7:while 因 streaming/destroying 退出而未走 break 时归一("stopped" 或 "destroy")。
+    if (endedBy === "stopped" && this.destroying) endedBy = "destroy";
     const s = this.stats;
     if (s) {
       const secs = (Date.now() - s.startMs) / 1000;
-      log.info(`bridge stream done: ${s.chunks} chunks / ${secs.toFixed(1)}s, maxGap=${s.maxGapMs.toFixed(0)}ms, latePackets=${this.bridgeLatePackets}, loss=${this.lossRequests}`);
+      log.info(`bridge stream done: ${s.chunks} chunks / ${secs.toFixed(1)}s, maxGap=${s.maxGapMs.toFixed(0)}ms, latePackets=${this.bridgeLatePackets}, loss=${this.lossRequests}, endedBy=${endedBy}`);
     }
+    return endedBy;
   }
 
   pause(): void {

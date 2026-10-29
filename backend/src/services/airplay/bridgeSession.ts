@@ -43,7 +43,7 @@ import { computeBridgeBackoffMs } from "./bridgeSource.js";
 import { PolyphaseResampler, floatToPcmS16, pcmS16ToFloat } from "./resampler.js";
 import { audibleAtUs, computeBridgeAnchors, driftCorrection, type BridgeAnchors } from "./bridgeMath.js";
 import { nowUs } from "../../utils/hostClock.js";
-import { RaopPlayer, CHUNK_LEN, raopBridgeConnectPrimeEnabled, type RaopSession } from "./raop.js";
+import { RaopPlayer, CHUNK_LEN, raopBridgeConnectPrimeEnabled, type BridgeStreamEndReason, type RaopSession } from "./raop.js";
 import { getAirPlayVolumeState, DEFAULT_AIRPLAY_VOLUME } from "./deviceState.js";
 import { degreesToDb } from "./decoder.js";
 import { AP2_SEND_ERROR_LIMIT, Ap2StreamSession, type Ap2StreamOptions, type Ap2StreamState } from "./ap2/ap2Stream.js";
@@ -306,8 +306,15 @@ export function raopBridgeGapFillEnabled(): boolean {
 /** 消费停滞看门狗开关(MF_BRIDGE_RAOP_LIVENESS_WATCHDOG)。缺省 ON;0/false = 关。
  *  设备主动信号(NTP 请求/重传请求)停摆超阈值 ⇒ 判接收端假死 ⇒ 自动完整重握手。 */
 export function raopBridgeLivenessWatchdogEnabled(): boolean {
+  // v4.9.7:**缺省关闭**(v4.9.6 缺省开启)。判据「设备主动信号停摆」对本项目主力
+  // 设备(HiVi/MUZO 2017 固件)结构性不可靠 —— 240 实证该机在曲目后半段**正常播放**
+  // 时就会停止发送 NTP timing 请求:每分钟 20 次的 3s 心跳在 05:31/05:32 完整消失
+  // 两分钟,而同一段该曲 45739 chunks / 365.1s 全程健康播完(deltaUs 稳、driftUs=0)。
+  // 于是每首歌必被误判假死一次,触发重连接到旧 player 上新流的连根掐断,反而制造
+  // 36s 无声(比它想修的假死更频繁)。真·假死可由用户切歌 / 整组 play 恢复(已实证),
+  // 不值得默认赌误判。需要实验时显式开:MF_BRIDGE_RAOP_LIVENESS_WATCHDOG=1
   const v = process.env.MF_BRIDGE_RAOP_LIVENESS_WATCHDOG;
-  return !(v === "0" || v === "false");
+  return v === "1" || v === "true";
 }
 
 /** 看门狗阈值 ms(MF_BRIDGE_RAOP_LIVENESS_MS,缺省 120000,下限 30000)。 */
@@ -639,6 +646,9 @@ export class BridgeSession {
   private gapFillerPromise: Promise<number> | null = null;
   /** B(消费停滞看门狗):重连进行中防重入。 */
   private livenessReconnectInFlight = false;
+  /** v4.9.7:RAOP 会话重建期间的互斥门 —— 期间禁止 maybeBeginStream 起流,
+   *  防止新流起在即将被 forceClose 的旧 player 上(见 reconnectRaop)。 */
+  private raopReconnectInFlight = false;
   /** 组泵暂停状态(HEARTBEAT flags bit1,§5.4)。 */
   private pausedState = false;
   private pausedAtUs: bigint | null = null;
@@ -952,6 +962,9 @@ export class BridgeSession {
   private async maybeBeginStream(): Promise<void> {
     if (this.opts.dry || this.closed || !this.connected || this.firstFrameTsUs === null) return;
     if (this.aligner !== null) return;
+    // v4.9.7:RAOP 会话重建窗口内不起流 —— 否则会起在即将被回收的旧 player 上。
+    // 复位后由下一帧 AUDIO 自然触发,最多推迟一个帧间隔。
+    if (this.raopReconnectInFlight) return;
     // A:新流首包发出前必须收掉垫片续流(防两路同时 sendChunk 打乱 seq/时间线)。
     // 仅在 filler 真在跑时 await(否则保持本函数原有同步语义,测试桩不破)。
     if (this.gapFillerPromise !== null) await this.stopGapFiller();
@@ -1015,9 +1028,13 @@ export class BridgeSession {
         latencyFrames,
         rate,
       })
-      .then(() => {
-        // 正常结束(producer null / 终态):stall/boundary 场景由对应路径处置;
-        // 设备侧 RAOP 断开(sendChunk false) ⇒ 走 RAOP 重连(§5.2 设备级重连必须新会话)。
+      .then((endedBy) => {
+        // v4.9.7:只有 `send`(sendChunk 返 false,设备侧真断开)才重连。
+        // `producer` = pullChunk 的 closed/streamAborted 分支 ⇒ **曲目播完**或上层主动
+        // 停流,交给 onBoundary 换代处置。历史缺陷:此处不区分原因,导致每首歌播完都
+        // 触发一次 reconnectRaop,而它在 await connect() 后 forceClose 掉刚起的新流 ⇒
+        // 6 轮 / 36s 无声死循环(240 实证 05:33:00)。destroy/stopped 同样不重连。
+        if (endedBy !== "send") return;
         if (!this.closed && this.connected && !this.streamAborted) this.scheduleRaopReconnect("stream ended");
       })
       .catch((e) => {
@@ -1134,38 +1151,51 @@ export class BridgeSession {
 
   private async reconnectRaop(): Promise<void> {
     if (this.closed || !this.connected) return;
-    // 标记 degraded:推流停,对齐器复位,等新会话 + 新帧重锚(重连窗口内旧队列清空)。
-    this.streamAborted = true;
-    this.aligner = null;
-    this.anchors = null;
-    this.anchorUs = null;
-    this.commandedLeadUs = null;
-    this.firstFrameTsUs = null;
-    this.inQueue = [];
-    this.inBytes = 0;
-    this.outBuf = Buffer.alloc(0);
-    const oldPlayer = this.player;
-    const player = new RaopPlayer({
-      host: this.opts.host ?? "",
-      port: this.opts.port ?? 5000,
-      pk: this.opts.pk,
-      et: this.opts.et,
-    });
+    // v4.9.7 互斥门:connect() 的 await 窗口内绝不允许 maybeBeginStream 在 oldPlayer
+    // 上起流 —— 否则 connect 完成后 oldPlayer.forceClose() 会把刚起 0.3~0.6s 的新流
+    // 当场掐死(240 实证 05:33:00.388 anchor → .705 reconnected → .708
+    // sendChunk false destroying=true),进而 .then() 再判「非正常结束」继续调度重连,
+    // 形成 36s 无声死循环。重入也一并挡掉。
+    if (this.raopReconnectInFlight) return;
+    this.raopReconnectInFlight = true;
     try {
-      const session = await player.connect();
-      this.raopSession = session;
-      this.player = player;
-      this.raopReconnectAttempt = 0;
-      log.info(`[airplay-bridge] raop reconnected: device=${this.deviceId}(新 RECORD,等待新代次首帧重锚)`);
-      pushInitialVolume(player, this.deviceId, this.opts.initialVolume, this.opts.sameHostDlnaPeer);
-      if (raopBridgeConnectPrimeEnabled()) {
-        try { player.primeSilence(RAOP_CONNECT_PRIME_CHUNKS, session); } catch (e: any) { log.error(`prime silence failed(reconnect): ${e?.message || e}`); }
+      // 标记 degraded:推流停,对齐器复位,等新会话 + 新帧重锚(重连窗口内旧队列清空)。
+      this.streamAborted = true;
+      this.aligner = null;
+      this.anchors = null;
+      this.anchorUs = null;
+      this.commandedLeadUs = null;
+      this.firstFrameTsUs = null;
+      this.inQueue = [];
+      this.inBytes = 0;
+      this.outBuf = Buffer.alloc(0);
+      const oldPlayer = this.player;
+      const player = new RaopPlayer({
+        host: this.opts.host ?? "",
+        port: this.opts.port ?? 5000,
+        pk: this.opts.pk,
+        et: this.opts.et,
+      });
+      try {
+        const session = await player.connect();
+        this.raopSession = session;
+        this.player = player;
+        this.raopReconnectAttempt = 0;
+        log.info(`[airplay-bridge] raop reconnected: device=${this.deviceId}(新 RECORD,等待新代次首帧重锚)`);
+        pushInitialVolume(player, this.deviceId, this.opts.initialVolume, this.opts.sameHostDlnaPeer);
+        if (raopBridgeConnectPrimeEnabled()) {
+          try { player.primeSilence(RAOP_CONNECT_PRIME_CHUNKS, session); } catch (e: any) { log.error(`prime silence failed(reconnect): ${e?.message || e}`); }
+        }
+        // v4.9.7 守卫:只有当前实例确实是这次新建的那个,才回收旧实例 ——
+        // 期间若已被别的路径替换,forceClose 会误杀正在推流的会话。
+        try { if (this.player === player) oldPlayer?.forceClose(); } catch { /* ignore */ }
+      } catch (e) {
+        try { player.forceClose(); } catch { /* ignore */ }
+        log.warn(`[airplay-bridge] raop reconnect failed: device=${this.deviceId} err=${(e as Error)?.message || e}`);
+        this.scheduleRaopReconnect("reconnect failed");
       }
-      try { oldPlayer?.forceClose(); } catch { /* ignore */ }
-    } catch (e) {
-      try { player.forceClose(); } catch { /* ignore */ }
-      log.warn(`[airplay-bridge] raop reconnect failed: device=${this.deviceId} err=${(e as Error)?.message || e}`);
-      this.scheduleRaopReconnect("reconnect failed");
+    } finally {
+      this.raopReconnectInFlight = false;
     }
   }
 

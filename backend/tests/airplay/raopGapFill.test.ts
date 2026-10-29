@@ -115,12 +115,21 @@ describe("env 开关与阈值", () => {
     }
   });
 
-  it("GAP_FILL / LIVENESS_WATCHDOG 缺省 ON,0/false 关闭", () => {
+  it("GAP_FILL 缺省 ON;LIVENESS_WATCHDOG 缺省 OFF(v4.9.7),仅 1/true 开启", () => {
     expect(raopBridgeGapFillEnabled()).toBe(true);
-    expect(raopBridgeLivenessWatchdogEnabled()).toBe(true);
+    // v4.9.7:看门狗缺省关闭 —— 「设备主动信号停摆」对 MUZO/HiVi 的正常静默结构性
+    // 误判(240 实证:曲目后半段停发 timing 请求 120s+,该曲仍健康播完 365.1s)。
+    expect(raopBridgeLivenessWatchdogEnabled()).toBe(false);
     process.env.MF_BRIDGE_RAOP_GAP_FILL = "0";
-    process.env.MF_BRIDGE_RAOP_LIVENESS_WATCHDOG = "false";
     expect(raopBridgeGapFillEnabled()).toBe(false);
+    // 显式开启(实验用):只有 "1"/"true" 算开。
+    process.env.MF_BRIDGE_RAOP_LIVENESS_WATCHDOG = "1";
+    expect(raopBridgeLivenessWatchdogEnabled()).toBe(true);
+    process.env.MF_BRIDGE_RAOP_LIVENESS_WATCHDOG = "true";
+    expect(raopBridgeLivenessWatchdogEnabled()).toBe(true);
+    process.env.MF_BRIDGE_RAOP_LIVENESS_WATCHDOG = "false";
+    expect(raopBridgeLivenessWatchdogEnabled()).toBe(false);
+    process.env.MF_BRIDGE_RAOP_LIVENESS_WATCHDOG = "0";
     expect(raopBridgeLivenessWatchdogEnabled()).toBe(false);
   });
 
