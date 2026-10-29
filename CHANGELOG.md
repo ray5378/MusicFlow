@@ -2,6 +2,16 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.9.6] - 2026-10-29
+
+### Fix / HiVi（MUZO 类固件）播放约 1 小时后接收端假死、永久无声（换歌垫片窗 RTP 断流）
+
+- **现象**：与 v4.9.5 修复的「歌中饿死」不同——服务端数据面全程健康（缓冲 1.05s、首包偏差 5-10ms、每歌 maxGap≈1s 全被覆盖），但设备侧零 timing 回复、零重传请求，`getPlayerStatus` 假播放（`uri=""`、curpos 空走）；组内 sendspin 成员（esp32）始终正常。只有完整重握手（TEARDOWN→ANNOUNCE/SETUP/RECORD）能唤醒，服务端内部换泵无效。
+- **根因**：换歌时 `onBoundary(track)` 停旧 stream 后，~2.5-3s 垫片窗（冷垫片 2500ms + TTFB）内 **RTP 完全断流**（静音也不发，实证：若发静音每 gen silenceChunks 应 +375 块，实际只 +4~6）。设备 1.05s 缓冲放完后真饿 ~2s，MUZO 固件「欠载即假死、不自动重缓冲」；每 3-4 分钟一次换歌反复戳，17 首（约 1 小时）后接收端彻底放弃。
+- **修复 A（垫片窗静音续流，根治）**：`onBoundary(track/seek/rehost)` 后由会话层按 8ms 节拍续发静音块（seq 连续、时间戳续走旧时间线、无 SYNC），新流 0xE0 重锚语义不变；`maybeBeginStream` 起新流前收尾防交错；8s 封顶。开关 `MF_BRIDGE_RAOP_GAP_FILL`（缺省开）。240 实测换歌窗 `gap-fill: 282 chunks / 2251ms` 恰好盖满，设备 timing 回复全程不断。
+- **修复 B（消费停滞看门狗，兜底）**：推流中设备主动信号（NTP timing 请求/重传请求）停摆超阈值 ⇒ 自动完整重握手（新 RECORD）。开关 `MF_BRIDGE_RAOP_LIVENESS_WATCHDOG`（缺省开），阈值 `MF_BRIDGE_RAOP_LIVENESS_MS`（缺省 120s，下限 30s）。
+- **验证**：新增 `tests/airplay/raopGapFill.test.ts`（12 条）；tests/airplay 54 文件全绿；本地全量 605 文件 / 8246 用例全绿；29 把守卫全绿。文档同步：airplay/group/sendspin 权威文档 v4.9.6 增补、KNOWN_ISSUES MF-005、STALL_MONITORING 盲区表。
+
 ## [4.9.5] - 2026-10-29
 
 ### Fix / 群组播放一段时间后 HiVi（MUZO 类固件）永久无声
