@@ -90,6 +90,32 @@ export const BRIDGE_HEARTBEAT_INTERVAL_MS = 1_000;
 /** 接收端 stall 判定:2s 未收到任何帧(§4.2)。 */
 export const BRIDGE_STALL_NO_FRAME_MS = 2_000;
 
+// ---------------------------------------------------------------------------
+// 曲末排空的桥安全钳制(2026-11 真机:换歌 RTP 断流 3~7s)
+// ---------------------------------------------------------------------------
+
+/** 曲末排空的桥周转余量(ms):排空上限 = 队列硬上限 − 本余量。
+ *
+ *  **为什么需要**:曲末排空期间 `pushLoop` 已退出、**不再产出任何 PCM**,而 AirPlay
+ *  桥成员的音频**全靠 pushLoop 现场产料**(`bridgeMember.pushAudio`,桥侧队列
+ *  `BRIDGE_QUEUE_HARD_CAP_MS` 为硬上限)⇒ 队列只出不进,排空时长一旦逼近硬上限,
+ *  排到后半段桥就**必然断料**:用户听感「卡顿几秒又恢复」。
+ *
+ *  **为什么是 1500ms**(三个事实,缺一不可):
+ *   ① 排空期间桥不再产料(上面的机制),可取量 = 排空前桥队列里的存量,硬上限 8s;
+ *   ② 2026-11 真机抓包实测:断料**提前 1.72s**(桥侧 `bridge pacing rebase:
+ *      +2987790µs`),即真实可用存量约 8s − 1.72s ≈ 6.28s;
+ *   ③ 1500ms ≈ 1720ms 实测断料点**再让 200ms**,吸收泵抖动与桥补投定时器粒度
+ *      (250ms 一拍),保证「钳制后也不断料」而不是「刚好不早于断料点」。
+ *  ⇒ 8s − 1.5s = 6.5s:仍能排掉绝大部分曲末缓冲,同时桥侧恒有余量。
+ *
+ *  消费点:sendspin/streamEngine.ts 曲末排空(经 bridgeMath.capEndDrainMs 钳制,
+ *  **仅当组内存在桥成员**;纯 sendspin 组不钳制,行为与本常量引入前逐字节一致)。 */
+export const BRIDGE_END_DRAIN_MARGIN_MS = 1_500;
+
+/** 曲末排空量在桥成员在场时的安全上限(ms)= 队列硬上限 − 周转余量(理由见上)。 */
+export const BRIDGE_END_DRAIN_SAFE_MAX_MS = BRIDGE_QUEUE_HARD_CAP_MS - BRIDGE_END_DRAIN_MARGIN_MS;
+
 /** RAOP 发送节拍安全余量(吸收 25ms 泵抖动与 socket 调度)。
  *
  *  ⚠️ **只用于锚点可达性判据**(planBridgeAnchor)与 RAOP 的 sendAt 节拍。

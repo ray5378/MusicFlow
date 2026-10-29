@@ -24,7 +24,7 @@ import { nowUs } from "./clock.js";
 import { PcmWindow, WindowEvictedError, WINDOW_HIGH_SEC, type WindowSource } from "./streamSource.js";
 import { recordSendspinDebug, refreshSendspinDebugEnabled } from "./debugLog.js";
 import type { SendspinServer, SendspinGroup } from "./server.js";
-import { bridgeStartLeadUs } from "../airplay/bridgeMath.js";
+import { bridgeStartLeadUs, capEndDrainMs } from "../airplay/bridgeMath.js";
 import { ANCHOR_SAFE_LEAD_US } from "../airplay/rates.js";
 import { createLogger } from "../../utils/logger.js";
 import { ap2TruncateMissingSec } from "../source/prefetchConfig.js";
@@ -1237,9 +1237,27 @@ export class GroupPump {
           // 缓冲里的音频会以 speed 倍速播完),不折算会在快进用例里白等几十秒。
           const rawDrainMs =
             (Number(cursorUs) - Number(nowUs()) - ANCHOR_SAFE_LEAD_US) / 1000;
-          const extraDrainMs =
-            Math.min(rawDrainMs, PREFILL_BUFFER_MAX_MS) / (this.speed > 0 ? this.speed : 1);
+          // 内容域排空量:先按预填充上限截断(旧行为,不动),再按倍速折算成墙钟等待。
+          const contentDrainMs = Math.min(rawDrainMs, PREFILL_BUFFER_MAX_MS);
+          // ★ 桥成员在场时**必须钳制**(2026-11 真机:换歌 RTP 断流 3~7s,45min 8 次与
+          //   换歌 8/8 对齐)。机制:排空期间本循环已退出、**不再产出任何 PCM**,而
+          //   AirPlay 桥成员的音频全靠 pushLoop 现场产料(bridgeMember.pushAudio),
+          //   桥侧队列只出不进且硬上限 8s ⇒ 排空量一旦超过队列余量,排到后半段桥
+          //   必然断料(实测提前 1.72s),听感即「卡顿几秒又恢复」。
+          //   纯 sendspin 组不受影响:音频已在设备缓冲里,排空只是等它播完 ——
+          //   `capEndDrainMs(_, false)` 原值返回,行为与改动前逐字节一致。
+          const drainCap = capEndDrainMs(contentDrainMs, this.group.hasBridges?.() === true);
+          const extraDrainMs = drainCap.drainMs / (this.speed > 0 ? this.speed : 1);
           if (prefillEnabled() && extraDrainMs > 0) {
+            // 只在**真的发生钳制**时打(否则每首歌都刷一条噪声日志)。
+            if (drainCap.clamped) {
+              logSafe(
+                this.server,
+                "info",
+                `sendspin 曲末排空:桥成员在场,排空量按桥队列上限钳制 ` +
+                  `${Math.round(drainCap.contentMs)}ms → ${Math.round(drainCap.drainMs)}ms song=${this.songId}`,
+              );
+            }
             logSafe(
               this.server,
               "info",

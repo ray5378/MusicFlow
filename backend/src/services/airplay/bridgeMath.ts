@@ -8,6 +8,7 @@
 import { ntpFromHostUs, ntpToHostUs } from "../../utils/hostClock.js";
 import {
   BRIDGE_COLD_START_LEAD_US,
+  BRIDGE_END_DRAIN_SAFE_MAX_MS,
   BRIDGE_WARM_START_LEAD_US,
   RAOP_SAFETY_MS,
   RESAMPLE_GROUP_DELAY_OUT_SAMPLES,
@@ -133,6 +134,37 @@ export function bridgeStartLeadUs(bridges: ReadonlyArray<{ warm: boolean }>): nu
   if (bridges.length === 0) return 0;
   for (const b of bridges) if (!b.warm) return BRIDGE_COLD_START_LEAD_US;
   return BRIDGE_WARM_START_LEAD_US;
+}
+
+// ---------------------------------------------------------------------------
+// 曲末排空的桥安全钳制(2026-11 真机:换歌 RTP 断流 3~7s)
+// ---------------------------------------------------------------------------
+
+/** `capEndDrainMs` 的结果。`drainMs === contentMs` ⇒ 未钳制。 */
+export interface EndDrainCap {
+  /** 入参:内容域排空量(ms,已按预填充上限截断,倍速折算前的值)。 */
+  contentMs: number;
+  /** 输出:实际可等待的排空量(ms)。组内无桥时**恒等于** contentMs。 */
+  drainMs: number;
+  /** 是否真的发生钳制(= drainMs < contentMs;仅在组内有桥时可能为 true)。 */
+  clamped: boolean;
+}
+
+/** 曲末排空量的桥安全钳制(纯函数)。
+ *
+ *  组内**有桥成员** ⇒ 排空量必须让桥队列撑得住:排空期间 `pushLoop` 不再产料,
+ *  桥侧队列只出不进,故上限 = `BRIDGE_QUEUE_HARD_CAP_MS − BRIDGE_END_DRAIN_MARGIN_MS`
+ *  (取值理由见 rates.ts 的 BRIDGE_END_DRAIN_MARGIN_MS 注释)。
+ *  组内**无桥**(纯 sendspin)⇒ 原值返回,行为与引入本函数前逐字节一致。
+ *
+ *  @param contentDrainMs 内容域排空量(ms);非有限值/≤0 一律归 0。
+ *  @param hasBridges 组内是否存在桥成员(SendspinGroup.hasBridges())。
+ */
+export function capEndDrainMs(contentDrainMs: number, hasBridges: boolean): EndDrainCap {
+  const contentMs = Number.isFinite(contentDrainMs) && contentDrainMs > 0 ? contentDrainMs : 0;
+  if (!hasBridges) return { contentMs, drainMs: contentMs, clamped: false };
+  const drainMs = Math.min(contentMs, BRIDGE_END_DRAIN_SAFE_MAX_MS);
+  return { contentMs, drainMs, clamped: drainMs < contentMs };
 }
 
 /** RAOP 发送节拍:sendAt(t) = audibleAt(t) − L − SAFETY(§3.3)。 */
