@@ -147,6 +147,22 @@ export function prefillEnabled(): boolean {
   return !(raw === "0" || raw === "false" || raw === "off");
 }
 
+/** 曲末排空「桥续静音」总开关(A 方案):env 缺省 ON,`MF_BRIDGE_DRAIN_SILENCE=0/false/off` 关闭。
+ *
+ *  关闭 ⇒ 排空循环与引入本能力前**逐字节一致**(不写 ring、不打日志)。
+ *  ⚠️ 缓存**按 env 取值**缓存(同一取值只判定一次;取值变化才重算):排空循环虽不热,
+ *  但它是每首歌都要跑的路径,不该每步都解析字符串;同时这样单测能直接切 env 验证关闭语义
+ *  (与 raop.ts 的实验开关同风格,但比"读一次永久缓存"更好测)。
+ *  ⚠️ 消费点只在**排空循环**(曲末 ≤40 次/首),不要拿它做推流热路径的开关。 */
+let drainSilenceCache: { raw: string | undefined; on: boolean } | null = null;
+export function bridgeDrainSilenceEnabled(): boolean {
+  const raw = process.env.MF_BRIDGE_DRAIN_SILENCE;
+  if (drainSilenceCache && drainSilenceCache.raw === raw) return drainSilenceCache.on;
+  const on = !(raw === "0" || raw === "false" || raw === "off");
+  drainSilenceCache = { raw, on };
+  return on;
+}
+
 /** 解析某首歌的可播字节(默认真实);测试可注入。 */
 /** 音源工厂契约。`startMs > 0` = 起播即定位(ffmpeg `-ss`),由 seek 重建与
  *  起播跳转共用 —— MA 语义里「从 X 秒开始播」和「跳到 X 秒」是同一件事:
@@ -1238,12 +1254,12 @@ export class GroupPump {
           const rawDrainMs =
             (Number(cursorUs) - Number(nowUs()) - ANCHOR_SAFE_LEAD_US) / 1000;
           // ★ 纯桥组(有桥 **且** 无直连成员,判据与上面锚点分支同一口径):桥的投递窗口
-          //   下沿是「现在 + 1.5s」,距此刻不足 `BRIDGE_DRAIN_TAIL_UNREACHABLE_MS` 的那段
-          //   内容**结构性投不出去**(§6.2 水位推过)⇒ 承诺排空它纯属白等(真机实测白等
-          //   1.72s,表现为换歌处 RTP 完全静默 3~7s);再叠一道桥队列硬上限(排空期间
-          //   pushLoop 已退出、桥队列只出不进),两端取小。
-          //   ⚠️ 混合组/纯直连组**必须原值**:直连 sendspin 设备的缓冲确实需要真排空,
-          //   砍短会切掉曲尾(见上方「只等超出旧水位的那部分」的说明)。
+          //   下沿是「现在 + 1.5s」,故桥**结构上拿不到**距此刻不足
+          //   `BRIDGE_END_DRAIN_MARGIN_MS`(扣掉排空公式已减的 ANCHOR_SAFE_LEAD 之后)的那段
+          //   内容(§6.2 水位推过)⇒ 承诺排空它纯属白等(真机实测白等 1.72s,表现为换歌处
+          //   RTP 完全静默 3~7s);再以桥队列硬上限兜顶(排空期间 pushLoop 已退出、队列只进不出)。
+          //   ⚠️ 混合组/纯直连组**必须原值**:直连 sendspin 设备的缓冲真有 ~9.78s,提前 advance
+          //   会被 BOUNDARY{track} 的 player.flush() 砍掉尾巴(见上方「只等超出旧水位的那部分」)。
           const pureBridge =
             this.group.hasBridges?.() === true && this.group.hasDirectMembers?.() !== true;
           const drainCap = capEndDrainMs(rawDrainMs, pureBridge);
@@ -1267,14 +1283,44 @@ export class GroupPump {
             // 分段等待而不是一次睡到底:每步按墙钟刷新上报进度,让进度条/歌词
             // 平滑走到曲末。一次睡到底会让进度停在 durationMs 之前,拖后自动切歌判定。
             const drainStepMs = 200;
+            // ★ A 方案:排空期间本循环不再产出 PCM,桥侧 `pullChunk` 只能等 waitDataMs
+            //   超时后每秒吐一块静音 ⇒ RTP 从 125pps 掉到约 1pps(接收端长时间近零速率
+            //   会被判假死/重锚)。这里**每步**给桥续一段与其等长(且同起点)的静音帧,
+            //   总量严格等于实际排空时长(多补会让桥收到超出内容尾的静音)。
+            //   判据:开关(MF_BRIDGE_DRAIN_SILENCE,缺省 ON)+ 组上有该能力(最小测试桩无
+            //   → 自动退化,与 `hasBridges?.()` 同风格)。
+            const canFillSilence =
+              bridgeDrainSilenceEnabled() && typeof this.group.pushBridgeOnlySilence === "function";
+            let fillTsUs = cursorUs;
+            let fillMs = 0;
+            let fillChunks = 0;
             for (
               let left = Math.min(extraDrainMs, PREFILL_BUFFER_MAX_MS);
               left > 0;
               left -= drainStepMs
             ) {
-              await sleep(Math.min(drainStepMs, left));
+              const stepMs = Math.min(drainStepMs, left);
+              await sleep(stepMs);
               this.group.positionMs = this.audiblePositionMs(lastPushedMs, cursorUs, floorMs);
               if (!this.group.audibleStarted && this.group.positionMs > floorMs) this.group.audibleStarted = true;
+              if (canFillSilence) {
+                fillChunks += this.group.pushBridgeOnlySilence?.(fillTsUs, stepMs * 1000) ?? 0;
+                fillTsUs += BigInt(stepMs * 1000);
+                fillMs += stepMs;
+              }
+            }
+            // 每首歌**一行**(不是每步):字段固定便于 grep / 守卫。
+            if (fillChunks > 0) {
+              const devs =
+                typeof this.group.bridges?.keys === "function"
+                  ? [...this.group.bridges.keys()].join(",")
+                  : "";
+              logSafe(
+                this.server,
+                "info",
+                `sendspin 曲末排空:桥续静音 ev=bridge-drain-fill dev=${devs || "-"} ` +
+                  `durMs=${Math.round(fillMs)} chunks=${fillChunks} song=${this.songId}`,
+              );
             }
           }
         }

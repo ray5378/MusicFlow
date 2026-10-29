@@ -80,6 +80,10 @@ export interface SendspinBridgeHandle {
   };
 }
 
+/** 曲末排空续静音的切片上限(µs)= 25ms,与泵帧长(pushLoop FRAME_MS)同量级。
+ *  桥按 s16le/48k/2ch 消费 MFAB AUDIO payload,故每片字节数 = 帧数 × 4。 */
+const BRIDGE_DRAIN_SILENCE_SLICE_US = 25_000;
+
 export interface SendspinServerOptions {
   pairkeys: Identity;
   identityDir?: string;
@@ -849,6 +853,56 @@ export class SendspinGroup {
     if (n > 0) {
       this.server.log("info", `bridge-backfill group=${this.name} device=${deviceId} frames=${n} durUs=${totalUs}`);
     }
+    return n;
+  }
+
+  // ---- A 方案(曲末排空续静音):排空期 pushLoop 已退出、没有新 PCM,桥侧
+  //      `pullChunk` 只能按 waitDataMs 超时每秒吐一块静音 ⇒ RTP 从 125pps 掉到 ~1pps。
+  //      这里把静音**按真帧**写进 pcm:100 的 ring,由 250ms 补投定时器照常按可听域
+  //      窗口投递,节拍得以保持。 ----
+
+  /** 曲末排空期间给桥**续静音**(A 方案;2026-11 真机:排空期 RTP 从 125pps 掉到约 1pps)。
+   *
+   *  用途:排空期间 `pushLoop` 已退出、不再产出 PCM,`bridgeSession.pullChunk()` 按
+   *  `waitDataMs=1000ms` 超时后每秒只吐一块 1408B 静音 ⇒ RTP 掉到约 1pps,接收端长时间
+   *  近零速率会被判假死 / 触发重锚。本方法把静音按 **≤25ms 的真帧**写进 pcm:100 的 ring
+   *  (与 `pushFrame` 的 BLK-01 虚拟组同一 key),补投定时器照常按可听域窗口投递。
+   *
+   *  ⚠️ **只写 ring,绝不写成员**:不调 `pushFrame`(那会走 members / deliveredByGroup /
+   *  deliveredPeak / 时间戳累计,破坏 BLK-01 守卫⑨与提前 EOF 判官),也不碰
+   *  `lastPushedMs`、`audibleStarted`、`silenceChunks`。
+   *
+   *  ⚠️ **已知统计代价(不要"修")**:这些是"真帧",所以 `framesIn` / 码率计量会增长而
+   *  `silenceChunks` 不增长 —— 监控上无法区分「尾段补静音」与「有内容」。这是 A 方案的
+   *  已知失真,`silenceChunks` 语义保持原样。
+   *
+   *  @param startTsUs 首片时间戳(内容域 = 排空起点 `cursorUs`,与 ring 内既有帧同源)。
+   *  @param durUs 本次要补的总时长(µs;= 本步排空 sleep 的毫秒数 × 1000)。
+   *  @returns 实际写入 ring 的帧数(0 = 无桥 / 参数无效)。 */
+  pushBridgeOnlySilence(startTsUs: bigint, durUs: number): number {
+    if (this.bridges.size === 0) return 0; // 无桥:无人消费,不写 ring(纯直连组零影响)
+    if (!Number.isFinite(durUs) || durUs <= 0) return 0;
+    const ring = this.ringFor(this.encoderKey("pcm", 100));
+    let ts = startTsUs;
+    let left = Math.round(durUs);
+    let n = 0;
+    while (left > 0) {
+      const d = Math.min(BRIDGE_DRAIN_SILENCE_SLICE_US, left);
+      const frames = Math.round((d * SAMPLE_RATE) / 1_000_000);
+      if (frames > 0) {
+        // s16le / 2ch 全零:每帧 = 2 声道 × 2 字节 = 4 字节(与 pcm 编码器输出同口径)。
+        ring.push({
+          tsUs: ts,
+          durUs: d,
+          data: Buffer.alloc(frames * 4),
+          ep: this.bridgeContentEpoch,
+        });
+        n++;
+      }
+      ts += BigInt(d);
+      left -= d;
+    }
+    if (n > 0) this.ensureBridgePushTimer();
     return n;
   }
 
