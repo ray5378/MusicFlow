@@ -1673,3 +1673,35 @@ memberKey, at},容量 128 LRU)在 `detachFromActiveGroups` 成功摘组后写入
 3. 模拟卡片收尾:`POST /peers/dlna:主卧/reset` → 日志只出现「源端 DLNA 重置跳过设备命令」,
    `RECORD` 之后**不得**再出现 `[DLNA][Stop]`;
 4. 往返:群组→HiVi→群组,`GET /v1/groups` 成员表里 HiVi 仍在。
+
+
+## v4.9.6 增补(垫片窗静音续流 + 消费停滞看门狗,2026-10-29)
+
+**现场**:HiVi(MUZO/Linkplay)在组里播放 ~1 小时后接收端假死——服务端数据面全程健康
+(缓冲 1.05s、首包偏差 5-10ms、maxGap≈1s 全被覆盖),但设备零 timing 回复、零重传请求、
+`getPlayerStatus` 假播放(`uri=""`、curpos 空走)。只有完整重握手(TEARDOWN → 新
+ANNOUNCE/SETUP/RECORD)能唤醒;服务端内部换泵(bridge-server 层重建)无效。
+
+**根因(与 v4.9.5 的歌中饿死不同)**:每次换歌,`onBoundary(track)` 停掉旧 stream →
+~2.5-3s 垫片窗(冷垫片 pendingTrackLeadUs 2500 + TTFB)内 **RTP 完全断流**(静音也不发,
+实证:每 gen silenceChunks 只 +4~6 块,断流 3s 应 +375 块)→ 设备 1.05s 缓冲放完后真饿
+~2s → MUZO 固件「欠载即假死、不自动重缓冲」,反复数次后接收端彻底放弃。
+
+**A. 垫片窗静音续流(根治)**:`RaopPlayer.fillGapSilence({shouldStop,maxMs})` ——
+`onBoundary(track/seek/rehost)` 后由会话层(`startGapFiller`)按 8ms 节拍继续发静音块:
+seq 连续、时间戳续走旧时间线、**无 SYNC**;结束复位 `started` ⇒ 新流真·首包仍带 0xE0
+marker,新流重锚语义**不变**(0xE0 + 新 startTs + 垫片窗照旧)。`maybeBeginStream` 起新流
+前 `stopGapFiller()` 收尾(仅 filler 在跑时 await,保持无 filler 时的同步语义);maxMs 8s
+封顶,下一首真不来就回到旧断流行为。可听间隙不变(仍是静音),变的只是 RTP 包不断。
+仅 RAOP 出口;AP2 不启用。开关 `MF_BRIDGE_RAOP_GAP_FILL`(缺省 ON,0/false 关)。
+守卫:测试桩/旧 player 无 `fillGapSilence` 方法时静默跳过。
+
+**B. 消费停滞看门狗(兜底)**:设备**主动**信号(NTP timing 请求、重传请求,都是设备发起)
+在推流中停摆超阈值 ⇒ 判接收端假死 ⇒ 自动 `reconnectRaop()`(完整新 RECORD,等待新代次
+首帧重锚)。纯判据 `livenessWatchdogShouldFire`(暂停/AP2/未连接/重连中一律不触发),
+挂在 stats tick(2s)上。开关 `MF_BRIDGE_RAOP_LIVENESS_WATCHDOG`(缺省 ON)、阈值
+`MF_BRIDGE_RAOP_LIVENESS_MS`(缺省 120000,下限 30000)。
+
+**为什么不取消垫片窗**:切歌垫片(冷 2500/暖 800)是 HiVi 0xE0 就绪窗口的实测定案,
+与「FLUSH/排空/aligner 续走」三条被真机否决的捷径无关 —— 本增补不消除可听间隙、
+不续走内容、不动 aligner,只在窗内让 RTP 不断流。

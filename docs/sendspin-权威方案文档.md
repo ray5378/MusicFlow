@@ -1644,3 +1644,12 @@ prev、音量/静音、自然结束自动下一首、停止）+ 组播 6 项（`
 ## v4.9.4-f1 增补(mDNS staleness 与群组桥在线判定,2026-10-28)
 
 > sendspin 侧零改动。群组起播的 airplay 在线判定改走容错版(F1/F4,见 airplay 权威文档 v4.9.4-f1 节);spin 成员 ready 判定与组泵不受影响。
+
+
+## v4.9.6 增补(桥换歌垫片窗静音续流,2026-10-29)
+
+组内 AirPlay 成员(MUZO/Linkplay 类固件)在换歌垫片窗(~2.5-3s,RTP 断流)反复被饿到
+接收端假死 ⇒ 该成员永久无声(组内其余成员正常)。修复 = 垫片窗内由桥会话层续发静音
+(`MF_BRIDGE_RAOP_GAP_FILL`,缺省开)+ 设备主动信号停摆看门狗自动完整重握手
+(`MF_BRIDGE_RAOP_LIVENESS_WATCHDOG`,缺省开,阈值 `MF_BRIDGE_RAOP_LIVENESS_MS`
+缺省 120s)。垫片窗时长、0xE0 重锚、组同步语义全部不变;详见 airplay 权威文档 v4.9.6 增补。

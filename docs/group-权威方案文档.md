@@ -1067,3 +1067,12 @@ PUT 语义：`memberId` 必须是本组成员（命名空间 id **原样整条**
   「v4.9.4-e3 增补」),否则设备输入仲裁被顶回 DLNA,表现为「泵 loss=0 但无声」。
 - **状态元数据**:`/v1/peers/group:<id>/status` 的 `media` 在泵侧只给 `songId+durationMs`
   时,出口按 songId 从组队列回填 title/artist/album/coverArt(见上方增补段)。
+
+
+## v4.9.6 增补(桥换歌垫片窗静音续流,2026-10-29)
+
+组内 AirPlay 成员(MUZO/Linkplay 类固件)在换歌垫片窗(~2.5-3s,RTP 断流)反复被饿到
+接收端假死 ⇒ 该成员永久无声(组内其余成员正常)。修复 = 垫片窗内由桥会话层续发静音
+(`MF_BRIDGE_RAOP_GAP_FILL`,缺省开)+ 设备主动信号停摆看门狗自动完整重握手
+(`MF_BRIDGE_RAOP_LIVENESS_WATCHDOG`,缺省开,阈值 `MF_BRIDGE_RAOP_LIVENESS_MS`
+缺省 120s)。垫片窗时长、0xE0 重锚、组同步语义全部不变;详见 airplay 权威文档 v4.9.6 增补。

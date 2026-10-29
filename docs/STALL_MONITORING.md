@@ -129,6 +129,7 @@ IO some/avg10 高、`%wa` 高、内存见底 → 公共路径抖动，先隔离 
 | **设备侧 underrun** | 只在 ESPHome 串口，不进容器 | 串口日志与 events 时间轴对齐 |
 | **WS 发送缓冲** | Node 发成功 ≠ 网卡已送达 | 宿主 softnet drop/time_squeeze；必要时加 `bufferedAmount` 日志 |
 | **双台同时卡** | 独立 WiFi 不会同时；公共路径（child 扇出 / 宿主 / 同交换机） | 查 child 单循环、宿主 PSI、同网段丢包 |
+| **AirPlay 桥数据面全绿但设备假死** | tick/缓冲/首包全部健康 ≠ 设备在收包；MUZO 类固件欠载后假死（零 timing/零重传、`getPlayerStatus` 假播放） | 查容器日志设备主动信号（`timing reply`/重传请求）是否停摆；v4.9.6 起看门狗自动完整重握手（`MF_BRIDGE_RAOP_LIVENESS_*`），垫片窗由 gap-fill 静音续流保活 |
 
 **双设备同时卡的优先假设**：同一 child `pushFrame` 扇出停顿，或宿主网络栈/IO 高压，**不是**两台音箱各自 WiFi。
 
