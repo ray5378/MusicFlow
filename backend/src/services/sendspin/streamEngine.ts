@@ -1237,24 +1237,25 @@ export class GroupPump {
           // 缓冲里的音频会以 speed 倍速播完),不折算会在快进用例里白等几十秒。
           const rawDrainMs =
             (Number(cursorUs) - Number(nowUs()) - ANCHOR_SAFE_LEAD_US) / 1000;
-          // 内容域排空量:先按预填充上限截断(旧行为,不动),再按倍速折算成墙钟等待。
-          const contentDrainMs = Math.min(rawDrainMs, PREFILL_BUFFER_MAX_MS);
-          // ★ 桥成员在场时**必须钳制**(2026-11 真机:换歌 RTP 断流 3~7s,45min 8 次与
-          //   换歌 8/8 对齐)。机制:排空期间本循环已退出、**不再产出任何 PCM**,而
-          //   AirPlay 桥成员的音频全靠 pushLoop 现场产料(bridgeMember.pushAudio),
-          //   桥侧队列只出不进且硬上限 8s ⇒ 排空量一旦超过队列余量,排到后半段桥
-          //   必然断料(实测提前 1.72s),听感即「卡顿几秒又恢复」。
-          //   纯 sendspin 组不受影响:音频已在设备缓冲里,排空只是等它播完 ——
-          //   `capEndDrainMs(_, false)` 原值返回,行为与改动前逐字节一致。
-          const drainCap = capEndDrainMs(contentDrainMs, this.group.hasBridges?.() === true);
-          const extraDrainMs = drainCap.drainMs / (this.speed > 0 ? this.speed : 1);
+          // ★ 纯桥组(有桥 **且** 无直连成员,判据与上面锚点分支同一口径):桥的投递窗口
+          //   下沿是「现在 + 1.5s」,距此刻不足 `BRIDGE_DRAIN_TAIL_UNREACHABLE_MS` 的那段
+          //   内容**结构性投不出去**(§6.2 水位推过)⇒ 承诺排空它纯属白等(真机实测白等
+          //   1.72s,表现为换歌处 RTP 完全静默 3~7s);再叠一道桥队列硬上限(排空期间
+          //   pushLoop 已退出、桥队列只出不进),两端取小。
+          //   ⚠️ 混合组/纯直连组**必须原值**:直连 sendspin 设备的缓冲确实需要真排空,
+          //   砍短会切掉曲尾(见上方「只等超出旧水位的那部分」的说明)。
+          const pureBridge =
+            this.group.hasBridges?.() === true && this.group.hasDirectMembers?.() !== true;
+          const drainCap = capEndDrainMs(rawDrainMs, pureBridge);
+          const extraDrainMs =
+            Math.min(drainCap.drainMs, PREFILL_BUFFER_MAX_MS) / (this.speed > 0 ? this.speed : 1);
           if (prefillEnabled() && extraDrainMs > 0) {
             // 只在**真的发生钳制**时打(否则每首歌都刷一条噪声日志)。
             if (drainCap.clamped) {
               logSafe(
                 this.server,
                 "info",
-                `sendspin 曲末排空:桥成员在场,排空量按桥队列上限钳制 ` +
+                `sendspin 曲末排空:纯桥组,排空量按桥投递上界钳制 ` +
                   `${Math.round(drainCap.contentMs)}ms → ${Math.round(drainCap.drainMs)}ms song=${this.songId}`,
               );
             }

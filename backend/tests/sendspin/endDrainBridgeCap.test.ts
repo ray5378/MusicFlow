@@ -1,18 +1,15 @@
-// ==================== 曲末排空 · 桥安全钳制(B 方案,2026-11) ====================
+// ==================== 曲末排空 · 纯桥组投递上界钳制(B 方案,2026-11) ====================
 //
 // 症状(用户报告):AirPlay 群组播放中「卡顿几秒又恢复」。
 // 真机抓包确证:每首歌结束,服务端 RTP **完全停止 3~7 秒**(45min 8 次,与换歌 8/8 对齐)。
 //
 // 机制:曲末排空(`pushLoop` 已退出,只 sleep + 刷新 group.positionMs)**停止产出 PCM**。
-//   - 纯 sendspin 设备没事:音频已经在设备缓冲里,排空只是等它播完;
-//   - AirPlay 桥成员的 PCM 全靠 `pushLoop` 现场产料(`bridgeMember.pushAudio`),
-//     桥侧队列只出不进、硬上限 `BRIDGE_QUEUE_HARD_CAP_MS` = 8s;
-//   - 实测排空需求 9784ms(几乎恒定 9781~9785)⇒ 必然提前 ~1.72s 断料
-//     (桥侧记录 `bridge pacing rebase: +2987790µs`)。
-//
-// 修法(B 方案):组内**有桥成员**时把排空量钳制到 `BRIDGE_QUEUE_HARD_CAP_MS − 1500ms`
-//   (= `BRIDGE_END_DRAIN_SAFE_MAX_MS`,6.5s);**纯 sendspin 组零变化** —— 不钳制、
-//   不打钳制日志、等待时长与改动前逐字节一致。
+//   - 纯桥组:桥的投递窗口下沿是「现在 + 1.5s」(§6.2),**距此刻不足
+//     `BRIDGE_DRAIN_TAIL_UNREACHABLE_MS` 的那段内容结构性投不出去** ⇒ 承诺排空它纯属
+//     白等(实测白等 1.72s,桥侧 `bridge pacing rebase: +2987790µs`);再叠一道桥队列
+//     硬上限(`BRIDGE_QUEUE_HARD_CAP_MS` = 8s,排空期间队列只出不进),两端取小。
+//   - 混合组 / 纯直连组:直连 sendspin 设备的缓冲**确实需要真排空**,砍短会切掉曲尾
+//     ⇒ 必须与改动前逐字节一致(不钳制、不打钳制日志)。
 //
 // 本文件两层验证:
 //   ① 纯函数 `capEndDrainMs`(判据 + 数值 + 边界 + 非法输入);
@@ -32,8 +29,7 @@ vi.mock("../../src/services/sendspin/index.js", () => ({
 import { GroupPump, overridePumpSource } from "../../src/services/sendspin/streamEngine.js";
 import { capEndDrainMs } from "../../src/services/airplay/bridgeMath.js";
 import {
-  BRIDGE_END_DRAIN_MARGIN_MS,
-  BRIDGE_END_DRAIN_SAFE_MAX_MS,
+  BRIDGE_DRAIN_TAIL_UNREACHABLE_MS,
   BRIDGE_QUEUE_HARD_CAP_MS,
 } from "../../src/services/airplay/rates.js";
 
@@ -48,47 +44,60 @@ afterAll(() => {
 // ① 纯函数:钳制判据与数值
 // ---------------------------------------------------------------------------
 
-describe("capEndDrainMs:曲末排空量的桥安全钳制(纯函数)", () => {
-  it("常量口径:上限 = 队列硬上限 − 周转余量 = 8000 − 1500 = 6500ms", () => {
+describe("capEndDrainMs:曲末排空量的纯桥组投递上界(纯函数)", () => {
+  it("常量口径:不可达段 1500ms、桥队列硬上限 8000ms", () => {
+    expect(BRIDGE_DRAIN_TAIL_UNREACHABLE_MS).toBe(1_500);
     expect(BRIDGE_QUEUE_HARD_CAP_MS).toBe(8_000);
-    expect(BRIDGE_END_DRAIN_MARGIN_MS).toBe(1_500);
-    expect(BRIDGE_END_DRAIN_SAFE_MAX_MS).toBe(6_500);
   });
 
-  it("有桥成员 + 真机实测排空需求 9784ms ⇒ 钳制到 6500ms", () => {
+  it("纯桥组 + 真机实测排空需求 9784ms ⇒ min(9784−1500, 8000) = 8000ms", () => {
     const r = capEndDrainMs(9784, true);
     expect(r.contentMs).toBe(9784);
-    expect(r.drainMs).toBe(BRIDGE_END_DRAIN_SAFE_MAX_MS);
-    expect(r.drainMs).toBe(6_500);
+    expect(r.drainMs).toBe(8_000);
+    expect(r.drainMs).toBe(
+      Math.min(9784 - BRIDGE_DRAIN_TAIL_UNREACHABLE_MS, BRIDGE_QUEUE_HARD_CAP_MS),
+    );
     expect(r.clamped).toBe(true);
   });
 
-  it("无桥(纯 sendspin 组)+ 同样 9784ms ⇒ 原值返回,不钳制", () => {
-    const r = capEndDrainMs(9784, false);
-    expect(r.contentMs).toBe(9784);
-    expect(r.drainMs).toBe(9784);
-    expect(r.clamped).toBe(false);
+  it("纯桥组 + 需求 6000ms ⇒ 只扣不可达段 = 4500ms(队列上限未触发)", () => {
+    const r = capEndDrainMs(6_000, true);
+    expect(r.drainMs).toBe(4_500);
+    expect(r.drainMs).toBeLessThan(BRIDGE_QUEUE_HARD_CAP_MS);
+    expect(r.clamped).toBe(true);
   });
 
-  it("有桥但排空需求未超上限(2200ms)⇒ 不钳制", () => {
-    const r = capEndDrainMs(2200, true);
-    expect(r.drainMs).toBe(2200);
-    expect(r.clamped).toBe(false);
+  it("纯桥组 + 需求 12000ms ⇒ 被队列硬上限兜住 = 8000ms", () => {
+    const r = capEndDrainMs(12_000, true);
+    expect(r.drainMs).toBe(BRIDGE_QUEUE_HARD_CAP_MS);
+    expect(r.clamped).toBe(true);
   });
 
-  it("边界:恰好等于上限不钳制,超 1ms 才钳制(日志只在真钳制时打)", () => {
-    expect(capEndDrainMs(BRIDGE_END_DRAIN_SAFE_MAX_MS, true).clamped).toBe(false);
-    const over = capEndDrainMs(BRIDGE_END_DRAIN_SAFE_MAX_MS + 1, true);
-    expect(over.clamped).toBe(true);
-    expect(over.drainMs).toBe(BRIDGE_END_DRAIN_SAFE_MAX_MS);
+  it("需求小于不可达段(1500ms)⇒ 结果为 0,绝不出现负数", () => {
+    for (const raw of [1_500, 1_200, 800, 1]) {
+      const r = capEndDrainMs(raw, true);
+      expect(r.drainMs).toBe(0);
+      expect(r.drainMs).toBeGreaterThanOrEqual(0);
+      expect(r.clamped).toBe(true);
+    }
+  });
+
+  it("非纯桥组(混合组 / 纯直连组)⇒ 原值返回,不钳制(与改动前逐字节一致)", () => {
+    for (const raw of [9784, 6_000, 1_200]) {
+      const r = capEndDrainMs(raw, false);
+      expect(r.drainMs).toBe(raw);
+      expect(r.clamped).toBe(false);
+    }
   });
 
   it("非法输入(NaN / 负数 / 0)⇒ 归 0,不产出负等待", () => {
     for (const bad of [Number.NaN, -1, 0, Number.NEGATIVE_INFINITY]) {
-      const r = capEndDrainMs(bad, true);
-      expect(r.contentMs).toBe(0);
-      expect(r.drainMs).toBe(0);
-      expect(r.clamped).toBe(false);
+      for (const pure of [true, false]) {
+        const r = capEndDrainMs(bad, pure);
+        expect(r.contentMs).toBe(0);
+        expect(r.drainMs).toBe(0);
+        expect(r.clamped).toBe(false);
+      }
     }
   });
 });
@@ -97,9 +106,23 @@ describe("capEndDrainMs:曲末排空量的桥安全钳制(纯函数)", () => {
 // ② pushLoop 集成:曲末排空段的日志与真实等待时长
 // ---------------------------------------------------------------------------
 
+/** 组形态:纯桥组 / 混合组 / 纯直连组 / 旧桩(两个判据都没有)。 */
+type GroupShape = "pureBridge" | "mixed" | "direct" | "legacyStub";
+
 /** 最小 stub group:只提供 pushLoop 真正会调的接口(其余走可选调用的兜底)。 */
-function makeGroup(over: Record<string, unknown> = {}) {
+function makeGroup(shape: GroupShape) {
   const frames: bigint[] = [];
+  const over: Record<string, unknown> = {};
+  if (shape === "pureBridge") {
+    over.hasBridges = () => true;
+    over.hasDirectMembers = () => false;
+  } else if (shape === "mixed") {
+    over.hasBridges = () => true;
+    over.hasDirectMembers = () => true;
+  } else if (shape === "direct") {
+    over.hasBridges = () => false;
+    over.hasDirectMembers = () => false;
+  } // legacyStub:两个方法都不提供(旧桩,可选链自动退化成「无桥」)
   const g: Record<string, any> = {
     positionMs: 0,
     timelineBaseUs: 0n,
@@ -144,13 +167,12 @@ async function waitInactive(pump: GroupPump, ms: number, what: string): Promise<
 }
 
 const DRAIN_STD_RE = /等设备播完缓冲 (\d+)ms 后再收流/;
-const DRAIN_CLAMP_RE = /桥成员在场,排空量按桥队列上限钳制 (\d+)ms → (\d+)ms/;
+const DRAIN_CLAMP_RE = /纯桥组,排空量按桥投递上界钳制 (\d+)ms → (\d+)ms/;
 
 interface RunOpts {
-  /** 注入音源的时长(ms);0 帧长未知口径统一走整包路径。 */
+  /** 注入音源时长(ms)。 */
   sourceMs: number;
-  /** 组内有无桥成员;`null` = 旧桩(根本没有 hasBridges 属性)。 */
-  hasBridges: boolean | null;
+  shape: GroupShape;
   /** 预填充档位(经 SENDSPIN_PREFILL_MS 生效)。 */
   prefillMs: number;
   /** 推流倍速(SENDSPIN_PUSH_SPEED),用于把真实等待压到测试可接受量级。 */
@@ -173,18 +195,16 @@ async function runPump(opts: RunOpts) {
     durationMs: 0, // 时长未知口径:按 EOF 收尾(不触发提前 EOF 判死)
   }));
   const recs: LogRec[] = [];
-  const over: Record<string, unknown> = {};
-  if (opts.hasBridges !== null) over.hasBridges = () => opts.hasBridges === true;
-  const { g, frames } = makeGroup(over);
+  const { g, frames } = makeGroup(opts.shape);
   const pump = new GroupPump(makeServer(recs), g);
   try {
     // ⚠️ play() 只**启动** pushLoop(推进循环 fire-and-forget),必须 waitInactive 等它收尾,
     //    否则曲末排空日志还没打出来就断言了。
-    await pump.play(`song-drain-${opts.hasBridges}-${opts.prefillMs}`);
+    await pump.play(`song-drain-${opts.shape}-${opts.prefillMs}`);
     await waitInactive(pump, 25_000, "曲末排空收尾");
     const inactiveAt = Date.now();
     const stdLog = recs.find((r) => DRAIN_STD_RE.test(r.msg));
-    return { recs, frames, g, totalFrames, stdLog, inactiveAt };
+    return { recs, frames, totalFrames, stdLog, inactiveAt };
   } finally {
     if (envBackup.speed === undefined) delete process.env.SENDSPIN_PUSH_SPEED;
     else process.env.SENDSPIN_PUSH_SPEED = envBackup.speed;
@@ -199,81 +219,99 @@ function clampLogOf(recs: LogRec[]): LogRec | undefined {
   return recs.find((r) => DRAIN_CLAMP_RE.test(r.msg));
 }
 
-function stdWaitMs(rec: LogRec | undefined, recs?: LogRec[]): number {
+function stdWaitMs(rec: LogRec | undefined, recs: LogRec[]): number {
   const m = rec ? DRAIN_STD_RE.exec(rec.msg) : null;
   if (!m) {
-    const dump = (recs ?? []).map((r) => `${r.level}:${r.msg}`).join(" | ");
-    throw new Error(`未找到曲末排空日志;实收:${rec ? rec.msg : "(无)"} 全部日志:${dump}`);
+    const dump = recs.map((x) => `${x.level}:${x.msg}`).join(" | ");
+    throw new Error(`未找到曲末排空日志;全部日志:${dump}`);
   }
   return Number(m[1]);
 }
 
-describe("pushLoop 曲末排空:组内有桥成员 ⇒ 排空量被钳制(日志 + 真实等待)", () => {
-  it("排空需求 9.4s+ / 桥上限 6.5s ⇒ 打钳制日志 6500ms,真实等待 ≈ 6500/speed(而非原值)", async () => {
+describe("pushLoop 曲末排空:纯桥组 ⇒ 按投递上界钳制(日志 + 真实等待)", () => {
+  it("排空需求远超上界(≈14.8s)⇒ 日志钳制到 8000ms,真实等待 ≈ 8000/speed", async () => {
     const speed = 8;
-    const prefillMs = 10_000; // 深档位:排空需求必然超过 6.5s 的桥安全上限
-    const out = await runPump({ sourceMs: 12_000, hasBridges: true, prefillMs, speed });
+    const out = await runPump({
+      sourceMs: 12_000,
+      shape: "pureBridge",
+      prefillMs: 10_000,
+      speed,
+    });
 
     // 整首内容确实推完了(排除「提前退出」造成的假象)
     expect(out.frames).toHaveLength(out.totalFrames);
 
     const clampRec = clampLogOf(out.recs);
-    expect(clampRec, "有桥且超上限时必须打钳制日志").toBeTruthy();
+    expect(clampRec, "纯桥组且被钳制时必须打钳制日志").toBeTruthy();
     const m = DRAIN_CLAMP_RE.exec(clampRec!.msg)!;
     const origMs = Number(m[1]);
     const clampedMs = Number(m[2]);
-    expect(origMs).toBeGreaterThan(BRIDGE_END_DRAIN_SAFE_MAX_MS); // 真的超了上限
-    expect(clampedMs).toBe(BRIDGE_END_DRAIN_SAFE_MAX_MS); // 钳到 6500
-    expect(clampedMs).toBe(6_500);
-    // 日志字段固定,便于 grep:带 song=
+    expect(origMs).toBeGreaterThan(BRIDGE_QUEUE_HARD_CAP_MS); // 真的超了队列硬上限
+    expect(clampedMs).toBe(
+      Math.min(origMs - BRIDGE_DRAIN_TAIL_UNREACHABLE_MS, BRIDGE_QUEUE_HARD_CAP_MS),
+    );
+    expect(clampedMs).toBe(BRIDGE_QUEUE_HARD_CAP_MS); // = 8000
     expect(clampRec!.msg).toContain("sendspin 曲末排空:");
 
-    // 钳制后实际等待 = clamped / speed(倍速折算),且标准排空日志报的是钳制后的值
+    // 钳制后实际等待 = clamped / speed(倍速折算),标准排空行报的也是钳制后的值
     expect(stdWaitMs(out.stdLog, out.recs)).toBe(Math.round(clampedMs / speed));
 
-    // 真实耗时也必须是钳制后的量级:未钳制时 ≈ origMs/speed(≈1.9s),钳制后 ≈0.81s
+    // 真实耗时也必须是钳制后的量级:未钳制时 ≈ origMs/speed(≈1.9s),钳制后 ≈1.0s
     const waited = out.inactiveAt - out.stdLog!.at;
     expect(waited).toBeGreaterThan(Math.round((clampedMs / speed) * 0.5));
-    expect(waited).toBeLessThan(Math.round((clampedMs / speed) * 0.5) + 700);
+    expect(waited).toBeLessThan(Math.round((clampedMs / speed) * 0.5) + 800);
     expect(waited).toBeLessThan(Math.round(origMs / speed) - 300);
   }, 30_000);
 
-  it("有桥但排空需求未超上限 ⇒ 不钳制、不打钳制日志(不刷噪声)", async () => {
+  it("排空需求一般(≈5.4s,未触队列上限)⇒ 只扣不可达段 1500ms", async () => {
     const speed = 8;
-    const prefillMs = 3_000;
-    // 短源(2s):即使按纯桥组的深锚点(4.5s)起算,排空需求也在 6.5s 以内
-    const out = await runPump({ sourceMs: 2_000, hasBridges: true, prefillMs, speed });
+    const out = await runPump({
+      sourceMs: 2_000,
+      shape: "pureBridge",
+      prefillMs: 3_000,
+      speed,
+    });
 
     expect(out.frames).toHaveLength(out.totalFrames);
-    expect(clampLogOf(out.recs), "未超上限时不得打钳制日志").toBeUndefined();
-    const waitMs = stdWaitMs(out.stdLog, out.recs);
-    expect(waitMs).toBeGreaterThan(0);
-    expect(waitMs * speed).toBeLessThanOrEqual(BRIDGE_END_DRAIN_SAFE_MAX_MS);
-    // 与纯函数判定一致:未超上限 ⇒ 不钳制
-    expect(capEndDrainMs(waitMs * speed, true).clamped).toBe(false);
+    const clampRec = clampLogOf(out.recs);
+    expect(clampRec).toBeTruthy();
+    const m = DRAIN_CLAMP_RE.exec(clampRec!.msg)!;
+    const origMs = Number(m[1]);
+    const clampedMs = Number(m[2]);
+    expect(clampedMs).toBeLessThan(BRIDGE_QUEUE_HARD_CAP_MS); // 队列上限未触发
+    expect(Math.abs(clampedMs - (origMs - BRIDGE_DRAIN_TAIL_UNREACHABLE_MS))).toBeLessThanOrEqual(1);
+    expect(clampedMs).toBeGreaterThan(0);
+    expect(stdWaitMs(out.stdLog, out.recs)).toBe(Math.round(clampedMs / speed));
   }, 30_000);
 });
 
-describe("pushLoop 曲末排空:纯 sendspin 组行为零变化", () => {
-  it("hasBridges=false ⇒ 不打钳制日志,排空量取原值(即使原值已超 6.5s),与旧桩逐项一致", async () => {
-    const speed = 8;
-    const prefillMs = 10_000;
-    const withJudge = await runPump({ sourceMs: 12_000, hasBridges: false, prefillMs, speed });
-    const legacyStub = await runPump({ sourceMs: 12_000, hasBridges: null, prefillMs, speed });
+describe("pushLoop 曲末排空:混合组 / 纯直连组行为零变化", () => {
+  const speed = 8;
+  const prefillMs = 10_000;
 
-    for (const out of [withJudge, legacyStub]) {
+  it("混合组(有桥且有直连成员)⇒ 不钳制、不打钳制日志,排空量取原值", async () => {
+    const out = await runPump({ sourceMs: 12_000, shape: "mixed", prefillMs, speed });
+    expect(out.frames).toHaveLength(out.totalFrames);
+    expect(clampLogOf(out.recs), "混合组不得出现钳制日志").toBeUndefined();
+    const waitMs = stdWaitMs(out.stdLog, out.recs);
+    // 原值口径:内容域排空需求 > 队列硬上限也照旧等待(证明没被钳制)
+    expect(waitMs * speed).toBeGreaterThan(BRIDGE_QUEUE_HARD_CAP_MS);
+    expect(capEndDrainMs(waitMs * speed, false).drainMs).toBe(waitMs * speed);
+  }, 40_000);
+
+  it("纯直连组(hasBridges=false)⇒ 不钳制,且与旧桩(无判据)等待量一致", async () => {
+    const direct = await runPump({ sourceMs: 12_000, shape: "direct", prefillMs, speed });
+    const legacyStub = await runPump({ sourceMs: 12_000, shape: "legacyStub", prefillMs, speed });
+
+    for (const out of [direct, legacyStub]) {
       expect(out.frames).toHaveLength(out.totalFrames);
-      // 纯 sendspin 组:无论排空需求多大都**不钳制、不打钳制日志**
-      expect(clampLogOf(out.recs), "纯 sendspin 组不得出现钳制日志").toBeUndefined();
+      expect(clampLogOf(out.recs), "纯直连组不得出现钳制日志").toBeUndefined();
       const waitMs = stdWaitMs(out.stdLog, out.recs);
-      expect(waitMs).toBeGreaterThan(0);
-      // 关键:内容域排空量已超过桥安全上限,却仍按原值等待
-      // ⇒ 证明「钳制只在有桥成员时生效」,纯 sendspin 行为与改动前一致。
-      expect(waitMs * speed).toBeGreaterThan(BRIDGE_END_DRAIN_SAFE_MAX_MS);
+      expect(waitMs * speed).toBeGreaterThan(BRIDGE_QUEUE_HARD_CAP_MS);
     }
 
-    // 有判据(false)与旧桩(无该属性)的等待量必须一致(±120ms 计时抖动)
-    const a = stdWaitMs(withJudge.stdLog, withJudge.recs);
+    // 有判据(false) 与 旧桩(无该属性) 的等待量必须一致(±120ms 计时抖动)
+    const a = stdWaitMs(direct.stdLog, direct.recs);
     const b = stdWaitMs(legacyStub.stdLog, legacyStub.recs);
     expect(Math.abs(a - b)).toBeLessThanOrEqual(120);
   }, 60_000);

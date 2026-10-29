@@ -91,30 +91,31 @@ export const BRIDGE_HEARTBEAT_INTERVAL_MS = 1_000;
 export const BRIDGE_STALL_NO_FRAME_MS = 2_000;
 
 // ---------------------------------------------------------------------------
-// 曲末排空的桥安全钳制(2026-11 真机:换歌 RTP 断流 3~7s)
+// 曲末排空:纯桥组的投递上界(2026-11 真机:换歌 RTP 断流 3~7s)
 // ---------------------------------------------------------------------------
 
-/** 曲末排空的桥周转余量(ms):排空上限 = 队列硬上限 − 本余量。
+/** 纯桥组「结构性投不出去」的尾段(ms):这段内容的排空承诺是**白等**。
  *
- *  **为什么需要**:曲末排空期间 `pushLoop` 已退出、**不再产出任何 PCM**,而 AirPlay
- *  桥成员的音频**全靠 pushLoop 现场产料**(`bridgeMember.pushAudio`,桥侧队列
- *  `BRIDGE_QUEUE_HARD_CAP_MS` 为硬上限)⇒ 队列只出不进,排空时长一旦逼近硬上限,
- *  排到后半段桥就**必然断料**:用户听感「卡顿几秒又恢复」。
+ *  **推导**(三个既有常量,任一变动都要重推本值):
+ *    投递下沿 `BRIDGE_PUSH_FLOOR_US`(1500ms,见 sendspin/constants.ts)
+ *    + 纯桥组 ahead(800ms,= `ANCHOR_SAFE_LEAD_US` 量级)
+ *    − `ANCHOR_SAFE_LEAD_US`(800ms,排空公式里已经先扣掉的那一段)
+ *    = **1500ms**。
  *
- *  **为什么是 1500ms**(三个事实,缺一不可):
- *   ① 排空期间桥不再产料(上面的机制),可取量 = 排空前桥队列里的存量,硬上限 8s;
- *   ② 2026-11 真机抓包实测:断料**提前 1.72s**(桥侧 `bridge pacing rebase:
- *      +2987790µs`),即真实可用存量约 8s − 1.72s ≈ 6.28s;
- *   ③ 1500ms ≈ 1720ms 实测断料点**再让 200ms**,吸收泵抖动与桥补投定时器粒度
- *      (250ms 一拍),保证「钳制后也不断料」而不是「刚好不早于断料点」。
- *  ⇒ 8s − 1.5s = 6.5s:仍能排掉绝大部分曲末缓冲,同时桥侧恒有余量。
+ *  **为什么**:曲末排空期间 `pushLoop` 已退出、**不再产出任何 PCM**,而桥的投递窗口
+ *  下沿是「现在 + 1.5s」(§6.2):比它更早的可听位置桥根本不接(水位推过)。所以
+ *  「距此刻不足 1500ms 的那部分内容」对桥是**结构性不可达**的 —— 承诺排空它只是
+ *  空等,真机实测白等 1.72s(`bridge pacing rebase: +2987790µs`),表现为换歌处
+ *  服务端 RTP 完全静默 3~7s(45min 8 次,与换歌 8/8 对齐)。
  *
- *  消费点:sendspin/streamEngine.ts 曲末排空(经 bridgeMath.capEndDrainMs 钳制,
- *  **仅当组内存在桥成员**;纯 sendspin 组不钳制,行为与本常量引入前逐字节一致)。 */
-export const BRIDGE_END_DRAIN_MARGIN_MS = 1_500;
-
-/** 曲末排空量在桥成员在场时的安全上限(ms)= 队列硬上限 − 周转余量(理由见上)。 */
-export const BRIDGE_END_DRAIN_SAFE_MAX_MS = BRIDGE_QUEUE_HARD_CAP_MS - BRIDGE_END_DRAIN_MARGIN_MS;
+ *  **叠加**:仅扣掉不可达段仍可能超过桥队列存量(硬上限 `BRIDGE_QUEUE_HARD_CAP_MS`
+ *  = 8s,排空期间队列只出不进),故两者的**较小值**才是纯桥组可承诺的排空量
+ *  (`bridgeMath.capEndDrainMs` 两端取小)。
+ *
+ *  ⚠️ 只对**纯桥组**(有桥且无直连 sendspin 成员)生效:混合组还有直连设备,
+ *  它的缓冲确实需要真排空(见 streamEngine 曲末排空段注释),砍短会切掉尾巴。
+ *  消费点:sendspin/streamEngine.ts 曲末排空。 */
+export const BRIDGE_DRAIN_TAIL_UNREACHABLE_MS = 1_500;
 
 /** RAOP 发送节拍安全余量(吸收 25ms 泵抖动与 socket 调度)。
  *

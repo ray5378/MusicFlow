@@ -8,7 +8,8 @@
 import { ntpFromHostUs, ntpToHostUs } from "../../utils/hostClock.js";
 import {
   BRIDGE_COLD_START_LEAD_US,
-  BRIDGE_END_DRAIN_SAFE_MAX_MS,
+  BRIDGE_DRAIN_TAIL_UNREACHABLE_MS,
+  BRIDGE_QUEUE_HARD_CAP_MS,
   BRIDGE_WARM_START_LEAD_US,
   RAOP_SAFETY_MS,
   RESAMPLE_GROUP_DELAY_OUT_SAMPLES,
@@ -137,33 +138,40 @@ export function bridgeStartLeadUs(bridges: ReadonlyArray<{ warm: boolean }>): nu
 }
 
 // ---------------------------------------------------------------------------
-// 曲末排空的桥安全钳制(2026-11 真机:换歌 RTP 断流 3~7s)
+// 曲末排空:纯桥组的投递上界(2026-11 真机:换歌 RTP 断流 3~7s)
 // ---------------------------------------------------------------------------
 
 /** `capEndDrainMs` 的结果。`drainMs === contentMs` ⇒ 未钳制。 */
 export interface EndDrainCap {
-  /** 入参:内容域排空量(ms,已按预填充上限截断,倍速折算前的值)。 */
+  /** 入参:排空需求(rawDrainMs,ms,= (cursorUs − nowUs() − ANCHOR_SAFE_LEAD_US)/1000)。 */
   contentMs: number;
-  /** 输出:实际可等待的排空量(ms)。组内无桥时**恒等于** contentMs。 */
+  /** 输出:可承诺的排空量(ms;恒 ≥ 0;未钳制时等于 contentMs)。 */
   drainMs: number;
-  /** 是否真的发生钳制(= drainMs < contentMs;仅在组内有桥时可能为 true)。 */
+  /** 是否真的发生钳制(= drainMs < contentMs)。 */
   clamped: boolean;
 }
 
-/** 曲末排空量的桥安全钳制(纯函数)。
+/** 曲末排空量的**纯桥组**投递上界钳制(纯函数)。
  *
- *  组内**有桥成员** ⇒ 排空量必须让桥队列撑得住:排空期间 `pushLoop` 不再产料,
- *  桥侧队列只出不进,故上限 = `BRIDGE_QUEUE_HARD_CAP_MS − BRIDGE_END_DRAIN_MARGIN_MS`
- *  (取值理由见 rates.ts 的 BRIDGE_END_DRAIN_MARGIN_MS 注释)。
- *  组内**无桥**(纯 sendspin)⇒ 原值返回,行为与引入本函数前逐字节一致。
+ *  纯桥组(`hasBridges() && !hasDirectMembers()`)里,桥的投递窗口下沿是「现在 + 1.5s」
+ *  (§6.2),故距此刻不足 `BRIDGE_DRAIN_TAIL_UNREACHABLE_MS` 的那段内容**结构性投不出去**
+ *  (详见 rates.ts 该常量的推导注释);再叠一道桥队列硬上限 `BRIDGE_QUEUE_HARD_CAP_MS`
+ *  (排空期间队列只出不进),两端取小即是能承诺的排空量,且不得为负。
  *
- *  @param contentDrainMs 内容域排空量(ms);非有限值/≤0 一律归 0。
- *  @param hasBridges 组内是否存在桥成员(SendspinGroup.hasBridges())。
+ *  **非纯桥组**(混合组 / 纯直连组)一律原值返回 —— 直连 sendspin 设备的缓冲
+ *  确实需要真排空,砍短会切掉曲尾,行为必须与引入本函数前逐字节一致。
+ *
+ *  @param rawDrainMs 排空需求(ms);非有限值/≤0 一律归 0。
+ *  @param pureBridge 是否纯桥组(调用方按 hasBridges / hasDirectMembers 判定)。
  */
-export function capEndDrainMs(contentDrainMs: number, hasBridges: boolean): EndDrainCap {
-  const contentMs = Number.isFinite(contentDrainMs) && contentDrainMs > 0 ? contentDrainMs : 0;
-  if (!hasBridges) return { contentMs, drainMs: contentMs, clamped: false };
-  const drainMs = Math.min(contentMs, BRIDGE_END_DRAIN_SAFE_MAX_MS);
+export function capEndDrainMs(rawDrainMs: number, pureBridge: boolean): EndDrainCap {
+  const contentMs = Number.isFinite(rawDrainMs) && rawDrainMs > 0 ? rawDrainMs : 0;
+  if (!pureBridge) return { contentMs, drainMs: contentMs, clamped: false };
+  // Math.max(..., 0):rawDrainMs 可能小于不可达段 ⇒ 结果是 0 而不是负数(负等待无意义)。
+  const drainMs = Math.max(
+    Math.min(contentMs - BRIDGE_DRAIN_TAIL_UNREACHABLE_MS, BRIDGE_QUEUE_HARD_CAP_MS),
+    0,
+  );
   return { contentMs, drainMs, clamped: drainMs < contentMs };
 }
 
