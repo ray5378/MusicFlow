@@ -5,7 +5,7 @@
 //
 // 机制:曲末排空(`pushLoop` 已退出,只 sleep + 刷新 group.positionMs)**停止产出 PCM**。
 //   - 纯桥组:桥的投递窗口下沿是「现在 + 1.5s」(§6.2),**距此刻不足
-//     `BRIDGE_DRAIN_TAIL_UNREACHABLE_MS` 的那段内容结构性投不出去** ⇒ 承诺排空它纯属
+//     `BRIDGE_END_DRAIN_MARGIN_MS` 的那段内容结构性投不出去** ⇒ 承诺排空它纯属
 //     白等(实测白等 1.72s,桥侧 `bridge pacing rebase: +2987790µs`);再叠一道桥队列
 //     硬上限(`BRIDGE_QUEUE_HARD_CAP_MS` = 8s,排空期间队列只出不进),两端取小。
 //   - 混合组 / 纯直连组:直连 sendspin 设备的缓冲**确实需要真排空**,砍短会切掉曲尾
@@ -29,7 +29,8 @@ vi.mock("../../src/services/sendspin/index.js", () => ({
 import { GroupPump, overridePumpSource } from "../../src/services/sendspin/streamEngine.js";
 import { capEndDrainMs } from "../../src/services/airplay/bridgeMath.js";
 import {
-  BRIDGE_DRAIN_TAIL_UNREACHABLE_MS,
+  BRIDGE_END_DRAIN_MARGIN_MS,
+  BRIDGE_END_DRAIN_SAFE_MAX_MS,
   BRIDGE_QUEUE_HARD_CAP_MS,
 } from "../../src/services/airplay/rates.js";
 
@@ -45,9 +46,13 @@ afterAll(() => {
 // ---------------------------------------------------------------------------
 
 describe("capEndDrainMs:曲末排空量的纯桥组投递上界(纯函数)", () => {
-  it("常量口径:不可达段 1500ms、桥队列硬上限 8000ms", () => {
-    expect(BRIDGE_DRAIN_TAIL_UNREACHABLE_MS).toBe(1_500);
+  it("常量口径:余量 1500ms(从需求里减)、安全上限 = 队列硬上限 8000ms(不再双重扣减)", () => {
+    expect(BRIDGE_END_DRAIN_MARGIN_MS).toBe(1_500);
     expect(BRIDGE_QUEUE_HARD_CAP_MS).toBe(8_000);
+    // 🔴 上限就是队列硬上限本身:1500 已从「需求」里减过,这里再减一次就会每首歌砍掉
+    //    约 1.5s 真实音频(推导见 rates.ts 的 BRIDGE_END_DRAIN_MARGIN_MS 注释)。
+    expect(BRIDGE_END_DRAIN_SAFE_MAX_MS).toBe(BRIDGE_QUEUE_HARD_CAP_MS);
+    expect(BRIDGE_END_DRAIN_SAFE_MAX_MS).toBe(8_000);
   });
 
   it("纯桥组 + 真机实测排空需求 9784ms ⇒ min(9784−1500, 8000) = 8000ms", () => {
@@ -55,7 +60,7 @@ describe("capEndDrainMs:曲末排空量的纯桥组投递上界(纯函数)", () 
     expect(r.contentMs).toBe(9784);
     expect(r.drainMs).toBe(8_000);
     expect(r.drainMs).toBe(
-      Math.min(9784 - BRIDGE_DRAIN_TAIL_UNREACHABLE_MS, BRIDGE_QUEUE_HARD_CAP_MS),
+      Math.min(9784 - BRIDGE_END_DRAIN_MARGIN_MS, BRIDGE_QUEUE_HARD_CAP_MS),
     );
     expect(r.clamped).toBe(true);
   });
@@ -69,8 +74,33 @@ describe("capEndDrainMs:曲末排空量的纯桥组投递上界(纯函数)", () 
 
   it("纯桥组 + 需求 12000ms ⇒ 被队列硬上限兜住 = 8000ms", () => {
     const r = capEndDrainMs(12_000, true);
-    expect(r.drainMs).toBe(BRIDGE_QUEUE_HARD_CAP_MS);
+    expect(r.drainMs).toBe(BRIDGE_END_DRAIN_SAFE_MAX_MS);
+    expect(r.drainMs).toBe(8_000);
     expect(r.clamped).toBe(true);
+  });
+
+  it("边界:需求 9500ms ⇒ 钳到上限 8000ms(需求−1500 仍高于上限时以 8000 收口)", () => {
+    const r = capEndDrainMs(9_500, true);
+    expect(r.drainMs).toBe(8_000);
+    expect(r.clamped).toBe(true);
+  });
+
+  it("边界:需求恰好 8000ms ⇒ 8000−1500 = 6500ms(尾段结构性不可达,与上限无关)", () => {
+    // ⚠️ 注意这里**不是**「8000−1500 双重扣减」那一版:那一版是把 6500 当成固定上限,
+    //    9784ms 的需求也被压到 6500 ⇒ 砍掉 1.5s 真实音频。本式是「需求 − 不可达尾段」,
+    //    需求 8000 ⇒ 设备侧本来就只有 8000ms 可播,其中末尾 1500ms 桥拿不到 ⇒ 6500 正确;
+    //    而需求 9784 ⇒ 8000(见上面的用例),真实音频不受损。
+    const r = capEndDrainMs(8_000, true);
+    expect(r.drainMs).toBe(6_500);
+    expect(r.clamped).toBe(true);
+  });
+
+  it("纯桥组只要需求 > 0 就必然发生钳制(尾段结构性不可达)⇒ 日志判据天然成立", () => {
+    for (const raw of [1_600, 8_000, 9_784, 20_000]) {
+      expect(capEndDrainMs(raw, true).clamped).toBe(true);
+    }
+    // 只有「无需排空」(≤0)时才不钳制、不打日志
+    expect(capEndDrainMs(0, true).clamped).toBe(false);
   });
 
   it("需求小于不可达段(1500ms)⇒ 结果为 0,绝不出现负数", () => {
@@ -248,7 +278,7 @@ describe("pushLoop 曲末排空:纯桥组 ⇒ 按投递上界钳制(日志 + 真
     const clampedMs = Number(m[2]);
     expect(origMs).toBeGreaterThan(BRIDGE_QUEUE_HARD_CAP_MS); // 真的超了队列硬上限
     expect(clampedMs).toBe(
-      Math.min(origMs - BRIDGE_DRAIN_TAIL_UNREACHABLE_MS, BRIDGE_QUEUE_HARD_CAP_MS),
+      Math.min(origMs - BRIDGE_END_DRAIN_MARGIN_MS, BRIDGE_QUEUE_HARD_CAP_MS),
     );
     expect(clampedMs).toBe(BRIDGE_QUEUE_HARD_CAP_MS); // = 8000
     expect(clampRec!.msg).toContain("sendspin 曲末排空:");
@@ -279,7 +309,7 @@ describe("pushLoop 曲末排空:纯桥组 ⇒ 按投递上界钳制(日志 + 真
     const origMs = Number(m[1]);
     const clampedMs = Number(m[2]);
     expect(clampedMs).toBeLessThan(BRIDGE_QUEUE_HARD_CAP_MS); // 队列上限未触发
-    expect(Math.abs(clampedMs - (origMs - BRIDGE_DRAIN_TAIL_UNREACHABLE_MS))).toBeLessThanOrEqual(1);
+    expect(Math.abs(clampedMs - (origMs - BRIDGE_END_DRAIN_MARGIN_MS))).toBeLessThanOrEqual(1);
     expect(clampedMs).toBeGreaterThan(0);
     expect(stdWaitMs(out.stdLog, out.recs)).toBe(Math.round(clampedMs / speed));
   }, 30_000);

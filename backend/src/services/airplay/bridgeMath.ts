@@ -8,8 +8,8 @@
 import { ntpFromHostUs, ntpToHostUs } from "../../utils/hostClock.js";
 import {
   BRIDGE_COLD_START_LEAD_US,
-  BRIDGE_DRAIN_TAIL_UNREACHABLE_MS,
-  BRIDGE_QUEUE_HARD_CAP_MS,
+  BRIDGE_END_DRAIN_MARGIN_MS,
+  BRIDGE_END_DRAIN_SAFE_MAX_MS,
   BRIDGE_WARM_START_LEAD_US,
   RAOP_SAFETY_MS,
   RESAMPLE_GROUP_DELAY_OUT_SAMPLES,
@@ -153,13 +153,16 @@ export interface EndDrainCap {
 
 /** 曲末排空量的**纯桥组**投递上界钳制(纯函数)。
  *
- *  纯桥组(`hasBridges() && !hasDirectMembers()`)里,桥的投递窗口下沿是「现在 + 1.5s」
- *  (§6.2),故距此刻不足 `BRIDGE_DRAIN_TAIL_UNREACHABLE_MS` 的那段内容**结构性投不出去**
- *  (详见 rates.ts 该常量的推导注释);再叠一道桥队列硬上限 `BRIDGE_QUEUE_HARD_CAP_MS`
- *  (排空期间队列只出不进),两端取小即是能承诺的排空量,且不得为负。
+ *  纯桥组(`hasBridges() && !hasDirectMembers()`)里,桥**结构上拿不到**「距此刻
+ *  `BRIDGE_PUSH_FLOOR_US + ahead` 以内」的内容,而排空公式已先扣过 `ANCHOR_SAFE_LEAD_US`,
+ *  故还需从排空需求里**减掉** `BRIDGE_END_DRAIN_MARGIN_MS`;再以桥队列硬上限
+ *  `BRIDGE_END_DRAIN_SAFE_MAX_MS`(= `BRIDGE_QUEUE_HARD_CAP_MS`)兜顶,结果为
+ *  `min(contentMs − MARGIN, SAFE_MAX)`,且不得为负。
+ *  推导与真机判据(退出后 8.06s 断料 ⇒ 可承诺 8000ms)见 rates.ts 该常量注释。
  *
- *  **非纯桥组**(混合组 / 纯直连组)一律原值返回 —— 直连 sendspin 设备的缓冲
- *  确实需要真排空,砍短会切掉曲尾,行为必须与引入本函数前逐字节一致。
+ *  **非纯桥组**(混合组 / 纯直连组)一律原值返回 —— 直连 sendspin 设备的缓冲确实有
+ *  ~9.78s,提前 advance 会让 `BOUNDARY{track}` 的 `player.flush()` 切掉它的尾巴,
+ *  行为必须与引入本函数前逐字节一致。
  *
  *  @param rawDrainMs 排空需求(ms);非有限值/≤0 一律归 0。
  *  @param pureBridge 是否纯桥组(调用方按 hasBridges / hasDirectMembers 判定)。
@@ -167,9 +170,9 @@ export interface EndDrainCap {
 export function capEndDrainMs(rawDrainMs: number, pureBridge: boolean): EndDrainCap {
   const contentMs = Number.isFinite(rawDrainMs) && rawDrainMs > 0 ? rawDrainMs : 0;
   if (!pureBridge) return { contentMs, drainMs: contentMs, clamped: false };
-  // Math.max(..., 0):rawDrainMs 可能小于不可达段 ⇒ 结果是 0 而不是负数(负等待无意义)。
+  // Math.max(..., 0):contentMs 可能小于余量 ⇒ 结果是 0 而不是负数(负等待无意义)。
   const drainMs = Math.max(
-    Math.min(contentMs - BRIDGE_DRAIN_TAIL_UNREACHABLE_MS, BRIDGE_QUEUE_HARD_CAP_MS),
+    Math.min(contentMs - BRIDGE_END_DRAIN_MARGIN_MS, BRIDGE_END_DRAIN_SAFE_MAX_MS),
     0,
   );
   return { contentMs, drainMs, clamped: drainMs < contentMs };

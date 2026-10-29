@@ -94,28 +94,39 @@ export const BRIDGE_STALL_NO_FRAME_MS = 2_000;
 // 曲末排空:纯桥组的投递上界(2026-11 真机:换歌 RTP 断流 3~7s)
 // ---------------------------------------------------------------------------
 
-/** 纯桥组「结构性投不出去」的尾段(ms):这段内容的排空承诺是**白等**。
+/** 纯桥组「结构性拿不到」的尾段(ms):这段内容的排空承诺是**白等**,要从排空需求里**减掉**。
+ *
+ *  🔴 注意方向:**它是从「排空需求」里减,不是从「上限 8000」里扣**(见下一条注释)。
  *
  *  **推导**(三个既有常量,任一变动都要重推本值):
- *    投递下沿 `BRIDGE_PUSH_FLOOR_US`(1500ms,见 sendspin/constants.ts)
- *    + 纯桥组 ahead(800ms,= `ANCHOR_SAFE_LEAD_US` 量级)
- *    − `ANCHOR_SAFE_LEAD_US`(800ms,排空公式里已经先扣掉的那一段)
- *    = **1500ms**。
+ *   - 桥的投递窗口下沿 = `BRIDGE_PUSH_FLOOR_US`(1500ms,见 sendspin/constants.ts)
+ *     + `ahead`(800ms)⇒ 桥**结构上永远拿不到「距此刻 2300ms 以内」的内容**
+ *     (比下沿更早的可听位置桥直接水位推过,不投);
+ *   - 而排空公式 `rawDrainMs = (cursorUs − nowUs() − ANCHOR_SAFE_LEAD_US)/1000` **已经**
+ *     先扣掉了 `ANCHOR_SAFE_LEAD_US`(800ms)。
+ *   ⇒ 还需再减掉的那一段 = 2300 − 800 = **1500ms**。
  *
- *  **为什么**:曲末排空期间 `pushLoop` 已退出、**不再产出任何 PCM**,而桥的投递窗口
- *  下沿是「现在 + 1.5s」(§6.2):比它更早的可听位置桥根本不接(水位推过)。所以
- *  「距此刻不足 1500ms 的那部分内容」对桥是**结构性不可达**的 —— 承诺排空它只是
- *  空等,真机实测白等 1.72s(`bridge pacing rebase: +2987790µs`),表现为换歌处
- *  服务端 RTP 完全静默 3~7s(45min 8 次,与换歌 8/8 对齐)。
+ *  **真机判据(不要凭直觉改数值)**:曲末 pushLoop 退出瞬间,内容累计还剩
+ *  `extraDrain(9784) + ANCHOR_SAFE_LEAD(800) = 10584ms`;其中**真能投出去**的只有
+ *  `10584 − 2300 = 8284ms`;抓包实测桥在 pushLoop 退出后 **8.06 秒断料**,与 8284ms
+ *  差一个 250ms 投递 tick,吻合。⇒ 设备侧真实可播音频 ≈ 8.06s,既不是 8s(队列上限),
+ *  更不是 9.78s(排空需求)。
+ *  ⚠️ 因此排空量只能由 `min(raw − 1500, 8000)` 决定:**若改成「8000 − 1500 = 6500」,
+ *  排到 6500ms 就 advance,设备侧还剩约 1.5 秒真实音频没播**,随后的
+ *  `BOUNDARY{track}` 会 `streamAborted + player.flush()` 把它直接砍掉 ⇒ 每首歌结尾
+ *  少 1.5 秒(比边界静默严重得多)。历史上这一版已被打回,勿再改回 6500。
  *
- *  **叠加**:仅扣掉不可达段仍可能超过桥队列存量(硬上限 `BRIDGE_QUEUE_HARD_CAP_MS`
- *  = 8s,排空期间队列只出不进),故两者的**较小值**才是纯桥组可承诺的排空量
- *  (`bridgeMath.capEndDrainMs` 两端取小)。
+ *  消费点:`bridgeMath.capEndDrainMs`(只对**纯桥组**生效;混合组/纯直连组一律原值)。 */
+export const BRIDGE_END_DRAIN_MARGIN_MS = 1_500;
+
+/** 纯桥组排空量的**硬上限**(ms)= 桥队列硬上限(排空期间 pushLoop 已退出、桥队列只出不进,
+ *  存量最多就是它)。
  *
- *  ⚠️ 只对**纯桥组**(有桥且无直连 sendspin 成员)生效:混合组还有直连设备,
- *  它的缓冲确实需要真排空(见 streamEngine 曲末排空段注释),砍短会切掉尾巴。
- *  消费点:sendspin/streamEngine.ts 曲末排空。 */
-export const BRIDGE_DRAIN_TAIL_UNREACHABLE_MS = 1_500;
+ *  🔴 **不要再写成 `BRIDGE_QUEUE_HARD_CAP_MS − BRIDGE_END_DRAIN_MARGIN_MS`**:1500 的余量
+ *  已经在上一条里从「排空需求」中减掉了,这里再扣一次就是双重扣减 ⇒ 每首歌结尾被
+ *  `player.flush()` 砍掉约 1.5 秒真实音频(推导与真机判据见 BRIDGE_END_DRAIN_MARGIN_MS)。
+ *  保留本别名只是为了让「上限」这个概念有名字、并被测试钉住。 */
+export const BRIDGE_END_DRAIN_SAFE_MAX_MS = BRIDGE_QUEUE_HARD_CAP_MS;
 
 /** RAOP 发送节拍安全余量(吸收 25ms 泵抖动与 socket 调度)。
  *
