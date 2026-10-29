@@ -2,6 +2,22 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.9.7] - 2026-10-29
+
+### Fix / 全屋组 HiVi 播放约 2 分钟后无声、每次换歌后约 36 秒无声（v4.9.6 看门狗误判链）
+
+- **现象**：跟 v4.9.5/v4.9.6 又不同——服务端数据面完全健康（`deltaUs≈1060ms`、`driftUs=0`、包流不断、`silenceChunks` 不涨），但设备**每首歌播到约 120 秒**就没声；换歌后能自己恢复，恢复前有约 36 秒的空白。组内 sendspin 成员（esp32）始终正常。
+- **根因（三条缺陷叠加，前一条 v4.9.6 新引入）**：
+  1. **B 的判据对主力设备结构性失效**：`lastDeviceSignalAt` 只认设备**主动**发起的包（ctrl 重传请求、NTP timing 请求）。HiVi/MUZO（2017 固件）在**曲目后半段正常播放时就会停发 timing 请求**——240 实证 3s 一次的心跳（20 次/分钟）在 05:31、05:32 两个整分钟完全消失，而同一段该曲 `45739 chunks / 365.1s` 全程健康播完。于是**每首歌播到 120s 必被误判假死一次**。
+  2. **`reconnectRaop()` 掐死刚起的新流**：它的 `await player.connect()` 是真实时间窗口（实测 ~320ms），窗口内 `maybeBeginStream` 因 `streamAborted` 被复位而在 **oldPlayer** 上起了新流；connect 返回后无条件 `oldPlayer.forceClose()`，把刚跑 0.3~0.6s 的新流连根掐断。
+  3. **`streamBridge().then()` 不区分结束原因**：一律 `scheduleRaopReconnect("stream ended")`，而 `pullChunk()` 返回 null 的条件是 `closed || streamAborted` ⇒ **曲目播完必然等于「断流」**。三者组成闭环：`liveness 触发 → 重连 → 掐死新流 → 再判断流 → 再重连`，实测 6 轮 / 36 秒。
+- **修复 A（看门狗缺省关闭）**：`raopBridgeLivenessWatchdogEnabled()` 改为只有 `MF_BRIDGE_RAOP_LIVENESS_WATCHDOG=1|true` 才开。判据在这台设备上误报率 100%，而它想捕获的真·假死可由用户切歌 / 整组 play 恢复（已实证）。代码与纯判据 `livenessWatchdogShouldFire` 全部保留。
+- **修复 B（重连互斥门）**：新增 `raopReconnectInFlight`，`reconnectRaop()` 全程置位（含 `await connect()` 窗口），`maybeBeginStream()` 门内直接 return，把起流推迟到下一帧 AUDIO 自然触发；重连重入由同一道门挡掉（内层早退不得复位外层门）；`oldPlayer.forceClose()` 另加 `if (this.player === player)` 守卫。
+- **修复 C（结束原因上报）**：`streamBridge()` 返回 `BridgeStreamEndReason`（`producer` / `send` / `destroy` / `stopped`），`.then()` **只在 `send` 时重连**——仅 `sendChunk` 返 false（设备侧真断开）才算断流；`producer`（曲目播完/上层停流）、`destroy`、`stopped` 一律交 onBoundary 换代处置。
+- **验证**：新增 `tests/airplay/bridgeReconnectGate.test.ts`（3 条：门内不起流 / 门内重入不新建 player 且不复位外层门 / 门关闭后恢复可起流）；`raopGapFill.test.ts` 同步改为断言看门狗缺省 OFF；tests/airplay 55 文件 / 757 用例全绿；29 把守卫全绿。240 热补丁实测 `WATCHDOG=[]`、liveness 日志 0 条、`deltaUs≈1060ms`、`driftUs=0`、`silenceChunks=0`。
+- **保留**：v4.9.6 的 A（垫片窗静音续流）已实证有效（换歌窗 `gap-fill: 282 chunks / 2251ms` 盖满 2.5s），缺省仍 ON，本次不动。
+- **文档**：airplay 权威文档 v4.9.7 增补、KNOWN_ISSUES 新增 MF-006、STALL_MONITORING 盲区补充。
+
 ## [4.9.6] - 2026-10-29
 
 ### Fix / HiVi（MUZO 类固件）播放约 1 小时后接收端假死、永久无声（换歌垫片窗 RTP 断流）

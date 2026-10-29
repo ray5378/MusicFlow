@@ -1705,3 +1705,63 @@ marker,新流重锚语义**不变**(0xE0 + 新 startTs + 垫片窗照旧)。`may
 **为什么不取消垫片窗**:切歌垫片(冷 2500/暖 800)是 HiVi 0xE0 就绪窗口的实测定案,
 与「FLUSH/排空/aligner 续走」三条被真机否决的捷径无关 —— 本增补不消除可听间隙、
 不续走内容、不动 aligner,只在窗内让 RTP 不断流。
+
+---
+
+## v4.9.7 增补(看门狗缺省关闭 + 重连互斥门 + 结束原因,2026-10-29)
+
+**现场(240 实测)**:一首 365.1s 的曲子 `bridge stream done: 45739 chunks / 365.1s`
+**全程健康播完**,但紧接其后的 36 秒里设备完全无声,日志呈 6 轮循环:
+
+```
+05:33:00.204  liveness watchdog: 设备主动信号已停 ≥120s ⇒ 判假死,自动完整重握手
+05:33:00.219  bridge stream done: 45739 chunks / 365.1s     ← 该曲健康播完
+05:33:00.388  anchor gen=43000129                            ← 新流起在 oldPlayer 上
+05:33:00.705  raop reconnected(新 RECORD)
+05:33:00.708  bridge stream break: sendChunk false destroying=true
+05:33:00.708  bridge stream done: 40 chunks / 0.3s           ← 刚起 0.3s 即被掐死
+05:33:00.708  raop reconnect in 5491ms (attempt 1, stream ended)
+... 重复 6 轮,共 ~36s,直到 onBoundary 换代把流起在正确实例上才恢复
+```
+
+**根因(三个缺陷叠加,v4.9.6 新引入其中两条)**:
+
+1. **B 的判据对主力设备结构性失效**(v4.9.6 引入)。`lastDeviceSignalAt` 只认设备**主动**
+   发起的两类包:ctrl 重传请求、NTP timing 请求。HiVi/MUZO(2017 固件)在**曲目后半段
+   正常播放时就会停止发送 timing 请求** —— 240 实证该机 3s 一次的心跳(20 次/分钟)在
+   05:31、05:32 两个整分钟**完全消失**,而同一段该曲数据面 `deltaUs` 稳、`driftUs=0`、
+   包流未断。于是**每首歌播到 120s 必被误判假死一次**。用户观察到的「播放一会就没声」
+   就是这个 120s 定时器。
+
+2. **`reconnectRaop()` 掐死刚起的新流**(v4.9.6 之前已有,被 1 引爆)。它的
+   `await player.connect()` 是一个真实的时间窗口(实测 ~320ms),窗口内
+   `maybeBeginStream` 因 `streamAborted` 被复位而在 **oldPlayer** 上起了新流;connect
+   返回后无条件 `oldPlayer.forceClose()` ⇒ 把刚跑 0.3~0.6s 的新流连根掐断。
+
+3. **`.then()` 不区分结束原因**(v4.9.6 之前已有,是放大器)。`streamBridge()` 结束时
+   一律 `scheduleRaopReconnect("stream ended")`,而 `pullChunk()` 返回 null 的条件是
+   `closed || streamAborted` ⇒ **曲目播完必然等于「断流」** ⇒ 每首歌播完都触发一次重连,
+   与 2 组成死循环的闭环。
+
+**修复(三处,互相独立)**:
+
+- **B 缺省关闭**。`raopBridgeLivenessWatchdogEnabled()` 改为只有
+  `MF_BRIDGE_RAOP_LIVENESS_WATCHDOG=1|true` 才开(原缺省 ON)。理由:判据在这台设备上
+  误报率 100%,而它想捕获的真·假死可由用户切歌 / 整组 play 恢复(已实证)。代码与
+  纯判据 `livenessWatchdogShouldFire` 全部保留,供将来有可靠判据时复用。
+- **重连互斥门**。新增 `raopReconnectInFlight`:`reconnectRaop()` 全程置位(含
+  `await connect()` 窗口),`maybeBeginStream()` 在门内直接 return,并把起流推迟到
+  下一帧 AUDIO 自然触发。重连重入也由同一道门挡掉(内层早退**不得**在 finally 复位
+  外层门)。`oldPlayer.forceClose()` 另加守卫 `if (this.player === player)`。
+- **结束原因上报**。`streamBridge()` 返回 `BridgeStreamEndReason`
+  (`producer` | `send` | `destroy` | `stopped`),`.then()` **只在 `send` 时重连**
+  —— 即仅 `sendChunk` 返 false(设备侧真断开)才算断流;`producer`(曲目播完/上层停流)、
+  `destroy`、`stopped` 一律不重连,交 onBoundary 换代处置。
+
+**验证**:`tests/airplay/bridgeReconnectGate.test.ts`(3 条)钉死「门内不起流」「门内重入
+不新建 player 且不复位外层门」「门关闭后恢复可起流」;`raopGapFill.test.ts` 同步改为
+断言看门狗缺省 OFF。240 热补丁后实测 `WATCHDOG=[]`、liveness 日志 0 条、
+`deltaUs≈1060ms`、`driftUs=0`、`silenceChunks=0`。
+
+**A 保留**:垫片窗静音续流(gap-fill)已实证有效(换歌瞬间 282 chunks / 2251ms 盖满
+2.5s 垫片窗),缺省仍 ON,本次不动。

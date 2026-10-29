@@ -149,3 +149,7 @@ IO some/avg10 高、`%wa` 高、内存见底 → 公共路径抖动，先隔离 
 3. `monitor.csv` 切歌窗 `stall` 可短暂为 1，中段应回 0；
 4. `tsc --noEmit` + 相关 vitest + `check-i18n` 绿；
 5. 真机体感验收（服务端全绿仍要听一遍）。
+- **v4.9.7 盲区补充**:「liveness watchdog 触发」本身**不再是异常证据** —— 该判据对
+  HiVi/MUZO 结构性误报(正常播放时也停发 timing 请求),v4.9.7 起缺省关闭。若看到
+  `bridge stream done: 4x chunks / 0.3~0.6s` 连续多轮(而非单首歌的完整时长),才是
+  「重连掐流死循环」的真信号。
