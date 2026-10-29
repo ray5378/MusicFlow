@@ -306,21 +306,21 @@ export function raopBridgeGapFillEnabled(): boolean {
 /** 消费停滞看门狗开关(MF_BRIDGE_RAOP_LIVENESS_WATCHDOG)。缺省 ON;0/false = 关。
  *  设备主动信号(NTP 请求/重传请求)停摆超阈值 ⇒ 判接收端假死 ⇒ 自动完整重握手。 */
 export function raopBridgeLivenessWatchdogEnabled(): boolean {
-  // v4.9.7:**缺省关闭**(v4.9.6 缺省开启)。判据「设备主动信号停摆」对本项目主力
-  // 设备(HiVi/MUZO 2017 固件)结构性不可靠 —— 240 实证该机在曲目后半段**正常播放**
-  // 时就会停止发送 NTP timing 请求:每分钟 20 次的 3s 心跳在 05:31/05:32 完整消失
-  // 两分钟,而同一段该曲 45739 chunks / 365.1s 全程健康播完(deltaUs 稳、driftUs=0)。
-  // 于是每首歌必被误判假死一次,触发重连接到旧 player 上新流的连根掐断,反而制造
-  // 36s 无声(比它想修的假死更频繁)。真·假死可由用户切歌 / 整组 play 恢复(已实证),
-  // 不值得默认赌误判。需要实验时显式开:MF_BRIDGE_RAOP_LIVENESS_WATCHDOG=1
+  // v4.9.8:恢复**缺省开启**,但判据源换成 ctrl 重传请求停摆(lastCtrlSignalAt) ——
+  // v4.9.7 缺省关闭是因为旧判据(合流 lastDeviceSignalAt,含 timing)对 MUZO 结构性
+  // 误报(正常播放停发 timing)。新判据:正常收包时 ctrl 请求持续活跃(~10/s),
+  // audio 通道死亡后归零(240 实证 292s 零请求,时间线与用户失聪完全吻合)。
+  // 残余误报面=长期零丢包的完美链路(2.4G UDP 125 包/s 现实中不存在),误报代价
+  // 是一次 reconnect(~1-2s),远小于通道死亡无人理睬。
   const v = process.env.MF_BRIDGE_RAOP_LIVENESS_WATCHDOG;
-  return v === "1" || v === "true";
+  return !(v === "0" || v === "false");
 }
 
 /** 看门狗阈值 ms(MF_BRIDGE_RAOP_LIVENESS_MS,缺省 120000,下限 30000)。 */
 export function raopBridgeLivenessMs(): number {
   const v = Number(process.env.MF_BRIDGE_RAOP_LIVENESS_MS);
-  return Number.isFinite(v) && v >= 30000 ? v : 120000;
+  // v4.9.8:缺省 300s —— 正常 ctrl 请求 ~10/s,5min 静默概率≈0;取宽防偶发网络平静。
+  return Number.isFinite(v) && v >= 30000 ? v : 300000;
 }
 
 /** 看门狗触发判据(纯函数,便于测试):设备主动信号停摆超阈值且当前确在推流。
@@ -1242,12 +1242,12 @@ export class BridgeSession {
         streaming: this.aligner !== null,
         reconnectInFlight: this.livenessReconnectInFlight,
         reconnectTimerSet: this.raopReconnectTimer !== null,
-        quietMs: this.player !== null ? Date.now() - this.player.lastDeviceSignalAt : 0,
+        quietMs: this.player !== null ? Date.now() - this.player.lastCtrlSignalAt : 0,
         thresholdMs: raopBridgeLivenessMs(),
       })
     ) {
       this.livenessReconnectInFlight = true;
-      log.warn(`[airplay-bridge] liveness watchdog: device=${this.deviceId} 设备主动信号已停 ≥${Math.round(raopBridgeLivenessMs() / 1000)}s ⇒ 判接收端假死,自动完整重握手(新 RECORD)`);
+      log.warn(`[airplay-bridge] liveness watchdog: device=${this.deviceId} ctrl 重传请求已停 ≥${Math.round(raopBridgeLivenessMs() / 1000)}s ⇒ 判 audio 通道死亡(240 实证 292s 零请求),自动完整重握手(新 RECORD)`);
       void this.reconnectRaop()
         .catch(() => { /* 重连失败已由 scheduleRaopReconnect 接管退避 */ })
         .finally(() => {

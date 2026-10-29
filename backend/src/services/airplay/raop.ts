@@ -358,6 +358,11 @@ export class RaopPlayer {
   /** 设备最近一次**主动**信号时刻(NTP 请求/重传请求都是设备发起)。
    *  消费停滞看门狗的活性源(2026-10-29):数据面再健康,设备不收包就是假死。 */
   lastDeviceSignalAt = Date.now();
+  /** 设备 ctrl 通道最后一次主动信号(重传请求)时刻(v4.9.8 看门狗判据源)。
+   *  ⚠️ 与 lastDeviceSignalAt 的区别:后者被 timing 请求一并刷新,而 MUZO 正常播放
+   *  时会停发 timing(结构性),不能作 audio 通道活性判据;ctrl 重传请求在正常收包时
+   *  持续活跃(240 实证 ~10/s),audio 通道死亡后归零 —— 240 实证 292s 零请求。 */
+  lastCtrlSignalAt = Date.now();
   /** 桥接路径 latePackets(§3.3):sendAt 已过期仍「追发但不改 RTP 映射」的包数。
    *  连续过期说明启动 lead 不足 —— 由上层(BridgeSession stats tick)报警/重锚。 */
   private bridgeLatePackets = 0;
@@ -719,6 +724,7 @@ export class RaopPlayer {
       // lost packet request: 4-byte RAOP header + seqno(2) + n(2), type 0x55|0x80
       if (msg.length >= 8 && (msg[1] & 0x7f) === 0x55) {
         this.lastDeviceSignalAt = Date.now();
+        this.lastCtrlSignalAt = Date.now();
         const seqno = msg.readUInt16BE(4);
         const n = msg.readUInt16BE(6);
         this.onLoss(seqno, n, controlRport);

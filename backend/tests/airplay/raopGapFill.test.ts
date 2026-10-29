@@ -115,28 +115,28 @@ describe("env 开关与阈值", () => {
     }
   });
 
-  it("GAP_FILL 缺省 ON;LIVENESS_WATCHDOG 缺省 OFF(v4.9.7),仅 1/true 开启", () => {
+  it("GAP_FILL / LIVENESS_WATCHDOG 缺省 ON(v4.9.8 判据源=ctrl 停摆);0/false 关闭", () => {
     expect(raopBridgeGapFillEnabled()).toBe(true);
-    // v4.9.7:看门狗缺省关闭 —— 「设备主动信号停摆」对 MUZO/HiVi 的正常静默结构性
-    // 误判(240 实证:曲目后半段停发 timing 请求 120s+,该曲仍健康播完 365.1s)。
-    expect(raopBridgeLivenessWatchdogEnabled()).toBe(false);
+    // v4.9.7 曾缺省关闭:旧判据(合流 lastDeviceSignalAt,含 timing)对 MUZO 正常静默
+    // 结构性误判。v4.9.8 判据源换成 ctrl 重传请求停摆(正常 ~10/s 活跃,通道死亡归零)
+    // ⇒ 误报面消失,恢复缺省开启。
+    expect(raopBridgeLivenessWatchdogEnabled()).toBe(true);
     process.env.MF_BRIDGE_RAOP_GAP_FILL = "0";
     expect(raopBridgeGapFillEnabled()).toBe(false);
-    // 显式开启(实验用):只有 "1"/"true" 算开。
+    process.env.MF_BRIDGE_RAOP_LIVENESS_WATCHDOG = "0";
+    expect(raopBridgeLivenessWatchdogEnabled()).toBe(false);
+    process.env.MF_BRIDGE_RAOP_LIVENESS_WATCHDOG = "false";
+    expect(raopBridgeLivenessWatchdogEnabled()).toBe(false);
     process.env.MF_BRIDGE_RAOP_LIVENESS_WATCHDOG = "1";
     expect(raopBridgeLivenessWatchdogEnabled()).toBe(true);
     process.env.MF_BRIDGE_RAOP_LIVENESS_WATCHDOG = "true";
     expect(raopBridgeLivenessWatchdogEnabled()).toBe(true);
-    process.env.MF_BRIDGE_RAOP_LIVENESS_WATCHDOG = "false";
-    expect(raopBridgeLivenessWatchdogEnabled()).toBe(false);
-    process.env.MF_BRIDGE_RAOP_LIVENESS_WATCHDOG = "0";
-    expect(raopBridgeLivenessWatchdogEnabled()).toBe(false);
   });
 
-  it("LIVENESS_MS 缺省 120000,下限 30000,env 可上调", () => {
-    expect(raopBridgeLivenessMs()).toBe(120000);
+  it("LIVENESS_MS 缺省 300000(v4.9.8),下限 30000,env 可上调", () => {
+    expect(raopBridgeLivenessMs()).toBe(300000);
     process.env.MF_BRIDGE_RAOP_LIVENESS_MS = "10";
-    expect(raopBridgeLivenessMs()).toBe(120000); // 低于下限回落缺省
+    expect(raopBridgeLivenessMs()).toBe(300000); // 低于下限回落缺省
     process.env.MF_BRIDGE_RAOP_LIVENESS_MS = "30000";
     expect(raopBridgeLivenessMs()).toBe(30000);
     process.env.MF_BRIDGE_RAOP_LIVENESS_MS = "60000";
