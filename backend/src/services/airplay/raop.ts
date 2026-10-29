@@ -347,6 +347,9 @@ export class RaopPlayer {
   private destroying = false;
   private stats: { chunks: number; maxGapMs: number; reanchors: number; lastSendMs: number; startMs: number } | null = null;
   private lossRequests = 0;
+  /** 设备最近一次**主动**信号时刻(NTP 请求/重传请求都是设备发起)。
+   *  消费停滞看门狗的活性源(2026-10-29):数据面再健康,设备不收包就是假死。 */
+  lastDeviceSignalAt = Date.now();
   /** 桥接路径 latePackets(§3.3):sendAt 已过期仍「追发但不改 RTP 映射」的包数。
    *  连续过期说明启动 lead 不足 —— 由上层(BridgeSession stats tick)报警/重锚。 */
   private bridgeLatePackets = 0;
@@ -707,6 +710,7 @@ export class RaopPlayer {
     this.ctrlSocket!.on("message", (msg) => {
       // lost packet request: 4-byte RAOP header + seqno(2) + n(2), type 0x55|0x80
       if (msg.length >= 8 && (msg[1] & 0x7f) === 0x55) {
+        this.lastDeviceSignalAt = Date.now();
         const seqno = msg.readUInt16BE(4);
         const n = msg.readUInt16BE(6);
         this.onLoss(seqno, n, controlRport);
@@ -720,6 +724,7 @@ export class RaopPlayer {
     // counter into its low NTP word) so the device can compute a sane
     // roundtrip (gettime_ms() - reference). recv/send = our current NTP.
     this.timeSocket!.on("message", (msg, rinfo) => {
+      this.lastDeviceSignalAt = Date.now();
       const header = msg.subarray(0, 4);
       const reqSendTime = msg.subarray(24, 32);
       const reply = Buffer.alloc(32);
@@ -778,6 +783,35 @@ export class RaopPlayer {
     }
     log.info(`prime silence: ${count} chunks -> ${this.opts.host}:${this.serverAudioPort} (MF_BRIDGE_RAOP_CONNECT_PRIME, no SYNC, marker reserved)`);
     return true;
+  }
+
+  /** 换歌垫片窗静音续流(2026-10-29,240 实证根因):onBoundary(track) 到下一首
+   *  first packet 之间有 ~2.5-3s 垫片窗(冷垫片 pendingTrackLeadUs 2500 + TTFB),
+   *  期间 RTP 完全断流 ⇒ 设备 1.05s 缓冲放完后真饿 ~2s ⇒ MUZO/Linkplay 固件
+   *  「欠载即假死、不自动重缓冲」,反复数次后接收端彻底放弃(零 timing/零重传,
+   *  服务端数据面全健康也救不回),只有完整重握手能唤醒。
+   *  本方法在垫片窗内按 8ms 节拍继续发静音块(seq 连续、时间戳续走旧时间线、
+   *  无 SYNC),接收端全程有包不假死;新流仍由 0xE0 marker + 新 startTs 重锚,
+   *  与垫片时间线无关。与 primeSilence 同语义:结束复位 started ⇒ 新流真·首包
+   *  仍带 marker 位。返回发出的块数;shouldStop() 为真 / destroy / maxMs 到顶即停。 */
+  async fillGapSilence(opts: { shouldStop: () => boolean; maxMs: number }): Promise<number> {
+    if (!this.audioSocket || this.destroying) return 0;
+    if (!Number.isFinite(this.serverAudioPort) || this.serverAudioPort <= 0 || this.serverAudioPort > 65535) return 0;
+    const zeros = Buffer.alloc(CHUNK_LEN * 4);
+    const stepMs = (CHUNK_LEN / this.opts.sampleRate) * 1000;
+    const deadline = Date.now() + opts.maxMs;
+    let next = performance.now();
+    let sent = 0;
+    while (!opts.shouldStop() && !this.destroying && Date.now() < deadline) {
+      if (!this.sendChunk(zeros)) break;
+      sent++;
+      next += stepMs;
+      const wait = next - performance.now();
+      if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+      else next = performance.now();
+    }
+    this.started = false; // 新流真·首包保留 marker 位(与 primeSilence 同语义)
+    return sent;
   }
 
   /** Send one ALAC chunk as an RTP audio packet. Returns false when stopped. */

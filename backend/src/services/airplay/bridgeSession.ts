@@ -295,6 +295,49 @@ export function raopNowAnchorEnabled(): boolean {
   return !(v === "0" || v === "false");
 }
 
+/** 换歌垫片窗静音续流开关(MF_BRIDGE_RAOP_GAP_FILL)。缺省 ON;0/false = 关闭回
+ *  「垫片窗 RTP 断流」旧行为。2026-10-29 240 实证:断流窗反复饿死 MUZO 接收端
+ *  (欠载假死)⇒ 永久无声;续流让接收端全程有包(可听间隙不变,仍是静音)。 */
+export function raopBridgeGapFillEnabled(): boolean {
+  const v = process.env.MF_BRIDGE_RAOP_GAP_FILL;
+  return !(v === "0" || v === "false");
+}
+
+/** 消费停滞看门狗开关(MF_BRIDGE_RAOP_LIVENESS_WATCHDOG)。缺省 ON;0/false = 关。
+ *  设备主动信号(NTP 请求/重传请求)停摆超阈值 ⇒ 判接收端假死 ⇒ 自动完整重握手。 */
+export function raopBridgeLivenessWatchdogEnabled(): boolean {
+  const v = process.env.MF_BRIDGE_RAOP_LIVENESS_WATCHDOG;
+  return !(v === "0" || v === "false");
+}
+
+/** 看门狗阈值 ms(MF_BRIDGE_RAOP_LIVENESS_MS,缺省 120000,下限 30000)。 */
+export function raopBridgeLivenessMs(): number {
+  const v = Number(process.env.MF_BRIDGE_RAOP_LIVENESS_MS);
+  return Number.isFinite(v) && v >= 30000 ? v : 120000;
+}
+
+/** 看门狗触发判据(纯函数,便于测试):设备主动信号停摆超阈值且当前确在推流。
+ *  暂停期不判(AP2 出口不判;重连进行中/已排程不重复触发)。 */
+export function livenessWatchdogShouldFire(opts: {
+  enabled: boolean;
+  isAp2: boolean;
+  paused: boolean;
+  connected: boolean;
+  closed: boolean;
+  hasPlayer: boolean;
+  streaming: boolean;
+  reconnectInFlight: boolean;
+  reconnectTimerSet: boolean;
+  quietMs: number;
+  thresholdMs: number;
+}): boolean {
+  if (!opts.enabled) return false;
+  if (opts.isAp2 || opts.paused || !opts.connected || opts.closed) return false;
+  if (!opts.hasPlayer || !opts.streaming) return false;
+  if (opts.reconnectInFlight || opts.reconnectTimerSet) return false;
+  return opts.quietMs > opts.thresholdMs;
+}
+
 export function planBridgeAnchor(opts: {
   firstFrameTsUs: bigint;
   latencyFrames: number;
@@ -591,6 +634,11 @@ export class BridgeSession {
   // ---- Phase 5:生命周期(代次重锚 / 暂停 / stall / RAOP 重连) ----
   /** 推流被终态打断(boundary/stall):producer 立刻返回 null,旧 streamBridge 循环退出。 */
   private streamAborted = false;
+  /** A(垫片窗静音续流):token 递增令在跑 filler 退出;promise 供新流首包前收尾。 */
+  private gapFillerToken = 0;
+  private gapFillerPromise: Promise<number> | null = null;
+  /** B(消费停滞看门狗):重连进行中防重入。 */
+  private livenessReconnectInFlight = false;
   /** 组泵暂停状态(HEARTBEAT flags bit1,§5.4)。 */
   private pausedState = false;
   private pausedAtUs: bigint | null = null;
@@ -816,6 +864,43 @@ export class BridgeSession {
     // (player.flush 置 started=false ⇒ 新流首包带 0xE0 marker,接收端重锚)。
     this.streamAborted = true;
     this.player?.flush();
+    // A(2026-10-29):垫片窗内静音续流 —— 旧流已停、新流未起,RTP 断流 ~2.5-3s
+    // 会反复把 MUZO 接收端饿到假死(实证:零 timing/零重传后只有完整重握手能救)。
+    // 续流只发静音,可听间隙不变;新流 0xE0 重锚语义不变。
+    this.startGapFiller();
+  }
+
+  /** A:垫片窗静音续流(仅 RAOP 出口;AP2 不启用)。maxMs 8s 封顶:下一首真不来
+   *  就回到旧断流行为,绝不无限续。filler 与新流互斥由 stopGapFiller 保证。 */
+  private startGapFiller(): void {
+    const player = this.player;
+    if (!player || this.ap2Session !== null || this.opts.dry) return;
+    if (!raopBridgeGapFillEnabled()) return;
+    if (typeof (player as unknown as { fillGapSilence?: unknown }).fillGapSilence !== "function") return; // 测试桩/旧 player
+    const token = ++this.gapFillerToken;
+    const startedAt = Date.now();
+    this.gapFillerPromise = player
+      .fillGapSilence({
+        shouldStop: () => token !== this.gapFillerToken || this.closed || this.pausedState,
+        maxMs: 8000,
+      })
+      .then((n) => {
+        if (n > 0) {
+          log.info(`[airplay-bridge] ${JSON.stringify({ ev: "gap-fill", dev: this.deviceId, chunks: n, ms: Date.now() - startedAt })}`);
+        }
+        return n;
+      })
+      .catch(() => 0);
+  }
+
+  /** 停掉垫片续流并等它收尾(新流首包发出前必须完成,防 seq/时间线交错;
+   *  filler 每 8ms 一拍,50ms 宽限足够干净退出)。 */
+  private async stopGapFiller(): Promise<void> {
+    this.gapFillerToken++;
+    const p = this.gapFillerPromise;
+    this.gapFillerPromise = null;
+    if (!p) return;
+    await Promise.race([p, new Promise((r) => setTimeout(r, 50))]);
   }
 
   /** 链路 stall(2s 无任何帧,含心跳):sendspin 子进程死亡/链路断。
@@ -867,6 +952,9 @@ export class BridgeSession {
   private async maybeBeginStream(): Promise<void> {
     if (this.opts.dry || this.closed || !this.connected || this.firstFrameTsUs === null) return;
     if (this.aligner !== null) return;
+    // A:新流首包发出前必须收掉垫片续流(防两路同时 sendChunk 打乱 seq/时间线)。
+    // 仅在 filler 真在跑时 await(否则保持本函数原有同步语义,测试桩不破)。
+    if (this.gapFillerPromise !== null) await this.stopGapFiller();
     const player = this.player;
     const session = this.raopSession;
     // AP2 realtime 没有 RAOP 会话对象(player/raopSession 恒 null)⇒ 判空必须放行 AP2;
@@ -1111,6 +1199,32 @@ export class BridgeSession {
   /** §10.5 stats tick:每设备一行 JSON(ev:"tick"),clock 恒 local-rtp-ntp(同源 host 单调钟)。 */
   private emitStatsTick(): void {
     if (this.closed) return;
+    // B(消费停滞看门狗,2026-10-29):设备主动信号(NTP 请求/重传请求)停摆超阈值
+    // ⇒ 接收端假死(数据面再健康也救不回,实证只有完整重握手能唤醒)⇒ 自动重连。
+    if (
+      livenessWatchdogShouldFire({
+        enabled: raopBridgeLivenessWatchdogEnabled(),
+        isAp2: this.ap2Session !== null,
+        paused: this.pausedState,
+        connected: this.connected,
+        closed: this.closed,
+        hasPlayer: this.player !== null,
+        streaming: this.aligner !== null,
+        reconnectInFlight: this.livenessReconnectInFlight,
+        reconnectTimerSet: this.raopReconnectTimer !== null,
+        quietMs: this.player !== null ? Date.now() - this.player.lastDeviceSignalAt : 0,
+        thresholdMs: raopBridgeLivenessMs(),
+      })
+    ) {
+      this.livenessReconnectInFlight = true;
+      log.warn(`[airplay-bridge] liveness watchdog: device=${this.deviceId} 设备主动信号已停 ≥${Math.round(raopBridgeLivenessMs() / 1000)}s ⇒ 判接收端假死,自动完整重握手(新 RECORD)`);
+      void this.reconnectRaop()
+        .catch(() => { /* 重连失败已由 scheduleRaopReconnect 接管退避 */ })
+        .finally(() => {
+          this.livenessReconnectInFlight = false;
+          if (this.player) this.player.lastDeviceSignalAt = Date.now();
+        });
+    }
     const rate = this.outRate;
     const queueMs = Math.round(((this.outBuf.length >> 2) / rate) * 1000);
     if (queueMs > this.maxQueueMs) this.maxQueueMs = queueMs;
@@ -1241,6 +1355,8 @@ export class BridgeSession {
     this.connected = false;
     this.pausedState = false;
     this.streamAborted = true;
+    this.gapFillerToken++; // A:令在跑的垫片续流立即退出(closed 亦使其自停)
+    this.gapFillerPromise = null;
     if (this.statsTimer) {
       clearInterval(this.statsTimer);
       this.statsTimer = null;
