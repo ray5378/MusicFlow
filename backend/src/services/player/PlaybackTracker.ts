@@ -131,11 +131,47 @@ export class PlaybackTracker {
   /** 本段冻结是否已派发过 frozen。同段只报一次,位置重新推进 / reset() 时释放。 */
   private frozenSignaled = false;
 
+  /**
+   * 播放位置观察钩子（**纯通知**，返回值被忽略）。
+   *
+   * 用途：曲末提前预解析下一首（C 方案，见 services/player/drainPreheat.ts）。每首歌结束时
+   * 那 2.34 秒「音源就绪」原本排在切歌之后（实测 RESOLVE-AUDIO 1030ms + BUF-STREAM），
+   * 而「下一首是谁」在曲末前几十秒就已确定 —— 把这个钩子挂在**位置推进**的地方，
+   * 让订阅方在曲末之前把 resolve/取流做完。
+   *
+   * 语义边界（重要）：
+   *   · **每次位置推进都回调**（本地 500ms 节拍 + 每次设备上报），不带阈值判定 ——
+   *     「进没进曲末窗口」「这一首预热过没有」由订阅方自己判，阈值与幂等只有一处真相
+   *     （drainPreheat.ts）。本类保持纯状态机，不为一个阈值去 import 会拉进 DB 的模块。
+   *   · 只在**时长已知**时回调（dur <= 0 时没有「曲末」可算，调了也没用）。
+   *   · **绝不影响返回值**：`update()` / `tick()` 的决策是播放正确性的根，钩子抛错必须
+   *     被就地吞掉（见 notifyPositionAdvance），否则「为了省 2 秒」反而会让切歌判定失效。
+   */
+  onPositionAdvance: ((posSec: number, durSec: number) => void) | null = null;
+
   /** 起播时注入本曲已知时长(秒)。0/无效值 = 未知。 */
   setExpectedDuration(seconds: number): void {
     const v = typeof seconds === "number" && Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
     if (v !== this.expectedDuration) this.overrunAt = null; // 换曲 → 重算宽限
     this.expectedDuration = v;
+  }
+
+  /**
+   * 位置推进的**纯通知**（曲末预热的订阅方）。
+   *
+   * 三条纪律：只通知时长已知的场景；异常就地吞掉；绝不改任何状态。
+   * 这是「预热绝不能影响播放」这条红线在 tracker 侧的落点 —— 订阅方（队列/网络/DB 操作）
+   * 出任何问题，`update()` / `tick()` 的判定结果都必须与改动前逐字一致。
+   */
+  private notifyPositionAdvance(posSec: number, durSec: number): void {
+    const fn = this.onPositionAdvance;
+    if (!fn) return;
+    if (!(durSec > 0) || !Number.isFinite(posSec)) return;
+    try {
+      fn(posSec, durSec);
+    } catch {
+      /* 红线：订阅方异常不得打断结束判定 / 冻结判定 / 卡死判定 */
+    }
   }
 
   getExpectedDuration(): number {
@@ -172,6 +208,9 @@ export class PlaybackTracker {
         decision = "track_changed";
       }
       this.lastPlaying = neww;
+      // 曲末预热：把「位置 + 已知时长」这一对事实交给订阅方（纯通知，无返回值、异常内部吞掉）。
+      // 放在结束判定之前 —— 那时 dur 还是本曲的（下面判 advance 会把 expectedDuration 清 0）。
+      this.notifyPositionAdvance(Number.isFinite(neww.position) ? neww.position : 0, dur);
       // 位置已到已知时长且持续了一个宽限期,设备却始终不报结束 → 主动判结束。
       // 这是「卡死在结尾」的兜底:不报位置的设备(外推封顶)只会一直 PLAYING。
       if (decision === "none" && dur > 0 && neww.position >= dur) {
@@ -264,6 +303,9 @@ export class PlaybackTracker {
     // 恢复播放后重新起算,避免「暂停前已等 7s」导致刚恢复就判结束。
     if (dur <= 0 || cur.playbackState !== PlaybackState.PLAYING) return "none";
     const pos = cur.position + (nowMs - cur.updatedAt) / 1000;
+    // 曲末预热：本地 500ms 节拍也要喂（不报位置的设备只靠这条外推位置，
+    // 5s 采样粒度会让「曲末前 9 秒」这个窗口最多只剩 4s，预热就来不及了）。
+    this.notifyPositionAdvance(pos, dur);
     if (pos < dur) {
       this.overrunAt = null;
       // ③ 冻结兜底:PLAYING、时长已知、且位置**在墙钟上**一动不动 ≥ FREEZE_TIMEOUT_MS

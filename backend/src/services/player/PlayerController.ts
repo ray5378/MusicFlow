@@ -54,10 +54,29 @@ export class PlayerController {
   private overrunTimer: ReturnType<typeof setInterval> | null = null;
   /** 由 QueueController 注入。 */
   onDecision: DecisionFn = () => {};
+  /**
+   * 播放位置推进的注入点（C 方案：曲末提前预解析下一首）。
+   *
+   * 由 `QueueController.registerPlayer` 挂上 —— 只有队列侧才知道「下一首是谁」，也才有
+   * `peekUpcomingPositions` 需要的只读队列视图。本类只做「playerId + 位置」的转述：
+   * 语义（是否进窗口 / 幂等 / fire-and-forget）全在 services/player/drainPreheat.ts。
+   *
+   * 默认空实现 ⇒ 未注册时（单测替身 / 纯 PlayerController 用法）行为与改动前完全一致。
+   * 回调**必须自己吞掉异常**：tracker 侧也兜了一层，这里是第二道保险。
+   */
+  onPositionAdvance: (playerId: string, posSec: number, durSec: number) => void = () => {};
 
   private trackerOf(playerId: string): PlaybackTracker {
     let t = this.trackers.get(playerId);
-    if (!t) { t = new PlaybackTracker(); this.trackers.set(playerId, t); }
+    if (!t) {
+      t = new PlaybackTracker();
+      // 曲末预热：把「哪个 player」缝到 tracker 的纯位置通知上。
+      // 在**创建时**绑定即可 —— playerId 与 tracker 一一对应且终身不变（pruneOrphans 删掉
+      // 后重建会重新绑，不会悬空）。
+      t.onPositionAdvance = (posSec: number, durSec: number) =>
+        this.onPositionAdvance(playerId, posSec, durSec);
+      this.trackers.set(playerId, t);
+    }
     return t;
   }
 

@@ -16,6 +16,7 @@ import { createSendspinProtocolPlayer } from "../sendspin/protocolPlayer.js";
 import { getCachedPlayability } from "../source/online/streamFallback.js";
 import { getPreProbeScheduler } from "./preProbeScheduler.js";
 import { prefetchSong, prefetchUpcoming } from "../source/prefetchCache.js";
+import { preheatNextOnDrain, resetDrainPreheat } from "./drainPreheat.js";
 import { getPrefetchSettings } from "../source/prefetchConfig.js";
 import { createGroupProtocolPlayer, getGroupStatus, hasOnlineMember } from "../group/protocolPlayer.js";
 import { checkPlayTarget } from "../playTarget.js";
@@ -109,6 +110,9 @@ interface PlayerControllerLike {
   resetTracker(playerId: string): void;
   /** 起播前注入当前曲已知时长(秒),供结束判定使用。 */
   setExpectedDuration(playerId: string, seconds: number): void;
+  /** 曲末提前预解析下一首(C 方案)的注入点。**可选**:测试替身未实现时静默跳过,
+   *  行为与改动前完全一致(tracker 侧钩子为 null,一次都不回调)。 */
+  onPositionAdvance?: (playerId: string, posSec: number, durSec: number) => void;
 }
 
 /** 跨曲连续「卡死→切歌」上限:超过即停队列。
@@ -213,9 +217,44 @@ export class QueueController extends EventEmitter {
     prefetchUpcoming(this.queues.get(playerId));
   }
 
+  /**
+   * 曲末提前预解析下一首（C 方案，2026-10-28）：tracker 的**位置推进**通知在队列侧的落点。
+   *
+   * 与 schedulePrefetch 的分工（互补，不是替代）：
+   *   · schedulePrefetch（队列变动时）→ prefetchUpcoming：解决「源慢不慢」（整曲字节）。
+   *     它**不调** `resolvePlayableRow`，所以 `[RESOLVE-AUDIO]` 那 1030ms 一直没被排掉。
+   *   · 本方法（**曲末前 9 秒**）→ preheatNextOnDrain：补 `resolvePlayableRow`
+   *     （+ 让 prefetchSong 再跑一次，它自带闸门与去重）。实测那次换歌的 2.34s
+   *     「音源就绪」正是这两段。
+   *
+   * 永不抛、永不阻塞：内部全 fire-and-forget（红线见 drainPreheat.ts 文件头）。
+   */
+  private notePositionAdvance(playerId: string, posSec: number, durSec: number): void {
+    try {
+      const id = stripPlayerPrefix(playerId);
+      // flow 会话驱动的设备：它拉的是一条**多曲连续流**，设备侧 position/duration 不对应
+      // 单曲（见 handleDecision 入口的 flowOwned 拦截），「下一首」由出流侧在曲目边界
+      // 自己推进 —— 这里的预解析没有意义，且会把整队里不该播的歌提前探一遍。
+      if (this.flowOwned.has(id)) return;
+      preheatNextOnDrain(id, this.queues.get(id), posSec * 1000, durSec * 1000);
+    } catch (e: any) {
+      log.debug(
+        `[QueueController][drain-preheat] ${playerId}: 预热排程异常（已忽略）: ${String(e?.message || e).slice(0, 120)}`,
+      );
+    }
+  }
+
   registerPlayer(playerId: string, player: UniversalPlayer, ctrl: PlayerControllerLike): void {
     this.players.set(playerId, player);
     this.ctrls.set(playerId, ctrl);
+    // C 方案（曲末提前预解析下一首）：把队列侧能力挂到 PlayerController 上。
+    // 四条注册路径（DLNA/组/AirPlay/sendspin 客户端）都汇到这里，故「纯 sendspin 组」
+    // 同样受益，不需要按组类型区分。playerId 带协议前缀，原样透传 —— 由
+    // notePositionAdvance 统一 stripPlayerPrefix，与其余决策路径同一口径。
+    if (ctrl) {
+      ctrl.onPositionAdvance = (pid: string, posSec: number, durSec: number) =>
+        this.notePositionAdvance(pid, posSec, durSec);
+    }
   }
 
   /** DLNA 设备发现后注册:创建 UniversalPlayer + 绑定 DLNA ProtocolPlayer。
@@ -318,6 +357,9 @@ export class QueueController extends EventEmitter {
     // seek 冷静期打标必须在**下发之前**:请求在途/重定位进行中就可能有一拍状态上报
     // 落进"设备非 PLAYING"的真空里(见 services/player/seekSettle.ts 顶部注释)。
     if (op === "seek") markSeekIssued(playerId);
+    // C 方案：seek 改写了「这一首还剩多久」，上一轮的曲末预热标记随之作废 ——
+    // 用户可能从尾部拖回开头再听到一次曲末，那时要能重新预热（幂等标记按 player 记）。
+    if (op === "seek") resetDrainPreheat(playerId);
     // stop / play 会丢弃当前播放上下文(位置归零或重投),旧的 seek 时刻不再有意义 ——
     // 清掉,避免新上下文里的合法 idle_early 被一条陈旧记录压住。
     // 「暂停看门狗转 stop」的持久标记同理(见 pauseStopSettle.ts 顶部):恢复播放/
@@ -1249,6 +1291,11 @@ export class QueueController extends EventEmitter {
       // 避免上一首的 PLAYING→IDLE 迁移再次触发 advance(对照 MA play_index 后清 prev_state)。
       // 乐观窗口保持开启,等设备上报 PLAYING 确认成功(cast 期间已屏蔽瞬态 IDLE)。
       ctrl.resetTracker(playerId);
+      // C 方案（曲末提前预解析下一首）：新的一代播放开始 → 清掉上一代的预热标记。
+      // 换歌本身不需要它（标记按 songId 比，换歌自然失配），这条是为了「同一首被手动重播 /
+      // stalled 重投后再听一次曲末」也能再预热一次。清标记零成本，预热本身仍由
+      // prefetchCache 的去重与闸门兜底，不会因此多下字节。
+      resetDrainPreheat(deviceId);
       void mediaUri;
     } catch (e: any) {
       console.warn(`[QueueController][playCurrent] ${playerId}: cast FAILED:`, e?.message || e);
