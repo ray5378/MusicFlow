@@ -29,6 +29,19 @@ import { STREAM_FALLBACK_PLUGIN_ID } from "../../plugin/core/streamFallbackPlugi
 import { resolvePreferredSong } from "../preferredSource.js";
 import { getEffectiveBaseUrl } from "../../dlna/control.js";
 import { getStreamSourcePriority } from "./streamSourcePriority.js";
+import { createLogger } from "../../../utils/logger.js";
+
+const log = createLogger("StreamFallback");
+
+/** 进程标识:同一份代码在主进程与 sendspin 子进程各跑一份,负缓存也是各一份。
+ *  排障时必须能区分是哪一侧写的,否则跨进程问题会被误读成「随机」。 */
+function who(): string {
+  try {
+    return process.env.MUSICFLOW_SENDSPIN_CHILD === "1" ? "sendspin-child" : "main";
+  } catch {
+    return "?";
+  }
+}
 
 /** 读取换源兜底配置(core-stream-fallback 内置插件):enabled 总开关 + 时长容差覆写。 */
 function getFallbackConfig(): { enabled: boolean; durationTolerance: number } {
@@ -110,6 +123,15 @@ function setFallback(key: string, url: string | null, opts?: { transient?: boole
     ttlMs: opts?.ttlMs ?? (transient ? transientBackoffMs : negativeTtlMs),
     transient,
   });
+  // 取证日志(2026-10-30,纯增量):只记**负结果**写入 —— 正结果每次切歌都有,记了是噪音。
+  // ttl 从缓存读回,不重算 TTL 表达式,确保与真实生效值一致。
+  if (url === null) {
+    const e = fallbackCache.get(key);
+    log.info(
+      `负缓存写入 song=${key} 档=${transient ? "transient" : "definitive"}` +
+        ` ttlMs=${e?.ttlMs ?? -1} who=${who()}`,
+    );
+  }
   if (fallbackCache.size > FALLBACK_CACHE_MAX) {
     const oldest = fallbackCache.keys().next().value;
     if (oldest === undefined) return;
@@ -544,6 +566,9 @@ export function markUnplayable(songId: string, opts?: { ttlMs?: number }): void 
   // 立即清掉可能存在的正缓存：否则同一首歌同时持有「可播(1h)」与「不可播」两条，
   // 读视图按正缓存优先 ⇒ 判跳失效（见 addPlayable 的注释）。
   playableCache.delete(songId);
+  // 与 setFallback 的通用负缓存日志分开:这条是**内容判官**的结论(整曲字节判出
+  // 试听片段/假成功),性质与「换源穷尽」不同,排障要能一眼分辨。
+  log.info(`判死(内容判官) song=${songId} ttlMs=${ttlMs} who=${who()}`);
   setFallback(songId, null, { transient: false, ttlMs });
 }
 
@@ -573,7 +598,12 @@ function addPlayable(songId: string) {
   //   队列预解析（RESOLVE-AUDIO）先写正缓存，把判官刚写的负缓存盖住；而
   //   getCachedPlayability 读正缓存优先 ⇒ 判跳失效，照播 60s 假歌。
   //   负缓存未过期期间一律拒绝写正缓存；负缓存过期（源可能已恢复）后自动解禁。
-  if (isNegativeFresh(songId)) return;
+  if (isNegativeFresh(songId)) {
+    // 「复活被挡」的唯一痕迹:源解析成功了,但负缓存还新鲜 ⇒ 正缓存写不进去。
+    // 2026-10-30 那例「预热说能播、起播判死」就发生在这条路径的下游。
+    log.info(`正缓存被负缓存拒绝 song=${songId} who=${who()} (负结果仍新鲜)`);
+    return;
+  }
   playableCache.set(songId, Date.now());
   if (playableCache.size > PLAYABLE_CACHE_MAX) {
     const oldest = playableCache.keys().next().value;
