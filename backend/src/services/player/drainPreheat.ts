@@ -49,6 +49,7 @@
 // "阈值"与"幂等"只有本文件一处真相，不在 tracker 里复制一份。
 import { peekUpcomingPositions, type QueuePeekSource } from "./preProbeScheduler.js";
 import { prefetchSong } from "../source/prefetchCache.js";
+import { getCachedPlayability } from "../source/online/streamFallback.js";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("DrainPreheat");
@@ -120,17 +121,46 @@ let executor: DrainPreheatExecutor = defaultExecutor;
  * **绝不自己重写**：playMode 有 one/order/all/shuffle 四种，重写必错（这是 C 方案明确禁止的）。
  * 拿不到（队列末尾 / peek 抛错 / 空 id）⇒ undefined，调用方静默返回。
  */
-export function peekNextSongId(peek: QueuePeekSource | undefined): string | undefined {
+export function peekNextSongId(
+  peek: QueuePeekSource | undefined,
+  opts?: { skipDead?: boolean; lookahead?: number },
+): string | undefined {
   if (!peek) return undefined;
   try {
-    const { positions } = peekUpcomingPositions(peek, 1);
-    const p = positions[0];
-    if (typeof p !== "number" || !Number.isInteger(p) || p < 0) return undefined;
-    const songId = peek.items?.[p]?.songId;
-    return typeof songId === "string" && songId.length > 0 ? songId : undefined;
+    const skipDead = opts?.skipDead === true;
+    // 不跳过判死曲时保持原语义(只取第 1 个位置);跳过时才多看几个。
+    const want = Math.max(1, Math.min(8, opts?.lookahead ?? (skipDead ? 4 : 1)));
+    const { positions } = peekUpcomingPositions(peek, want);
+    for (const p of positions) {
+      if (typeof p !== "number" || !Number.isInteger(p) || p < 0) continue;
+      const songId = peek.items?.[p]?.songId;
+      if (typeof songId !== "string" || songId.length === 0) continue;
+      if (skipDead && isDeadSong(songId)) continue;
+      return songId;
+    }
+    return undefined;
   } catch (e: any) {
     log.debug(`曲末预热：peek 下一首异常（已忽略）: ${String(e?.message || e).slice(0, 120)}`);
     return undefined;
+  }
+}
+
+/**
+ * 该曲是否**已被判死**(明确且未过期的负判定)。
+ *
+ * 必须与 `QueueController.judgePlayable` 的**第一道闸**同一判据 —— 起播时会跳过的歌,
+ * 预览也不该把它当「下一首」去预热。2026-10-30 真机:预热 `0ea5a2da` 用了 4.8s,
+ * 起播 4s 后却零日志判死并跳到 `b13bc96b`,两次解析全白做,且真正要播的那首没预热
+ * (gap-fill 从 103ms 回落到 3000ms)。
+ *
+ * 只认 `"unplayable"`:`unknown` / `transient` / `playable` 一律照常预热 ——
+ * 「不把不知道当成死的」是 2026-09-11 就定下的边界,这里不越界。
+ */
+function isDeadSong(songId: string): boolean {
+  try {
+    return getCachedPlayability(songId) === "unplayable";
+  } catch {
+    return false;
   }
 }
 
@@ -153,7 +183,8 @@ export function preheatNextOnDrain(
     if (!Number.isFinite(posMs) || !Number.isFinite(durMs)) return;
     if (!(durMs > 0)) return; // 时长未知 ⇒ 没有「曲末」可算
     if (posMs < durMs - DRAIN_PREHEAT_LEAD_MS) return; // 还没进窗口
-    const songId = peekNextSongId(peek);
+    // skipDead:与起播判据对齐,避免预热一首「马上会被跳过」的歌(见 isDeadSong)。
+    const songId = peekNextSongId(peek, { skipDead: true });
     if (!songId) return; // 队列末尾 / 单曲循环外的无可定下一首 → 静默
     if (marks.get(playerId) === songId) return; // 幂等：本代次已预热过（命中不打日志）
     // 先落标记再开跑：宁可「这次失败不重试」，也不要每 500ms 重来一次。
