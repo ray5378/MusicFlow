@@ -467,6 +467,27 @@ export class RaopPlayer {
   private lossWinCount = 0;
   private lossWinMiss = 0;
   private lossWinSeq0 = 0;
+  /** [OBS-LOSS] 设备请求了**服务端尚未产生**的包(seq 严格晚于 `this.seq`)的累计包数。
+   *
+   *  为什么必须和 miss 分开统计(2026-10-31 HiVi 192.168.10.30 抓包取证):
+   *  一次爆发 657 条请求里 656 条的 seq 已经超过服务端已发位置(实测超出 +763
+   *  到 +25110),即设备一直在要"未来包"。这批包物理上不存在,补发必然 miss,
+   *  **且加大重传缓冲对它完全无效**。它与「请求的是旧包、但缓冲太小已被淘汰」
+   *  是两类性质不同的故障:后者才是容量问题。混在同一个 miss 计数里会让
+   *  「缓冲已经够大了为什么还在 miss」这类判断长期失真。 */
+  private lossFuturePackets = 0;
+  /** [OBS-LOSS] 本 200ms 聚合窗口内的"未来包请求"数。 */
+  private lossWinFuture = 0;
+  /** [OBS-LOSS] backlog 当前最小 key(Map 插入序首键);-1 = 空缓冲。
+   *
+   *  ⚠️ 不能对 16 位 seq 用 `Math.min/max` 求区间:seq 回绕(65535 → 0)之后
+   *  `Math.min` 会给出 0、`Math.max` 给出 65535,得到一个看似"覆盖全空间"的
+   *  错误区间,反而掩盖「请求 seq 其实不在缓冲里」这一事实。这里改为在
+   *  `sendChunk` 里随插入/淘汰同步维护首尾键 —— Map 的插入序等价于
+   *  「已发包的单调序号」,天然回绕安全。 */
+  private backlogHeadKey = -1;
+  /** [OBS-LOSS] backlog 当前最大 key(插入序尾键,即最近一次写入的 seq)。 */
+  private backlogTailKey = -1;
   /** 设备最近一次**主动**信号时刻(NTP 请求/重传请求都是设备发起)。
    *  消费停滞看门狗的活性源(2026-10-29):数据面再健康,设备不收包就是假死。 */
   lastDeviceSignalAt = Date.now();
@@ -902,6 +923,22 @@ export class RaopPlayer {
   get backlogPackets(): number {
     return this.audioBacklog.size;
   }
+  /** [OBS-LOSS] 设备请求"未来包"(服务端尚未产生)的累计包数。 */
+  get lossFutureCount(): number {
+    return this.lossFuturePackets;
+  }
+  /** [OBS-LOSS] backlog 当前最小 key(回绕安全);空缓冲返回 -1。 */
+  get backlogHead(): number {
+    return this.backlogHeadKey;
+  }
+  /** [OBS-LOSS] backlog 当前最大 key(回绕安全);空缓冲返回 -1。 */
+  get backlogTail(): number {
+    return this.backlogTailKey;
+  }
+  /** [OBS-LOSS] 当前已发送到的 seq;设备请求超过它即为"未来包"。 */
+  get currentSeq(): number {
+    return this.seq;
+  }
   private backlogSeq = 0;
 
   /** exp4 实验开关(MF_BRIDGE_RAOP_CONNECT_PRIME):RECORD 后立即向设备灌 n 包
@@ -987,9 +1024,13 @@ export class RaopPlayer {
     pkt.writeUInt32BE(this.ssrc >>> 0, 8);
     enc.copy(pkt, 12);
     this.audioBacklog.set(this.seq, Buffer.from(pkt));
+    this.backlogTailKey = this.seq;
+    if (this.backlogHeadKey < 0) this.backlogHeadKey = this.seq;
     if (this.audioBacklog.size > this.backlogMaxPackets) {
       const firstKey = this.audioBacklog.keys().next().value as number;
       this.audioBacklog.delete(firstKey);
+      const nextHead = this.audioBacklog.keys().next().value as number | undefined;
+      this.backlogHeadKey = nextHead === undefined ? -1 : nextHead;
     }
     this.audioSocket.send(pkt, 0, pkt.length, this.serverAudioPort, this.opts.host);
     this.headTs = (this.headTs + CHUNK_LEN) >>> 0;
@@ -1003,8 +1044,15 @@ export class RaopPlayer {
   private onLoss(seqno: number, n: number, controlPort: number): void {
     this.lossRequests++;
     this.lossRequestedPackets += Math.max(1, n);
+    const resentBefore = this.lossResentPackets;
+    let futureThis = 0;
     for (let i = 0; i < n; i++) {
       const idx = (seqno + i) & 0xffff;
+      // [OBS-LOSS] 回绕安全的"晚于"比较(RFC 1982 序列号算术):
+      // 0 < (idx - this.seq) mod 2^16 < 2^15 ⇒ idx 严格晚于服务端已发到的位置,
+      // 即设备要的是还没产生的包;== 0 表示正好是要最后一个已发包(可补发)。
+      const ahead = (idx - this.seq) & 0xffff;
+      if (ahead !== 0 && ahead < 0x8000) futureThis++;
       const pkt = this.audioBacklog.get(idx);
       if (!pkt) continue;
       this.lossResentPackets++;
@@ -1018,15 +1066,23 @@ export class RaopPlayer {
       }
     }
     this.lossMissPackets += Math.max(0, this.lossRequestedPackets - this.lossResentPackets - this.lossMissPackets);
+    // [OBS-LOSS] 窗口 miss:本次请求里 backlog 查不到的包数。
+    // ⚠️ 这个字段此前只被重置和打印、从未被累加 ⇒ 日志里 `miss=` 恒为 0,
+    // 是**假象**,会让「补发到底成没成」完全不可观测(排查 HiVi 曲中失声期间
+    // 一度据此误判"重传全部命中")。这里按「请求数 - 本轮实际补发数」补齐。
+    this.lossWinMiss += Math.max(0, n - (this.lossResentPackets - resentBefore));
+    this.lossWinFuture += futureThis;
+    this.lossFuturePackets += futureThis;
     // [OBS-LOSS] 窗口聚合:200ms 一行,避免一次爆发 657 条请求刷屏
     const nowMs = Date.now();
     if (nowMs - this.lossWinStartMs > 200) {
       if (this.lossWinCount > 0) {
-        log.warn(`[raop-loss] dev=${this.opts.deviceId ?? "-"} req=${this.lossWinCount} seq0=${this.lossWinSeq0} seq1=${seqno} miss=${this.lossWinMiss} backlog=${this.audioBacklog.size} cap=${this.backlogMaxPackets} total=${this.lossRequests} totalMiss=${this.lossMissPackets}`);
+        log.warn(`[raop-loss] dev=${this.opts.deviceId ?? "-"} req=${this.lossWinCount} seq0=${this.lossWinSeq0} seq1=${seqno} miss=${this.lossWinMiss} future=${this.lossWinFuture} backlog=${this.audioBacklog.size} cap=${this.backlogMaxPackets} head=${this.backlogHeadKey} tail=${this.backlogTailKey} cur=${this.seq} total=${this.lossRequests} totalMiss=${this.lossMissPackets}`);
       }
       this.lossWinStartMs = nowMs;
       this.lossWinCount = 0;
       this.lossWinMiss = 0;
+      this.lossWinFuture = 0;
       this.lossWinSeq0 = seqno;
     }
     this.lossWinCount++;
@@ -1307,6 +1363,10 @@ export class RaopPlayer {
     this.started = false;
     this.audioBacklog.clear();
     this.backlogSeq = 0;
+    // [OBS-LOSS] 缓冲已清空 ⇒ head/tail 必须一并回到 -1,否则日志会继续打印
+    // 一个已经不存在的 key 区间(seek 后尤其容易误判"请求在范围内却查不到")。
+    this.backlogHeadKey = -1;
+    this.backlogTailKey = -1;
     this.positionSec = seekSec;
     if (this.socket && !this.socket.destroyed) {
       try {

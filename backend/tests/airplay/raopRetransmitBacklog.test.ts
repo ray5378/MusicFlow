@@ -141,6 +141,90 @@ describe("RAOP 重传缓冲:覆盖一次真实的空口突发", () => {
   });
 });
 
+describe("\"未来包\"请求单独计数(设备要的是还没产生的包)", () => {
+  // 背景(2026-10-31 HiVi 192.168.10.30 抓包):一次爆发 657 条重传请求里,
+  // 656 条的 seq 已经超过服务端当前已发位置(实测超出 +763 到 +25110)。
+  // 这批包物理上不存在 ⇒ 必然 miss,且**加大重传缓冲对它无效**。
+  // 必须与「缓冲太小导致旧包被淘汰」分开统计,否则会一直误判容量不足。
+
+  it("请求 seq 全部大于 this.seq ⇒ 全部计入 future,且一个都补发不出去", () => {
+    const { p, anyP, ctrl } = makePlayer();
+    for (let i = 0; i < 10; i++) p.sendChunk(pcmChunk()); // seq 1..10
+    ctrl.sent.length = 0;
+    const missBefore = p.lossMissCount;
+    // 要 15..24 —— 服务端才发到 10,全都是"未来包"
+    anyP.onLoss(15, 10, 7001);
+    expect(p.lossFutureCount).toBe(10);
+    expect(ctrl.sent.length).toBe(0); // 物理上不存在,补不出去
+    expect(p.lossRequestedCount).toBe(10);
+    expect(p.lossMissCount - missBefore).toBe(10);
+  });
+
+  it("部分超前的请求:只把超出已发位置的那部分计为 future", () => {
+    const { p, anyP, ctrl } = makePlayer();
+    for (let i = 0; i < 10; i++) p.sendChunk(pcmChunk()); // seq 1..10
+    ctrl.sent.length = 0;
+    const missBefore = p.lossMissCount;
+    // 要 6..15:6..10 在缓冲里(5 个),11..15 是未来包(5 个)
+    anyP.onLoss(6, 10, 7001);
+    expect(ctrl.sent.length).toBe(5);
+    expect(p.lossFutureCount).toBe(5);
+    expect(p.lossResentCount).toBe(5);
+    expect(p.lossMissCount - missBefore).toBe(5);
+  });
+
+  it("边界:请求 seq 恰好等于 this.seq ⇒ 不算未来包(且能补发)", () => {
+    const { p, anyP, ctrl } = makePlayer();
+    for (let i = 0; i < 10; i++) p.sendChunk(pcmChunk()); // seq 1..10
+    ctrl.sent.length = 0;
+    anyP.onLoss(10, 1, 7001); // 正好最后一个已发包
+    expect(p.lossFutureCount).toBe(0);
+    expect(ctrl.sent.length).toBe(1);
+    expect(p.lossMissCount).toBe(0);
+  });
+
+  it("future 与 miss 不是互斥关系:未来包必然同时计入 miss", () => {
+    const { p, anyP, ctrl } = makePlayer();
+    for (let i = 0; i < 10; i++) p.sendChunk(pcmChunk());
+    ctrl.sent.length = 0;
+    anyP.onLoss(20, 3, 7001); // 20..22 全是未来包
+    expect(p.lossFutureCount).toBe(3);
+    expect(p.lossMissCount).toBe(3);
+    expect(p.lossResentCount).toBe(0);
+  });
+});
+
+describe("backlog 区间诊断:seq 16 位回绕时 head/tail 不得失真", () => {
+  it("正常推进:head=最早未淘汰的 key,tail=最近写入的 key,cur=this.seq", () => {
+    const { p } = makePlayer();
+    for (let i = 0; i < 10; i++) p.sendChunk(pcmChunk()); // seq 1..10
+    expect(p.backlogHead).toBe(1);
+    expect(p.backlogTail).toBe(10);
+    expect(p.currentSeq).toBe(10);
+  });
+
+  it("回绕后 head/tail 仍按发送先后给出正确区间(Math.min/max 会算错)", () => {
+    const { p, anyP } = makePlayer();
+    anyP.seq = 0xfffc; // 65532
+    for (let i = 0; i < 10; i++) p.sendChunk(pcmChunk());
+    // 写入顺序:65533,65534,65535,0,1,2,3,4,5,6
+    expect(p.currentSeq).toBe(6);
+    expect(p.backlogTail).toBe(6); // 最近写入
+    // 若用 Math.min 会得到 0、Math.max 会得到 65535 —— 那是个"覆盖全域"的假区间
+    expect(p.backlogHead).toBe(65533);
+    expect(p.backlogHead).not.toBe(0);
+  });
+
+  it("淘汰后 head 前移(窗口滑出旧包)", () => {
+    const { p } = makePlayer();
+    // 默认 2048 档:多发 50 包 ⇒ 最早的 50 个被淘汰
+    for (let i = 0; i < AUDIO_BACKLOG_MAX_PACKETS + 50; i++) p.sendChunk(pcmChunk());
+    expect(p.backlogPackets).toBe(AUDIO_BACKLOG_MAX_PACKETS);
+    expect(p.backlogHead).toBe(51); // 1..50 已淘汰
+    expect(p.backlogTail).toBe(AUDIO_BACKLOG_MAX_PACKETS + 50);
+  });
+});
+
 describe("重传缓冲档位可配置(MF_BRIDGE_RAOP_BACKLOG_PACKETS)", () => {
   const key = "MF_BRIDGE_RAOP_BACKLOG_PACKETS";
   const saved = process.env[key];
