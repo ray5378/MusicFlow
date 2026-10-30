@@ -2,6 +2,15 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.10.1] - 2026-10-30
+
+### Fix / 容器重建后设备僵死会话自愈:握手失败 TEARDOWN 探测重试(S1)+ boot clear-probe(S3)+ 优雅退出窗口 30s(S2)
+
+- **S1 握手失败自动救回**:容器重建后 MUZO 固件保留对旧容器的半开 RTSP 会话,新握手 ANNOUNCE/SETUP 即 `read ECONNRESET`,旧行为直接回落 solo cast(同一条握手必挂)= 设备静默,唯一救法曾是人工 stop→等 10s→play。现在 prepareBridgeRoute 失败时自动:TEARDOWN 探测(新 RTSP 连接,无 session 也发,设备回 454 无害)→ 退避 5s/15s 两档重试完整握手;probe 不可达立即放弃;救不回才按 MAJ-07 回落 solo cast。仅设备类连接失败(ECONNRESET/ECONNREFUSED/超时)触发;AP2 凭据缺失等语义错误不重试。
+- **S3 boot clear-probe**:容器启动 12s(持久化设备清单启动即恢复,不等 mDNS)对每台已知 AirPlay 设备发一次 blind TEARDOWN 探测,把僵死态清在用户起播前;45s 兜底轮只补 mDNS 迟到设备。防误杀:首轮已确认的设备兜底轮不碰;正被桥会话占用(用户已起播)的设备两轮都跳过 —— blind TEARDOWN 无 session 也真杀会话(HiVi 实测回 200)。
+- **S2 优雅退出窗口**:compose 显式 `stop_grace_period: 30s`(默认 10s 可能掐断逐会话 TEARDOWN)。gracefulShutdown 的 TEARDOWN 链路已实抓验证(带 session id)。
+- 新模块 `airplay/raopProbe.ts` + `raop.ts raopTeardownProbe` + 子进程 `raopProbe` RPC;新增 19+4 例定向测试(tests/airplay/raopProbe.test.ts + GroupProtocolPlayerRoutes S1 集成)。
+
 ## [4.10.0] - 2026-10-30
 
 ### Fix / 桥会话活性看门狗判据第三次换源(timing 心跳) + 优雅退出补 TEARDOWN + 换歌链路 F1/F2/F3 与排空钳制

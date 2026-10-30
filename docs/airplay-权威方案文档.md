@@ -1848,3 +1848,62 @@ control/timing UDP 仍活,但音频流进不了设备,固件连重传请求都�
   「距上次上行心跳 ms」。
 - **A(治本,单列待实施)**:换歌不断流——新流 anchor 抢在旧流排空前,或跨轨同一 RTP 时间线补静音,
   把 3.78s 断流压到 0。
+
+## v4.10.1 增补:S1/S3 容器重建僵死会话自愈(TEARDOWN 探测)——2026-10-30 用户拍板并验收
+
+### 1. 事故与根因链(接 v4.10.0 增补)
+
+容器重建后,MUZO 固件保留对**旧容器**的半开 RTSP 会话;新容器对同一设备
+ANNOUNCE/SETUP 即 `read ECONNRESET`。旧行为:prepareBridgeRoute 失败 → 该设备
+回落 solo cast(同一条握手必挂)= 「在组里但无声且状态正常」,唯一救法是人工
+stop → 等 10s → play(2026-10-30 16:30 实测一次成功:ANNOUNCE 331ms → SETUP 155ms
+→ RECORD 20ms,握手总耗时 507ms)。
+
+### 2. S1:握手失败自动 TEARDOWN 探测 + 退避重试(代码已实施)
+
+- **新模块 `backend/src/services/airplay/raopProbe.ts`**(主进程编排):
+  - `raopProbeDevice(deviceId)`:RPC `raopProbe` 到 airplay 子进程;**host/port 必须
+    主进程查好随载荷下发**(子进程 discovery 注册表恒空,不能按 deviceId 反查,
+    与 bridgePrepareDevice 同一契约)。
+  - `retryBridgePrepareWithProbe`:重试梯 = probe → 退避 → 重试完整握手,
+    两档 **5s/15s**(每档重试前各 probe 一次);probe 不可达立即放弃,不空耗 20s。
+  - `isBridgeHandshakeDeviceError`:只认设备类连接失败(ECONNRESET/ECONNREFUSED/
+    ETIMEDOUT/EHOSTUNREACH/EPIPE/socket hang up/连接超时);AP2 凭据缺失等语义
+    错误不重试(必复现)。
+  - 测试钩子 `setBridgePrepareRetrySleepForTest` / `resetBootProbeStateForTest`。
+- **`raop.ts` 加 `raopTeardownProbe(host, port)`**:纯协议一次性连接(不复用
+  RaopPlayer,不建 UDP、不加密协商):OPTIONS → TEARDOWN(**无 session 也发**,
+  设备回 454/451 无害),OPTIONS 不答(TCP 活但 RTSP 层哑)按不可达处理。
+  子进程 `childMain.ts` 加 `raopProbe` RPC 分支。
+- **落点**:`group/protocolPlayer.ts` prepareBridgeRoute catch 分支 —— 仅设备类
+  失败走重试梯,救回则进桥(`[bridge-prepare] retry#N` 日志),救不回才 MAJ-07
+  回落 solo cast。
+- **⚠️ 实测双刃剑**:HiVi 实测 blind TEARDOWN(无 session)**回 200 = 真杀当前
+  会话**——这就是它清僵死会话的原理,也意味着绝不能碰有合法会话的设备(S3 防误杀)。
+
+### 3. S2:优雅退出验证 + stop_grace_period(运维侧,已落地 240)
+
+- 240 host 预挂 tcpdump 实抓容器重启:`TEARDOWN rtsp://192.168.10.30:4515/6277954418`
+  **带 session id** —— v4.10.0 gracefulShutdown 的 TEARDOWN 链路确认工作。
+- compose 显式 `stop_grace_period: 30s`(默认 10s 可能掐断逐会话 TEARDOWN;
+  容器 StopTimeout=30 已确认)。
+
+### 4. S3:boot clear-probe(代码已实施)
+
+- `index.ts` isAirPlayEnabled 块内 `scheduleBootClearProbes()`:**12s 首轮 +
+  45s 兜底轮**。
+- 提前依据:`loadPersistedAirPlayDevices()` 启动即恢复持久化清单,不等 mDNS;
+  子进程 fork ~3s。实测 boot 后 15s 完成全部探测。
+- **防误杀三原则**(45s 兜底可能清掉用户刚建立的合法会话——用户拍板前指出):
+  ① 首轮探测过的设备记入 `bootProbedDevices`,兜底轮(`onlyUnprobed=true`)只补
+  集合外的 mDNS 迟到设备;② 每台探测前查 `isBridgeOwned`(import control.js,
+  无环:control 不引 raopProbe),活跃桥会话两轮都跳过并记入已确认;
+  ③ 清单为空(发现未完成)整轮跳过。
+- 首跑实录(2026-10-30):HiVi .30:4515 TEARDOWN=200(真清掉会话)、MUZO
+  .230:5000 TEARDOWN=451(无会话无害)、3 台持久化无效地址(host=:0)正确跳过。
+
+### 5. 部署铁律(本次新增)
+
+**compose recreate 会重置容器文件系统**(非挂载的 /app/backend 回到镜像内容)
+⇒ 热补丁顺序必须是 **recreate → tar 注入(`cat tgz | docker exec -i musicflow
+tar xzf - -C /app/backend`)→ restart**;先注入后 recreate 补丁会丢。

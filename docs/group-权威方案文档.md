@@ -1103,3 +1103,30 @@ PUT 语义：`memberId` 必须是本组成员（命名空间 id **原样整条**
   **A(治本:换歌不断流,新流 anchor 抢在旧流排空前)单列待实施**。
 - 群组口径验收判据(BCD/A 落地后必须过):换歌全程 RTP 不断流(pcap 旧流末包→新流首包间隔 <300ms)+
   桥 tick `deltaUs/deltaP95Us/queueMs` 连续无跳变 + 看门狗触发次数为 0 + 人耳无失声。
+
+## v4.10.1 增补:prepareBridgeRoute 失败自动救回梯(S1)+ boot clear-probe(S3)
+
+### 1. 桥准备失败的自动救回(接 MAJ-07 降级之前)
+
+v4.10.0 语义:prepareBridgeRoute 单设备失败 → MAJ-07 回落 solo cast。但容器重建后
+MUZO 固件保留半开会话,同一条握手**必挂**(ECONNRESET),solo 也挂 = 设备静默。
+v4.10.1 在 MAJ-07 之前插入自动救回梯(细节以 airplay 权威文档 v4.10.1 增补为准):
+
+- 判据 `isBridgeHandshakeDeviceError`:只认设备类连接失败;AP2 凭据缺失等语义
+  错误直接走 MAJ-07(不重试)。
+- 梯:TEARDOWN 探测(新 RTSP 连接,无 session 也发)→ 5s → 重试握手 → 再 probe
+  → 15s → 重试握手;probe 不可达立即放弃。
+- 救回 ⇒ 设备进桥(sockets);救不回 ⇒ 原 MAJ-07 回落 solo cast,行为不变。
+- 日志口径:`[bridge-prepare] retry#N device=X probe=ok(options=… teardown=…)
+  reason=…` / `retry#N 成功` / `probe 不可达 → 放弃重试`。
+
+### 2. boot clear-probe(12s 首轮 + 45s 兜底,防误杀三原则)
+
+- 容器重启后设备清单来自持久化恢复(不等 mDNS),**12s 即完成清理探测**;
+  45s 兜底轮只补 mDNS 迟到设备。
+- 防误杀:①首轮已确认设备兜底轮不碰(`bootProbedDevices`);②`isBridgeOwned`
+  的设备(用户已起播)两轮都跳过 —— **blind TEARDOWN 无 session 也真杀会话**
+  (HiVi 实测回 200);③清单为空整轮跳过。
+
+### 3. S2(运维侧):优雅退出 TEARDOWN 已实抓验证(带 session id),240 compose 显式
+`stop_grace_period: 30s`。gracefulShutdown 链路自 v4.10.0 起确认工作,无需再改。
