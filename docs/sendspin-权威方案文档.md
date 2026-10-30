@@ -1653,3 +1653,30 @@ prev、音量/静音、自然结束自动下一首、停止）+ 组播 6 项（`
 (`MF_BRIDGE_RAOP_GAP_FILL`,缺省开)+ 设备主动信号停摆看门狗自动完整重握手
 (`MF_BRIDGE_RAOP_LIVENESS_WATCHDOG`,缺省开,阈值 `MF_BRIDGE_RAOP_LIVENESS_MS`
 缺省 120s)。垫片窗时长、0xE0 重锚、组同步语义全部不变;详见 airplay 权威文档 v4.9.6 增补。
+
+## v4.10.2 增补:曲末预热下推到子进程(跨进程可播缓存双向打通)——2026-10-30
+
+**问题**:换歌时泵的取源耗时 2.2~6.7s,而设备侧曲末排空窗口只有 ≈9.78s,余量仅 3.1s。
+
+**根因**:`QueueController → drainPreheat → resolvePlayableRow` 在主进程,泵
+(`streamEngine.defaultSource`)在 supervisor fork 的 sendspin 子进程。`playableCache` /
+`fallbackCache` 是 module-local Map,`fork` 出的是独立 Node 进程,**不共享**;`ipcProtocol`
+此前也没有预热消息 ⇒ 主进程预热 27/28 次 `cached ms=1~6`,泵侧 38 次全部 `ensure-ok`
+2.9~3.9s,泵命中 `fresh-cache` 的次数为 **0**。
+
+**修法**:`drainPreheat` 判出可播源后调 `warmHook(songId)` → `sendspinWarmPreheat` →
+`supervisor.post({t:"preheat"})` → 子进程 `warmSongInChild()` 在本进程内重算并写热自己的缓存。
+只做 resolve,**不建流、不取字节**(整曲字节仍由主进程 `prefetchCache` 预取,泵的 ffmpeg
+经回环 `/rest/stream` 命中,实测 0.17s)。
+
+**红线**:只 resolve 不取字节;按「泵存活计数」门控(纯 DLNA 不白探);同曲幂等;
+失败一律静默退回原行为。
+
+**真机判据**(240):`[Sendspin-preheatChild] INFO 子进程预热 ev=child-preheat song=… ok=1`
+之后,泵起播的 `[RESOLVE-AUDIO] … (fresh-cache) ms=1`,`gap-fill` 从 2250ms 降到 ~103ms。
+
+**已知限制**:预热的目标由 `peekUpcomingPositions` 预测;`playMode=shuffle` 下实测出现
+「预测 `0ea5a2da` / 实际播 `b13bc96b`」的偏差,此时预热打偏、泵仍旧冷启动(gap-fill 回落
+到 ~3000ms,与修复前一致,**不构成回归**)。预测一致性属独立问题,单列跟进。
+
+完整取证见 `docs/换歌取源跨进程预热-方案与取证.md`。

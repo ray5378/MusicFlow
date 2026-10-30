@@ -2,6 +2,17 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.10.2] - 2026-10-30
+
+### Fix / resume 补建桥路由(R1) + 曲末预热下推到 sendspin 子进程(换歌取源 3.2s → ~1ms)
+
+- **R1 重启后不起播/不出声**:`activeBridgeRoutes` 是进程内模块级 Map,容器重建后为空,而 `resume()` 只 fanOut DLNA + spinOp 组泵、**假设桥路由还活着** ⇒ 无桥会话 ⇒ 泵只推 WS 客户端 ⇒ AirPlay 成员全程静默,必须切歌才出声。现在 `resume()` 先 `ensureBridgeRouteOnResume()`:桥开关开 + 该组无路由 + 有在线 AirPlay 成员时补建会话并 `sendspinGroupBridgeSync`;补建失败只告警,不阻塞 resume。
+- **曲末预热下推到子进程**:主进程 `drainPreheat` 在曲末前 9s 算出的「可播结论」写进主进程 module-local 缓存,而泵跑在 supervisor fork 的 sendspin 子进程里读不到 ⇒ 每首起播都要在子进程内重探一次(实测 `ensure-ok` 2.9~3.9s)。这段时间全靠曲末排空窗口(实测 9760~9786ms)顶着,超窗即可闻静音。现在预热成功后经 IPC `preheat` 下发,子进程在本进程内重算并把结论写进自己的缓存,泵起播命中 `fresh-cache`(真机 3.17s → 1ms,`gap-fill` 2250ms → 103ms)。
+- 门控与红线:仅 fork 模式 + supervisor 在跑时下发;子进程按「泵存活计数」判断本进程有没有在用 sendspin 的组(纯 DLNA 播放不白探源);同曲幂等(上限 512 条);下发/预热任一失败自动退回原行为,绝不冒到 tracker。
+- 与既有 `songUnplayable`(子→主负缓存回传)构成跨进程缓存的**双向**打通 —— 负结论此前已打通,正结论一直是缺口。
+- 新模块 `backend/src/services/sendspin/preheatChild.ts`;`ipcProtocol` 增 `preheat` 消息;`drainPreheat` 增 `setDrainPreheatWarmHook`。新增 11 例定向测试。
+- 方案与真机取证见 `docs/换歌取源跨进程预热-方案与取证.md`。
+
 ## [4.10.1] - 2026-10-30
 
 ### Fix / 容器重建后设备僵死会话自愈:握手失败 TEARDOWN 探测重试(S1)+ boot clear-probe(S3)+ 优雅退出窗口 30s(S2)
