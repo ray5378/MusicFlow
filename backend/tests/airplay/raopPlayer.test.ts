@@ -22,6 +22,7 @@ import {
 } from "crypto";
 import {
   RaopPlayer,
+  AUDIO_BACKLOG_MAX_PACKETS,
   CHUNK_LEN,
   SAMPLE_RATE,
   SAMPLE_SIZE,
@@ -359,14 +360,18 @@ describe("sendChunk:RTP 音频包位布局", () => {
     expect(audio.sent.length).toBe(0);
   });
 
-  it("重传 backlog 上限 128:超出后淘汰最老的包", () => {
+  // v4.10.6:上限由 AUDIO_BACKLOG_MAX_PACKETS 决定(128 -> 2048),
+  // 这里不再硬编码 128,改为对常量取模,以后调常量本例仍成立。
+  it("重传 backlog 封顶于 AUDIO_BACKLOG_MAX_PACKETS:超出后淘汰最老的包", () => {
     const { p, anyP } = makePlayer();
     anyP.seq = 0;
-    for (let i = 0; i < 130; i++) p.sendChunk(pcmChunk());
-    expect(anyP.audioBacklog.size).toBe(128);
-    expect(anyP.audioBacklog.has(1)).toBe(false); // 第一个包已被淘汰
-    expect(anyP.audioBacklog.has(2)).toBe(false);
-    expect(anyP.audioBacklog.has(130)).toBe(true);
+    const extra = 2;
+    const total = AUDIO_BACKLOG_MAX_PACKETS + extra;
+    for (let i = 0; i < total; i++) p.sendChunk(pcmChunk());
+    expect(anyP.audioBacklog.size).toBe(AUDIO_BACKLOG_MAX_PACKETS);
+    expect(anyP.audioBacklog.has(1)).toBe(false); // 最老的包已被淘汰
+    expect(anyP.audioBacklog.has(extra)).toBe(false);
+    expect(anyP.audioBacklog.has(total)).toBe(true);
   });
 
   it("加密会话(rsa)发出的负载是密文,不等于明文 ALAC", () => {
