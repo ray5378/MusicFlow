@@ -2,6 +2,19 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.10.0] - 2026-10-30
+
+### Fix / 桥会话活性看门狗判据第三次换源(timing 心跳) + 优雅退出补 TEARDOWN + 换歌链路 F1/F2/F3 与排空钳制
+
+- **看门狗判据换 timing 心跳**:v4.9.8 的 ctrl 重传判据被 2026-10-29 10:03–10:48 十连炸证伪(间隔精确 300s 共 10 次,同期 timing 心跳每分钟稳定 17~21 条)——重传请求是丢包驱动信号,流越干净越不发,静默 ≠ 死亡。新判据 = timing(NTP) 心跳停摆 ≥45s(`MF_BRIDGE_RAOP_LIVENESS_MS` 缺省 45000,下限 30000;健康期 20 次/分钟、会话内最大间隔仅 6.0s 的 pcap 实测为据),开关与熔断保留(`MF_BRIDGE_RAOP_LIVENESS_WATCHDOG` 缺省 ON)。
+- **优雅退出补 TEARDOWN**:容器重启时子进程 dispatch 无 "stop" 分支 ⇒ 真正停桥会话的 onStop() 从未被调用 ⇒ 设备(MUZO)挂在死会话上,重启后不出声不发 timing(2026-10-29 实证静音 10 分钟、服务端照推 3 条流)。改为退出前走组/端级 transport stop 再退进程。
+- **F1 复播注入**:复播后立刻回填当前条目期望时长(`primeExpectedDuration`),消掉复播后 0 时长误判。
+- **F2 自适应轮询**:队列轮询改自重排 setTimeout,近曲末 20s 内自动降到 1s(曲末决策延迟最高 5s→1s)。
+- **F3 evaluate 快路径**:advance/track_changed/ended 三个决策跳过 250ms+500ms 两层去抖立即派发;idle_early 仍走去抖(测试钉住两侧行为)。
+- **streamEngine 排空**:步长钳制 `min(drainStepMs, ceil(left))` 免砍歌尾、有桥成员曲末排空量按桥队列上限钳制(修换歌时 AirPlay 断流 3~7 秒)、排空期给桥续静音保 RTP 节拍(`MF_BRIDGE_DRAIN_SILENCE`)、`ev=bridge-drain-fill` 每首一行可观测日志。
+- **文档**:airplay/group 权威文档 v4.10.0 增补(失声根因取证 + B/C/D 方案入档);新增 `docs/AirPlay播放中断-根因排查与已排除方向.md`、`docs/播放监控-多维度监控台使用手册.md`。
+- **验证**:定向 5 测试文件 59 例全绿(含新增 `bridgeLivenessBreaker.test.ts` 15 例);`tsc` 0 错;240 热补丁(v499)真机确认换歌不卡、监控台判定 HEALTHY。
+
 ## [4.9.8] - 2026-10-29
 
 ### Fix / HiVi 长会话播放数小时后整段无声（audio RTP 通道死亡，看门狗换判据自动救活）

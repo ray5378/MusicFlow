@@ -1800,3 +1800,51 @@ control/timing UDP 仍活,但音频流进不了设备,固件连重传请求都�
 **保留**:v4.9.6 A(gap-fill)、v4.9.7 三修复(看门狗缺省关→本版换判据后恢复开/重连
 互斥门/结束原因上报)全部在位。v4.9.7 关看门狗是因为旧判据误报;v4.9.8 换判据后恢复
 开启,不是回退。
+
+## v4.10.0 增补(看门狗判据换 timing 心跳 + 优雅退出 TEARDOWN + 失声根因取证与 B/C/D 方案入档,2026-10-30)
+
+### 1. 看门狗判据第三次换源:ctrl(300s) → timing 心跳(lastTimingAt,45s)
+
+- v4.9.8 判据(ctrl 重传请求停摆 300s)被 2026-10-29 10:03–10:48 的**十连炸**证伪:间隔精确 300s 共 10 次,
+  而同期 `timing reply` 每分钟稳定 17~21 条(心跳完全健康)。重传请求是**丢包驱动**信号,流越干净越不发,
+  ctrl 静默 300s ≠ audio 通道死亡 ⇒ 纯误杀,每次 9~14s 静音。
+- 新判据 = **timing(NTP) 心跳停摆 ≥45s**(`raop.ts` 的 `lastTimingAt`,timeSocket 收包即刷新)。
+  240 实测健康期恒为 20 次/分钟(每 3s 一次),跨换歌不断流;会话内最大间隔仅 6.0s(4611 包/9 会话/≈4.1h pcap 实测)。
+  开关 `MF_BRIDGE_RAOP_LIVENESS_WATCHDOG` 缺省 ON,阈值 `MF_BRIDGE_RAOP_LIVENESS_MS` 缺省 45000(下限 30000),
+  纯判据 `livenessWatchdogShouldFire` 与熔断 `livenessBreakerActive`(10min 内 ≥2 次 ⇒ 停 30min)保留。
+- ⚠️ 熔断器当前**结构性失效**:`livenessFireAt` 挂在 session 实例上,每次触发都重建 session ⇒ 历史清零 ⇒
+  永远攒不到 2 次(十连炸即为证据)。修复入下文 B/C/D-C,本版**未改**。
+
+### 2. 优雅退出补 TEARDOWN(重启后设备挂死会话的根治)
+
+- 根因(2026-10-29 20:54 tcpdump/4515 实证):容器重启只发 ANNOUNCE/SETUP/RECORD,TEARDOWN=0。原因链:
+  `supervisor.stop()` → `rpc("stop")` → 子进程 dispatch 无 "stop" 分支 ⇒ 抛错 ⇒ `killChild("SIGKILL")`;
+  真正停桥会话的 `onStop()` 从未被调用。设备(MUZO)对「服务器突然消失」不做清理,接收端挂在死会话上,
+  新进程握手虽 200 但不切会话 ⇒ 不出声、不发 timing,只能靠显式 TEARDOWN 重置。
+- 修法(`src/index.ts` `gracefulShutdown()`):退出前走「组/端级 transport stop」——真机上被反复验证会
+  下发 TEARDOWN 的同一条路(用户点停止/组级 stop 后设备立刻能重新接管),再退进程。
+
+### 3. 「偶发失声」根因取证(2026-10-30,240 线上 pcap+日志闭环)
+
+- **方法论两坑(先对齐再取证)**:① `docker logs -t` 打 UTC、`tcpdump -r` 打本地 CST,混用会得出完全相反
+  的结论(本次曾据此误判「看门狗误杀」,对齐后反转);② `timing reply` 日志无 deviceId/端口,多台 AirPlay
+  成员的回包混在一条序列里,用它量「心跳静默」是脏数据,必须走 pcap(host 过滤,UDP 载荷过滤用 `udp[4:2]=40`)。
+- **换歌断流基线**:128 次换歌,旧流 DONE → 新流 anchor 的无 RTP 窗口**中位 3.78s**(p90 13.45s),而设备
+  音频延迟缓冲 `latencyFrames=44100`≈1.0s ⇒ **每次换歌都必然欠载**。
+- **因果链**:换歌欠载 → 设备进入「等流」态并停发 NTP(约 12.5% 概率不自行恢复)→ 45s 后看门狗
+  TEARDOWN+新 RECORD(**纯断音 14s**,握手本身仅 497ms)→ 重连瞬间泵把 10.6s 预填充一口气灌入 →
+  `[bridge-server] overflow backlog=8025ms` → 桥会话被自己打死(`reason=closed`)→ 再等 ~6s rehost,
+  `staleFrames=385200`(8.7s 内容被丢)。两次事件 backlog 都精确顶到 8025ms。
+- 现行 timing 判据的 4 次触发(10-29 13:07/14:37、10-30 04:09/04:21)**全部紧跟换歌**(新流首包距触发
+  28.4~68.9s)。完整证据链见 `docs/AirPlay播放中断-根因排查与已排除方向.md`。
+
+### 4. B/C/D 方案(2026-10-30 用户拍板入档,**代码未实施**,实施时须同步 group/sendspin 两份权威文档)
+
+- **B(恢复分级)**:心跳静默先「原地重锚续流」(不拆会话、不停 RTP),无效再升级新 RECORD;RECORD 后泵
+  **从当下续投**,禁止把预填充水位(10611ms 档)一次性灌入(直接消掉二次崩的 ~6s)。
+- **C(兜底)**:熔断器上提到**设备级**(不随 session 销毁);阈值 45s→15s(自然上限 6s 的 2.5 倍,实测无
+  10~45s 区间样本)——每次事件失声从 ~45s 压到 ~15s。
+- **D(观测)**:`timing reply` 加 deviceId+端口;看门狗日志加 quietMs/thresholdMs;桥 tick 加
+  「距上次上行心跳 ms」。
+- **A(治本,单列待实施)**:换歌不断流——新流 anchor 抢在旧流排空前,或跨轨同一 RTP 时间线补静音,
+  把 3.78s 断流压到 0。

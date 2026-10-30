@@ -1076,3 +1076,30 @@ PUT 语义：`memberId` 必须是本组成员（命名空间 id **原样整条**
 (`MF_BRIDGE_RAOP_GAP_FILL`,缺省开)+ 设备主动信号停摆看门狗自动完整重握手
 (`MF_BRIDGE_RAOP_LIVENESS_WATCHDOG`,缺省开,阈值 `MF_BRIDGE_RAOP_LIVENESS_MS`
 缺省 120s)。垫片窗时长、0xE0 重锚、组同步语义全部不变;详见 airplay 权威文档 v4.9.6 增补。
+
+## v4.10.0 增补(换歌链路 F1/F2/F3 + 排空钳制/可观测 + 桥失声 B/C/D 方案入档,2026-10-30)
+
+### 1. 换歌链路三修复(已随 240 热补丁 v499 真机确认:换歌不卡、曲尾不被多砍)
+
+- **F1 复播注入**:`transport` 的 `op=play` 分支在 `resume()` 后调 `primeExpectedDuration(playerId,
+  playerId, 当前条目)`,把期望时长立刻回填(flowOwned 设备传 0),消掉复播后 evaluate 用 0 时长误判。
+- **F2 自适应轮询**:QueueController 轮询从固定 `setInterval` 改自重排 `setTimeout`(`startPollLoop`;
+  busy 时跳过本轮,`pollNearEnd` 近曲末 20s 内降到 1s),曲末决策延迟从最高 5s 压到 1s。
+- **F3 evaluate 快路径**:PlayerController 的 `advance/track_changed/ended` 三个决策跳过 250ms+500ms
+  两层去抖立即派发;`idle_early` 等仍走去抖(测试钉住两侧行为,`PlayerController.test.ts`)。
+- **streamEngine 排空修复**:步长 `stepMs=min(drainStepMs, ceil(left))`(免砍歌尾 1.5s,25f88d08);
+  有桥成员曲末排空量按桥队列上限钳制(ec2d4e29/c2c083c7);纯桥组判据=运行时 `hasBridges()`/
+  `hasDirectMembers()`;排空期给桥续静音保 RTP 节拍(`pushBridgeOnlySilence`+
+  `MF_BRIDGE_DRAIN_SILENCE`,549540f0);`ev=bridge-drain-fill`/`bridge-drain-fill-skip` 单行可观测日志。
+
+### 2. 桥失声根因与 B/C/D 方案(细节以 airplay 权威文档 v4.10.0 增补为准,此处只记群组侧结论)
+
+- 根因(2026-10-30 取证):换歌时旧流停止→新流首包的无 RTP 窗口**中位 3.78s**(128 次实测)> 设备 1s
+  音频延迟缓冲 ⇒ 接收端欠载进入「等流」态并停发 NTP 心跳,约 12.5% 概率不自行恢复 ⇒ 45s 后看门狗
+  TEARDOWN+新 RECORD(纯断音 14s),重连瞬间 10.6s 预填充一次性灌入再把新会话打死
+  (`backlog=8025ms` → `reason=closed` → 再等 ~6s rehost)。
+- **B/C/D 为方案入档(2026-10-30 用户拍板,代码未实施)**:B=恢复分级(先原地重锚续流、RECORD 后泵从
+  当下续投);C=熔断器上提设备级+阈值 45s→15s;D=`timing reply` 加 deviceId/端口、看门狗日志加 quietMs。
+  **A(治本:换歌不断流,新流 anchor 抢在旧流排空前)单列待实施**。
+- 群组口径验收判据(BCD/A 落地后必须过):换歌全程 RTP 不断流(pcap 旧流末包→新流首包间隔 <300ms)+
+  桥 tick `deltaUs/deltaP95Us/queueMs` 连续无跳变 + 看门狗触发次数为 0 + 人耳无失声。
