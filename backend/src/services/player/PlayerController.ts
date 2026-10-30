@@ -108,6 +108,17 @@ export class PlayerController {
     // 即时喂 tracker:捕获去抖窗口内的状态迁移(如 PLAYING→IDLE 自然结束)。
     const decision = this.trackerOf(playerId).update(toCompareState(state));
     this.pendingDecision.set(playerId, decision);
+    // F3:切歌/结束决策时间敏感 —— 跳过两层去抖立即派发。下游 QueueController.handleDecision
+    // 的 `advancing` 守卫已防重入(playCurrent 期间二次 advance 被吞),无需额外一次性闸。
+    // 仅 advance/track_changed/ended 走快路径;idle_early/stalled/frozen 仍走去抖
+    // (它们含复查/异步判定,需窗口合并瞬态,误触发代价高)。
+    if (decision === "advance" || decision === "track_changed" || decision === "ended") {
+      this.pendingDecision.delete(playerId);
+      // 这三个分支绝不可能是 "none"(上面 if 已排除),无需再判空。
+      log.debug(`[PlayerController][evaluate] t=${Date.now()} ${playerId}: decision=${decision} (fast-path, skip debounce)`);
+      this.onDecision(decision, playerId);
+      return;
+    }
     // 第一层去抖:250ms 内多次上报合并
     const existing = this.debounceTimers.get(playerId);
     if (existing) clearTimeout(existing);

@@ -1288,9 +1288,11 @@ export class GroupPump {
             //   会被判假死/重锚)。这里**每步**给桥续一段与其等长(且同起点)的静音帧,
             //   总量严格等于实际排空时长(多补会让桥收到超出内容尾的静音)。
             //   判据:开关(MF_BRIDGE_DRAIN_SILENCE,缺省 ON)+ 组上有该能力(最小测试桩无
-            //   → 自动退化,与 `hasBridges?.()` 同风格)。
-            const canFillSilence =
-              bridgeDrainSilenceEnabled() && typeof this.group.pushBridgeOnlySilence === "function";
+            //   → 自动退化,与 `hasBridges?.()` 同风格)。两个条件分开存,只为了**可观测**:
+            //   跳过时必须能一眼分辨「开关关了」/「桩没有该方法」/「方法在但桥集合是空的」。
+            const silenceSwitchOn = bridgeDrainSilenceEnabled();
+            const hasFillApi = typeof this.group.pushBridgeOnlySilence === "function";
+            const canFillSilence = silenceSwitchOn && hasFillApi;
             let fillTsUs = cursorUs;
             let fillMs = 0;
             let fillChunks = 0;
@@ -1299,7 +1301,17 @@ export class GroupPump {
               left > 0;
               left -= drainStepMs
             ) {
-              const stepMs = Math.min(drainStepMs, left);
+              // 🔴 stepMs 必须是**正整数**:`extraDrainMs` 是浮点(µs 差 /1000,真机
+              //   实测 14180.15899999999965),最后一步的 `left` 会带着小数尾巴,直接
+              //   拿去 `BigInt(stepMs * 1000)` 会抛 TypeError("not an integer") ⇒
+              //   pushLoop 异常终止,且崩在 `ev=bridge-drain-fill` 那行日志之前(真机
+              //   2026-11 首夜实锤,14180ms 排空那首)。
+              //   - `Math.ceil` 而非 `Math.round`:① 恒得正整数,BigInt 转换不可能抛;
+              //     ② ceil 让最后一步**吞掉**小数尾巴,不会出现 `left=0.16` 时 round→0
+              //     的 `sleep(0)` + `push(0µs)` 空转步(`pushBridgeOnlySilence` 对
+              //     `durUs<=0` 返回 0,白跑一次循环);
+              //   - 代价:总排空量最多多 1ms(相对于 14s 量级完全无意义)。
+              const stepMs = Math.min(drainStepMs, Math.ceil(left));
               await sleep(stepMs);
               this.group.positionMs = this.audiblePositionMs(lastPushedMs, cursorUs, floorMs);
               if (!this.group.audibleStarted && this.group.positionMs > floorMs) this.group.audibleStarted = true;
@@ -1309,7 +1321,15 @@ export class GroupPump {
                 fillMs += stepMs;
               }
             }
-            // 每首歌**一行**(不是每步):字段固定便于 grep / 守卫。
+            // ★ 每首歌**恰好一行**(不是每步),且**三选一必须都留痕** —— 绝不允许静默:
+            //   2026-11 真机教训:排空期 `fillChunks` 恒 0 而一行日志都没有,A/B 连续两次
+            //   被误判成「公式错」,真因是 `pushBridgeOnlySilence` 内部 `bridges.size === 0`
+            //   直接 return 0(桥压根没挂上,见 G2)。字段固定便于 grep:
+            //   - `ev=bridge-drain-fill`        真的补了,带 dev / bridges / durMs / chunks;
+            //   - `ev=bridge-drain-fill-skip`   没补,`reason=disabled|no-api|no-bridge`,
+            //     并带 bridges/members/gid(no-bridge 时就是「组里没有桥」的直接证据)。
+            const bridgesN = this.group.bridges?.size ?? 0;
+            const membersN = this.group.members?.size ?? 0;
             if (fillChunks > 0) {
               const devs =
                 typeof this.group.bridges?.keys === "function"
@@ -1319,7 +1339,22 @@ export class GroupPump {
                 this.server,
                 "info",
                 `sendspin 曲末排空:桥续静音 ev=bridge-drain-fill dev=${devs || "-"} ` +
-                  `durMs=${Math.round(fillMs)} chunks=${fillChunks} song=${this.songId}`,
+                  `bridges=${bridgesN} durMs=${Math.round(fillMs)} chunks=${fillChunks} song=${this.songId}`,
+              );
+            } else if (!canFillSilence) {
+              logSafe(
+                this.server,
+                "info",
+                `sendspin 曲末排空:桥续静音跳过 ev=bridge-drain-fill-skip ` +
+                  `reason=${silenceSwitchOn ? "no-api" : "disabled"} bridges=${bridgesN} song=${this.songId}`,
+              );
+            } else {
+              logSafe(
+                this.server,
+                "info",
+                `sendspin 曲末排空:桥续静音跳过 ev=bridge-drain-fill-skip ` +
+                  `reason=no-bridge bridges=${bridgesN} members=${membersN} ` +
+                  `gid=${this.group.name} song=${this.songId}`,
               );
             }
           }

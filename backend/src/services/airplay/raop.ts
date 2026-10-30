@@ -257,6 +257,10 @@ export interface RaopConnectOptions {
   /** Force RSA encryption path even if the device doesn't advertise it. */
   forceRsa?: boolean;
   sampleRate?: number;
+  /** 设备标识,**仅用于日志定位**(2026-10-30 D 组)。
+   *  240 上多台 AirPlay 成员的 NTP 回包会混进同一条 `timing reply` 序列,日志不带
+   *  deviceId 就没法按设备量"心跳静默",线上因此算错过一次。 */
+  deviceId?: string;
 }
 
 export type PcmProducer = () => Promise<Buffer | null>;
@@ -363,6 +367,18 @@ export class RaopPlayer {
    *  时会停发 timing(结构性),不能作 audio 通道活性判据;ctrl 重传请求在正常收包时
    *  持续活跃(240 实证 ~10/s),audio 通道死亡后归零 —— 240 实证 292s 零请求。 */
   lastCtrlSignalAt = Date.now();
+  /** 设备 **timing(NTP)心跳**最后时刻 —— 会话是否被设备真正接管的唯一可靠信号。
+   *  240 实测(2026-10-29,40 分钟/8 次换歌):健康期恒为 20 次/分钟(每 3s 一次),
+   *  从不断流;而设备接收端僵死时**立刻归零且永不恢复**(12:12:38 之后 10 分钟 0 次,
+   *  同期服务端推完 3 条流)。v4.9.7「MUZO 正常播放会停发 timing」的结论据此推翻。 */
+  lastTimingAt = Date.now();
+  /** 设备 timing(NTP)请求的**累计次数**(单调递增;会话重建时随新 player 归零)。
+   *  用途:v4.10.1「上一次看门狗重连到底有没有把设备救回来」的唯一可信判据。
+   *  ⚠️ 不能用 lastTimingAt 比较 —— 它是**字段初值 = 构造时刻**,而看门狗重连时新 player
+   *  恰在 fire 之后构造,`lastTimingAt > lastFireAt` 恒真 ⇒ failedRun 永远归零 ⇒
+   *  「连续救不回来就止损」那一级变成死代码(2026-10-30 独立复核发现)。
+   *  也不能靠重连后回写 lastTimingAt 代替:那是给 quiet 判据宽限,不代表设备活过来。 */
+  timingCount = 0;
   /** 桥接路径 latePackets(§3.3):sendAt 已过期仍「追发但不改 RTP 映射」的包数。
    *  连续过期说明启动 lead 不足 —— 由上层(BridgeSession stats tick)报警/重锚。 */
   private bridgeLatePackets = 0;
@@ -379,6 +395,7 @@ export class RaopPlayer {
       pk: opts.pk,
       et: opts.et,
       forceRsa: opts.forceRsa,
+      deviceId: opts.deviceId,
     };
     this.rsa = !!opts.forceRsa || !!opts.et?.includes("1");
     this.sid = String(Math.floor(Math.random() * 1e10)).padStart(10, "0");
@@ -739,6 +756,8 @@ export class RaopPlayer {
     // roundtrip (gettime_ms() - reference). recv/send = our current NTP.
     this.timeSocket!.on("message", (msg, rinfo) => {
       this.lastDeviceSignalAt = Date.now();
+      this.lastTimingAt = Date.now();
+      this.timingCount++;
       const header = msg.subarray(0, 4);
       const reqSendTime = msg.subarray(24, 32);
       const reply = Buffer.alloc(32);
@@ -753,7 +772,7 @@ export class RaopPlayer {
       writeNtp(reply, sec, frac, 16);
       writeNtp(reply, sec, frac, 24);
       this.timeSocket!.send(reply, rinfo.port, rinfo.address);
-      log.info(`timing reply ref=${reqSendTime.toString("hex")} ntp=${sec}.${frac.toString(16)}`);
+      log.info(`timing reply dev=${this.opts.deviceId ?? "-"} lport=${this.timeSocket!.address().port} rport=${rinfo.port} ref=${reqSendTime.toString("hex")} ntp=${sec}.${frac.toString(16)}`);
     });
   }
 

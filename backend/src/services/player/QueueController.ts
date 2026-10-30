@@ -125,7 +125,11 @@ export class QueueController extends EventEmitter {
   private players = new Map<string, UniversalPlayer>();
   private ctrls = new Map<string, PlayerControllerLike>();
   private advancing = new Set<string>();
-  private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private pollTimer: ReturnType<typeof setTimeout> | null = null;
+  /** F2:自适应轮询——轮询在途时不再排下一轮(避免 1s 档重叠跑飞)。 */
+  private pollBusy = false;
+  /** F2:本轮轮询发现任一活跃播放器进入「曲末前 20s」→ 下一轮切 1s 缩短换歌等待。 */
+  private pollNearEnd = false;
   // 服务器端定时暂停（sleep timer），key = 裸 deviceId/groupId。到点立即暂停。
   private sleepTimers = new Map<string, { timer: NodeJS.Timeout; deadline: number }>();
   /** 同一首连续卡死计数(key=裸 id):stalled 重投只兜一次 transient,
@@ -366,7 +370,16 @@ export class QueueController extends EventEmitter {
     // 显式停止都是新播放会话,不清会把新会话里合法的 idle_early 复查一直压住。
     if (op === "stop" || op === "play") { clearSeekSettle(playerId); clearPauseStop(playerId); }
     try {
-      if (op === "play") await player.resume();
+      if (op === "play") {
+        await player.resume();
+        // F1:复播也注入本曲已知时长(否则 tracker.expectedDuration 恒 0 → 曲末预热 C 与
+        // overrun 本地节拍结束兜底算不出窗口 → 换歌只能等 5s 轮询)。与 playCurrent 同口径:
+        // flow 会话设备注入 0;队列尚未定当前曲则跳过,留给 playCurrent 自己(cast 前必注入)。
+        const q = this.queues.get(playerId);
+        if (q && q.currentIndex >= 0 && q.items[q.currentIndex]) {
+          this.primeExpectedDuration(player.playerId, playerId, q.items[q.currentIndex]);
+        }
+      }
       else if (op === "pause") await player.pause();
       else if (op === "stop") await player.stop();
       else if (op === "seek") await player.seek(arg!);
@@ -392,7 +405,20 @@ export class QueueController extends EventEmitter {
    *  间隔 5s(MA 是 30s,本地设备事件支持差,用 5s 平衡)。 */
   startPollLoop(baseUrl: () => string): void {
     if (this.pollTimer) return;
-    this.pollTimer = setInterval(() => { this.pollAllDevices(baseUrl).catch(() => {}); }, 5000);
+    // F2:自适应轮询。曲末前 20s 切到 1s,否则 5s(对照 MA force_poll 30s,本地 5s 平衡)。
+    // 自重生 setTimeout 而非固定 setInterval:① 轮询在途时不重排下一轮(pollBusy 双保险);
+    // ② 近曲末动态提速。硬约束:无活跃播放器 / 时长未知(dur<=0)一律 5s,绝不乱提速。
+    const tick = () => {
+      if (this.pollBusy) { this.pollTimer = setTimeout(tick, 5000) as any; return; }
+      this.pollBusy = true;
+      this.pollNearEnd = false;
+      this.pollAllDevices(baseUrl).catch(() => {}).finally(() => {
+        this.pollBusy = false;
+        const next = this.pollNearEnd ? 1000 : 5000;
+        this.pollTimer = setTimeout(tick, next) as any;
+      });
+    };
+    this.pollTimer = setTimeout(tick, 5000) as any;
   }
 
   private async pollAllDevices(_baseUrl: () => string): Promise<void> {
@@ -415,6 +441,11 @@ export class QueueController extends EventEmitter {
         // 取用(它自己负责清)。先删就会把"离开时的播放位置"丢掉,续播只能从头播。
         const wasLost = this.linkLost.has(deviceId);
         if (typeof state.position === "number" && state.position > 0) this.lastPos.set(deviceId, state.position);
+        // F2:标记「曲末前 20s」→ 下一轮轮询切 1s 缩短换歌等待。dur<=0(未知时长)
+        // 或 position<=0(还没开始走)则不判曲末,保持 5s。
+        const nearItem = q.items[q.currentIndex];
+        const nearDur = nearItem ? this.knownDuration(nearItem) : 0;
+        if (nearDur > 0 && state.position > 0 && nearDur - state.position <= 20) this.pollNearEnd = true;
         // state.playerId 已是 "dlna:<deviceId>",直接上报 PlayerController。
         this.ctrls.get(deviceId)?.reportState(state);
         // 轮询快照:debug 级(5s × N 设备,info 下太吵)。排障"进度条回退/不动"时
@@ -1249,7 +1280,8 @@ export class QueueController extends EventEmitter {
       // position/duration 不对应单曲,按单曲时长判定必然误判(见 flowOwned 注释)。
       // 用可选调用:这是纯内存注入,即便调用方(测试替身)未实现该方法,也绝不能
       // 影响起播 —— 静默跳过即退化为"时长未知"(= 改动前的行为)。
-      ctrl.setExpectedDuration?.(playerId, this.flowOwned.has(deviceId) ? 0 : this.knownDuration(fullItem));
+      // F1:抽出 primeExpectedDuration 两处共用(transport("play") 复播也走这套)。
+      this.primeExpectedDuration(playerId, deviceId, fullItem);
       // 乐观窗口必须在 cast 之前开启:castToDevice 内部 Stop→SetAVTransportURI→Play
       // 会触发 GENA STOPPED/TRANSITIONING/PLAYING 事件。若窗口在 cast 之后才开,
       // 设备在 cast 期间上报的 PLAYING 会先于窗口开启到达 → 窗口永远等不到 PLAYING
@@ -1340,6 +1372,17 @@ export class QueueController extends EventEmitter {
       if (typeof row?.duration === "number" && row.duration > 0) return row.duration;
     } catch { /* 库不可读 → 未知 */ }
     return 0;
+  }
+
+  /** F1:把「本曲已知时长」注入 PlayerController.tracker(供结束判定 + 曲末预热窗口)。
+   *  抽出来两处共用:playCurrent(cast 前)与 transport("play" 复播)。
+   *  - flow 会话设备注入 0(多曲连续流,单曲时长无意义,见 flowOwned 注释);
+   *  - 队列尚未定当前曲(currentIndex<0)则跳过,留给 playCurrent 自己(cast 前必注入);
+   *  - 用可选调用:测试替身未实现 setExpectedDuration 时静默退化(= 改动前行为)。 */
+  private primeExpectedDuration(playerId: string, deviceId: string, item: QueueItem): void {
+    const q = this.queues.get(deviceId);
+    if (!q || q.currentIndex < 0) return;
+    this.ctrls.get(deviceId)?.setExpectedDuration?.(playerId, this.flowOwned.has(deviceId) ? 0 : this.knownDuration(item));
   }
 
   /** 只带 songId 的 item(HA/脚本/持久化恢复)在 cast 前补全元数据。

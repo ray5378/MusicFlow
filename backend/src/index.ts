@@ -673,5 +673,43 @@ server.listen(port, "0.0.0.0", () => {
 });
 
 // Clean shutdown: stop mDNS so the service record disappears promptly.
-process.on("SIGTERM", () => { stopMdnsBroadcast(); server.close(); });
-process.on("SIGINT", () => { stopMdnsBroadcast(); server.close(); });
+//
+// v4.10.0(根因):**退出前必须先把 RAOP/桥会话 TEARDOWN 掉**。设备(MUZO)对
+// 「服务器突然消失」不做清理,接收端会挂在死会话上;新进程起来后 ANNOUNCE/
+// SETUP/RECORD 虽返回 200,但设备不切会话 ⇒ 不出声、不发 timing,只能靠显式
+// TEARDOWN 才重置(2026-10-29 12:12 实证,静音 10 分钟、服务端照推 3 条流)。
+let shuttingDown = false;
+async function gracefulShutdown(sig: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  try { console.log(`[boot] ${sig}: stop mDNS + TEARDOWN all airplay sessions`); } catch { /* ignore */ }
+  try { stopMdnsBroadcast(); } catch { /* ignore */ }
+  // ⚠️ v4.10.0 实测修正(2026-10-29 20:54 抓包实证):调 stopAirPlayService() **发不出 TEARDOWN**。
+  //    tcpdump tcp/4515 显示重启时只有 ANNOUNCE/SETUP/RECORD,TEARDOWN = 0。原因链:
+  //      supervisor.stop() → rpc("stop") → 子进程 dispatch 无 "stop" 分支 ⇒ 未知 op 抛错
+  //      ⇒ 捕获后直接 killChild("SIGKILL");而真正停桥会话的 onStop() 在 ChildRpcHost 里
+  //      **从未被调用**(handleMessage 只处理 t==="req")。于是桥会话随进程一起被砍,没有 TEARDOWN。
+  //    改为走「组/端级 transport stop」——这是真机上被反复验证会下发 TEARDOWN 的同一条路
+  //    (用户点停止 / 组级 stop 后设备立刻能重新接管)。
+  try {
+    const { getPeerManager } = await import("./services/peer.js");
+    const { getQueueController } = await import("./services/player/index.js");
+    const qc = getQueueController();
+    const cast = getPeerManager()
+      .list()
+      .filter((p) => /^(group|airplay|dlna|sendspin):/.test(String(p.peerId)));
+    for (const p of cast) {
+      try {
+        qc.stopPlayback(String(p.peerId));
+      } catch { /* 单端失败不影响其它端 */ }
+    }
+    await Promise.race([
+      Promise.allSettled(cast.map((p) => qc.transport(String(p.peerId), "stop"))),
+      new Promise((r) => setTimeout(r, 4000)),
+    ]);
+  } catch { /* 停传输失败也要继续退出 */ }
+  try { server.close(); } catch { /* ignore */ }
+  setTimeout(() => process.exit(0), 800).unref?.();
+}
+process.on("SIGTERM", () => { void gracefulShutdown("SIGTERM"); });
+process.on("SIGINT", () => { void gracefulShutdown("SIGINT"); });

@@ -7,6 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { RaopPlayer, CHUNK_LEN } from "../../src/services/airplay/raop.js";
 import {
+  livenessBreakerActive,
   livenessWatchdogShouldFire,
   raopBridgeGapFillEnabled,
   raopBridgeLivenessMs,
@@ -115,11 +116,10 @@ describe("env 开关与阈值", () => {
     }
   });
 
-  it("GAP_FILL / LIVENESS_WATCHDOG 缺省 ON(v4.9.8 判据源=ctrl 停摆);0/false 关闭", () => {
+  it("GAP_FILL / LIVENESS_WATCHDOG 缺省 ON(v4.10.0 判据源=timing 心跳);0/false 关闭", () => {
     expect(raopBridgeGapFillEnabled()).toBe(true);
-    // v4.9.7 曾缺省关闭:旧判据(合流 lastDeviceSignalAt,含 timing)对 MUZO 正常静默
-    // 结构性误判。v4.9.8 判据源换成 ctrl 重传请求停摆(正常 ~10/s 活跃,通道死亡归零)
-    // ⇒ 误报面消失,恢复缺省开启。
+    // v4.10.0:判据源 = 设备 timing 心跳(健康期 20 次/分钟,实测 40 分钟不断流;
+    // 接收端僵死时立刻归零且永不恢复)⇒ 缺省开启,阈值 45s。
     expect(raopBridgeLivenessWatchdogEnabled()).toBe(true);
     process.env.MF_BRIDGE_RAOP_GAP_FILL = "0";
     expect(raopBridgeGapFillEnabled()).toBe(false);
@@ -133,12 +133,15 @@ describe("env 开关与阈值", () => {
     expect(raopBridgeLivenessWatchdogEnabled()).toBe(true);
   });
 
-  it("LIVENESS_MS 缺省 300000(v4.9.8),下限 30000,env 可上调", () => {
-    expect(raopBridgeLivenessMs()).toBe(300000);
+  it("LIVENESS_MS 缺省 15000(v4.10.1),下限 5000,env 可上调", () => {
+    // 15s 的依据(2026-10-30 240 pcap):HiVi 上行 NTP 4611 包 / 9 会话 / ≈4.1 小时,
+    // 会话内最大间隔仅 6.0s(>10s 样本 0)⇒ 15s = 自然上限 2.5 倍仍有余量;
+    // 旧缺省 45s 会把每次"接收端僵死"的失声拖到 45s 以上。
+    expect(raopBridgeLivenessMs()).toBe(15000);
     process.env.MF_BRIDGE_RAOP_LIVENESS_MS = "10";
-    expect(raopBridgeLivenessMs()).toBe(300000); // 低于下限回落缺省
-    process.env.MF_BRIDGE_RAOP_LIVENESS_MS = "30000";
-    expect(raopBridgeLivenessMs()).toBe(30000);
+    expect(raopBridgeLivenessMs()).toBe(15000); // 低于下限回落缺省
+    process.env.MF_BRIDGE_RAOP_LIVENESS_MS = "6000";
+    expect(raopBridgeLivenessMs()).toBe(6000);
     process.env.MF_BRIDGE_RAOP_LIVENESS_MS = "60000";
     expect(raopBridgeLivenessMs()).toBe(60000);
   });
@@ -184,5 +187,31 @@ describe("livenessWatchdogShouldFire(纯判据)", () => {
 
   it("开关关闭 → 不触发", () => {
     expect(livenessWatchdogShouldFire({ ...base, enabled: false })).toBe(false);
+  });
+});
+
+// v4.10.0:任何自动恢复都必须有失败退避。v4.9.8 的反面教材是没有退避 ——
+// 判据错了一次误判就演变成每 5 分钟一次的连环重连(每次 9~14s 静音)。
+describe("livenessBreakerActive(心跳重连熔断)", () => {
+  const NOW = 1_700_000_000_000;
+
+  it("从未触发 → 不熔断", () => {
+    expect(livenessBreakerActive([], NOW)).toBe(false);
+  });
+
+  it("10 分钟内仅 1 次 → 不熔断(允许第一次自愈)", () => {
+    expect(livenessBreakerActive([NOW - 1_000], NOW)).toBe(false);
+  });
+
+  it("10 分钟内 2 次 → 熔断", () => {
+    expect(livenessBreakerActive([NOW - 300_000, NOW - 1_000], NOW)).toBe(true);
+  });
+
+  it("只有 1 次在窗口内、另一次已超 10 分钟 → 不熔断", () => {
+    expect(livenessBreakerActive([NOW - 700_000, NOW - 1_000], NOW)).toBe(false);
+  });
+
+  it("3 次都在窗口内 → 熔断", () => {
+    expect(livenessBreakerActive([NOW - 500_000, NOW - 200_000, NOW - 1_000], NOW)).toBe(true);
   });
 });

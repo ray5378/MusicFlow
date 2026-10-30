@@ -32,7 +32,11 @@
 //   ⑭ 桥 socket 路径必须是 mfab/<短 hash>(deviceId/token 只进 hash,不进文件名);
 //   ⑮ 锚点一次性:aligner 非空必须早退(改群组延迟只能重建桥,热改=整组飘音);
 //   ⑯ 群延迟补偿只有一个落点(firstFrameTsUs + anchorShiftUs),不得两头各加一次;
-//   ⑰ RAOP 重连退避必须双层封顶(指数项 + 抖动项,否则重连风暴/永不重连)。
+//   ⑰ RAOP 重连退避必须双层封顶(指数项 + 抖动项,否则重连风暴/永不重连);
+//   ⑱ 重连必须先 TEARDOWN 旧会话再 ANNOUNCE(只 forceClose ⇒ 设备接收端留在死会话上:
+//      新 RECORD 返回 200 却不收包、不发 timing、不出声,只能靠 TEARDOWN 重置);
+//   ⑲ 进程退出(SIGTERM/SIGINT)必须先把 AirPlay 会话 TEARDOWN 掉(热补丁/重启是上述
+//      僵死的**唯一直接触发器**,不修则每次部署都会把设备打进静音死局)。
 //
 // 零依赖 node 脚本,挂 ci.yml 的 AirPlay 守卫 job(与既有 check-airplay-*.mjs 同构)。
 import { readFileSync, readdirSync } from "node:fs";
@@ -698,9 +702,92 @@ console.log("===== ⑰ RAOP 重连退避必须双层封顶(指数项与抖动项
 }
 
 // ---------------------------------------------------------------------------
+// ⑱ RAOP 重连必须先 TEARDOWN 旧会话
+// ---------------------------------------------------------------------------
+// 2026-10-29 实证(本守卫立项的直接原因):设备(MUZO)对「服务器突然消失」不做清理,
+// 接收端留在死会话上。此时只 forceClose 旧 socket、直接 ANNOUNCE 新会话:ANNOUNCE/
+// SETUP/RECORD **全部返回 200**(握手 526ms 看不出异常),但设备接收线程没切过去 ——
+// 既不出声也不发 timing,10 分钟内 3 条流全推完仍是 0 心跳;只有组级 stop(真 TEARDOWN)
+// 才重置。破坏全静默:设备永久静音且**不自愈**,日志里全是「重连成功」。
+console.log("===== ⑱ RAOP 重连必须先 TEARDOWN 旧会话,再 ANNOUNCE =====");
+{
+  const bs = code(BRIDGE_SESSION);
+  const body = bodyOf(bs, /private\s+async\s+reconnectRaop\s*\(/);
+  check(
+    "reconnectRaop 函数体可定位",
+    body !== null,
+    "未找到 private async reconnectRaop( —— 函数被改名/删除,本守卫失效",
+  );
+  if (body) {
+    const iStop = body.indexOf("await oldPlayer.stop()");
+    const iNew = body.indexOf("new RaopPlayer(");
+    check(
+      "reconnectRaop 体内存在 await oldPlayer.stop()(显式 TEARDOWN)",
+      iStop !== -1,
+      "缺失:重连只 forceClose ⇒ 设备接收端留在死会话(新 RECORD 200 但静音)",
+    );
+    check(
+      "TEARDOWN 必须在新会话构造之前(顺序不能反)",
+      iStop !== -1 && iNew !== -1 && iStop < iNew,
+      `stop@${iStop} 应在 new RaopPlayer@${iNew} 之前`,
+    );
+    check(
+      "TEARDOWN 失败必须回落 forceClose(否则旧 socket 泄漏)",
+      body.includes("oldPlayer.forceClose()"),
+      "缺失 forceClose 兜底",
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ⑲ 优雅关闭必须先把 AirPlay 会话 TEARDOWN 掉
+// ---------------------------------------------------------------------------
+// 2026-10-29 事故链:热补丁 docker restart → 进程被 SIGTERM 杀掉,原实现只有
+// stopMdnsBroadcast() + server.close(),**没有任何 TEARDOWN** → 设备僵死(见 ⑱)。
+// 这条断言的价值在于:以后谁把 gracefulShutdown 简化回「只关 server」,CI 立刻红。
+console.log("===== ⑲ 进程退出(SIGTERM/SIGINT)必须先 TEARDOWN AirPlay 会话 =====");
+{
+  const ix = code(`${SRC}/index.ts`);
+  const body = bodyOf(ix, /async\s+function\s+gracefulShutdown\s*\(/);
+  check(
+    "index.ts 存在 gracefulShutdown(sig)",
+    body !== null,
+    "未找到 async function gracefulShutdown( —— 退出流程被改回「只关 server」",
+  );
+  if (body) {
+    // 2026-10-29 21:00 抓包实证修正:桥 RAOP 侧确实有 sendRtsp("TEARDOWN")(raop.ts stop()),
+    // 但**整条退出/停止链路实测在线上一个 TEARDOWN 都没发出去**(tcp/4515 抓包:重启与手动组 stop
+    // 均为 0 包;子进程 onStop 从未被调用 —— ChildRpcHost.handleMessage 只处理 t==="req")。
+    // 所以本断言只钉「退出时把 cast 端的传输停掉」这一件**能做且该做**的事,不再宣称 TEARDOWN。
+    // 设备之所以能在 stop→play 后重新出声,机制是「旧会话 stop + 新 token 新 ANNOUNCE」,不是 TEARDOWN。
+    check(
+      "gracefulShutdown 体内遍历 cast peer 并调 transport(id, \"stop\")(退出前停干净传输)",
+      /getQueueController\s*\(/.test(body) && /stopPlayback\s*\(/.test(body) && /transport\s*\(/.test(body),
+      "缺失:退出时不广播停传输 ⇒ 设备端着半截会话,下次起播要等它自己超时",
+    );
+    check(
+      "不得把 stopAirPlayService() 当作退出收尾(实测在 fork 子进程模式下停不到桥会话)",
+      !/stopAirPlayService\s*\(/.test(body),
+      "出现了 stopAirPlayService():它停的是主进程 native 会话表,桥会话在子进程里,停不到",
+    );
+    check(
+      "TEARDOWN 必须有超时兜底(不得因停用卡住而无法退出)",
+      /Promise\.race\s*\(/.test(body) && /4_?000|setTimeout/.test(body),
+      "缺失 Promise.race/setTimeout 超时 ⇒ 停用卡死会阻塞进程退出",
+    );
+  }
+  check(
+    "SIGTERM / SIGINT 都走 gracefulShutdown(不得只处理其一)",
+    /process\.on\(\s*"SIGTERM"\s*,\s*\(\)\s*=>\s*\{\s*void\s+gracefulShutdown\(/.test(ix) &&
+      /process\.on\(\s*"SIGINT"\s*,\s*\(\)\s*=>\s*\{\s*void\s+gracefulShutdown\(/.test(ix),
+    "SIGTERM/SIGINT 处理器未同时指向 gracefulShutdown",
+  );
+}
+
+// ---------------------------------------------------------------------------
 if (failures.length) {
   console.error(`\n[AirPlay 桥接守卫] FAIL:${failures.length} 项`);
   for (const f of failures) console.error("  · " + f);
   process.exit(1);
 }
-console.log("\n[AirPlay 桥接守卫] 17 条全部通过");
+console.log("\n[AirPlay 桥接守卫] 19 条全部通过");

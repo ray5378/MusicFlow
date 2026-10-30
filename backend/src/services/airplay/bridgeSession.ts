@@ -303,24 +303,106 @@ export function raopBridgeGapFillEnabled(): boolean {
   return !(v === "0" || v === "false");
 }
 
-/** 消费停滞看门狗开关(MF_BRIDGE_RAOP_LIVENESS_WATCHDOG)。缺省 ON;0/false = 关。
- *  设备主动信号(NTP 请求/重传请求)停摆超阈值 ⇒ 判接收端假死 ⇒ 自动完整重握手。 */
+/** 会话活性看门狗开关(MF_BRIDGE_RAOP_LIVENESS_WATCHDOG)。缺省 ON;0/false = 关。
+ *  判据 = 设备 **timing(NTP)心跳** 停摆超阈值 ⇒ 判会话未被接管/接收端僵死 ⇒ 先 TEARDOWN
+ *  旧会话再完整重握手。 */
 export function raopBridgeLivenessWatchdogEnabled(): boolean {
-  // v4.9.8:恢复**缺省开启**,但判据源换成 ctrl 重传请求停摆(lastCtrlSignalAt) ——
-  // v4.9.7 缺省关闭是因为旧判据(合流 lastDeviceSignalAt,含 timing)对 MUZO 结构性
-  // 误报(正常播放停发 timing)。新判据:正常收包时 ctrl 请求持续活跃(~10/s),
-  // audio 通道死亡后归零(240 实证 292s 零请求,时间线与用户失聪完全吻合)。
-  // 残余误报面=长期零丢包的完美链路(2.4G UDP 125 包/s 现实中不存在),误报代价
-  // 是一次 reconnect(~1-2s),远小于通道死亡无人理睬。
+  // 判据演进史(三步都踩过,别再退回去):
+  //   v4.9.7 判据=合流 lastDeviceSignalAt(含 timing)→ 缺省关闭(当时误以为 MUZO 正常播放
+  //          会停发 timing);
+  //   v4.9.8 判据=ctrl 重传请求停摆(lastCtrlSignalAt)→ **误杀健康流**:重传请求是丢包驱动
+  //          信号,流越干净设备越不发(240 实证 loss=0 的 170s 流 latePackets 仅 297),
+  //          ctrl 静默满 300s 即被判「audio 通道死亡」→ 每 5min00s 一次、每次 9~14s 静音;
+  //   v4.10.0 判据=timing 心跳(lastTimingAt)→ 240 实测健康期恒为 **20 次/分钟(每 3s 一次)**,
+  //          跨 8 次换歌不断流;设备接收端僵死时**立刻归零且永不恢复**(12:12:38 后 0 次/10min,
+  //          同期服务端推完 3 条流)。「MUZO 正常播放会停发 timing」的旧结论据此推翻。
+  // 误报代价 = 一次 reconnect(新 RECORD + 重锚)。阈值 v4.10.1 起为 15s(≈漏 4 个心跳),
+  // 并有 0/30s/120s 分级退避 + 连续 3 次救不回则停用 30min 兜底。
   const v = process.env.MF_BRIDGE_RAOP_LIVENESS_WATCHDOG;
   return !(v === "0" || v === "false");
 }
 
-/** 看门狗阈值 ms(MF_BRIDGE_RAOP_LIVENESS_MS,缺省 120000,下限 30000)。 */
+/** 看门狗阈值 ms(MF_BRIDGE_RAOP_LIVENESS_MS,缺省 15000,下限 5000)。 */
 export function raopBridgeLivenessMs(): number {
   const v = Number(process.env.MF_BRIDGE_RAOP_LIVENESS_MS);
-  // v4.9.8:缺省 300s —— 正常 ctrl 请求 ~10/s,5min 静默概率≈0;取宽防偶发网络平静。
-  return Number.isFinite(v) && v >= 30000 ? v : 300000;
+  // 判据 = timing 心跳。缺省 **15s** 而不是 v4.10.0 的 45s(2026-10-30 实测改)：
+  //   240 全量 pcap 里 HiVi 上行 NTP 共 4611 包 / 9 个会话 / ≈4.1 小时播放,
+  //   **会话内最大间隔只有 6.0 秒**(直方图 0.5-5s:4583、5-10s:3、>10s:0),
+  //   即健康期铁定 20 次/分钟、绝不抖到 10s 以上 ⇒ 15s = 自然上限的 2.5 倍仍有富余。
+  //   而 45s 会把每次"接收端僵死"的失声拉长到 45s 以上:实测一次事件的纯断音是
+  //   14s,其中 45s 全耗在"等判据",用户听感就是"失声一分钟"。
+  // env 下限放到 5s(排障用);低于 5s 视为误配,回落缺省。
+  return Number.isFinite(v) && v >= 5000 ? v : 15000;
+}
+
+/** 熔断(纯函数):10 分钟内因心跳缺失重连 ≥2 次 ⇒ 判据可疑,停用 30 分钟。
+ *  任何自动恢复都必须有失败退避 —— v4.9.8 的反面教材就是没有退避,一次误判变连环重连。 */
+export function livenessBreakerActive(fireAtMs: number[], nowMs: number): boolean {
+  const recent = fireAtMs.filter((t) => nowMs - t < 600000);
+  return recent.length >= 2;
+}
+
+/** 熔断状态 —— **按 deviceId 持久,不随 BridgeSession 销毁**(2026-10-30 修结构性失效)。
+ *
+ *  原实现把 fireAt/cooldownUntil 放在 session 实例上,而看门狗每次触发都会重建 RAOP
+ *  会话、进而重建 session 对象 ⇒ 历史随旧实例一起销毁 ⇒「窗口内 ≥2 次」的门槛永远
+ *  攒不满,熔断等于摆设。240 实证:2026-10-29 10:03–10:48 连炸 10 次、间隔精确 300s,
+ *  熔断一次都没生效。
+ *
+ *  分级策略(既不连环重连、也不把用户永久钉在无声上):
+ *    - 窗口内第 1 次：立即重连(cooldown 0);
+ *    - 窗口内第 2 次：最小间隔 30s;
+ *    - 窗口内 ≥3 次：最小间隔 120s;
+ *    - **连续 3 次重连都没把心跳救回来**(每次 fire 后 lastTimingAt 仍早于上次 fire)
+ *      ⇒ 判「判据或设备侧已不可救」,停用 30min 止损并告警。
+ *  只要重连后设备恢复过心跳(heartbeatSinceLastFire=true),failedRun 立刻归零,
+ *  下一次该救的时候照常立刻救。 */
+export interface LivenessBreakerState {
+  fireAt: number[];
+  cooldownUntil: number;
+  lastFireAt: number;
+  failedRun: number;
+}
+const livenessBreakerByDevice = new Map<string, LivenessBreakerState>();
+
+export function livenessBreakerState(deviceId: string): LivenessBreakerState {
+  let s = livenessBreakerByDevice.get(deviceId);
+  if (!s) {
+    s = { fireAt: [], cooldownUntil: 0, lastFireAt: 0, failedRun: 0 };
+    livenessBreakerByDevice.set(deviceId, s);
+  }
+  return s;
+}
+
+/** 记一次看门狗触发,返回本次要不要重连、退避多久。纯状态机(便于单测)。
+ *  @param heartbeatSinceLastFire 上次触发之后设备是否又发过心跳。 */
+export function noteLivenessFire(
+  deviceId: string,
+  nowMs: number,
+  heartbeatSinceLastFire: boolean,
+): { firesInWindow: number; failedRun: number; cooldownUntil: number; disabled: boolean } {
+  const s = livenessBreakerState(deviceId);
+  s.fireAt = s.fireAt.filter((t) => nowMs - t < 600000);
+  s.fireAt.push(nowMs);
+  if (s.lastFireAt > 0 && !heartbeatSinceLastFire) s.failedRun += 1;
+  else s.failedRun = 0;
+  s.lastFireAt = nowMs;
+  if (s.failedRun >= 2) {
+    // 连续 3 次(T0 + 两次后续)重连全部没救回心跳 ⇒ 停用 30min。
+    s.cooldownUntil = nowMs + 1800000;
+    s.fireAt = [];
+    s.failedRun = 0;
+    return { firesInWindow: 0, failedRun: 0, cooldownUntil: s.cooldownUntil, disabled: true };
+  }
+  const gap = s.fireAt.length >= 3 ? 120000 : s.fireAt.length === 2 ? 30000 : 0;
+  s.cooldownUntil = gap > 0 ? nowMs + gap : 0;
+  return { firesInWindow: s.fireAt.length, failedRun: s.failedRun, cooldownUntil: s.cooldownUntil, disabled: false };
+}
+
+/** 测试用:清空熔断状态(不传 = 全清)。 */
+export function resetLivenessBreaker(deviceId?: string): void {
+  if (deviceId) livenessBreakerByDevice.delete(deviceId);
+  else livenessBreakerByDevice.clear();
 }
 
 /** 看门狗触发判据(纯函数,便于测试):设备主动信号停摆超阈值且当前确在推流。
@@ -646,6 +728,12 @@ export class BridgeSession {
   private gapFillerPromise: Promise<number> | null = null;
   /** B(消费停滞看门狗):重连进行中防重入。 */
   private livenessReconnectInFlight = false;
+  /** 心跳看门狗触发历史已上提为**设备级**(见 livenessBreakerState)——
+   *  挂在 session 上会随每次触发重建而清零,熔断永远攒不满。 */
+  /** 上一次看门狗触发时刻 player.timingCount 的快照(判「这次重连救回来没有」)。 */
+  private timingCountAtFire = 0;
+  /** C-4 结构性兜底:connected 且有 player 却一直 aligner=null(无消费者)的起始时刻。 */
+  private noConsumerSince = 0;
   /** v4.9.7:RAOP 会话重建期间的互斥门 —— 期间禁止 maybeBeginStream 起流,
    *  防止新流起在即将被 forceClose 的旧 player 上(见 reconnectRaop)。 */
   private raopReconnectInFlight = false;
@@ -687,7 +775,7 @@ export class BridgeSession {
       onBoundary: (gen, reason) => this.onBoundary(gen, reason),
       onStall: () => this.onLinkStall(),
       onHeartbeat: (gen, seq, paused) => this.onBridgeHeartbeat(paused === true),
-      onOverflow: (ms) => log.warn(`bridge overflow: device=${this.deviceId} backlog=${Math.round(ms)}ms`),
+      onOverflow: (ms) => this.onReceiveOverflow(ms),
       log: (...args: unknown[]) => log.info(args.map((a) => String(a)).join(" ")),
     };
     const server = new BridgeServer(
@@ -707,6 +795,7 @@ export class BridgeSession {
       port: this.opts.port ?? 5000,
       pk: this.opts.pk,
       et: this.opts.et,
+      deviceId: this.opts.deviceId,
     });
     let session: RaopSession;
     try {
@@ -916,6 +1005,27 @@ export class BridgeSession {
   /** 链路 stall(2s 无任何帧,含心跳):sendspin 子进程死亡/链路断。
    *  §5.2「sendspin 子进程崩溃 ⇒ airplay 侧无残留播放」:立刻停推流(不写静音),
    *  保留 listener 等重连;BridgeMember 重连成功会发 BOUNDARY{rehost} ⇒ 走 onBoundary 重锚。 */
+  /** §4.4 接收侧积压超上限(服务端已决定销毁该 session):把积压一并丢弃。
+   *
+   *  为什么必须丢(2026-10-30 240 实证):积压之所以能长到 8s,是因为**没有消费者**
+   *  (看门狗重连窗口内 aligner=null)。这些 PCM 对时间线早已过期 —— 留着只会在发送侧
+   *  重连(&rehost)后被当成正常内容消费,表现为 `ev=stale staleFrames=385200`
+   *  (≈8.7s 内容一次性废弃)且旧会话 Socket 生命周期被拉长。丢弃是显式的、有界的。 */
+  private onReceiveOverflow(ms: number): void {
+    const dropped = this.inBytes;
+    this.inQueue = [];
+    this.inBytes = 0;
+    this.outBuf = Buffer.alloc(0);
+    log.warn(`[airplay-bridge] ${JSON.stringify({
+      ev: "recv-overflow",
+      dev: this.deviceId,
+      gen: this.generation,
+      backlogMs: Math.round(ms),
+      droppedBytes: dropped,
+      droppedMs: Math.round((dropped / BRIDGE_PCM_BYTES_PER_SEC) * 1000),
+    })}`);
+  }
+
   private onLinkStall(): void {
     if (this.closed || !this.aligner) return;
     log.warn(`[airplay-bridge] link stall: device=${this.deviceId} 停推流,等待发送侧重连(无残留播放)`);
@@ -1170,16 +1280,31 @@ export class BridgeSession {
       this.inBytes = 0;
       this.outBuf = Buffer.alloc(0);
       const oldPlayer = this.player;
+      // v4.10.0 根因修复:先对设备**显式 TEARDOWN 旧会话**,再 ANNOUNCE 新会话。
+      // 只 forceClose 会把 MUZO 的接收端留在旧会话上 —— 新 RECORD 虽然 RTSP 200,
+      // 但设备既不收包也不发 timing、不出声(2026-10-29 12:12 实证:重启后 10 分钟
+      // 3 条流全推完,设备心跳 0 次,只有组级 stop(TEARDOWN)才能救活)。
+      if (oldPlayer) {
+        try {
+          await oldPlayer.stop();
+        } catch {
+          try { oldPlayer.forceClose(); } catch { /* ignore */ }
+        }
+        if (this.player === oldPlayer) this.player = null;
+      }
       const player = new RaopPlayer({
         host: this.opts.host ?? "",
         port: this.opts.port ?? 5000,
         pk: this.opts.pk,
         et: this.opts.et,
+        deviceId: this.opts.deviceId,
       });
       try {
         const session = await player.connect();
         this.raopSession = session;
         this.player = player;
+        // 新 player 的 timingCount 从 0 起算,快照同步归零才能正确判"这一次救回来没有"。
+        this.timingCountAtFire = 0;
         this.raopReconnectAttempt = 0;
         log.info(`[airplay-bridge] raop reconnected: device=${this.deviceId}(新 RECORD,等待新代次首帧重锚)`);
         pushInitialVolume(player, this.deviceId, this.opts.initialVolume, this.opts.sameHostDlnaPeer);
@@ -1196,6 +1321,15 @@ export class BridgeSession {
       }
     } finally {
       this.raopReconnectInFlight = false;
+      // ★ v4.10.1 根因修复:互斥门复位后**必须补一次起流判定**。
+      //   connect() 的 await 窗口(~0.5s)内到达的 AUDIO 帧会把 firstFrameTsUs 设好、
+      //   并在 maybeBeginStream 里因 raopReconnectInFlight=true 早退;而 ingestAudio
+      //   只在 firstFrameTsUs 从 null→非null 的那一帧才触发起流 ⇒ 从此**没人再触发**。
+      //   后果(240 实证 2026-10-30 04:21:37–04:21:44):新会话永不进 live(aligner 恒
+      //   null)即**没有消费者**,接收侧积压按实时速率涨到 8s → §4.4 overflow 断连 →
+      //   发送侧再等 ~6s rehost。看门狗本来只手握 0.5s,却被这一条拉成两次断音 ~14s。
+      //   maybeBeginStream 幂等(aligner!==null 即 return),补调无副作用。
+      void this.maybeBeginStream();
     }
   }
 
@@ -1229,9 +1363,21 @@ export class BridgeSession {
   /** §10.5 stats tick:每设备一行 JSON(ev:"tick"),clock 恒 local-rtp-ntp(同源 host 单调钟)。 */
   private emitStatsTick(): void {
     if (this.closed) return;
-    // B(消费停滞看门狗,2026-10-29):设备主动信号(NTP 请求/重传请求)停摆超阈值
-    // ⇒ 接收端假死(数据面再健康也救不回,实证只有完整重握手能唤醒)⇒ 自动重连。
+    // C-3(复核):熔断状态是模块级、跨 session 永生 —— 只要设备**真的**在发心跳就必须解除,
+    // 否则一次"30min 止损"会跨越用户手动重播/换会话残留,让设备长时间不被看护。
+    // 注意:解除门槛是"最近 5s 内真收到心跳",不是"重连过",所以救不回来的连续失败
+    // (全程无心跳)仍然照常累计 failedRun → 3 次止损那级依然可达。
+    if (this.player !== null && Date.now() - this.player.lastTimingAt < 5000) {
+      resetLivenessBreaker(this.deviceId);
+    }
+    // B(会话活性看门狗,2026-10-29,v4.10.0 判据换 timing 心跳):心跳停摆超阈值
+    // ⇒ 会话未被设备接管 / 接收端僵死(数据面再健康也救不回,实证只有 TEARDOWN +
+    // 完整重握手能唤醒)⇒ 自动重连。
+    const livenessThresholdMs = raopBridgeLivenessMs();
+    const livenessQuietMs = this.player !== null ? Date.now() - this.player.lastTimingAt : 0;
+    const livenessBreaker = livenessBreakerState(this.deviceId);
     if (
+      Date.now() >= livenessBreaker.cooldownUntil &&
       livenessWatchdogShouldFire({
         enabled: raopBridgeLivenessWatchdogEnabled(),
         isAp2: this.ap2Session !== null,
@@ -1242,18 +1388,59 @@ export class BridgeSession {
         streaming: this.aligner !== null,
         reconnectInFlight: this.livenessReconnectInFlight,
         reconnectTimerSet: this.raopReconnectTimer !== null,
-        quietMs: this.player !== null ? Date.now() - this.player.lastCtrlSignalAt : 0,
-        thresholdMs: raopBridgeLivenessMs(),
+        quietMs: livenessQuietMs,
+        thresholdMs: livenessThresholdMs,
       })
     ) {
+      // 判「上一次重连到底救没救回来」= **同一个 player** 的 timingCount 有没有涨过。
+      // ⚠️ 绝不能用 lastTimingAt 比较:它是字段初值=构造时刻,新 player 恰在 fire 之后
+      // 构造 ⇒ 条件恒真 ⇒ failedRun 永远归零 ⇒ 30min 止损变成死代码(复核 C-1)。
+      const heartbeatSinceLastFire = this.player !== null && this.player.timingCount > this.timingCountAtFire;
+      if (this.player !== null) this.timingCountAtFire = this.player.timingCount;
+      const fired = noteLivenessFire(this.deviceId, Date.now(), heartbeatSinceLastFire);
+      if (fired.disabled) {
+        log.warn(`[airplay-bridge] liveness watchdog 熔断: device=${this.deviceId} 连续 3 次重连都没换回心跳 ⇒ 停用 30min(判据或设备侧已不可救,止损避免连环重连)`);
+        return;
+      }
       this.livenessReconnectInFlight = true;
-      log.warn(`[airplay-bridge] liveness watchdog: device=${this.deviceId} ctrl 重传请求已停 ≥${Math.round(raopBridgeLivenessMs() / 1000)}s ⇒ 判 audio 通道死亡(240 实证 292s 零请求),自动完整重握手(新 RECORD)`);
+      log.warn(`[airplay-bridge] liveness watchdog: device=${this.deviceId} gen=${this.generation} timing 心跳已停 ${(livenessQuietMs / 1000).toFixed(1)}s ≥ ${(livenessThresholdMs / 1000).toFixed(0)}s ⇒ 判会话未被接管/接收端僵死,先 TEARDOWN 旧会话再完整重握手(10min 内第 ${fired.firesInWindow} 次,连续未救回 ${fired.failedRun} 次)`);
       void this.reconnectRaop()
         .catch(() => { /* 重连失败已由 scheduleRaopReconnect 接管退避 */ })
         .finally(() => {
           this.livenessReconnectInFlight = false;
-          if (this.player) this.player.lastDeviceSignalAt = Date.now();
+          // ★ v4.10.1 复核 C-2:重连完成必须同时重置 **quiet 基线**。
+          //   新 player 在 `connect()` **之前**构造,而 connect 预算是 12s
+          //  (raop.ts AIRPLAY_CONNECT_BUDGET_MS)⇒ 一次慢重连做完时 lastTimingAt 已经
+          //   "12s 旧",15s 阈值下再过一个 2s tick 就会立刻二次判定 ⇒ TEARDOWN 刚建好的
+          //   会话。45s 阈值时 12s 远小于阈值所以从不暴露,降到 15s 才成为真风险。
+          //   这里只给"宽限窗",不代表设备活过来 —— 活体判据看 timingCount。
+          if (this.player) {
+            this.player.lastDeviceSignalAt = Date.now();
+            this.player.lastTimingAt = Date.now();
+          }
         });
+    }
+    // C-4(复核)结构性兜底:看门狗要求 `streaming = aligner !== null`,而本次事故的
+    // 状态恰恰是 **aligner 恒 null**(240 实证 04:21:37–04:21:44 无一个 anchor)⇒ 看门狗
+    // 在最需要它的状态里是关闭的。这里独立补一条:connected + 有 player + 无消费者,且
+    // 积压已超 1.5s 并持续 8s ⇒ 说明起流判定被漏掉,主动补一次并告警。
+    // (8s 门槛高于实测换歌断流中位数 3.78s / p90 13.45s 的起流延迟,不会误触正常换代。)
+    if (this.connected && this.player !== null && this.aligner === null && !this.pausedState) {
+      if (this.noConsumerSince === 0) this.noConsumerSince = Date.now();
+      const stalledMs = Date.now() - this.noConsumerSince;
+      if (stalledMs >= 8000 && this.inBytes >= BRIDGE_PCM_BYTES_PER_SEC * 1.5) {
+        log.warn(`[airplay-bridge] ${JSON.stringify({
+          ev: "no-consumer",
+          dev: this.deviceId,
+          gen: this.generation,
+          stalledMs,
+          backlogMs: this.backlogMs(),
+        })}`);
+        this.noConsumerSince = Date.now();
+        void this.maybeBeginStream();
+      }
+    } else {
+      this.noConsumerSince = 0;
     }
     const rate = this.outRate;
     const queueMs = Math.round(((this.outBuf.length >> 2) / rate) * 1000);
@@ -1282,6 +1469,9 @@ export class BridgeSession {
       queueMs,
       maxQueueMs: this.maxQueueMs,
       late: this.player?.bridgeLateCount ?? 0,
+      // D 组观测(2026-10-30):距设备上一次 timing 心跳的毫秒数 —— 看门狗判据的唯一
+      // 输入,必须能被事后复核(null = 尚无 player)。健康期应恒 < 6000。
+      timingAgeMs: this.player !== null ? Date.now() - this.player.lastTimingAt : null,
       ap2LateSkips: this.ap2LateSkips,
       ap2Degraded: this.ap2LinkLoss !== null,
       realigned: this.stats.realignments,

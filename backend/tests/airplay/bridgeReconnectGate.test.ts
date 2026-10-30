@@ -14,9 +14,14 @@
 // 修法:窗口内禁止起流 + 重连重入直接返回(内层 finally 不得复位外层门)。
 import "../plugins/_env.js";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { bridgeSocketPath } from "../../src/services/airplay/bridgeChannel.js";
-import { BridgeSession } from "../../src/services/airplay/bridgeSession.js";
+import {
+  BridgeSession,
+  livenessBreakerState,
+  noteLivenessFire,
+  resetLivenessBreaker,
+} from "../../src/services/airplay/bridgeSession.js";
 
 const sessions: BridgeSession[] = [];
 
@@ -85,5 +90,80 @@ describe("v4.9.7 RAOP 重连互斥门(修复 36s 无声死循环)", () => {
     await any.maybeBeginStream();
     expect(any.anchors).not.toBeNull();
     expect(any.anchorUs).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v4.10.1:看门狗重连之后「新会话永不进 live」的根因修复
+//
+// 事故链(240 实证 2026-10-30 04:21:37–04:21:44):
+//   ① 看门狗判定心跳停止 ⇒ reconnectRaop();
+//   ② connect() 的 await 窗口(~0.5s)内 bridge 侧照常送 AUDIO 帧,这些帧把
+//      firstFrameTsUs 设好,并在 maybeBeginStream 里因 raopReconnectInFlight=true 早退;
+//   ③ finally 只复位了门,没有补一次起流判定;而 ingestAudio 只在 firstFrameTsUs
+//      由 null→非null 的那一帧才触发起流 ⇒ 从此没人再触发;
+//   ④ 结果 aligner 恒 null = 没有消费者,接收侧积压按实时速率涨到 8s
+//      ⇒ §4.4 overflow 断连 ⇒ 发送侧再等 ~6s rehost(tick 一直是 state:"connected",
+//      全程没有一个 ev:"anchor")。
+// 于是看门狗只手握 0.5s 的动作,被放大成两次断音合计 ~14s。
+// ---------------------------------------------------------------------------
+describe("v4.10.1 重连后补起流判定 + overflow 清积压", () => {
+  it("★ 重连结束后必须补一次起流判定(无论 connect 成不成)", async () => {
+    const s = mkSession();
+    await s.start();
+    const any = s as any;
+    any.opts.dry = false;
+    any.connected = true;
+    const spy = vi.spyOn(any, "maybeBeginStream");
+    await any.reconnectRaop();
+    expect(spy).toHaveBeenCalled();
+    // 门必须复位,否则后续永远不起流
+    expect(any.raopReconnectInFlight).toBe(false);
+  });
+
+  it("★ 心跳健康即解除熔断(C-3:熔断状态是模块级、跨会话永生,不许把活设备钉住)", async () => {
+    const s = mkSession();
+    await s.start();
+    const any = s as any;
+    any.connected = true;
+    // 先把该设备的熔断窗口填满
+    noteLivenessFire(s.deviceId, Date.now() - 2000, true);
+    noteLivenessFire(s.deviceId, Date.now() - 1000, true);
+    expect(livenessBreakerState(s.deviceId).fireAt.length).toBe(2);
+    // 设备确实在发心跳 ⇒ tick 里必须解除
+    any.player = { lastTimingAt: Date.now(), timingCount: 7, bridgeLateCount: 0 };
+    any.aligner = null;
+    any.emitStatsTick();
+    expect(livenessBreakerState(s.deviceId).fireAt.length).toBe(0);
+    resetLivenessBreaker(s.deviceId);
+  });
+
+  it("★ 有 player 却无消费者且积压很厚 ⇒ 主动补一次起流(C-4 自愈)", async () => {
+    const s = mkSession();
+    await s.start();
+    const any = s as any;
+    any.connected = true;
+    any.player = { lastTimingAt: Date.now(), timingCount: 1, bridgeLateCount: 0 };
+    any.aligner = null;
+    any.inBytes = 48000 * 4 * 2; // 2s 的 48k s16le 立体声
+    any.noConsumerSince = Date.now() - 9000;
+    const spy = vi.spyOn(any, "maybeBeginStream").mockResolvedValue(undefined);
+    any.emitStatsTick();
+    expect(spy).toHaveBeenCalledTimes(1);
+    // 触发后必须重置计时,避免每 2s 刷一次日志/调用
+    expect(Date.now() - any.noConsumerSince).toBeLessThan(1000);
+  });
+
+  it("★ 接收侧 overflow 必须丢弃无消费者的积压 PCM(in/out 一并清)", async () => {
+    const s = mkSession();
+    await s.start();
+    const any = s as any;
+    any.inQueue = [Buffer.alloc(64), Buffer.alloc(64)];
+    any.inBytes = 128;
+    any.outBuf = Buffer.alloc(256);
+    any.onReceiveOverflow(8025);
+    expect(any.inBytes).toBe(0);
+    expect(any.inQueue.length).toBe(0);
+    expect(any.outBuf.length).toBe(0);
   });
 });

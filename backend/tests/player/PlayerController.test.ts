@@ -19,15 +19,27 @@ describe("PlayerController", () => {
   });
   afterEach(() => { ctrl?.stopOverrunTicker(); vi.useRealTimers(); });
 
-  it("reportState 后 0.25s 去抖,再 0.5s 转发决策", () => {
+  it("advance 决策跳过两层去抖立即派发(F3:缩短换歌等待)", () => {
+    // 未注入 knownDuration → dur=0 → PLAYING→IDLE 判为 advance(非 idle_early)。
     ctrl.reportState(st(PlaybackState.PLAYING));
     ctrl.reportState(st(PlaybackState.IDLE)); // 自然结束
+    // F3:advance 走快路径,不再等 0.25s+0.5s 去抖,立即派发(下游 advancing 守卫防重入)。
+    expect(onDecision).toHaveBeenCalledTimes(1);
+    expect(onDecision.mock.calls[0][0]).toBe("advance");
+    expect(onDecision.mock.calls[0][1]).toBe("dlna:d1");
+  });
+
+  it("非快路径决策(idle_early)仍走 0.25s+0.5s 两层去抖", () => {
+    // 注入 knownDuration,让 IDLE 时位置远未到时长 → 判 idle_early(误报,不切歌)。
+    ctrl.setExpectedDuration("dlna:d1", 100);
+    ctrl.reportState(st(PlaybackState.PLAYING, "u1", 10));
+    ctrl.reportState(st(PlaybackState.IDLE, "u1", 5)); // pos=max(5,10)=10 < 100-10 ⇒ idle_early
     expect(onDecision).not.toHaveBeenCalled();
     vi.advanceTimersByTime(250); // 第一层去抖
     expect(onDecision).not.toHaveBeenCalled();
     vi.advanceTimersByTime(500); // 第二层去抖
     expect(onDecision).toHaveBeenCalledTimes(1);
-    expect(onDecision.mock.calls[0][0]).toBe("advance");
+    expect(onDecision.mock.calls[0][0]).toBe("idle_early");
   });
 
   it("乐观窗口期间忽略 IDLE 上报(屏蔽瞬态)", () => {
