@@ -46,6 +46,35 @@ export const HANDSHAKE_BUDGET_MS = 8_000;
 /** 握手期间单步的最小等待(预算快耗尽时也要给设备一个响应的机会)。 */
 export const RTSP_STEP_MIN_MS = 1_500;
 
+/** 重传缓冲最多保留多少个已发 RTP 包(供设备 0x55 重传请求补发)。
+ * 设备侧 WiFi 空口会一次丢掉 ~240 个连续包(实测 1.92s 音频,见
+ * docs/播放监控-多维度监控台使用手册.md 与 240 真机取证);旧值 128 包只覆盖 1.02s,
+ * 补不到更早的包 ⇒ 设备缓冲(约 1.0s)被抽干 ⇒ 曲中失声数秒后自愈。
+ * 2048 包 = 2048 * 352 / 44100 ≈ 16.4s,内存约 2048 * 1428B ≈ 2.9MB/会话,可忽略。
+ */
+export const AUDIO_BACKLOG_MAX_PACKETS = 2048;
+
+/** 允许的档位(用户可选)。2048 为默认,4096 给极端丢包环境。
+ * 内存代价:包大小约 1428B ⇒ 4096 档约 5.9MB/会话,仍在可接受范围。
+ */
+export const AUDIO_BACKLOG_ALLOWED_PACKETS = [512, 1024, 2048, 4096, 8192] as const;
+
+/**
+ * 解析重传缓冲档位(环境变量 MF_BRIDGE_RAOP_BACKLOG_PACKETS)。
+ * - 未设置 / 非法 ⇒ 默认档 AUDIO_BACKLOG_MAX_PACKETS(2048)
+ * - 不在档位表内 ⇒ 取「不小于它」的最小档,并打 WARN(不静默吞)
+ * - 超过最大档 ⇒ 钳到最大档
+ */
+export function resolveAudioBacklogMaxPackets(): number {
+  const raw = Number(process.env.MF_BRIDGE_RAOP_BACKLOG_PACKETS ?? "");
+  const allowed = AUDIO_BACKLOG_ALLOWED_PACKETS as unknown as number[];
+  const maxTier = allowed[allowed.length - 1];
+  if (!Number.isFinite(raw) || raw <= 0) return AUDIO_BACKLOG_MAX_PACKETS;
+  if (allowed.includes(raw)) return raw;
+  if (raw > maxTier) return maxTier;
+  return allowed.find((v) => v >= raw) ?? maxTier;
+}
+
 /** 按方法 + 握手剩余预算选超时:清理请求永远短;握手请求受总预算约束。 */
 export function rtspTimeoutFor(method: string, remainingHandshakeMs: number | null): number {
   if (method === "TEARDOWN" || method === "FLUSH") return RTSP_CLEANUP_TIMEOUT_MS;
@@ -427,6 +456,17 @@ export class RaopPlayer {
   private destroying = false;
   private stats: { chunks: number; maxGapMs: number; reanchors: number; lastSendMs: number; startMs: number } | null = null;
   private lossRequests = 0;
+  /** [OBS-LOSS] 设备请求补发的包总数 / 实际补发成功的包数 / 补不到的包数 */
+  private lossRequestedPackets = 0;
+  private lossResentPackets = 0;
+  private lossMissPackets = 0;
+  /** 本会话生效的重传缓冲档位(构造时读一次,运行期不变)。 */
+  readonly backlogMaxPackets = resolveAudioBacklogMaxPackets();
+  /** [OBS-LOSS] 重传请求窗口聚合(避免 657 条请求刷屏) */
+  private lossWinStartMs = 0;
+  private lossWinCount = 0;
+  private lossWinMiss = 0;
+  private lossWinSeq0 = 0;
   /** 设备最近一次**主动**信号时刻(NTP 请求/重传请求都是设备发起)。
    *  消费停滞看门狗的活性源(2026-10-29):数据面再健康,设备不收包就是假死。 */
   lastDeviceSignalAt = Date.now();
@@ -845,6 +885,23 @@ export class RaopPlayer {
   }
 
   private audioBacklog = new Map<number, Buffer>();
+
+  /** [OBS-LOSS] 设备请求补发但缓冲里已没有(补不到)的包数。 */
+  get lossMissCount(): number {
+    return this.lossMissPackets;
+  }
+  /** [OBS-LOSS] 设备请求补发的包总数。 */
+  get lossRequestedCount(): number {
+    return this.lossRequestedPackets;
+  }
+  /** [OBS-LOSS] 实际补发成功的包数。 */
+  get lossResentCount(): number {
+    return this.lossResentPackets;
+  }
+  /** [OBS-LOSS] 当前重传缓冲里的包数。 */
+  get backlogPackets(): number {
+    return this.audioBacklog.size;
+  }
   private backlogSeq = 0;
 
   /** exp4 实验开关(MF_BRIDGE_RAOP_CONNECT_PRIME):RECORD 后立即向设备灌 n 包
@@ -930,7 +987,7 @@ export class RaopPlayer {
     pkt.writeUInt32BE(this.ssrc >>> 0, 8);
     enc.copy(pkt, 12);
     this.audioBacklog.set(this.seq, Buffer.from(pkt));
-    if (this.audioBacklog.size > 128) {
+    if (this.audioBacklog.size > this.backlogMaxPackets) {
       const firstKey = this.audioBacklog.keys().next().value as number;
       this.audioBacklog.delete(firstKey);
     }
@@ -945,10 +1002,12 @@ export class RaopPlayer {
 
   private onLoss(seqno: number, n: number, controlPort: number): void {
     this.lossRequests++;
+    this.lossRequestedPackets += Math.max(1, n);
     for (let i = 0; i < n; i++) {
       const idx = (seqno + i) & 0xffff;
       const pkt = this.audioBacklog.get(idx);
       if (!pkt) continue;
+      this.lossResentPackets++;
       const resend = Buffer.from(pkt);
       resend[0] = 0x80;
       resend[1] = 0x56 | 0x80;
@@ -958,6 +1017,19 @@ export class RaopPlayer {
         this.ctrlSocket.send(resend, 0, resend.length, controlPort, this.opts.host);
       }
     }
+    this.lossMissPackets += Math.max(0, this.lossRequestedPackets - this.lossResentPackets - this.lossMissPackets);
+    // [OBS-LOSS] 窗口聚合:200ms 一行,避免一次爆发 657 条请求刷屏
+    const nowMs = Date.now();
+    if (nowMs - this.lossWinStartMs > 200) {
+      if (this.lossWinCount > 0) {
+        log.warn(`[raop-loss] dev=${this.opts.deviceId ?? "-"} req=${this.lossWinCount} seq0=${this.lossWinSeq0} seq1=${seqno} miss=${this.lossWinMiss} backlog=${this.audioBacklog.size} cap=${this.backlogMaxPackets} total=${this.lossRequests} totalMiss=${this.lossMissPackets}`);
+      }
+      this.lossWinStartMs = nowMs;
+      this.lossWinCount = 0;
+      this.lossWinMiss = 0;
+      this.lossWinSeq0 = seqno;
+    }
+    this.lossWinCount++;
   }
 
   /** Periodic sync packet to control port (libraop _raopcl_send_sync). */
