@@ -11,6 +11,7 @@ import { createDlnaProtocolPlayer, getDevice, getDeviceStatus, isDeviceAvailable
 import { createAirPlayProtocolPlayer } from "../airplay/protocolPlayer.js";
 import { getAirPlayStatus, isAirPlayDeviceDisabled, isAirplayBridgeEnabled, isBridgeOwned, hasActiveSession, bridgePrepareDevice, bridgeStopDevice, selectAirPlayBridgeProtocol } from "../airplay/control.js";
 import { bridgeSocketPath } from "../airplay/bridgeChannel.js";
+import { raopProbeDevice, retryBridgePrepareWithProbe, isBridgeHandshakeDeviceError } from "../airplay/raopProbe.js";
 import { getAirPlayDevice, rescanAirPlayDevices } from "../airplay/discovery.js";
 import type { BridgeSocketSpec } from "../sendspin/bridgeAttach.js";
 import { getSendspinFront } from "../sendspin/index.js";
@@ -437,7 +438,10 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
   /** 准备桥路由:逐设备生成 token → bridgePrepare(§4.1 顺序 ①)。
    *  单设备失败(MAJ-07)→ 记入 fallback,该设备本流回落 solo cast;
    *  全部失败 → 返回 null(整组退回 legacy 路由,与 flag=0 同行为)。
-   *  返回:成功规格数组 + 需回落 solo cast 的设备列表。 */
+   *  返回:成功规格数组 + 需回落 solo cast 的设备列表。
+   *  S1(v4.10.x):握手阶段设备类失败(ECONNRESET 等,容器重建后 MUZO 固件保留
+   *  半开会话的典型症状)先走「TEARDOWN 探测 + 5s/15s 退避重试」救回,救不回才
+   *  回落 solo cast —— 现场验证过 stop→10s→play 一次成功,把该人工步骤自动化。 */
   async function prepareBridgeRoute(
     apOnline: string[],
     /** B 方案暖复用:上一条路由的 specs —— 同设备同协议沿用旧 token ⇒ 子进程暖复用会话。 */
@@ -455,15 +459,35 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
       const prevSpec = reuse?.find((r) => r.deviceId === d && r.protocol === protocol);
       // 同设备同协议沿用旧 token ⇒ 子进程暖复用会话(RAOP 握手零重来);否则新 token(冷启语义)。
       const token = prevSpec ? prevSpec.token : randomBytes(12).toString("hex");
-      try {
+      const attempt = (): Promise<{ listening: true; socketPath: string }> => {
         // socketPath 在主进程按同一实现计算(bridgeSocketPath,<100B 断言在此抛)。
         bridgeSocketPath(d, token);
         // v4.9.4:settle 只在冷建(新 token)时做;warm 复用(同 token 哑会话)不等待 ——
         // 快路径,DLNA 早已让位(本组上一首即在播)。
-        await bridgePrepareDevice(d, token, protocol, groupId, { initialVolume: groupInitialVolume, settleDlna: !prevSpec });
+        return bridgePrepareDevice(d, token, protocol, groupId, { initialVolume: groupInitialVolume, settleDlna: !prevSpec });
+      };
+      try {
+        await attempt();
         sockets.push({ deviceId: d, socketPath: bridgeSocketPath(d, token), token, protocol });
       } catch (e) {
-        log.warn(`[group][bridge] ${groupId}: bridgePrepare 失败 device=${d} → 本流回落 solo cast: ${(e as Error)?.message || e}`);
+        const reason = (e as Error)?.message || String(e);
+        // S1:仅握手阶段设备类失败值得重试(AP2 凭据缺失等语义错误重试必复现)。
+        if (isBridgeHandshakeDeviceError(reason)) {
+          const recovered = await retryBridgePrepareWithProbe({
+            reason,
+            probe: () => raopProbeDevice(d),
+            attempt,
+            onRetry: (n, probe) => log.info(`[bridge-prepare] retry#${n} device=${d} probe=${probe.reachable ? "ok" : "unreachable"}(options=${probe.optionsStatus ?? "-"} teardown=${probe.teardownStatus ?? "-"}) reason=${reason}`),
+            onGiveUp: (n, probe) => log.warn(`[bridge-prepare] retry#${n} device=${d} probe 不可达(${probe.detail}) → 放弃重试,本流回落 solo cast`),
+            onFail: (n, err) => log.warn(`[bridge-prepare] retry#${n} 仍失败 device=${d}: ${(err as Error)?.message || err}`),
+            onRecovered: (n) => log.info(`[bridge-prepare] retry#${n} 成功 device=${d},桥会话已建立`),
+          });
+          if (recovered) {
+            sockets.push({ deviceId: d, socketPath: bridgeSocketPath(d, token), token, protocol });
+            continue;
+          }
+        }
+        log.warn(`[group][bridge] ${groupId}: bridgePrepare 失败 device=${d} → 本流回落 solo cast: ${reason}`);
         soloFallback.push(d);
       }
     }

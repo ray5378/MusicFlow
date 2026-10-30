@@ -12,6 +12,7 @@
 import { ChildRpcHost } from "../rendererHost/childHost.js";
 import { AirplaySessionRuntime } from "./sessionRuntime.js";
 import { BridgeSessionManager } from "./bridgeSession.js";
+import { raopTeardownProbe } from "./raop.js";
 import { cleanupStaleBridgeSockets } from "./bridgeChannel.js";
 import type {
   AirplayChildToParent,
@@ -152,6 +153,11 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
         // 按 sessionToken 停对应桥会话;未知 token 幂等返回。
         await this.bridgeSessions.stop(String(p?.token ?? ""));
         return null;
+      }
+      case "raopProbe": {
+        // S1/S3:TEARDOWN 探测(S1 重试前置 / S3 boot clear-probe)。host/port 由
+        // 主进程随载荷下发(子进程 discovery 注册表恒空,不能按 deviceId 反查)。
+        return raopTeardownProbe(String(p.host), Number(p.port), Number(p.timeoutMs) > 0 ? Number(p.timeoutMs) : 6_000);
       }
       case "bridgeStatus": {
         // 桥会话状态(诊断/soak):deviceId/token/socket/streaming/统计。

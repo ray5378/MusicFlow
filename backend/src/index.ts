@@ -471,6 +471,7 @@ getEventManager().on("device_list_changed", () => {
 import { startAirPlayService, wireAirPlayPersistence, loadPersistedAirPlayDevices, isAirPlayDeviceDisabled, isAirPlayEnabled } from "./services/airplay/control.js";
 import { getAirPlayDevices, getAirPlayDevice, onAirPlayEvent } from "./services/airplay/discovery.js";
 import { splitGroupMembers, startBridgeRouteReconciler } from "./services/group/protocolPlayer.js";
+import { scheduleBootClearProbes } from "./services/airplay/raopProbe.js";
 // AirPlay 渲染器插件默认关闭(插件管理页开关):开启才启动 mDNS 服务与设备注册,
 // 关闭时零常驻资源(无网络监听/定时器/会话/peer/player)。
 if (isAirPlayEnabled()) {
@@ -486,6 +487,12 @@ if (isAirPlayEnabled()) {
   for (const d of getAirPlayDevices()) {
     if (d.available) getQueueController().registerAirPlayDevice(d.id, (d.alias || d.name).trim());
   }
+  // S3(2026-10-30 全屋 HiVi 无声事故):容器重启后 MUZO 固件保留对旧容器的半开
+  // RTSP 会话,新握手 ANNOUNCE 即 ECONNRESET,唯一救法曾是人工 stop→等 10s→play。
+  // boot 后 12s 对每台已知 AirPlay 设备各发一次 blind TEARDOWN 探测(持久化清单
+  // 启动即恢复,不等 mDNS;45s 兜底轮覆盖 mDNS 迟到的设备),把僵死态在用户起播前
+  // 清掉。探测幂等,454 无害。
+  scheduleBootClearProbes();
 }
 
 // ==================== Sendspin (server role) renderer ====================

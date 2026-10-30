@@ -33,6 +33,13 @@ const h = vi.hoisted(() => {
 
   const prepareCalls: any[] = [];
   const prepareFail = new Set<string>();
+  // S1:握手阶段设备类失败(read ECONNRESET)专用 —— 与语义性 prepareFail 分开,
+  // 用于验证「TEARDOWN 探测 + 退避重试」救回路径。
+  const prepareFailReset = new Set<string>();
+  const probeCalls: string[] = [];
+  const probeReply = { reachable: true, optionsStatus: 200, teardownStatus: 454, detail: "ok" };
+  /** true = probe 成功后顺手撤掉 prepareFailReset(模拟冷却后固件 GC 了半开会话)。 */
+  let probeClearsFail = false;
   const bridgeStopCalls: Array<{ token: string; deviceId?: string }> = [];
   const syncCalls: Array<{ gname: string; devices: string[] }> = [];
   const detachCalls: Array<[string, string]> = [];
@@ -97,7 +104,7 @@ const h = vi.hoisted(() => {
   return {
     calls, rec, devices, apStatus, apDisabled, bridgeOwned, devStatus,
     groups, gm, gmVolumeWrite,
-    prepareCalls, prepareFail, bridgeStopCalls, syncCalls, detachCalls, spinPlayCalls,
+    prepareCalls, prepareFail, prepareFailReset, probeCalls, probeReply, probeClearsFail, bridgeStopCalls, syncCalls, detachCalls, spinPlayCalls,
     state, protoPlayer, spinPlayer,
   };
 });
@@ -134,6 +141,7 @@ vi.mock("../../src/services/airplay/control.js", () => ({
   selectAirPlayBridgeProtocol: () => "raop" as const,
   bridgePrepareDevice: async (deviceId: string, token: string, protocol: string, groupId?: string) => {
     h.prepareCalls.push({ deviceId, token, protocol, groupId });
+    if (h.prepareFailReset.has(deviceId)) throw new Error("read ECONNRESET");
     if (h.prepareFail.has(deviceId)) throw new Error("prepare failed");
     return { listening: true, socketPath: `/tmp/b_${deviceId}_${token}.sock` };
   },
@@ -141,6 +149,19 @@ vi.mock("../../src/services/airplay/control.js", () => ({
     h.bridgeStopCalls.push({ token, deviceId });
   },
 }));
+
+// S1:重试梯用真实现(classifier/backoff 不 mock 漂移),只替 raopProbeDevice(不碰网络)。
+vi.mock("../../src/services/airplay/raopProbe.js", async (importOriginal) => {
+  const actual = await importOriginal<any>();
+  return {
+    ...actual,
+    raopProbeDevice: async (deviceId: string) => {
+      h.probeCalls.push(deviceId);
+      if (h.probeClearsFail) h.prepareFailReset.delete(deviceId);
+      return h.probeReply;
+    },
+  };
+});
 
 vi.mock("../../src/services/airplay/bridgeChannel.js", () => ({
   bridgeSocketPath: (deviceId: string, token: string) => `/tmp/b_${deviceId}_${token}.sock`,
@@ -202,6 +223,8 @@ import {
   startBridgeRouteReconciler,
   stopBridgeRouteReconciler,
 } from "../../src/services/group/protocolPlayer.js";
+// S1:真实现 setter(mock 工厂 spread actual,同一模块实例 ⇒ 钩子对重试梯生效)。
+import { setBridgePrepareRetrySleepForTest } from "../../src/services/airplay/raopProbe.js";
 
 function makeItem(songId = "s1"): any {
   return { songId, title: "t", mime: "audio/mpeg", duration: 100 };
@@ -228,6 +251,12 @@ beforeEach(() => {
   h.gmVolumeWrite.length = 0;
   h.prepareCalls.length = 0;
   h.prepareFail.clear();
+  h.prepareFailReset.clear();
+  h.probeCalls.length = 0;
+  h.probeReply.reachable = true;
+  h.probeReply.detail = "ok";
+  h.probeClearsFail = false;
+  setBridgePrepareRetrySleepForTest(null);
   h.bridgeStopCalls.length = 0;
   h.syncCalls.length = 0;
   h.detachCalls.length = 0;
@@ -247,6 +276,7 @@ beforeEach(() => {
 
 afterEach(() => {
   resetBridgeRouteReconcilerForTest();
+  setBridgePrepareRetrySleepForTest(null);
   vi.useRealTimers();
 });
 
@@ -759,5 +789,63 @@ describe("状态派生(pollState / getGroupStatus)", () => {
     h.devStatus.d1 = { state: "PLAYING", position: 61, duration: 200, volume: 88, muted: false };
     const st = await getGroupStatus("g1");
     expect(st).toMatchObject({ state: "PLAYING", position: 61, duration: 200, volume: 20 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// S1(2026-10-30 全屋 HiVi 无声事故):容器重建后 MUZO 固件保留对旧容器的半开
+// RTSP 会话,新握手 ANNOUNCE/SETUP 即 `read ECONNRESET`;旧行为直接回落 solo cast
+// (同一条握手必挂)= 设备静默,唯一救法曾是人工 stop→等 10s→play。
+// 落地:握手失败 → TEARDOWN 探测(子进程新连接,454 无害)→ 5s/15s 退避重试。
+describe("S1:握手失败 TEARDOWN 探测重试(救回不落 solo)", () => {
+  function spinOnlySetup(): void {
+    setGroup(["sendspin:sp1", "airplay:a1"]);
+    h.state.front = { clients: new Map([["sp1", { ready: true }]]), groups: new Map() } as any;
+    apOn("a1");
+    setBridgePrepareRetrySleepForTest(async () => {}); // 退避零耗
+  }
+
+  it("ECONNRESET + probe 可达 + 重试成功 ⇒ 设备进桥(sockets 含 a1),不落 solo", async () => {
+    spinOnlySetup();
+    h.prepareFailReset.add("a1"); // 首次握手 ECONNRESET
+    h.probeClearsFail = true; // probe 后撤标记 ⇒ 模拟「冷却后固件 GC 了半开会话,第二次握手成功」
+    const p = createGroupProtocolPlayer("g1");
+    await p.playMedia(makeItem(), "http://base");
+    expect(h.probeCalls).toEqual(["a1"]);
+    expect(h.prepareCalls.filter((c: any) => c.deviceId === "a1")).toHaveLength(2);
+    expect(h.spinPlayCalls[0]!.extra.sockets.map((s: any) => s.deviceId)).toContain("a1");
+    expect(h.calls.a1 ?? []).not.toContain("play"); // 没落 solo cast
+  });
+
+  it("probe 不可达(设备真离线)⇒ 不重试,立即回落 soloFallback", async () => {
+    spinOnlySetup();
+    h.prepareFailReset.add("a1");
+    h.probeReply.reachable = false;
+    h.probeReply.detail = "TCP connect: ECONNREFUSED";
+    const p = createGroupProtocolPlayer("g1");
+    await p.playMedia(makeItem(), "http://base");
+    expect(h.probeCalls).toEqual(["a1"]);
+    expect(h.prepareCalls.filter((c: any) => c.deviceId === "a1")).toHaveLength(1); // 无重试
+    expect(h.calls.a1).toContain("play"); // solo cast
+  });
+
+  it("两档全败 ⇒ 最终落 soloFallback(与旧行为一致,不无限重试)", async () => {
+    spinOnlySetup();
+    h.prepareFailReset.add("a1"); // probe 清不掉:两次重试都 ECONNRESET
+    const p = createGroupProtocolPlayer("g1");
+    await p.playMedia(makeItem(), "http://base");
+    expect(h.probeCalls).toEqual(["a1", "a1"]); // 每档重试前各 probe 一次
+    expect(h.prepareCalls.filter((c: any) => c.deviceId === "a1")).toHaveLength(3); // 首次 + 2 重试
+    expect(h.calls.a1).toContain("play");
+  });
+
+  it("语义性失败(prepare failed,非设备类)⇒ 不 probe 不重试(旧行为)", async () => {
+    spinOnlySetup();
+    h.prepareFail.add("a1");
+    const p = createGroupProtocolPlayer("g1");
+    await p.playMedia(makeItem(), "http://base");
+    expect(h.probeCalls).toEqual([]);
+    expect(h.prepareCalls.filter((c: any) => c.deviceId === "a1")).toHaveLength(1);
+    expect(h.calls.a1).toContain("play");
   });
 });
