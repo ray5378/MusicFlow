@@ -849,3 +849,66 @@ describe("S1:握手失败 TEARDOWN 探测重试(救回不落 solo)", () => {
     expect(h.calls.a1).toContain("play");
   });
 });
+
+// ---------------------------------------------------------------------------
+// R1(2026-10-30 容器重启后续播无声):activeBridgeRoutes 是进程内 Map,重启后为空;
+// resume() 旧实现假设桥还活着 ⇒ 只 fanOut DLNA + 组泵,AirPlay 桥无人重建 ⇒ 泵只推
+// WS,桥成员全程静默,必须切歌(cast)才恢复。方案 A:resume 前补建路由 + bridgeSync 补挂。
+describe("R1:resume 补建桥路由(重启后续播不进静默)", () => {
+  it("桥路由表为空 + ap 在线 ⇒ 冷建路由 + 泵补挂 + 登记", async () => {
+    setGroup(["sendspin:sp1", "airplay:a1"]);
+    h.state.front = { clients: new Map([["sp1", { ready: true }]]), groups: new Map() } as any;
+    apOn("a1");
+    const p = createGroupProtocolPlayer("g1");
+    await p.resume();
+    expect(h.prepareCalls.filter((c: any) => c.deviceId === "a1")).toHaveLength(1);
+    expect(h.syncCalls).toHaveLength(1); // bridgeSync 补挂泵句柄
+    expect(h.syncCalls[0]!.gname).toBe("ug:g1");
+    expect(h.syncCalls[0]!.devices).toEqual(["a1"]);
+    expect(isBridgeRouteActive("g1")).toBe(true); // 路由已登记(后续 stop 能拆)
+    expect(h.calls["spin:g1"]).toContain("resume");
+  });
+
+  it("桥路由表已有该组 ⇒ 不重复 prepare(正常 resume 零开销)", async () => {
+    setGroup(["sendspin:sp1", "airplay:a1"]);
+    h.state.front = { clients: new Map([["sp1", { ready: true }]]), groups: new Map() } as any;
+    apOn("a1");
+    setBridgeRoutesForTest(new Map([["g1", [{ deviceId: "a1", socketPath: "/tmp/b", token: "tkOld", protocol: "raop" }]]]));
+    const p = createGroupProtocolPlayer("g1");
+    await p.resume();
+    expect(h.prepareCalls).toHaveLength(0);
+    expect(h.syncCalls).toHaveLength(0);
+    expect(h.calls["spin:g1"]).toContain("resume");
+  });
+
+  it("组内无在线 ap ⇒ 不建桥(resume 行为不变)", async () => {
+    setGroup(["sendspin:sp1"]);
+    h.state.front = { clients: new Map([["sp1", { ready: true }]]), groups: new Map() } as any;
+    const p = createGroupProtocolPlayer("g1");
+    await p.resume();
+    expect(h.prepareCalls).toHaveLength(0);
+    expect(h.calls["spin:g1"]).toContain("resume");
+  });
+
+  it("桥总开关关闭 ⇒ 不建桥(resume 行为不变)", async () => {
+    setGroup(["sendspin:sp1", "airplay:a1"]);
+    h.state.front = { clients: new Map([["sp1", { ready: true }]]), groups: new Map() } as any;
+    apOn("a1");
+    h.state.bridgeEnabled = false;
+    const p = createGroupProtocolPlayer("g1");
+    await p.resume();
+    expect(h.prepareCalls).toHaveLength(0);
+    expect(h.syncCalls).toHaveLength(0);
+  });
+
+  it("prepare 失败 ⇒ 记录告警但 resume 仍执行(不阻塞播控)", async () => {
+    setGroup(["sendspin:sp1", "airplay:a1"]);
+    h.state.front = { clients: new Map([["sp1", { ready: true }]]), groups: new Map() } as any;
+    apOn("a1");
+    h.prepareFail.add("a1");
+    const p = createGroupProtocolPlayer("g1");
+    await p.resume();
+    expect(h.calls["spin:g1"]).toContain("resume"); // 播控不被桥失败阻塞
+    expect(isBridgeRouteActive("g1")).toBe(false);
+  });
+});

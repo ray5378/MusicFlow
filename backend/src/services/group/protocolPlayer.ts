@@ -14,7 +14,7 @@ import { bridgeSocketPath } from "../airplay/bridgeChannel.js";
 import { raopProbeDevice, retryBridgePrepareWithProbe, isBridgeHandshakeDeviceError } from "../airplay/raopProbe.js";
 import { getAirPlayDevice, rescanAirPlayDevices } from "../airplay/discovery.js";
 import type { BridgeSocketSpec } from "../sendspin/bridgeAttach.js";
-import { getSendspinFront } from "../sendspin/index.js";
+import { getSendspinFront, sendspinGroupBridgeSync } from "../sendspin/index.js";
 import { sendspinGroupName } from "../sendspin/playerCore.js";
 import { PlaybackState, type PlayerState, type ProtocolPlayer, type QueueItem } from "../player/types.js";
 import { createLogger } from "../../utils/logger.js";
@@ -495,6 +495,40 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
     return { sockets, soloFallback };
   }
 
+  /** R1 方案 A(2026-10-30):resume 前补建桥路由 —— 专治「容器重启后再点播放,
+      泵只推 WS、桥成员全程静默,必须切歌才出声」。
+     判据:桥开关开 && 组内有在线 AirPlay 成员 && 本组不在 activeBridgeRoutes
+     (重启后 Map 空 / 桥崩溃后已摘)。命中则冷建路由(新 token)+ 登记 + 用
+     bridgeSync 给泵补挂句柄(泵此刻仍暂停,resume 后按表推送)。
+     返回是否补建成功。路由还在时零开销。 */
+  async function ensureBridgeRouteOnResume(): Promise<boolean> {
+    if (!isAirplayBridgeEnabled()) return false;
+    if (activeBridgeRoutes.has(groupId)) return false; // 桥还在 = 正常 resume,不碰
+    const apOnline = await getOnlineAirplayIdsTolerant(groupId);
+    if (apOnline.length === 0) return false;
+    const t0 = Date.now();
+    const prepared = await prepareBridgeRoute(apOnline);
+    if (!prepared) {
+      log.warn(`[group][bridge] ${groupId}: resume 补建桥路由失败(全部设备 prepare 失败)→ AirPlay 成员本曲静默`);
+      return false;
+    }
+    activeBridgeRoutes.set(groupId, prepared.sockets);
+    // 泵侧补挂:此刻泵多为暂停/刚起状态,bridgeSync 只登记句柄;resume 后按表推流。
+    let synced = 0;
+    let confirmed = false;
+    try {
+      const r = await sendspinGroupBridgeSync(sendspinGroupName(groupId), prepared.sockets);
+      synced = r.synced;
+      confirmed = r.confirmed;
+    } catch (e) {
+      log.warn(`[group][bridge] ${groupId}: resume 补挂泵句柄异常: ${(e as Error)?.message || e}`);
+    }
+    log.info(`[group][bridge] ${groupId}: resume 补建桥路由 ${prepared.sockets.length} 台`
+      + `(synced=${synced} confirmed=${confirmed}) ${Date.now() - t0}ms`
+      + (prepared.soloFallback.length > 0 ? ` ⚠️ ${prepared.soloFallback.length} 台 prepare 失败:${prepared.soloFallback.join(",")}` : ""));
+    return true;
+  }
+
   return {
     playerId,
     async playMedia(item: QueueItem, baseUrl: string) {
@@ -578,7 +612,15 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
       await teardownBridgeRoute();
     },
     async pause() { await fanOut("pause", p => p.pause()); await spinOp(p => p.pause()); },
-    async resume() { await fanOut("resume", p => p.resume()); await spinOp(p => p.resume()); },
+    async resume() {
+      // R1(2026-10-30 容器重启后续播无声):activeBridgeRoutes 是进程内 Map,重启后为空;
+      // resume() 语义假设「桥路由还活着」⇒ 只 fanOut DLNA + 组泵,AirPlay 桥无人重建 ⇒
+      // 泵只推 WS 客户端,桥成员全程静默,必须切歌(走 cast 路径)才恢复。
+      // 这里在 resume 前补建桥路由并给泵补挂句柄(方案 A);路由还在时零开销直接返回。
+      await ensureBridgeRouteOnResume();
+      await fanOut("resume", p => p.resume());
+      await spinOp(p => p.resume());
+    },
     async seek(seconds: number) {
       // debug:组 seek 是「DLNA 扇出 + sendspin 组单发」两条独立路径 ——
       // 一条成功一条失败时,组内成员会停在两个不同时间轴(组内不同步的根因),
