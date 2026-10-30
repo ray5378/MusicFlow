@@ -82,6 +82,31 @@ export function shouldSkipBridgeInitialVolume(sameHostDlnaPeer?: string): boolea
 /** exp4:prime 灌包数量(10 包 ≈ 80ms,足够建立 RTP 流存在感)。 */
 const RAOP_CONNECT_PRIME_CHUNKS = 10;
 
+// ---------------------------------------------------------------------------
+// producer 预填充 / 低水位补货(与 decoder.ts 的 PREFILL_MS 同一层 jitter buffer)
+//
+// 根因(HiVi H5MKII 曲中失声实证):桥接 producer(pullChunk)此前直接消费 outBuf,
+// 没有 decoder.ts 那层 prefill ⇒ outBuf 常驻 0~8ms(不到 1 个 352 帧块),上游一阵
+// 供料抖动就见底 ⇒ 352/44100 ≈ 7.98ms 的发送节拍被打断 ⇒ late 以 ~22/s 单调累积
+// ⇒ 设备 1.05s 缓冲抽干 ⇒ 追赶模式 + 大量「未来包」重传 ⇒ 哑音数秒后自愈。
+// 修复 = 给桥接 producer 补上解码路径已有的那层预填充(纯缓冲层,不动内容时间线)。
+// ---------------------------------------------------------------------------
+
+/** 桥接 producer 预填充水位(ms)—— 与 decoder.ts 的 PREFILL_MS 对齐(同为 1500)。 */
+const BRIDGE_PREFILL_MS = 1500;
+
+/** 运行中低水位补货目标(ms):outBuf 跌破它就先等补货到该水位再出块,避免把上游
+ *  抖动直接传导成发送节拍抖动(late)。做成常量便于调。 */
+const BRIDGE_LOW_WATER_MS = 200;
+
+/** 低水位补货的单次等待预算(ms)。刻意远小于 waitDataMs:上游恰好 1x 供料时
+ *  outBuf 涨不上去,必须很快放弃并降级到原有欠料逻辑,否则反把节拍拖慢。 */
+const BRIDGE_LOW_WATER_WAIT_MS = 40;
+
+/** 等料轮询粒度(ms)。原为 5ms,而发送节拍仅 7.98ms —— 等一轮就吃掉大半个节拍
+ *  窗口;细化到 1ms 以降低残留抖动(该定时器只在欠料/补货等待期间才会转)。 */
+const BRIDGE_PULL_POLL_MS = 1;
+
 /** Fix-1: 桥会话建立(RECORD 完成)后主动推一次初始音量。此前桥会话只在音量
  *  **变更**事件时才有 SET_PARAMETER(cast 路径 control.applyVolumeDb 不覆盖桥),
  *  起播/重连会话从不推,接收端落默认初始音量(shairport-sync -18dB ⇒ loopback
@@ -697,6 +722,8 @@ export class BridgeSession {
   private inBytes = 0;
   /** 输出速率 s16le 出缓冲(producer 逐 352 帧切割)。 */
   private outBuf: Buffer = Buffer.alloc(0);
+  /** producer 预填充已完成 —— 预填充只在首块做一次(不是每块都做)。 */
+  private prefillDone = false;
   readonly stats: BridgeSessionStats = {
     framesIn: 0, chunksOut: 0, silenceChunks: 0,
     insertedFrames: 0, droppedFrames: 0, skippedFrames: 0, realignments: 0,
@@ -1494,6 +1521,46 @@ export class BridgeSession {
   private async pullChunk(): Promise<Buffer | null> {
     if (this.closed || this.streamAborted) return null;
     const need = CHUNK_LEN * 4;
+    // —— 新增:producer 预填充 / 低水位补货(decoder.ts PREFILL 的桥接对应层)——
+    // 首块先囤到预填充水位再出块;运行中跌破低水位则先等补货到该水位,避免把上游抖动
+    // 直接传导成发送节拍抖动。两段都带超时,超时降级到下面的原有欠料逻辑(不补静音、
+    // 不报错)。纯缓冲层:tsUs / baseTs / startTs / 锚点 / aligner 一律不碰 —— 只是让
+    // outBuf 多囤一些已解码音频,不改变任何一帧的内容位置。
+    const prefillBytes = this.prefillTargetBytes();
+    const lowWaterBytes = this.lowWaterTargetBytes();
+    const filling = !this.prefillDone;
+    const wantBytes = filling ? Math.max(need, prefillBytes) : Math.max(need, lowWaterBytes);
+    const refillBudgetMs = filling ? this.waitDataMs : BRIDGE_LOW_WATER_WAIT_MS;
+    // outBuf 已不足一块(真欠料)时不进补货阶段,交给下面原有的 waitDataMs 等料逻辑。
+    if (filling || this.outBuf.length >= need) {
+      const refillDeadline = Date.now() + refillBudgetMs;
+      while (this.outBuf.length < wantBytes) {
+        // 预填充/补货期间会话被停 ⇒ 立即返回 null,绝不能卡死发送循环。
+        if (this.closed || this.streamAborted) return null;
+        const next = this.inQueue.shift();
+        if (next !== undefined) {
+          this.inBytes -= next.buf.length;
+          this.resampleIn(next);
+          continue;
+        }
+        if (Date.now() >= refillDeadline) break;
+        await new Promise((r) => setTimeout(r, BRIDGE_PULL_POLL_MS));
+      }
+      if (filling) {
+        // 预填充只做一次(首块):没攒够目标水位也只是记一条 info,后续照旧走原有逻辑。
+        this.prefillDone = true;
+        if (this.outBuf.length < prefillBytes) {
+          log.info(`[airplay-bridge] ${JSON.stringify({
+            ev: "producer-prefill-short",
+            dev: this.deviceId,
+            gen: this.generation,
+            targetBytes: prefillBytes,
+            gotBytes: this.outBuf.length,
+            budgetMs: refillBudgetMs,
+          })}`);
+        }
+      }
+    }
     const deadline = Date.now() + this.waitDataMs;
     while (this.outBuf.length < need) {
       const next = this.inQueue.shift();
@@ -1503,7 +1570,7 @@ export class BridgeSession {
         continue;
       }
       if (Date.now() >= deadline) break;
-      await new Promise((r) => setTimeout(r, 5));
+      await new Promise((r) => setTimeout(r, BRIDGE_PULL_POLL_MS));
     }
     if (this.outBuf.length < need) {
       // 欠料:可用部分 + 静音补齐;未凑满的余料留在 outBuf 下一轮先用。
@@ -1519,6 +1586,17 @@ export class BridgeSession {
     this.outBuf = Buffer.from(this.outBuf.subarray(need));
     this.stats.chunksOut++;
     return chunk;
+  }
+
+  /** 预填充目标字节数 = BRIDGE_PREFILL_MS 对应的 PCM 字节数。
+   *  按**本实例**的实际输出速率换算(48k 直通或重采样后的 outRate),不硬编码采样率。 */
+  private prefillTargetBytes(): number {
+    return Math.round((BRIDGE_PREFILL_MS / 1000) * this.outRate * 2 * 2);
+  }
+
+  /** 低水位目标字节数(同上,按本实例的实际输出速率换算)。 */
+  private lowWaterTargetBytes(): number {
+    return Math.round((BRIDGE_LOW_WATER_MS / 1000) * this.outRate * 2 * 2);
   }
 
   /** 单帧处理:对齐(§4.5)→ 重采样 → 裁头出清 → 追加输出。 */
