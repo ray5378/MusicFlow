@@ -2,6 +2,20 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.10.5] - 2026-10-30
+
+### Fix / 取证日志不得破坏静态守卫钉死的单行拦截
+
+- v4.10.4 给 `streamFallback.addPlayable` 补取证日志时，把
+  `if (isNegativeFresh(songId)) return;` 改写成了花括号块，导致
+  `scripts/check-group-invariants.mjs` 的 G16 断言（按字面量钉死该行）失配，
+  main 分支 `ci / 群组不变量守卫` 转红（89/90，唯一失败项即此条）。
+- 恢复被钉住的单行拦截原文，取证日志前置为独立的 `if` 打日志语句：
+  判定条件、返回路径、正/负缓存语义**零变化**，`isNegativeFresh` 为纯读判定，
+  重复调用无副作用。
+- 线上影响范围：仅 main 分支 CI 红灯，**未触发回滚**（tag `v4.10.4` 的
+  `build-and-push` 及四条门禁全 success，镜像 digest 未被回退）。
+
 ## [4.10.4] - 2026-10-30
 
 ### Chore / streamFallback 补负缓存取证日志(纯增量,零逻辑改动)
