@@ -1675,8 +1675,9 @@ prev、音量/静音、自然结束自动下一首、停止）+ 组播 6 项（`
 **真机判据**(240):`[Sendspin-preheatChild] INFO 子进程预热 ev=child-preheat song=… ok=1`
 之后,泵起播的 `[RESOLVE-AUDIO] … (fresh-cache) ms=1`,`gap-fill` 从 2250ms 降到 ~103ms。
 
-**已知限制**:预热的目标由 `peekUpcomingPositions` 预测;`playMode=shuffle` 下实测出现
-「预测 `0ea5a2da` / 实际播 `b13bc96b`」的偏差,此时预热打偏、泵仍旧冷启动(gap-fill 回落
-到 ~3000ms,与修复前一致,**不构成回归**)。预测一致性属独立问题,单列跟进。
+**已知限制(v4.10.3 已纠正)**:先前误判为「shuffle 预测偏差」——**不成立**。真机日志
+`playCurrent source=auto-advance idx=0 song=0ea5a2da` 证明预测是对的,它被换掉是因为
+4 秒后被 `judgePlayable` 按**负缓存**(零日志)判死跳过。v4.10.3 让预览下一首跳过
+`unplayable` 的歌(与 `judgePlayable` 第一道闸同判据),预热不再打偏。
 
 完整取证见 `docs/换歌取源跨进程预热-方案与取证.md`。

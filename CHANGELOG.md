@@ -2,6 +2,27 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.10.3] - 2026-10-30
+
+### Fix / 预览下一首与起播判据对齐——避免预热一首「马上会被跳过」的歌
+
+- **纠正前一条的错误结论**:v4.10.2 曾把「预热打偏」归因为 `playMode=shuffle` 的预览偏差。
+  真机日志否掉了这个判断 —— `playCurrent source=auto-advance idx=0 song=0ea5a2da` 说明
+  自动切歌选的**正是**预测那首;它被换掉是因为 4 毫秒后被 `judgePlayable` 判死跳过。
+- **根因**:`judgePlayable` 第一道闸 `getCachedPlayability(songId)==="unplayable"` 直接返回
+  `skip` 且**不打日志**。这条负缓存来自同一首歌更早一次 `ensurePlayableStream` 的换源穷尽
+  (TTL 2h);而 `resolvePlayableRow` 的 `reverify-ok` 分支(本行复核通过)**不写正缓存**,
+  即便写也会被「负缓存未过期期间拒绝写正缓存」挡掉。同一首歌在两个判据下结论相反 ——
+  解析说能播、起播说判死,负缓存赢在起播侧,于是一次预热(4.8s)完全白做,而真正要播的
+  那首没预热(`gap-fill` 从 103ms 回落到 3000ms)。
+- **修法**:`peekNextSongId` 增加 `skipDead` 选项 —— 取 `peekUpcomingPositions(peek, 4)`,
+  跳过 `unplayable` 的曲,返回第一个还活着的。与 `judgePlayable` 第一道闸同一判据。
+  默认不传 `skipDead` 时行为逐字节不变;只认 `unplayable`,`unknown`/`transient`/`playable`
+  一律照常预热(「不把不知道当成死的」边界不越);判据抛错或全被判死 ⇒ 不预热,绝不抛。
+- 新增 7 例定向测试(`tests/player/peekNextSongIdDeadSkip.test.ts`)。
+- 未一并修(单列):`reverify-ok` 不写正缓存导致该曲 2 小时内反复被判死;治本需给负缓存
+  区分来源,涉及「试听片段」护栏,单独评估。
+
 ## [4.10.2] - 2026-10-30
 
 ### Fix / resume 补建桥路由(R1) + 曲末预热下推到 sendspin 子进程(换歌取源 3.2s → ~1ms)
