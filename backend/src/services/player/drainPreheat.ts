@@ -166,6 +166,23 @@ export function preheatNextOnDrain(
   }
 }
 
+// ---------------- 下推钩子(2026-10-30) ----------------
+
+/** 预热成功后的旁路通知:`(songId) => void`。
+ *
+ *  为什么需要:预热在主进程算完的结论只写进**主进程**的 module-local 缓存,而真正
+ *  起播的泵在 sendspin 子进程里读不到(实测泵命中 fresh-cache 0 次)。这个钩子把
+ *  「已可播」这件事下推过去,让子进程提前把探测做完。
+ *  默认 null = 什么都不做(测试 / 未启用 sendspin 时零行为)。 */
+export type DrainPreheatWarmHook = (songId: string) => void;
+
+let warmHook: DrainPreheatWarmHook | null = null;
+
+/** 注册下推钩子(null = 注销)。由主进程 boot 时接上 sendspin 的实现。 */
+export function setDrainPreheatWarmHook(fn: DrainPreheatWarmHook | null): void {
+  warmHook = fn;
+}
+
 /** 真正执行预热 + 打一行可在真机上 grep 的日志。只在真的执行时被调用（幂等命中不会进来）。 */
 async function runPreheat(
   playerId: string,
@@ -189,6 +206,15 @@ async function runPreheat(
     log.debug(
       `[drain-preheat] ${playerId}: 预热 resolve 异常（已忽略）: ${String(e?.message || e).slice(0, 160)}`,
     );
+  }
+  // 旁路下推:放在日志之前 —— 日志本身失败也不该阻断下推(两者互不依赖)。
+  // outcome!=="skip" 才意味着「确实判出了一行可播源」,skip(无源)下推没有意义。
+  if (warmHook && outcome !== "skip") {
+    try {
+      warmHook(songId);
+    } catch {
+      /* 红线:下推失败绝不冒到 tracker */
+    }
   }
   try {
     log.info(

@@ -498,12 +498,22 @@ if (isAirPlayEnabled()) {
 // ==================== Sendspin (server role) renderer ====================
 // Sendspin 渲染器插件默认关闭:开启才实例化 SendspinServer 并注册客户端播放器;
 // 关闭时零常驻资源。与 DLNA/AirPlay 同为服务器权威播放器(QueueController 统一队列)。
-import { startSendspinService, stopSendspinService, isSendspinEnabled } from "./services/sendspin/index.js";
+import {
+  startSendspinService,
+  stopSendspinService,
+  isSendspinEnabled,
+  sendspinWarmPreheat,
+} from "./services/sendspin/index.js";
+import { setDrainPreheatWarmHook } from "./services/player/drainPreheat.js";
 if (isSendspinEnabled()) {
   startSendspinService().catch((e) =>
     log.error("[sendspin] start failed", { err: (e as Error)?.message || e }),
   );
 }
+// 曲末预热下推(2026-10-30):主进程算完「下一首可播」后通知 sendspin 子进程重算一次,
+// 让它自己的可播缓存也热起来 —— 泵起播的 3s 探测就被搬到曲末排空窗口之前了。
+// 门控在钩子实现里(fork + supervisor 在跑),没启用 sendspin 时只是一次空调用。
+setDrainPreheatWarmHook(sendspinWarmPreheat);
 // 进程退出时收敛(测试/前端宿主进程优雅关闭),避免残留连接与组。
 process.once("beforeExit", () => {
   if (isSendspinEnabled()) void stopSendspinService();

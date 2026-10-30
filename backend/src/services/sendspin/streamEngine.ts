@@ -1572,6 +1572,12 @@ export class GroupPump {
 // ---- 单组 pump 池(server:group 生命周期内复用) ----
 const pumpByGroup = new WeakMap<SendspinGroup, GroupPump>();
 
+/** 存活泵计数(建 +1 / `stopGroupPump` -1)。WeakMap 不可枚举,而桥组的泵是按
+ *  `ug:<groupId>` 的组对象建的、不在 `server.groups`(按 clientId 索引)里,
+ *  枚举法会漏 ⇒ 只能用计数器。用途仅是「子进程预热要不要探源」的门控:
+ *  计数偏高只会多探一次(可接受),偏低才会漏预热,故只在 stop 时递减、且不置负。 */
+let activePumpCount = 0;
+
 /** 取(或建)该组的 pump。 */
 /** 取(或建)该组的 pump。
  *
@@ -1587,6 +1593,7 @@ export function pumpFor(
   if (!p) {
     p = new GroupPump(server, group);
     pumpByGroup.set(group, p);
+    activePumpCount += 1;
   }
   if (onUnplayable) p.onUnplayable = onUnplayable;
   return p;
@@ -1597,6 +1604,7 @@ export function stopGroupPump(group: SendspinGroup): void {
   if (p) {
     try { p.stop(); } catch { /* ignore */ }
     pumpByGroup.delete(group);
+    activePumpCount = Math.max(0, activePumpCount - 1);
   }
 }
 
@@ -1604,6 +1612,23 @@ export function stopGroupPump(group: SendspinGroup): void {
  *  建一个空泵,把"源端根本没在播"误判成"有个泵在"。 */
 export function peekPump(group: SendspinGroup): GroupPump | undefined {
   return pumpByGroup.get(group);
+}
+
+/** 本进程里是否**有活着的**泵(建 +1 / `stopGroupPump` -1)。
+ *
+ *  供子进程预热做门控:纯 DLNA / 直连播放时不该为一首根本不归 sendspin 推的歌
+ *  白探一次源(每首一次 3s 的对外探测,会占上游配额)。
+ *
+ *  ⚠️ 不要用「遍历 `server.groups` 再 `pumpByGroup.has()`」:桥组的泵是按
+ *  `ug:<groupId>` 的组对象建的,与 `server.groups`(按 clientId 索引)不是同一批键,
+ *  2026-10-30 真机首版就是这么写的 —— 门控恒 false,子进程静默跳过。 */
+export function hasActivePump(): boolean {
+  return activePumpCount > 0;
+}
+
+/** 测试用:复位泵计数(模块级状态,不随 resetDrainPreheat 清)。 */
+export function resetActivePumpCountForTest(): void {
+  activePumpCount = 0;
 }
 
 /** 把 `from` 名下的泵整体移交到 `to`(含 WeakMap 键),返回落点(ms)。

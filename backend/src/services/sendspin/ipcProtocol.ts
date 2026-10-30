@@ -76,7 +76,17 @@ export interface SendspinReadyInfo {
 /** 主进程 → 子进程的附加消息(通用 req/stop 之外)。 */
 export type SendspinHostExtra =
   | { t: "init"; port?: number }
-  | { t: "cfg"; cfg: SendspinIpcConfig };
+  | { t: "cfg"; cfg: SendspinIpcConfig }
+  /** 曲末预热下推(2026-10-30):主进程已算完「下一首可播」,让**子进程**在本进程内再
+   *  算一次,把结论写进它自己那份 module-local 可播缓存。
+   *
+   *  起因(240 真机取证):主进程预热 28 次里 27 次 `cached ms=1~6`,而同一首歌 13s 后
+   *  泵在子进程里 38 次全部 `ensure-ok ms=2900~3930` —— 泵命中 fresh-cache 的次数为 **0**。
+   *  这 3s 落在曲末排空窗口(实测 9760~9786ms)里,超窗即可闻静音。
+   *
+   *  与下面 `songUnplayable`(子→主,负缓存回传)是同一类跨进程缓存断层的**反方向**。
+   *  发即忘:不需要应答,子进程没起来时 `post()` 自带兜底。 */
+  | { t: "preheat"; songId: string };
 
 /** 子进程 → 主进程的业务事件。 */
 export type SendspinChildEvent =

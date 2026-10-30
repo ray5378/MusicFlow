@@ -1325,3 +1325,23 @@ export function isSendspinEnabled(): boolean {
     return false;
   }
 }
+
+/** 曲末预热下推(2026-10-30) —— 把主进程算好的「可播结论」下发给 sendspin 子进程。
+ *
+ *  背景见 `ipcProtocol` 的 `preheat` 注释:预热在主进程做、泵在子进程跑,两份
+ *  module-local 缓存互不可见,泵每首都要重探 3s,直接变成换歌静音。
+ *
+ *  门控(任一不满足即静默返回):
+ *    - in-proc 模式:与主进程同一份缓存,下发等于自投自收;
+ *    - supervisor 没跑:没有子进程可发(`post()` 本身也带兜底,这里少一次无用功)。
+ *  永不抛:发即忘,失败只影响"这次没提前探",播放主链路不受任何影响。 */
+export function sendspinWarmPreheat(songId: string): void {
+  try {
+    if (!songId) return;
+    if (!isForkMode()) return;
+    if (!sendspinSupervisor.isRunning()) return;
+    sendspinSupervisor.post({ t: "preheat", songId });
+  } catch {
+    /* 发即忘 */
+  }
+}

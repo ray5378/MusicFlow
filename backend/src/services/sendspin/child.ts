@@ -28,6 +28,7 @@ import {
 import { getServer, setServer } from "./runtime.js";
 import type { ParentToSendspinChild, SendspinChildToParent } from "./ipcProtocol.js";
 import type { SendspinChildController } from "./childMain.js";
+import { warmSongInChild } from "./preheatChild.js";
 
 const LOG_NAME = "sendspin-child";
 const LABEL = "sendspin 子进程";
@@ -105,6 +106,12 @@ installChildFatalHandlers(LOG_NAME, LABEL);
 
 // 消息循环先注册:提前到达的消息交给 controller(未就绪时 controller 为 null,安全丢弃)。
 installChildMessageLoop<ParentToSendspinChild>(LOG_NAME, LABEL, async (raw) => {
+  if (raw.t === "preheat") {
+    // 主进程在曲末前 9s 就算好了「可播结论」;在本进程重算一次,只为把结论落进
+    // **本进程**的 module-local 缓存 —— 泵起播才能命中 fresh-cache(详见 preheatChild.ts)。
+    warmSongInChild(raw.songId);
+    return;
+  }
   if (raw.t === "cfg") {
     // 兼容旧路径:配置热更新统一走 RPC applyCfg;这里保留直发通道(免等 RPC 应答)。
     await controller?.handleMessage({ t: "req", id: -1, op: "applyCfg", payload: raw.cfg });
