@@ -598,12 +598,11 @@ function addPlayable(songId: string) {
   //   队列预解析（RESOLVE-AUDIO）先写正缓存，把判官刚写的负缓存盖住；而
   //   getCachedPlayability 读正缓存优先 ⇒ 判跳失效，照播 60s 假歌。
   //   负缓存未过期期间一律拒绝写正缓存；负缓存过期（源可能已恢复）后自动解禁。
-  if (isNegativeFresh(songId)) {
-    // 「复活被挡」的唯一痕迹:源解析成功了,但负缓存还新鲜 ⇒ 正缓存写不进去。
-    // 2026-10-30 那例「预热说能播、起播判死」就发生在这条路径的下游。
-    log.info(`正缓存被负缓存拒绝 song=${songId} who=${who()} (负结果仍新鲜)`);
-    return;
-  }
+  // 取证:正缓存被负缓存拒绝(源解析成功但翻不回 playable)的唯一痕迹。
+  // 注意:下面这行 `if (isNegativeFresh(songId)) return;` 被
+  // scripts/check-group-invariants.mjs 的 G16 静态钉死,**不许改写成花括号块**。
+  if (isNegativeFresh(songId)) log.info(`正缓存被负缓存拒绝 song=${songId} who=${who()} (负结果仍新鲜)`);
+  if (isNegativeFresh(songId)) return;
   playableCache.set(songId, Date.now());
   if (playableCache.size > PLAYABLE_CACHE_MAX) {
     const oldest = playableCache.keys().next().value;
