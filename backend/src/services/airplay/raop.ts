@@ -317,6 +317,34 @@ export interface RaopBridgeAnchor {
 // RTSP request builder
 // ---------------------------------------------------------------------------
 /**
+ * 设备侧**保持深度**下限(毫秒)。SYNC 包 offset 4 广播 `headTs − latencyFrames`,
+ * 设备据此决定「收下多少音频才开始出声」—— 即它的 jitter buffer 深度(= 锚点公式的 L)。
+ *
+ * 为什么需要可调(2026-10-31 根因):
+ *  - HiVi(MUZO 固件)**从不回 Audio-Latency**(bridgeCalib.ts 实测 90 分钟 0 条),
+ *    于是 `latencyFrames` 只能停在缺省 1s(44100 帧),保持深度 = 1.0s;
+ *  - 空口一次连续丢包实测 ≈240 个 RTP 包 ≈ **1.92s > 1.0s** ⇒ 设备必然被抽干
+ *    ⇒ 曲中失声约 2s 后自愈。重传缓冲(2048 包/16.4s)只保证「补得到」,
+ *    不保证「补得及」—— 要在设备饿死前补上,只能让它手里多握一些。
+ *  - 本文件既有注释已写明该故障形态:too-small value ⇒ "periodic total silence
+ *    while progress keeps advancing",与真机签名逐字吻合。
+ *
+ * 缺省 **1000ms = 历史行为,零变化**。调到 2500~3000 可覆盖最坏空口空洞。
+ * 下限 1000ms 不可再降(会周期性跑空);上限 8000ms 纯防御(端到端延迟线性增加)。
+ * 代价:端到端延迟随该值增加,组内一致故不破坏同步。
+ */
+export function raopHoldMs(): number {
+  const v = Number(process.env.MF_BRIDGE_RAOP_HOLD_MS);
+  if (!Number.isFinite(v) || v < 1000) return 1000;
+  return v > 8000 ? 8000 : v;
+}
+
+/** hold 毫秒 → 帧(按会话采样率换算,44.1k / 48k 通用)。 */
+export function raopHoldFrames(sampleRate: number): number {
+  return Math.max(1, Math.round((raopHoldMs() / 1000) * sampleRate));
+}
+
+/**
  * exp4 实验开关(全部缺省关闭 = 现行为):桥 RECORD→首包段对齐 solo 语义。
  *  - MF_BRIDGE_RAOP_CONNECT_PRIME:RECORD 后立即灌静音包(无 SYNC),把「设备见到
  *    RTP 流」的间隔压到 solo 量级,验证 MUZO/Linkplay 是否因长静默期拒绝渲染。
@@ -435,7 +463,8 @@ export class RaopPlayer {
   // the device derives its RTP hold depth mostly from this sync field, and a
   // too-small value makes it run dry → periodic total silence while progress
   // keeps advancing. Updated from the RECORD reply's Audio-Latency when present.
-  private latencyFrames = SAMPLE_RATE;
+  // 2026-10-31:缺省仍 1s,但可用 MF_BRIDGE_RAOP_HOLD_MS 抬高(见 raopHoldMs)。
+  private latencyFrames = raopHoldFrames(SAMPLE_RATE);
   private started = false;
   private paused = false;
   private cseq = 0;
@@ -845,6 +874,13 @@ export class RaopPlayer {
       const audioLatency = parseInt(record.headers["audio-latency"] || "", 10);
       if (Number.isFinite(audioLatency) && audioLatency > 0) {
         this.latencyFrames = Math.max(audioLatency, this.opts.sampleRate);
+        // [2026-10-31] 保持深度只许**抬高**(MF_BRIDGE_RAOP_HOLD_MS,缺省 1000ms ⇒ 与历史完全一致)。
+        // ⚠️ 上面那行必须保持原样:静态守卫 check-airplay-bridge.mjs 按字面量钉死
+        //    `Math.max(audioLatency, this.opts.sampleRate)`,语义是「不得下沉归零」。
+        //    抬高走下面的独立语句,不改被钉的表达式(2026-10-31 踩过一次:直接改成
+        //    raopHoldFrames(...) 让守卫 28/29 转红)。
+        const holdFrames = raopHoldFrames(this.opts.sampleRate);
+        if (holdFrames > this.latencyFrames) this.latencyFrames = holdFrames;
         log.info(`audio latency: ${audioLatency} frames -> sync latency ${this.latencyFrames} frames (${Math.round(this.latencyFrames / this.opts.sampleRate * 1000)}ms)`);
       }
     } finally {
