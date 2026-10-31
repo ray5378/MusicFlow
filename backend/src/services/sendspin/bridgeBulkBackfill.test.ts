@@ -5,7 +5,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { SendspinServer, SendspinGroup } from "./server.js";
 import type { BridgeBoundaryReason } from "../airplay/bridgeChannel.js";
 import { setNowUsOverride } from "./clock.js";
-import { BRIDGE_BACKFILL_MAX_US } from "./constants.js";
+import { BRIDGE_BACKFILL_MAX_US, BRIDGE_PUSH_TICK_MS } from "./constants.js";
 
 const PCM_KEY = "pcm:100";
 // 组无成员 → computeCommonSendAhead 回落 DEFAULT_MIN_BUFFER_MS(800ms)。
@@ -96,7 +96,7 @@ afterEach(() => {
 });
 
 describe("桥开局 bulk 投递(曲中失声根因修复)", () => {
-  it("(a) 换代后对每座桥各触发一次 bulk:一次性灌入 ≤6s、严格升序、水位登记后 tick 不重复", async () => {
+  it("(a) 换代后对每座桥各触发一次 bulk:一次性灌入 ≤6s、严格升序、水位登记后 tick 不重投且领先封顶", async () => {
     setNowUsOverride(() => NOW);
     const { g, ring, durByTs } = makeGroup();
     const b1 = new TrackingBridge("d1");
@@ -122,12 +122,30 @@ describe("桥开局 bulk 投递(曲中失声根因修复)", () => {
       // floor 之下的帧(X<1.5s)绝不出现
       expect(b.frames.every((f) => f.ts >= NOW + 1_500_000n)).toBe(true);
     }
-    // pending 已消费:同 NOW 再 tick 不重复投(bulk 已把 ≤6s 全部投完)
+    // pending 已消费:同 NOW 再 tick 不得重投已投帧,也不得凭空放大领先量。
+    // [Fix D 2026-10-31] 旧断言写的是「帧数完全不变」——那是把窗口死锁当契约:
+    // 窗口恒为 (watermark, hi],而 bulk 建立的领先量远高于 hi,两者同速前进 ⇒ 窗口
+    // 永远为空 ⇒ bulk 的 6s 吃完即断粮(真机:bulk 4.625s 吃完 → rebase +2.768s)。
+    // 正确语义 = ① 绝不重投已投帧(严格 ts 升序且大于 bulk 末帧);② 稳态 tick 至多
+    // 把水位补到 lo+BRIDGE_BACKFILL_MAX_US 这个领先硬上限。
     const before1 = b1.frames.length;
     const before2 = b2.frames.length;
+    const lastTs1 = b1.frames[before1 - 1].ts;
+    const lastTs2 = b2.frames[before2 - 1].ts;
     g.bridgePushTick();
-    expect(b1.frames.length).toBe(before1);
-    expect(b2.frames.length).toBe(before2);
+    const leadCapTs = NOW + AHEAD + 1_500_000n + BigInt(BRIDGE_BACKFILL_MAX_US);
+    for (const [b, lastTs, before] of [
+      [b1, lastTs1, before1] as const,
+      [b2, lastTs2, before2] as const,
+    ]) {
+      for (let i = before; i < b.frames.length; i++) {
+        expect(b.frames[i].ts).toBeGreaterThan(lastTs);
+      }
+      // 单次 tick 的产量上限(tick 时长换算成帧数)
+      expect(b.frames.length - before).toBeLessThanOrEqual(Math.ceil((BRIDGE_PUSH_TICK_MS * 1_000) / FRAME_US));
+      // 领先量不超过 lo+6s 硬上限(否则会一路追到泵预填充前沿,顶穿接收端 8s 红线)
+      expect(b.frames[b.frames.length - 1].ts).toBeLessThanOrEqual(leadCapTs);
+    }
   });
 
   it("(b) 本代新料不足 6s ⇒ 不硬投(pending 保留,只走常态 1s 窗口 tick)", async () => {
