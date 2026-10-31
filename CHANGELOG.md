@@ -29,6 +29,42 @@
 - ICMP ping 报 0% 丢包、pcap 速率正常 seqHole=0、「我窗口内没看到」——三者**都不能**用来
   否定设备侧丢包。唯一能直接证明设备侧丢包的证据是**设备主动发回的重传请求**。
 
+### Fix / 桥接开局投递量不足 —— 换代后一次性灌满 6s(bulk backfill)
+
+- **问题**：桥接会话建立后只有 250ms 一次的 tick、单 tick 窗口宽仅 1s，接收端
+  `inQueue` 水位只能缓慢爬升到 ~1s；而 AirPlay 设备在切歌/重连后有 2~3s 的就绪
+  窗口，水位不足时新歌开头会被判为「无数据」而静默跳过。
+- **修复**：新增「开局 bulk 投递」。换代后由 `bridgePushTick` 发现本代新料
+  ≥ `BRIDGE_BACKFILL_MAX_US`(6s) 时，按 `BRIDGE_PUSH_TICK_MS` 分片一次性灌入，
+  片间 `await setImmediate` 让出事件循环，保证发送侧队列始终远低于
+  `BRIDGE_QUEUE_HARD_CAP_MS`(8s)；实际投递量由 `bulkBackfillCapUs` 钳到
+  `min(6s, 硬上限 − 当前排队 − 余量)`。
+- **时序契约**：换代瞬间 ring 必空(新代首帧未产出)，**不能**在
+  `notifyBridgeGeneration` 就地投，必须等 tick 观测到新料。
+- **配套遥测**：`inQueueMs` / `maxQueueMs` / `queuePeakMs` 进 tick 与 bridge-window
+  日志；首填等待加 `hasInFlight` 门控，避免「有数据正在飞但队列已空」被误判为空。
+
+### Fix / 桥接投递窗口上界不跟随水位，与 bulk 形成永久死锁(秒级循环卡顿)
+
+- **现象**：bulk 上线后真机出现**每秒一次**的循环卡顿，比原问题更严重。
+- **根因**：`deliverBridgeWindow` 的稳态窗口是 `(watermark, hi]`，其中
+  `hi = now + BRIDGE_PUSH_HORIZON_US + ahead − shift` **不随已投递水位移动**。
+  bulk 一次性把水位推到 `lo + 6s`(远高于 `hi`)，此后两者都按 1x 前进 ⇒
+  差距永久冻结 ⇒ **窗口恒为空** ⇒ bulk 那 6s 吃完即断粮 ⇒ 滞后越过
+  `BRIDGE_RESUME_REBASE_US`(2s) 触发 `pacing rebase`(RTP 映射不动) ⇒
+  永久落后 2.6s ⇒ 每包都迟 + 设备持续干涸。
+- **铁证**：真机 `bridge-bulk durUs=4625000`(04:44:46 UTC) → 4.6s 后
+  `pacing rebase +2768574µs idx=580`(04:44:54)，而 `580 × 352 / 44100 = 4.629s`
+  恰好吃完 bulk 的量；随后 `inQueueMs` 恒 0、`deltaUs` 恒 −2.59s、
+  `late` 以 125/秒 累积、`droppedFrames` 持续增长。
+- **修复**：窗口上界改为**跟随水位**并设领先硬上限
+  `hiEff = min(max(hi, watermark + BRIDGE_PUSH_TICK_MS), lo + BRIDGE_BACKFILL_MAX_US)`。
+  每 tick 恰好补一个 tick 的量，bulk 建立的领先量由稳态 1x 维持(既不重投也不塌陷)；
+  `lo + 6s` 是**领先量硬上限**，防止一路追到泵预填充前沿(实测 10.6s)顶穿接收端
+  8s 溢出红线。`watermark = 0` 时退化为原窗口，行为不变。
+- **验收(240 真机)**：`pacing rebase` 0 次；`queueMs ≈ 200`、`inQueueMs ≈ 1250`、
+  `deltaUs` 稳定 +1.06s(抖动 <3ms)、`droppedFrames` 0、`silenceChunks` 0。
+
 ## [4.10.5] - 2026-10-30
 
 ### Fix / 取证日志不得破坏静态守卫钉死的单行拦截
