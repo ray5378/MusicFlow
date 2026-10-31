@@ -727,6 +727,11 @@ export class SendspinGroup {
   bridgeSpecs: BridgeSocketSpec[] = [];
   /** 每桥投递水位(原 ts 域):≤ 水位的帧已投递/已丢弃;缺失或 0n = 当前代次尚未投递。 */
   readonly bridgeWatermarks = new Map<string, bigint>();
+  /** 开局 bulk 待投桥集合(换代时登记;tick 发现本代新料 ≥6s 时一次性投递,见
+   *  bulkBackfillBridge)。250ms tick 供=耗=1x,接收侧水位永远起不来 —— 曲中失声根因。 */
+  private bridgeBulkPending = new Set<string>();
+  /** bulk 投递进行中的桥(期间 tick 对该桥跳过窗口投递,防乱序双写)。 */
+  private bridgeBulkInFlight = new Set<string>();
   /** 桥内容代次:notifyBridgeGeneration 递增;ring 帧经 pushFrame 打上 ep 戳,
    *  投递时只投当前代次 —— 旧代次帧即使 ts 落在新窗口内也不可信(中途 seek/
    *  rehost 时旧 cursor 可达 now+10s,仅重置水位挡不住)。 */
@@ -774,6 +779,11 @@ export class SendspinGroup {
     //  - 水位清零(缺失/0n 哨兵 = 本代次尚未投递):下一 tick 从当前窗口重算。
     this.bridgeContentEpoch++;
     this.bridgeWatermarks.clear();
+    // 开局 bulk 待投登记:换代瞬间 ring 里新代帧还是空的(首帧未产出),不能就地投;
+    // 登记 pending,由 bridgePushTick 在「本代新料 ≥ BRIDGE_BACKFILL_MAX_US」时触发
+    // 一次性批量投递(bulkBackfillBridge),把接收侧 inQueue 拉到 ~6s 后由 tick 1x 续杯。
+    this.bridgeBulkPending.clear();
+    for (const deviceId of this.bridges.keys()) this.bridgeBulkPending.add(deviceId);
     // 切歌垫片(A 方案,对齐 MA set_timing 动态 lead):内容代次切换时全组统一晚 Δ
     // 起播,给桥的重锚定留窗口 —— 否则 esp32 先播、桥内对齐器裁掉新曲开头(切歌吞音)。
     //  - reason=track 且本次路由冷启(句柄重建,RAOP 握手+设备缓冲)⇒ 冷 lead;
@@ -854,6 +864,69 @@ export class SendspinGroup {
       this.server.log("info", `bridge-backfill group=${this.name} device=${deviceId} frames=${n} durUs=${totalUs}`);
     }
     return n;
+  }
+
+  /** ring 内当前代次最后一帧的 ts(本代可用投递存量的右端;无当前代次帧 ⇒ null)。 */
+  private currentGenTailUs(ring: Array<{ tsUs: bigint; durUs: number; data: Uint8Array; ep?: number }>): bigint | null {
+    const epoch = this.bridgeContentEpoch;
+    for (let i = ring.length - 1; i >= 0; i--) {
+      if (ring[i].ep === epoch) return ring[i].tsUs;
+    }
+    return null;
+  }
+
+  /** 开局 bulk 投递(曲中失声根因修复):把 ring 里当前代次、窗口底 lo 之上至多
+   *  BRIDGE_BACKFILL_MAX_US(6s,< BRIDGE_RECEIVE_OVERFLOW_MS 8s)的存量一次性批量
+   *  投给该桥,接收侧 inQueue 一次拉到 ~6s 水位;之后 250ms tick 以 1x 续杯、发送侧
+   *  1x 消费 ⇒ 水位长期保持(等价 airplay/decoder.ts「服务端长期领先接收端」语义)。
+   *
+   *  时序契约:由 bridgePushTick 在「pending 且本代新料 ≥ 6s」时触发 —— 换代瞬间
+   *  ring 必空(新代首帧未产出),不能挂在 notifyBridgeGeneration 就地投。
+   *  - 投递严格按 ring 顺序(ts 升序):锚点 firstFrameTsUs 由首帧锁定,乱序打歪时间线;
+   *  - 分片投递(每 BRIDGE_PUSH_TICK_MS 时长一片,片间 await setImmediate 让出事件
+   *    循环):发送侧 BridgeSource.enqueue 在 queuedMs > BRIDGE_QUEUE_HARD_CAP_MS(8s)
+   *    时断连重连,分片+让出保证 Tx 队列始终远低于硬上限;
+   *  - 期间 tick 对该桥跳过窗口投递(bridgeBulkInFlight),防乱序双写;
+   *  - 代次切换/摘桥立即静默中止(水位已由 notifyBridgeGeneration 清零,不留脏值)。 */
+  private async bulkBackfillBridge(deviceId: string): Promise<void> {
+    const b = this.bridges.get(deviceId);
+    if (!b) return;
+    const ring = this.recentByGroup.get(this.encoderKey("pcm", 100));
+    if (!ring || ring.length === 0) return;
+    const now = nowUs();
+    const ahead = BigInt(this.commonSendAheadUs());
+    const shift = this.bridgeAnchorShiftUs(deviceId);
+    const lo = now + BigInt(BRIDGE_PUSH_FLOOR_US) + ahead - shift;
+    const hi = lo + BigInt(BRIDGE_BACKFILL_MAX_US);
+    const epoch = this.bridgeContentEpoch;
+    const capUs = BigInt(BRIDGE_BACKFILL_MAX_US);
+    const chunkCapUs = BigInt(BRIDGE_PUSH_TICK_MS) * 1000n;
+    let last = this.bridgeWatermarks.get(deviceId) ?? 0n;
+    let totalUs = 0n;
+    let chunkUs = 0n;
+    for (const e of ring) {
+      if (this.bridgeContentEpoch !== epoch || !this.bridges.has(deviceId)) return; // 代次切换/摘桥:静默中止
+      if (e.ep !== epoch) continue; // 严格相等当前代次才投(与 deliverBridgeWindow 同判)
+      if (!e.data || e.data.length === 0) continue;
+      if (last !== 0n && e.tsUs <= last) continue;
+      if (e.tsUs < lo) { last = e.tsUs; continue; } // 已入可听域之下:丢弃,水位推过
+      if (e.tsUs > hi || totalUs + BigInt(e.durUs) > capUs) break; // 6s 上限
+      try {
+        b.pushAudio(e.data, e.tsUs - ahead + shift);
+      } catch { return; }
+      last = e.tsUs;
+      totalUs += BigInt(e.durUs);
+      chunkUs += BigInt(e.durUs);
+      if (chunkUs >= chunkCapUs) {
+        chunkUs = 0n;
+        this.bridgeWatermarks.set(deviceId, last);
+        await new Promise((r) => setImmediate(r)); // 让出事件循环:Tx 侧消化队列,不触 8s hardCap
+      }
+    }
+    this.bridgeWatermarks.set(deviceId, last);
+    if (totalUs > 0n) {
+      this.server.log("info", `bridge-bulk group=${this.name} device=${deviceId} durUs=${totalUs}`);
+    }
   }
 
   // ---- A 方案(曲末排空续静音):排空期 pushLoop 已退出、没有新 PCM,桥侧
@@ -943,6 +1016,20 @@ export class SendspinGroup {
         const shift = this.bridgeAnchorShiftUs(deviceId);
         const lo = now + BigInt(BRIDGE_PUSH_FLOOR_US) + ahead - shift;
         const hi = now + BigInt(BRIDGE_PUSH_HORIZON_US) + ahead - shift;
+        // 开局 bulk(曲中失声根因修复):换代后等「本代新料 ≥ 6s」一次性批量投递。
+        // 不够 6s 就不触发(换代瞬间 ring 必空,硬投只能投到残羹),tick 照旧 1x 续杯。
+        if (this.bridgeBulkInFlight.has(deviceId)) continue; // bulk 分片让出期间跳过窗口投递(防乱序双写)
+        if (this.bridgeBulkPending.has(deviceId)) {
+          const tailUs = this.currentGenTailUs(ring);
+          if (tailUs !== null && tailUs - lo >= BigInt(BRIDGE_BACKFILL_MAX_US)) {
+            this.bridgeBulkPending.delete(deviceId);
+            this.bridgeBulkInFlight.add(deviceId);
+            void this.bulkBackfillBridge(deviceId)
+              .catch(() => { /* 单桥失败不连累组泵 */ })
+              .finally(() => { this.bridgeBulkInFlight.delete(deviceId); });
+            continue;
+          }
+        }
         this.deliverBridgeWindow(b, deviceId, ring, lo, hi, ahead);
       } catch { /* 单桥失败不连累组泵 */ }
     }
@@ -989,12 +1076,16 @@ export class SendspinGroup {
   /** 单座桥从组里摘除后的投递状态清理(bridgeAttach 同步/摘除路径调用)。 */
   onBridgeHandleRemoved(deviceId: string): void {
     this.bridgeWatermarks.delete(deviceId);
+    this.bridgeBulkPending.delete(deviceId);
+    this.bridgeBulkInFlight.delete(deviceId);
     if (this.bridges.size === 0) this.stopBridgePushTimer();
   }
 
   /** 组内全部桥清空后的投递状态清理(bridgeAttach clearGroupBridges 调用)。 */
   onBridgesCleared(): void {
     this.bridgeWatermarks.clear();
+    this.bridgeBulkPending.clear();
+    this.bridgeBulkInFlight.clear();
     this.stopBridgePushTimer();
   }
 

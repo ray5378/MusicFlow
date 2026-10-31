@@ -139,15 +139,17 @@ describe("桥接 producer 预填充 / 低水位补货", () => {
   it("★ (e) 预填充只做一次:首块之后的调用不再等预填充水位", async () => {
     const s = mkSession({ waitDataMs: 60 });
     await s.start();
-    // 完全不供料 ⇒ 首块:预填充等满 waitDataMs 后降级到原有欠料逻辑(再等 waitDataMs)。
+    // 完全不供料 ⇒ 无在途数据:首填等待不生效(空载不空等预算),直接落回原有
+    // 欠料逻辑(等满 waitDataMs 后补静音)。hasInFlight 门控的判别点:首块耗时
+    // ≈ 1 × waitDataMs,且远小于首填预算 —— 没有被 300ms 预算拖过迟到阈值。
     const t0 = Date.now();
     const first = await s.pullOutChunk();
     const dt1 = Date.now() - t0;
     expect(first).not.toBeNull();
     expect(first!.length).toBe(1408);
     expect(s.stats.silenceChunks).toBe(1); // 原有欠料补静音语义保持不变
-    expect(dt1).toBeGreaterThanOrEqual(90); // ≈ 2 × waitDataMs:预填充确实发生了
-    expect(dt1).toBeLessThan(600); // 不是死等
+    expect(dt1).toBeGreaterThanOrEqual(40); // ≈ 1 × waitDataMs:原有欠料等待发生了
+    expect(dt1).toBeLessThan(280); // 空载不空等首填预算(300ms)
 
     // 第二块:预填充已完成 ⇒ 只走原有等料(≈1 × waitDataMs),不再叠一层预填充。
     const t1 = Date.now();

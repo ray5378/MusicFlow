@@ -95,6 +95,11 @@ const RAOP_CONNECT_PRIME_CHUNKS = 10;
 /** 桥接 producer 预填充水位(ms)—— 与 decoder.ts 的 PREFILL_MS 对齐(同为 1500)。 */
 const BRIDGE_PREFILL_MS = 1500;
 
+/** 首块预填充的单次等待预算(ms)。独立小常量,不再借 waitDataMs(1000):开局 bulk
+ *  到位时 inQueue 一次到位,预算只是兜底;预算过长会把首块(0xE0 首包)拖后,
+ *  加剧换歌处静默(旧形状 1000ms + 二级等待最坏 ~2s,已回收)。 */
+const BRIDGE_PREFILL_WAIT_MS = 300;
+
 /** 运行中低水位补货目标(ms):outBuf 跌破它就先等补货到该水位再出块,避免把上游
  *  抖动直接传导成发送节拍抖动(late)。做成常量便于调。 */
 const BRIDGE_LOW_WATER_MS = 200;
@@ -1494,6 +1499,9 @@ export class BridgeSession {
       state: this.pausedState ? "paused" : this.aligner ? "live" : (this.connected ? "connected" : "listening"),
       clock: "local-rtp-ntp",
       queueMs,
+      // inQueue 深度(ms)= inBytes / BRIDGE_PCM_BYTES_PER_SEC(即 backlogMs()):
+      // 分辨欠料在哪一层 —— 上游没给(bulk 未生效,应 ≈6000)还是 resample 没转。
+      inQueueMs: this.backlogMs(),
       maxQueueMs: this.maxQueueMs,
       late: this.player?.bridgeLateCount ?? 0,
       // D 组观测(2026-10-30):距设备上一次 timing 心跳的毫秒数 —— 看门狗判据的唯一
@@ -1530,9 +1538,14 @@ export class BridgeSession {
     const lowWaterBytes = this.lowWaterTargetBytes();
     const filling = !this.prefillDone;
     const wantBytes = filling ? Math.max(need, prefillBytes) : Math.max(need, lowWaterBytes);
-    const refillBudgetMs = filling ? this.waitDataMs : BRIDGE_LOW_WATER_WAIT_MS;
+    const refillBudgetMs = filling ? BRIDGE_PREFILL_WAIT_MS : BRIDGE_LOW_WATER_WAIT_MS;
+    // 首填等待只对「已有在途数据」的流有意义(生产上 maybeBeginStream 由首帧 ingest
+    // 触发 ⇒ 首次 pull 必有在途料)。一帧都没到过(无上游/注入桩)时不空等预算:
+    // 立刻落回下方原有 waitDataMs 欠料逻辑 —— 否则首块 sendAt 被拖过
+    // AP2_LATE_SKIP_US ⇒ pacing 迟到级联(要追到 BRIDGE_RESUME_REBASE_US 才发首块)。
+    const hasInFlight = this.inQueue.length > 0 || this.inBytes > 0 || this.outBuf.length > 0;
     // outBuf 已不足一块(真欠料)时不进补货阶段,交给下面原有的 waitDataMs 等料逻辑。
-    if (filling || this.outBuf.length >= need) {
+    if (this.outBuf.length >= need || (filling && hasInFlight)) {
       const refillDeadline = Date.now() + refillBudgetMs;
       while (this.outBuf.length < wantBytes) {
         // 预填充/补货期间会话被停 ⇒ 立即返回 null,绝不能卡死发送循环。
