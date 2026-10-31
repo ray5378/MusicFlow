@@ -743,6 +743,9 @@ export class SendspinGroup {
   bridgeSpecs: BridgeSocketSpec[] = [];
   /** 每桥投递水位(原 ts 域):≤ 水位的帧已投递/已丢弃;缺失或 0n = 当前代次尚未投递。 */
   readonly bridgeWatermarks = new Map<string, bigint>();
+  /** [Fix D.1 2026-10-31] 每桥「上一次投递给定时器所用的锚点位移」基准。
+   *  与当前 shift 不一致 ⇒ 水位属于旧基准,follow 外扩必须失效一拍(见 deliverBridgeWindow)。 */
+  readonly bridgeShiftAtDelivery = new Map<string, bigint>();
   /** 开局 bulk 待投桥集合(换代时登记;tick 发现本代新料 ≥6s 时一次性投递,见
    *  bulkBackfillBridge)。250ms tick 供=耗=1x,接收侧水位永远起不来 —— 曲中失声根因。 */
   private bridgeBulkPending = new Set<string>();
@@ -823,6 +826,7 @@ export class SendspinGroup {
     //  - 水位清零(缺失/0n 哨兵 = 本代次尚未投递):下一 tick 从当前窗口重算。
     this.bridgeContentEpoch++;
     this.bridgeWatermarks.clear();
+    this.bridgeShiftAtDelivery.clear(); // [Fix D.1] 新代次 = 新基准
     // 开局 bulk 待投登记:换代瞬间 ring 里新代帧还是空的(首帧未产出),不能就地投;
     // 登记 pending,由 bridgePushTick 在「本代新料 ≥ BRIDGE_BACKFILL_MAX_US」时触发
     // 一次性批量投递(bulkBackfillBridge),把接收侧 inQueue 拉到 ~6s 后由 tick 1x 续杯。
@@ -1190,10 +1194,25 @@ export class SendspinGroup {
     // 是**领先量硬上限**——没有它,每 tick 都补 1 tick 会一路追到泵的预填充前沿
     // (真机 10611ms),把桥队列顶穿 BRIDGE_RECEIVE_OVERFLOW_MS(8s) 红线。
     // 未投过(watermark=0)时 max 取 hi、min 取 hi ⇒ 原窗口,行为不变。
+    // [Fix D.1 2026-10-31] follow 只在**同一锚点基准**内生效:成员延迟格被 PUT 后
+    //   shift 会把整个窗口平移,上一拍的水位属于旧基准,再按「水位 + 1 tick」外扩
+    //   等于把**新窗口之外**的帧塞进新时间线。单测实证(2026-10-31,全量跑出):
+    //   ap-2 PUT 1500ms 后本应被新 `hi` 挡住的帧被 follow 放行 ⇒ pushed 1→2。
+    //   shift 变更的那一拍退回严格窗口,下一拍基准一致后 follow 自然恢复 —— 死锁
+    //   修复不受影响(稳态 shift 恒定,改延迟是用户 PUT 的偶发动作,不是播放路径)。
+    const prevShift = this.bridgeShiftAtDelivery.get(deviceId);
+    const shiftChanged = prevShift !== undefined && prevShift !== shift;
+    this.bridgeShiftAtDelivery.set(deviceId, shift);
     const tickUs = BigInt(BRIDGE_PUSH_TICK_MS) * 1000n;
     const leadCapUs = lo + BigInt(BRIDGE_BACKFILL_MAX_US);
     const followUs = last + tickUs;
-    const hiEff = (hi > followUs ? hi : followUs) > leadCapUs ? leadCapUs : (hi > followUs ? hi : followUs);
+    const hiEff = shiftChanged
+      ? hi
+      : (hi > followUs ? hi : followUs) > leadCapUs
+        ? leadCapUs
+        : hi > followUs
+          ? hi
+          : followUs;
     for (const e of ring) {
       if (e.ep !== epoch) continue; // S2(QA):严格相等当前代次才投 —— ep 缺失=未打戳=不可信
       if (!e.data || e.data.length === 0) continue; // 空包必跳过(2026-09-17 ESPHome:严格端收空包判 Invalid data)
@@ -1279,6 +1298,7 @@ export class SendspinGroup {
   /** 单座桥从组里摘除后的投递状态清理(bridgeAttach 同步/摘除路径调用)。 */
   onBridgeHandleRemoved(deviceId: string): void {
     this.bridgeWatermarks.delete(deviceId);
+    this.bridgeShiftAtDelivery.delete(deviceId); // [Fix D.1]
     this.bridgeBulkPending.delete(deviceId);
     this.bridgeBulkInFlight.delete(deviceId);
     this.bridgeDiagLogAt.delete(deviceId);
@@ -1288,6 +1308,7 @@ export class SendspinGroup {
   /** 组内全部桥清空后的投递状态清理(bridgeAttach clearGroupBridges 调用)。 */
   onBridgesCleared(): void {
     this.bridgeWatermarks.clear();
+    this.bridgeShiftAtDelivery.clear(); // [Fix D.1]
     this.bridgeBulkPending.clear();
     this.bridgeBulkInFlight.clear();
     this.bridgeDiagLogAt.clear();
