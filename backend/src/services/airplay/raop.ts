@@ -311,6 +311,8 @@ export interface RaopBridgeAnchor {
   latencyFrames: number;
   /** 输出采样率(AP1 = 44100;48k 直通协议 = 48000)。 */
   rate: number;
+  /** L2 跨曲显式重锚:true 时 streamBridge 写锚后发 FLUSH+RECORD 让接收端按新映射重锚。仅「换代(track)」置位。 */
+  explicitReanchor?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -435,7 +437,7 @@ export async function raopTeardownProbe(host: string, port: number, timeoutMs = 
  *  - `send`:sendChunk 返 false(会话已销毁 / 无 audio socket)—— 设备侧断连。
  *  - `destroy`:`destroying` 被置位(主动销毁)。
  *  - `stopped`:`streaming` 被外部置 false(flush / 换代)。 */
-export type BridgeStreamEndReason = "producer" | "send" | "destroy" | "stopped";
+export type BridgeStreamEndReason = "producer" | "send" | "destroy" | "stopped" | "reanchor-failed";
 
 export class RaopPlayer {
   opts: RaopConnectOptions & { host: string; port: number; sampleRate: number };
@@ -444,6 +446,8 @@ export class RaopPlayer {
   private aesIv = randomBytes(16);
   private ssrc = randomBytes(4).readUInt32BE(0);
   private seq = (Math.random() * 0xffff) | 0;
+  /** 上一包发出时的 headTs(模 2^32);-1 = 尚未发过包。跨曲重锚(L1/L2)判时间线前跳用。 */
+  private lastSentTs = -1;
   /** 握手总预算的截止时刻(epoch ms;0 = 不在握手阶段)。见 rtspTimeoutFor。 */
   private handshakeDeadline = 0;
   private headTs = 0;
@@ -1069,6 +1073,7 @@ export class RaopPlayer {
       this.backlogHeadKey = nextHead === undefined ? -1 : nextHead;
     }
     this.audioSocket.send(pkt, 0, pkt.length, this.serverAudioPort, this.opts.host);
+    this.lastSentTs = this.headTs >>> 0;
     this.headTs = (this.headTs + CHUNK_LEN) >>> 0;
     this.positionSec = ts2ms((this.headTs - this.baseTs) >>> 0, this.opts.sampleRate) / 1000;
     return true;
@@ -1279,6 +1284,31 @@ export class RaopPlayer {
       this.latencyFrames = Math.max(1, Math.round(anchor.latencyFrames));
     }
     this.positionSec = ts2ms((this.headTs - this.baseTs) >>> 0, this.opts.sampleRate) / 1000;
+    // ---- 跨曲重锚(L1+L2,Fix G,对标 MA 的 FLUSH+重 START)----
+    // L1:若新锚起点早于上一包(headTs 回退),强制 baseTs/startTs/headTs 三者同量前跳,
+    //   保证 positionSec 与 SYNC 映射不变(只动 RTP 起点,不重标内容)。
+    if (this.lastSentTs >= 0) {
+      const sr = this.opts.sampleRate;
+      const minNext = (this.lastSentTs + CHUNK_LEN) >>> 0;
+      const ahead = (minNext - this.startTs) >>> 0;
+      if (ahead !== 0 && ahead < 0x8000_0000) {
+        this.baseTs = (this.baseTs + ahead) >>> 0;
+        this.startTs = (this.startTs + ahead) >>> 0;
+        this.headTs = (this.headTs + ahead) >>> 0;
+        log.warn(`bridge re-anchor: 时间线强制前跳 ${ahead} frames (${((ahead / sr) * 1000).toFixed(1)}ms)`);
+      }
+      // L2:换代(track)显式重锚 —— 发 FLUSH 冲刷旧时间线 + RECORD 开新录制会话。
+      //   失败(设备不回 2xx)抛错 -> 上层 reconnectRaop 冷重建。
+      if (anchor.explicitReanchor === true) {
+        try {
+          await this.reanchorForNewStream();
+          log.info(`bridge re-anchor ok: FLUSH + RECORD(seq=${(this.seq + 1) & 0xffff}, rtptime=${this.headTs})`);
+        } catch (e) {
+          log.warn(`bridge re-anchor failed: ${(e as Error)?.message || e} -> 交回上层冷重建`);
+          return "reanchor-failed";
+        }
+      }
+    }
     this.bridgeLatePackets = 0;
     const rate = this.opts.sampleRate;
     let idx = 0; // 已发包数(内容样本 [idx·352, (idx+1)·352) 的序号)
@@ -1434,6 +1464,30 @@ export class RaopPlayer {
     this.started = false;
     this.streaming = false;
     if (this.syncTimer) { clearInterval(this.syncTimer); this.syncTimer = null; }
+    this.audioBacklog.clear();
+    this.backlogSeq = 0;
+    this.backlogHeadKey = -1;
+    this.backlogTailKey = -1;
+  }
+
+  /** 跨曲显式重锚(L2,对标 MA 的 FLUSH+重 START):发 RTSP FLUSH 冲刷旧时间线,
+   *  再以新 seq/rtptime 发 RECORD 开新录制会话,让接收端彻底关闭旧流、按新映射重锚。
+   *  仅「换代(track)」触发;seek/拖动走别路。失败抛错 -> 上层回退冷重建。 */
+  async reanchorForNewStream(): Promise<void> {
+    if (!this.socket || this.socket.destroyed) throw new Error("rtsp socket gone");
+    if (this.syncTimer) { clearInterval(this.syncTimer); this.syncTimer = null; }
+    this.started = false;
+    this.audioBacklog.clear();
+    this.backlogSeq = 0;
+    this.backlogHeadKey = -1;
+    this.backlogTailKey = -1;
+    const rtptime = this.headTs >>> 0;
+    const nextSeq = (this.seq + 1) & 0xffff;
+    const flush = await this.sendRtsp("FLUSH", null, null, [["RTP-Info", `seq=${this.seq};rtptime=${rtptime}`]]);
+    if (!(flush.status >= 200 && flush.status < 300)) throw new Error(`FLUSH ${flush.status}`);
+    const record = await this.sendRtsp("RECORD", null, null, [["Range", "npt=0-"], ["RTP-Info", `seq=${nextSeq};rtptime=${rtptime}`]]);
+    if (!(record.status >= 200 && record.status < 300)) throw new Error(`RECORD ${record.status}`);
+    this.syncLoop();
   }
 
   async stop(): Promise<void> {

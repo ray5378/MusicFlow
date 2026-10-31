@@ -1204,7 +1204,22 @@ export class SendspinGroup {
     const shiftChanged = prevShift !== undefined && prevShift !== shift;
     this.bridgeShiftAtDelivery.set(deviceId, shift);
     const tickUs = BigInt(BRIDGE_PUSH_TICK_MS) * 1000n;
-    const leadCapUs = lo + BigInt(BRIDGE_BACKFILL_MAX_US);
+    // [Fix E 2026-10-31] 上界改为「当前水位 + 队列余量」，不再用「lo + 6s」：
+    //   旧上界与水位无关 —— bulk 一旦把水位推到 lo+6s（其自身上限），后续新帧 ts
+    //   恒略高于 lo+6s ⇒ 每 tick 都 break ⇒ 窗口永久空、queueMs/inQueueMs 恒 0，
+    //   只能靠 bulk 每 6s 灌一次 + raop 追发（late 250/s）。
+    //   真机 2026-10-31 15:27 实证：contentFrontierVsNowUs=14.95s、
+    //   tailVsHiUs=11.95s、window=[now+2s, now+3s] ⇒ 一帧投不出、device 断粮。
+    //   队列余量口径与 bulkBackfillCapUs 完全一致，顶不穿 BRIDGE_QUEUE_HARD_CAP_MS。
+    const queueBudgetMs = Math.max(
+      1000,
+      BRIDGE_QUEUE_HARD_CAP_MS - this.bridgeQueuedMs(b) - BRIDGE_BULK_QUEUE_MARGIN_MS,
+    );
+    // last 是**绝对时刻**(µs)，queueBudgetMs*1000 是**时长**(µs)：
+    //   last=0n(本代次尚未投递)时若直接相加，cap 会退化成「6e6 这个时刻」，
+    //   远小于所有真实 ts ⇒ 全部 break ⇒ 投递恒 0，且 last>hiEff 恒成立会误清水位。
+    //   未投过时回落 hi(=原窗口语义，与 Fix D「未投过时行为不变」一致)。
+    const leadCapUs = last !== 0n ? last + BigInt(queueBudgetMs) * 1000n : hi;
     const followUs = last + tickUs;
     const hiEff = shiftChanged
       ? hi
@@ -1213,6 +1228,15 @@ export class SendspinGroup {
         : hi > followUs
           ? hi
           : followUs;
+    // [Fix E 2026-10-31] 基准平移后旧水位可能落到新窗口之外：成员延迟 PUT 与
+    //   watchdog 重连都会改 shift，整个窗口随之平移。旧水位若高于新 hiEff，后续帧
+    //   全部 `ts > hiEff` ⇒ break ⇒ 永久断粮（Fix D.1 只让该拍退回严格 hi，没处理
+    //   「水位已越界」）。清零回「本代次尚未投递」语义，下一 tick 从当前窗口重算；
+    //   旧水位在旧基准下已无参照意义。ep 过滤保证不会重投旧代次帧。
+    if (shiftChanged && last !== 0n && last > hiEff) {
+      last = 0n;
+      this.bridgeWatermarks.delete(deviceId);
+    }
     for (const e of ring) {
       if (e.ep !== epoch) continue; // S2(QA):严格相等当前代次才投 —— ep 缺失=未打戳=不可信
       if (!e.data || e.data.length === 0) continue; // 空包必跳过(2026-09-17 ESPHome:严格端收空包判 Invalid data)

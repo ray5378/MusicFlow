@@ -2,6 +2,50 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.10.7] - 2026-10-31
+
+### Fix / 桥投递窗口上界与水位脱钩 —— 曲中失声的总根因(服务端投不出)
+
+- **现象**:曲中(非歌开头、非切歌点)突然无声数秒后自愈;服务端多数时段指标全绿
+  (`droppedFrames=0`、`silenceChunks=0`、`realigned=0`、`deltaUs` 稳定),唯一持续异常是
+  `late` 单调递增。
+- **证据链**:双向 pcap(`/tmp/mfpc`)显示发送侧每秒 126~130 包、100 秒零中断(不是空口丢包、
+  不是供料不足);`[sendspin] bridge-window` 同一时刻 `contentFrontierVsNowUs=14.95s`、
+  `tailVsHiUs=11.95s`、窗口只有 `[now+2s, now+3s]`、`queueMs=0` —— **窗口内根本没有内容可投**。
+- **根因**:`deliverBridgeWindow` 的上界 `leadCapUs = lo + BRIDGE_BACKFILL_MAX_US` 只与 `lo`
+  有关、与水位 `last` 无关。bulk 把水位推到 `lo+6s` 后,新帧 `ts` 恒略高于该上界 ⇒ 每 tick
+  第一帧就 `break`,**一帧都投不出**,退化为「每 6s bulk 灌一次 + raop 追发硬撑」⇒
+  `inQueueMs` 归零 ⇒ 设备断粮 ⇒ 静音 ⇒ watchdog 重连。这也解释了「总是曲中卡、歌开头不卡」。
+- **修复**:上界改为「当前水位 + 桥队列余量」,与 `bulkBackfillCapUs` 同口径:
+  `queueBudgetMs = max(1000, BRIDGE_QUEUE_HARD_CAP_MS − bridgeQueuedMs − 余量)`;
+  `leadCapUs = last + queueBudgetMs*1000`。水位推进受队列余量约束,不再顶穿 8s 溢出红线。
+  `last=0n`(本代次尚未投递)时回落 `hi`,与 Fix D「未投过时行为不变」一致(否则把绝对时刻
+  与时长相加会退化成极小 cap,导致全部 break)。
+
+### Fix / 基准平移后旧水位越界 —— 次生死锁
+
+- `shift`(成员延迟 PUT / watchdog 重连)变化会整体平移窗口,而 Fix D.1 只让该拍退回严格 `hi`,
+  没处理「旧水位已落到新窗口之外」:一旦 `last > hiEff`,后续帧全部 `break`,形成与上面同款的
+  永久死锁且不自愈。
+- 修复:基准平移且 `last > hiEff` 时清零水位并删除该设备水位记录,回到「本代次尚未投递」
+  语义,由下一 tick 从当前窗口重算;`ep !== epoch` 过滤保证不会重投旧代次帧。
+
+### Fix / 跨曲换代显式重锚(FLUSH + RECORD)
+
+- `track` 换代不再起垫片续流:旧 `streamBridge` 由 `pullChunk` 返回 null(generation 已切换)
+  自然退出,新代次首帧重新起流并带 `explicitReanchor=true`。
+- `RaopPlayer` 新增 `lastSentTs` 与 `reanchorForNewStream()`:写锚后若新锚起点早于上一包,
+  先把 `baseTs/startTs/headTs` 三者同量前跳(只动 RTP 起点、不改 SYNC 映射与 `positionSec`);
+  再发 `FLUSH`(带旧 seq/rtptime)+ `RECORD`(带新 seq/rtptime),让接收端关闭旧时间线并按
+  新映射重锚。失败抛错 ⇒ 结束原因新增 `reanchor-failed` ⇒ 上层 `reconnectRaop()` 冷重建。
+- `stop` 时一并清理重传缓冲与 backlog 索引,避免旧代次残留包被重传。
+
+### Chore / 版本号
+
+- `backend/package.json` 版本号对齐 `4.10.7`。
+- 真机验收判据见 `docs/桥投递窗口水位死锁-根因与修复-2026-10-31.md`:
+  `queueMs` 稳定 >0、`inQueueMs` 2000~3000ms、`late` 不再单调增长、曲中 `silenceChunks` 恒 0。
+- 说明:本轮尚未完成与 Music Assistant 的出口数据对标,真机成功标准待对标后确定(见今日待办未闭环)。
 ## [4.10.6] - 2026-10-31
 
 ### Fix / 曲中(同一首歌内)偶发失声约 2 秒后自愈 —— 重传缓冲覆盖不足

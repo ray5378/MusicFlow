@@ -969,8 +969,11 @@ export class BridgeSession {
    *  - track/seek/rehost:清旧代次队列 + 计入 staleFramesDropped + 重锚 —— 新代次
    *    首帧确立新 A ⇒ 新 scheduledAnchorUs(可 grep `ev:"gen"` + `ev:"anchor"`);
    *  - stop:流终态(跨源切歌/组停),停推流;RAOP 会话由编排侧 bridgeStop 拆。 */
+  /** 最近一次 onBoundary 的原因(track/seek/rehost/stop)。Fix G 用它判换代->显式重锚。 */
+  private lastBoundaryReason: string | null = null;
   private onBoundary(generation: number, reason: string): void {
     if (this.closed) return;
+    this.lastBoundaryReason = reason;
     log.info(`[airplay-bridge] ${JSON.stringify({ ev: "gen", dev: this.deviceId, gen: generation >>> 0, prevGen: this.generation, reason })}`);
     // 清旧代次:入队未消费 + 出缓冲未切割的全部计入丢弃。
     const stale = (this.inBytes >> 2) + (this.outBuf.length >> 2);
@@ -991,7 +994,14 @@ export class BridgeSession {
       this.player?.flush();
       return;
     }
-    // track/seek/rehost:热复用 RAOP 会话,推流循环立刻退出,新代次首帧重新起流
+    // track:换代。Fix G —— 不再起垫片续流;旧 streamBridge 由 pullChunk 返回 null
+    // (generation 已切换)自然退出,新代次首帧经 maybeBeginStream 重调 streamBridge
+    // 并带 explicitReanchor=true 显式重锚(发 FLUSH+RECORD)。
+    if (reason === "track") {
+      void this.stopGapFiller();
+      return;
+    }
+    // seek/rehost:热复用 RAOP 会话,推流循环立刻退出,新代次首帧重新起流
     // (player.flush 置 started=false ⇒ 新流首包带 0xE0 marker,接收端重锚)。
     this.streamAborted = true;
     this.player?.flush();
@@ -1169,6 +1179,7 @@ export class BridgeSession {
         anchorUs: plan.anchorUs,
         latencyFrames,
         rate,
+        explicitReanchor: this.lastBoundaryReason === "track",
       })
       .then((endedBy) => {
         // v4.9.7:只有 `send`(sendChunk 返 false,设备侧真断开)才重连。
@@ -1176,6 +1187,10 @@ export class BridgeSession {
         // 停流,交给 onBoundary 换代处置。历史缺陷:此处不区分原因,导致每首歌播完都
         // 触发一次 reconnectRaop,而它在 await connect() 后 forceClose 掉刚起的新流 ⇒
         // 6 轮 / 36s 无声死循环(240 实证 05:33:00)。destroy/stopped 同样不重连。
+        if (endedBy === "reanchor-failed") {
+          if (!this.closed && this.connected) void this.reconnectRaop();
+          return;
+        }
         if (endedBy !== "send") return;
         if (!this.closed && this.connected && !this.streamAborted) this.scheduleRaopReconnect("stream ended");
       })
