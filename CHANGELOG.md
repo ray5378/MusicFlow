@@ -65,6 +65,35 @@
 - **验收(240 真机)**：`pacing rebase` 0 次；`queueMs ≈ 200`、`inQueueMs ≈ 1250`、
   `deltaUs` 稳定 +1.06s(抖动 <3ms)、`droppedFrames` 0、`silenceChunks` 0。
 
+### Fix / 成员延迟 PUT 后,投递窗口不得跨锚点基准外扩
+
+- **问题**：成员延迟(按成员存)被 PUT 后 `shift` 变化会平移整个投递窗口，而 Fix D 的
+  「跟随水位」用的是**旧基准**下的水位 ⇒ 会把新窗口之外的帧塞进新时间线。
+  全量测试实证：`tests/sendspin/bridgePushFrame.test.ts`「每桥读各自成员格」pushed 1→2。
+- **修复**：新增 `bridgeShiftAtDelivery`，`shift` 变更的那一拍退回严格窗口，
+  下一拍基准一致后 follow 自然恢复 —— 稳态 `shift` 恒定，死锁修复不受影响。
+
+### Feature / 设备保持深度可配置(`MF_BRIDGE_RAOP_HOLD_MS`)
+
+- **背景(本日定论)**：设备侧 hold depth 由 SYNC 包广播的 `rtp_timestamp_latency`
+  (= 锚点公式的 `L`)决定。缺省只有 **1.0s**,而空口一次连续丢包实测 **≈240 包 ≈1.92s**
+  ⇒ 设备必被抽干 ⇒ 曲中失声约 2s 后自愈。重传缓冲(2048 包≈16.4s)只保证「补得到」,
+  不保证「补得及」。
+- **新增**：`MF_BRIDGE_RAOP_HOLD_MS`,**缺省 1000 = 历史行为零变化**,可抬高到
+  2500~3000 覆盖最坏空口空洞;下限 1000 不可再降(会周期性跑空),上限 8000 纯防御。
+  代价:端到端延迟随该值线性增加,组内一致故不破坏同步。
+- **真机验收(240)**：`MF_BRIDGE_RAOP_HOLD_MS=2500` ⇒ `leadUs` 1050000 → **2550000**,
+  `droppedFrames / silenceChunks / realigned` 恒 0;同形态 `raop-loss` 爆发仍在但**不再失声**。
+
+### 文档 / 抓包取证方法论补「必抓设备请求方向」
+
+- `docs/曲中失声-抓包取证方法论与复盘-2026-10-31.md` 新增 §2.2.1:BPF 精确式
+  `udp and src host <设备IP> and udp[1] = 0xd5`、端口兜底式,以及三列判读表
+  (`miss=0` / `future < miss` / `miss == future` 各指什么);并记录 `seq0` 是上一个聚合
+  窗口的陈旧字段、只能用 `seq1` 与 `cur` 判范围。
+- 新增 `docs/今日待办-曲中失声与桥投递-2026-10-31.md`:当天唯一进度看板(根因三次演进、
+  改动清单、真机验收、未闭环 P0–P4、验收判据、回退路径)。
+
 ## [4.10.5] - 2026-10-30
 
 ### Fix / 取证日志不得破坏静态守卫钉死的单行拦截
