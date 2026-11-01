@@ -245,16 +245,18 @@ describe("PlaybackTracker.onPositionAdvance:纯通知接线", () => {
 
   it("tick() 用外推位置回调（不报位置的设备只有这条会推进）", () => {
     const t = new PlaybackTracker();
-    const now = Date.now();
-    t.update(toCompareState(st(PlaybackState.PLAYING, "u1", 240)));
+    // 外推位置的基点是**该次上报的时刻**(updatedAt),不是测试自己的 Date.now():
+    // 两者在 CI 上会差出零点几毫秒(st() 先取 Date.now(),随后 now 再取一次),
+    // 落点变成 240.999 就会挂掉 ≥241 的下沿。以 updatedAt 为基点取 1s,落点恒为 241。
+    const s = st(PlaybackState.PLAYING, "u1", 240);
+    t.update(toCompareState(s));
     const seen: Array<[number, number]> = [];
     t.onPositionAdvance = (p, d) => seen.push([p, d]);
     t.setExpectedDuration(250);
-    t.tick(now + 1_000);
+    t.tick(s.updatedAt + 1_000);
     expect(seen).toHaveLength(1);
     expect(seen[0][1]).toBe(250);
-    // 外推位置 = 末次上报位置 + 墙钟流逝（st() 的 updatedAt 与 now 之间有几毫秒抖动，
-    // 故用区间断言而不是精确相等）。
+    // 仍用区间断言:防止实现改成取整/截断后落点漂移。
     expect(seen[0][0]).toBeGreaterThanOrEqual(241);
     expect(seen[0][0]).toBeLessThan(242);
   });
