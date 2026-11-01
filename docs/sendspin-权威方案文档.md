@@ -1699,3 +1699,22 @@ prev、音量/静音、自然结束自动下一首、停止）+ 组播 6 项（`
 `unplayable` 的歌(与 `judgePlayable` 第一道闸同判据),预热不再打偏。
 
 完整取证见 `docs/换歌取源跨进程预热-方案与取证.md`。
+
+## v4.11.1 增补(CI 守卫口径回归修正,2026-11-01)
+
+v4.11.0 的功能代码(组时间线 D4~D9 / 组「测试延迟」/ 帧级成员补偿 / 下一首预解码开关)**没有变**;
+红的是**守卫断言与现状脱钩**。与 sendspin 直接相关的是 P1、P2 两条,口径已按现状重钉:
+
+**P1(续播位置透传)**:`airplay/protocolPlayer.ts` 的 `rpc("playMedia", {` 参数块改成跨行(桥接
+socket 按需追加)后,原「单行 `grep -F` 整串」断言恒不命中 ⇒ 假红。现先把源码 `tr '\n' ' '` 折成
+单行再比对:**钉的仍是「`clientId, item, streamUrl, seekPositionMs: startMs` 按序在位」,排版不参与判定。**
+
+**P2(切歌 keep_stream)**:S1 让切歌分支多了预取入口 —— `playerCore` 两处的条件从
+`if (g.canKeepStream()) {` 变成 `if (g.canKeepStream() || keepQueueForPrefetch) {`,原「完整条件
+字面量命中 2 次」断言归零。现改为钉**门禁语义**:`g.canKeepStream()` ≥2 **且**其分支内
+`g.clearPlayback();` ≥2 —— 即「两处都过门禁、且只清缓冲不发 `stream/end`」;条件表达式允许附加旁路。
+
+> 教训(可复用):守卫钉的是**契约**,不是**字符排版**。源码一旦换行或加并列分支,字面量断言就会
+> 假红;正确写法是「归一化后匹配关键序列」或「只钉不可变的部分(门禁 + 动作)」。
+> 同一批口径修正还包含 `ci` 的 AirPlay2 发现分级守卫 R4(见 airplay 权威文档 §7.6)与前端 MfIcon
+> 注册表(`AudioLines`,见 group 权威文档 §6.9)。

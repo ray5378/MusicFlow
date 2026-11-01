@@ -651,7 +651,7 @@ PUT 语义：`memberId` 必须是本组成员（命名空间 id **原样整条**
 | `POST /v1/groups/:id/delay-test/stop` | 停止（同上权限/归属/错误码） |
 | `GET /v1/groups/:id/delays` | 多回显一个 `delayTest: isGroupDelayTestActive(id)`（刷新页面后按钮仍显示「停止」） |
 
-**前端**：运行态/忙碌态用 `delayTesting` / `delayTestBusy` 两个 `Record<string, boolean>` 按组 id 分表，动作按当前态切 `.../delay-test` 或 `.../delay-test/stop`，并从 GET delays 回读状态。**不得用全局布尔** —— 否则一台设备在测试时全组按钮都变「停止」。
+**前端**：运行态/忙碌态用 `delayTesting` / `delayTestBusy` 两个 `Record<string, boolean>` 按组 id 分表，动作按当前态切 `.../delay-test` 或 `.../delay-test/stop`，并从 GET delays 回读状态。**不得用全局布尔** —— 否则一台设备在测试时全组按钮都变「停止」。按钮图标 `AudioLines` **必须**在 `frontend/src/components/MfIcon.vue` 的 import 与 `ICONS` 表里登记（v4.11.1 起 `ci` 的图标注册表守卫会拦：`ICONS` 是显式白名单，未登记 = 渲染空图标且 CI 红）。
 
 **守卫与测试**：`check-group-invariants.mjs` **G20**（12 条：样本参数钉死 / 复用不重写 / upsert / 删除顺序 / 单曲循环 / 三态还原 / 绝不顺手起播 / 全部组停了才删行 / 两路由 + 回显 / 前端每组独立）；单测 `tests/group/delayTest.test.ts`（16 例）+ `tests/routes/apiGroupDelayTest.test.ts`（8 例）。
 

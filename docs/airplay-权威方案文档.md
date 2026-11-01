@@ -69,7 +69,7 @@
 
 > **基线**：MusicFlow **v4.6.77** · 后端 `backend/src/services/airplay/*`（实测 21 个 `.ts`） · 230 测试床 shairport-sync（AP1/AP2）· 真机 HiVi H5MKII / MUZO / WR320
 > **文档来历**：合并此前分散在 `PLAYBACK_SEEK_MA_REWORK.md`、`archive/MusicFlow-AirPlay2(E2~E5)课题立项与实施计划-2026-10-20.md`、`CHANGELOG` 4.6.5x 条目、230 真机排障记录与 `check-airplay-playback-chain.mjs` 守卫注释，并以 **2026-10-20 / 2026-10-21 / 2026-10-22 三轮 HiVi 真机实测** 的最新结论为准。
-> **怎么读**：**第一～五部分是正确做法，照做即可**；**第六部分是踩过的坑（含被推翻的旧结论），务必别重蹈**；第七部分是回归守卫清单（7 个脚本 / 273 个 `check()` 调用点(其中 1 处是 8 次展开的模板)，运行时 280 条断言）；**第八部分是 DLNA + AirPlay 合一设备的流转权威方案**（同设备双身份、双向时序、失败表、验收矩阵）；
+> **怎么读**：**第一～五部分是正确做法，照做即可**；**第六部分是踩过的坑（含被推翻的旧结论），务必别重蹈**；第七部分是回归守卫清单（7 个脚本 / 310 个 `check()` 调用点(其中 1 处是 8 次展开的模板)，运行时 317 条断言；口径随 **v4.11.1** 同步）；**第八部分是 DLNA + AirPlay 合一设备的流转权威方案**（同设备双身份、双向时序、失败表、验收矩阵）；
 > **第九部分是实现级代码地图**（21 个文件逐个 + 行为→代码反查表，排障从这里开始）；**第十部分是桥接环的时间基准**（`tsUs` 唯一口径、窗口/水位/锚点/stats 判据）；**第十一部分是群组 A/V 延迟补偿 R31**（v4.8.0 起按成员一格、±30s；AirPlay 侧改完要重建/自愈该成员桥，细节唯一出处 group 权威文档 §6）。
 > **本文是 AirPlay 链路的唯一权威**。与其它文档冲突时，以本文为准。
 
@@ -489,7 +489,7 @@ HiVi H5MKII 同时以 `airplay:00226C••••••`（HiVi）与 `dlna:FF31
 
 ---
 
-# 第七部分：回归守卫（7 个脚本 / 309 个 `check()` 调用点(其中 1 处是 8 次展开的模板) ⇒ 运行时 316 条断言）
+# 第七部分：回归守卫（7 个脚本 / 310 个 `check()` 调用点(其中 1 处是 8 次展开的模板) ⇒ 运行时 317 条断言）
 
 七个零依赖 node 脚本,全部挂 `.github/workflows/ci.yml`。**它们钉的不是风格,是
 已经付过真机代价的静默故障** —— 每条断言都做过「最小违规反证」,删掉即回归对应 bug。
@@ -501,13 +501,13 @@ HiVi H5MKII 同时以 `airplay:00226C••••••`（HiVi）与 `dlna:FF31
 | `check-airplay-decode-af.mjs` | 20 | 解码 `-af` 只留协议输出段 | 动态被二次压缩 / 设备无声 |
 | `check-airplay-playback-chain.mjs` | 139 | R1~R30 全链路契约 | 卡 PLAYING、误切歌、流转失败、RPC 挂死 |
 | `check-airplay-rtsp-line.mjs` | 6 | RTSP 请求行三段 | 部分接收端 `400` |
-| `check-airplay-ap2-discovery.mjs` | 17 | AP1 造表 / AP2 只打能力 | 死设备、HAP 配对全挂 |
+| `check-airplay-ap2-discovery.mjs` | 18 | AP1 造表 / AP2 只打能力 / 投屏入口统一走桥 | 死设备、HAP 配对全挂 |
 | `check-airplay-bridge.mjs` | 98 | 桥接环 20 组不变量(①~⑰ + ⑱⑲⑳) | 慢 3.7s / underrun / 切歌无声 / Lost sync / 同刻不同内容 |
 
 > **条数口径**:上表 = 脚本里 `check(...)` 的**调用点数**(静态可数,`grep -c '^\s*check('` 再扣掉模板)。
 > `check-airplay-bridge.mjs` 有 1 处 `check()` 写在 `uniq()` 模板体内、被调用 8 次 ⇒ 该脚本**运行时**
-> 执行 **105** 条断言(97 固定 + 8 动态);七个脚本合计 **98+19+10+20+139+6+17 = 309** 个调用点(含该模板) ⇒
-> **运行时 308 + 8 = 316** 条。三者对不上时**以脚本实测为准**(`grep -c '^\s*check('` + `grep -c 'console.log("====='`)。
+> 执行 **105** 条断言(97 固定 + 8 动态);七个脚本合计 **98+19+10+20+139+6+18 = 310** 个调用点(含该模板) ⇒
+> **运行时 309 + 8 = 317** 条。三者对不上时**以脚本实测为准**(`grep -c '^\s*check('` + `grep -c 'console.log("====='`)。
 
 ```bash
 cd backend
@@ -697,13 +697,19 @@ flow 解析、回环偏移、DLNA Stop 反向守卫、独立子进程** —— �
 | 79 | raopTransport.test.ts 断言三条握手请求行以 RTSP/1.0 收尾 |
 | 84 | raopTransport.test.ts 覆盖 fire-and-forget 分支(SET_PARAMETER)的版本段 |
 
-## 7.6 `check-airplay-ap2-discovery.mjs`(17 条)
+## 7.6 `check-airplay-ap2-discovery.mjs`(18 条)
 
 **钉什么**:`_raop._tcp` 造设备表、`_airplay._tcp` **只打能力**(`upsertAp2` 不得写
 `devices` 表,`ap2Caps.set` 恰好 1 处);`supportsAp2` 必须同时满足「能力表命中」与
 `protovers ≥ 1.1`(`AP2_MIN_PROVERS=[1,1]`),缺省/非法值返回 false;`_airplay` 的 `down` 走
-`dropAp2`(只清能力,不标设备离线),`_raop` 的 `down` 才标离线;renderer 的 `cast` 仍只调
-`castToAirPlayDevice`(AP2 不提前分流)。
+`dropAp2`(只清能力,不标设备离线),`_raop` 的 `down` 才标离线;音乐投放**统一走桥** ⇒
+renderer 插件的 `cast()` **不得自建投屏会话**(只保留 `RendererPlugin` 契约并直接抛错),
+`castToAirPlayDevice` 仍留在 `control.ts` 且由桥(`airplay/protocolPlayer.ts`)调用。
+
+> **v4.11.1 口径修正**:`b350c188` 把音乐投放统一到桥之后,渲染器插件不再自建 RAOP 会话、
+> `cast()` 改为抛错指路 ⇒ 旧断言「`cast()` 只调 `castToAirPlayDevice`」恒假,把整条 `ci` 打红
+> (与 v4.11.0 的功能改动无关)。现改为**双向**钉:R4-a「`cast()` 不得自开投屏会话」+
+> R4-b「`castToAirPlayDevice` 仍在 `control.ts` 且由桥调用」—— 既禁回潮,也不许顺手删掉 AP1 直连能力。
 
 **删掉会回归什么**:`upsertAp2` 写设备表 = 纯 AP2 广播造出「点了报错」的 AP1 死设备;能力判定
 写死 true = 不支持 AP2 的设备被当 AP2,后续 HAP 配对全挂;down 走错分支 = 一次 `_airplay`
@@ -711,27 +717,31 @@ flow 解析、回环偏移、DLNA Stop 反向守卫、独立子进程** —— �
 
 | 行号 | 钉住的不变量 |
 |---|---|
-| **45** | **R1 两种 mDNS 记录都浏览,但设备表只有一个来源** |
-| 47 | 同时浏览 `_raop._tcp` 与 `_airplay._tcp` |
-| 52 | `_raop` 常驻 browser 仍由 upsert(建表)驱动 |
-| 57 | `_airplay` 常驻 browser 由 upsertAp2(只打能力)驱动 |
-| 64 | **upsertAp2 不得写 devices 表**(纯 AP2-only 广播不能造出 AP1 设备) |
-| 69 | upsertAp2 只往能力表写(ap2Caps.set 恰好 1 处) |
-| 74 | `_airplay` 缺 deviceid 时直接忽略(不靠名字猜设备) |
-| **79** | **R2 判据:protovers ≥ 1.1 且必须同时有 `_airplay` 记录** |
-| 82 | 存在唯一写 supportsAp2 的助手 applyAp2 |
-| 87 | supportsAp2 = 同时依赖 ap2Caps 命中与 protovers 下限(不得写死 true) |
-| 92 | protoversAtLeast 对缺省 / 非法值返回 false(宁可不认 AP2,也不误判) |
-| 97 | AP2 协议版本下限常量为 1.1(与 230 接收器 protovers 实测一致) |
-| **102** | **R3 down 必须清能力(否则关掉 AP2 仍长期显示支持)** |
-| 105 | 存在 dropAp2 且删除能力表条目 |
-| 110 | `_airplay` 的 down 走 dropAp2(不是把设备标记离线) |
-| 115 | `_raop` 的 down 仍只把设备标记离线(AP1 行为未变) |
-| 120 | stop 时清空能力表(避免下一轮启动残留旧能力) |
-| **125** | **R4 AP1 零回归:对外能力透出存在,投屏入口未改** |
-| 127 | listAirPlayDevices 透出 supportsAp2 与 ap2 原始能力 |
-| 132 | renderer 的 discover meta 带 supportsAp2 |
-| 137 | **renderer 的 cast 仍只调 castToAirPlayDevice**(E2 不得提前分流 AP2) |
+| **48** | **R1 两种 mDNS 记录都浏览,但设备表只有一个来源** |
+| 49 | 同时浏览 `_raop._tcp` 与 `_airplay._tcp` |
+| 54 | `_raop` 常驻 browser 仍由 upsert(建表)驱动 |
+| 59 | `_airplay` 常驻 browser 由 upsertAp2(只打能力)驱动 |
+| 66 | **upsertAp2 不得写 devices 表**(纯 AP2-only 广播不能造出 AP1 设备) |
+| 71 | upsertAp2 只往能力表写(ap2Caps.set 恰好 1 处) |
+| 76 | `_airplay` 缺 deviceid 时直接忽略(不靠名字猜设备) |
+| **82** | **R2 判据:protovers ≥ 1.1 且必须同时有 `_airplay` 记录** |
+| 84 | 存在唯一写 supportsAp2 的助手 applyAp2 |
+| 89 | supportsAp2 = 同时依赖 ap2Caps 命中与 protovers 下限(不得写死 true) |
+| 94 | protoversAtLeast 对缺省 / 非法值返回 false(宁可不认 AP2,也不误判) |
+| 99 | AP2 协议版本下限常量为 1.1(与 230 接收器 protovers 实测一致) |
+| **105** | **R3 down 必须清能力(否则关掉 AP2 仍长期显示支持)** |
+| 107 | 存在 dropAp2 且删除能力表条目 |
+| 112 | `_airplay` 的 down 走 dropAp2(不是把设备标记离线) |
+| 117 | `_raop` 的 down 仍只把设备标记离线(AP1 行为未变) |
+| 122 | stop 时清空能力表(避免下一轮启动残留旧能力) |
+| **128** | **R4 AP1 零回归:对外能力透出存在,投屏入口统一走桥** |
+| 129 | listAirPlayDevices 透出 supportsAp2 与 ap2 原始能力 |
+| 134 | renderer 的 discover meta 带 supportsAp2 |
+| 139 | **renderer 的 cast 不得自开投屏会话**(只保留契约并抛错,音乐投放统一走桥) —— R4-a |
+| 146 | **castToAirPlayDevice 仍在 control 层且由桥调用**(AP1 直连能力未丢) —— R4-b |
+
+> 行号 = 脚本里该条 `check(` 的起始行。v4.11.1 新增 `BRIDGE` / `bridge` 两行常量后整体下移 2 行;
+> 与脚本对不上时**以脚本实测为准**(`grep -n '^check(' backend/scripts/check-airplay-ap2-discovery.mjs`)。
 
 ## 7.7 `check-airplay-bridge.mjs`(①~⑳ 组 / 97 个固定断言点 + 8 条 `uniq()` 动态展开 ⇒ 运行时 105 条)
 

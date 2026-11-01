@@ -19,6 +19,9 @@
   正向断言，保证 AP1 直连能力没丢。
 - **security / npm audit**:`follow-redirects 1.16.1`(GHSA-mrwp-f3q8-3g9p, high，
   链路 `axios@1.20.0 → follow-redirects@1.16.1`)。改为 `overrides: { "follow-redirects": "1.16.2" }`。
+- **ci / 全量测试 flaky**:`tests/player/drainPreheat.test.ts` 的「tick() 用外推位置回调」把外推基点
+  取成测试自己的 `Date.now()`，与 `updatedAt` 差零点几毫秒时落点变成 `240.999`，撞上 `≥241` 下界。
+  改为以该次上报的 `updatedAt` 为基点取 1s（落点恒为 241），区间断言保留以防实现改成取整/截断。
 
 > 说明:`v4.11.0` 的 tag 与镜像内容不变(产品代码无差异)，本版只是把 CI 口径修绿并补齐追溯点。
 
