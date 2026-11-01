@@ -8,7 +8,8 @@
 //   2. AP2 判据 = 同时有 `_airplay` 记录 **且** `protovers ≥ 1.1`。不认「某个 features 位」:
 //      位定义只能由 230 接收器实测反证,凭记忆写死会在真机上分错级。
 //   3. `_airplay` 记录下线 ⇒ 能力翻回 false,但设备**可用性**仍由 `_raop` 的 up/down 决定。
-//   4. AP1 链路零回归:投屏入口仍是 `castToAirPlayDevice`(AP2 分流不在 E2 范围内)。
+//   4. AP1 链路零回归:音乐投放**统一走桥** —— 渲染器插件 `cast()` 不得自建 RAOP 会话
+//      (只保留契约并直接抛错),`castToAirPlayDevice` 仍留在 control 层并由桥调用。
 //
 // 为什么要在 CI 钉死:这类破坏全静默 ——
 //   · 把 `_airplay` 记录当设备写进表 → 多出一批投不了的设备,但没有任何报错;
@@ -26,6 +27,7 @@ const read = (rel) => readFileSync(join(root, rel), "utf8");
 const DISCOVERY = "backend/src/services/airplay/discovery.ts";
 const RENDERER = "backend/src/services/plugin/renderers/airplay.ts";
 const CONTROL = "backend/src/services/airplay/control.ts";
+const BRIDGE = "backend/src/services/airplay/protocolPlayer.ts";
 
 const failures = [];
 function check(name, ok, detail) {
@@ -40,6 +42,7 @@ function check(name, ok, detail) {
 const disc = stripComments(read(DISCOVERY));
 const rend = stripComments(read(RENDERER));
 const ctrl = stripComments(read(CONTROL));
+const bridge = stripComments(read(BRIDGE));
 const count = (hay, needle) => hay.split(needle).length - 1;
 
 console.log("===== R1 两种 mDNS 记录都浏览,但设备表只有一个来源 =====");
@@ -122,7 +125,7 @@ check(
   "stopAirPlayDiscovery 未清 ap2Caps",
 );
 
-console.log("===== R4 AP1 零回归:对外能力透出存在,投屏入口未改 =====");
+console.log("===== R4 AP1 零回归:对外能力透出存在,投屏入口统一走桥 =====");
 check(
   "listAirPlayDevices 透出 supportsAp2 与 ap2 原始能力",
   /supportsAp2:\s*!!d\.supportsAp2/.test(ctrl) && /ap2:\s*d\.ap2/.test(ctrl),
@@ -134,9 +137,16 @@ check(
   "renderer discover 未上报 supportsAp2",
 );
 check(
-  "**renderer 的 cast 仍只调 castToAirPlayDevice**(E2 不得提前分流 AP2)",
-  count(rend, "castToAirPlayDevice(") === 1 && !/castToAirPlay2|ap2Cast|ap2\/cast/.test(rend),
-  "renderer 里出现了 AP2 投屏分流",
+  "**renderer 的 cast 不得自开投屏会话**(音乐投放统一走桥:只保留契约并抛错)",
+  count(rend, "castToAirPlayDevice(") === 0 &&
+    !/castToAirPlay2|ap2Cast|ap2\/cast/.test(rend) &&
+    /throw new Error\(\s*[\w`"'$]*AirPlay 音乐投放已统一走桥/.test(rend),
+  "renderer 仍自建投屏会话(应改为抛错并指向播放器/队列接口)",
+);
+check(
+  "castToAirPlayDevice 仍在 control 层且由桥调用(AP1 直连能力未丢)",
+  /export async function castToAirPlayDevice\(/.test(ctrl) && count(bridge, "castToAirPlayDevice(") >= 1,
+  "control.ts 未导出 castToAirPlayDevice,或桥(protocolPlayer.ts)不再调用",
 );
 
 if (failures.length) {
