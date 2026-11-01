@@ -41,7 +41,7 @@
 
 > **本文件的角色**：**权威现状**。AirPlay/RAOP 与桥接环的**唯一事实来源** —— 桥的 28B 帧格式、锚点公式（`firstFrameTsUs + anchorShiftUs`）、投递窗口/水位、`stats` 判据、AirPlay 侧守卫全在这里。
 
-**5 份相关文档（都在 `docs/`，链接可直接点开）**
+**相关文档（都在 `docs/`，链接可直接点开）**
 
 | 文档 | 角色 | 一句话用途 |
 |---|---|---|
@@ -52,6 +52,8 @@
 | [AirPlay1-2与Sendspin桥接落地方案.md](./AirPlay1-2与Sendspin桥接落地方案.md) | **历史方案** | 桥接的调研与落地方案：MA 精要、MusicFlow 现状盘点、Phase 拆解、230 模拟验收 |
 | [曲中失声-抓包取证方法论与复盘-2026-10-31.md](./曲中失声-抓包取证方法论与复盘-2026-10-31.md) | **深度取证层** | 曲中失声完整误判-纠正链、环形 pcap/探针工具箱、伪证陷阱 9 条、两级对账方法 |
 | [AirPlay排障总手册-监控与取证-2026-10-31.md](./AirPlay排障总手册-监控与取证-2026-10-31.md) | **排障入口** | 监控手册/取证方法论/已排除台账/权威文档四层路由 + 六步排障标准流程 |
+| [MA-AirPlay-完整数据标准-2026-10-31.md](./MA-AirPlay-完整数据标准-2026-10-31.md) | **对标基线（实测）** | MA→HiVi 双向抓包得出的数据面/时序面标准（seq/ts、2 s 水位、自动换歌与手动操作签名、验收判据） |
+| [AirPlay全量强制走桥-对齐方案-2026-10-31.md](./AirPlay全量强制走桥-对齐方案-2026-10-31.md) | **执行方案** | 把上述基线落到 MusicFlow：所有 AirPlay 强制走「发送端 + Sendspin 桥」、分阶段改造与验收 |
 
 **硬口径**：**历史方案文档不再作为事实来源；任何冲突以三份权威文档为准。** 历史方案文档只保留「为什么这样设计」与「当时踩了什么坑 / 推翻了什么」两类价值 —— 其中的 Phase 条目、行号、字段名一律可能过期。
 
@@ -341,6 +343,38 @@ fork 模式首次真机验证暴露两处「子进程 RPC 永久挂起」，表�
 音量 40（转发到同 host DLNA）/ 停止 / 主卧→HiVi 流转 + reset 源端 / AP→DL→AP 快速往返，
 设备 `getPlayerStatus` 全程 `play` 且 `curpos` 前进；无 `rpc 超时`、无 `RAOP connect 总超时`。
 
+## 2.13 组时间线同步（v4.11.0，D 族不变量）★ 2026-11-01
+
+多台 AirPlay 设备同组时，「同源同拍」**不是**各台自己起播再事后校准，而是全组共享**一条组时间线**：
+组泵产出的 48k PCM 带同一个组时间线 `tsUs`，每个成员的桥会话从**同一个内容零点**（`plan.anchorUs`，
+由组锚点登记册下发）出发，只有各自的**可听锚点**再按自己的成员补偿平移。
+
+总开关 `bridgeSyncGroupTimelineEnabled()`（`rates.ts`，缺省开；`MF_BRIDGE_SYNC_GROUP_TIMELINE=0` 回退旧口径）。
+
+两条总纲（家族前提，改动前必读）：
+
+- **成员补偿只落在「映射锚点 / AP2 出声锚点」**（`mapAnchorUs = sync ? anchorUs + shiftUs : anchorUs`），
+  **绝不进送包节拍**（`beatAnchorUs` 只含全组同值的 `groupDelayUs(rate)`）。旧形态把补偿加进投递戳，
+  实测直接造成「同刻送到各成员的内容不同」：+2000ms 成员 skip 4.75s / 两次 pacing rebase，
+  -650ms 成员 `droppedFrames` 12s。
+- **桥开关开启时，AirPlay 成员一律不得回落 solo cast**（`prepareBridgeRoute` 失败只记 `bridgeUnavailable`）。
+  回落 solo = 该设备自拉流、脱离组时间线，组内「同源同拍」立刻失效。
+
+| 编号 | 不变量 | 现状实现（唯一出处） | 破坏后的真机现象 |
+|---|---|---|---|
+| D4 | 对齐零点 = **组时间线锚点**，不是本会话首帧 | `maybeBeginStream`：`new BridgeTimelineAligner(bridgeSyncGroupTimelineEnabled() ? plan.anchorUs : plan.forceNow && firstFrameTsUs !== null ? firstFrameTsUs : plan.anchorUs, ...)`；锚点不可达时打 `anchor unreachable` 并 `this.anchorUs = plan.anchorUs` 重锚 | 重建/迟到加入的成员从「旧进度」起播，用户只看到「各台进度不一样」 |
+| D5 | 早于内容零点（`_drop_until_us`）的输入**整块丢弃、不补静音** | 对齐器 `contentAnchorUs` getter = `anchorUs`；`resampleIn` 入口 `if (this.groupTimelineSync && entry.tsUs < aligner.contentAnchorUs)` ⇒ 只累加 `droppedFrames` 后 return，**绝不 `appendOut`** | 让对齐器去 drop：`outBuf` 被裁空 ⇒ 补静音 ⇒ 开头整段丢音 |
+| D6 | 手动 next/prev 才回拨 RTP ts；自动换歌是**纯内容替换** | `BRIDGE_MANUAL_REWIND_MS = 1662`（44.1k 实际落 1.660s，基线来自 17 次实测 p50 1.662s）、`BRIDGE_MANUAL_REWIND_TTL_MS = 10_000`；只在 `this.ap2Session === null` 的手动分支登记并消费后清零；`onBoundary` 的 `if (reason === "track" && !manual)` 只 `stopGapFiller()`（0 FLUSH / 0 RECORD / 不 `reconnectRaop`）；暖复用 `prev.applyAnchorShift(opts.anchorShiftUs ?? 0)` | 不回拨 ⇒ 设备侧 RTP 时间线跳变被判非法包；回拨扩散到自动换歌 ⇒ 每首开头静音一下 |
+| D7 | 同组同代次（generation）共享**一个**锚点 | `BridgeGroupAnchorRegistry.publish/peek`：`peek` 校验可达性（`anchorUs + GROUP_ANCHOR_LATE_TOLERANCE_US < nowHostUs + floorLeadUs` ⇒ `null`）；先 peek、未命中才 `publish(plan.anchorUs)`；仅 `bridgeSyncGroupTimelineEnabled() && !!groupKey` 时启用；管理器 `new BridgeSession(opts, this.groupAnchors, this.groupBoundaries)` 注入两本登记册 | 各成员 RECORD 握手时差直接变成内容错位（实测 `best_lag=6` 包） |
+| D8 | 组级边界处置**全组一致**（clear 优先）+ 补静音上限抬到 10s + 内容轴污染即重规划 | `BridgeGroupBoundaryRegistry.publish(groupKey, generation >>> 0, !localKeep)` + `isClearRequired(...)`；组同步模式 `insertCapFrames = rate * 10`；超长断料本地跳段仍在（`act.insertFrames > rate * 2`）；`isContentAxisPoisoned()` = `stats.skippedFrames > 0` ⇒ `resetTimeline(reason)`（清锚点/对齐器、`streamAborted = true`、统计归零）；暖复用前 `if (prev.isContentAxisPoisoned()) prev.resetTimeline("warm-reuse-poisoned")` | 一台清队列、一台保留 ⇒ 组内内容轴分叉（跨换歌粘住 2.95s），只能整组重规划 |
+| D9 | 改成员补偿**必生效** | `control.ts: bridgeRebuildDelayDevice` → `airplaySupervisor.rpc<boolean>("bridgeRebuildDelay", { deviceId, shiftUs })` → 子进程 `case "bridgeRebuildDelay"` → `bridgeSessions.rebuildForShift`（`ev: "rebuild-shift"` + `await this.reconnectRaop()` + `if (!this.applyAnchorShift(shiftUs)) return false`）；AP2 出口无 RTP 时间线 ⇒ 只 `applyAnchorShift` 后返回 false（交路由兜底）；`PUT /v1/groups/:id/delays` 三段兜底 = 重建成员会话 → `rebuildBridgeRoutes` → 逐成员 `bridgeJoinMember` | 只靠 SYNC 平移 ⇒ 接收端只在 RECORD 吃映射，**出声时刻其实没变**（用户：调了延迟没反应） |
+
+**代价（必须提前告知用户）**：D9 生效要重建该成员 RTSP 会话 ⇒ 该设备 **1~2s 静音**；AP2 会话不重连，
+要等下一次起流才完全对齐。自动换歌（D6）**没有**这个代价 —— 它是纯内容替换。
+
+**守卫**：`check-airplay-bridge.mjs` 的 ⑯（锚点基准不含补偿）+ ⑳（D4~D9 共 22 条）已把这些形态钉死；
+把它改回「看起来更合理」的写法会在 CI 直接失败，不会再靠听感发现。
+
 ---
 
 # 第三部分：超时与预算总表
@@ -455,7 +489,7 @@ HiVi H5MKII 同时以 `airplay:00226C••••••`（HiVi）与 `dlna:FF31
 
 ---
 
-# 第七部分：回归守卫（7 个脚本 / 273 个 `check()` 调用点(其中 1 处是 8 次展开的模板) ⇒ 运行时 280 条断言）
+# 第七部分：回归守卫（7 个脚本 / 309 个 `check()` 调用点(其中 1 处是 8 次展开的模板) ⇒ 运行时 316 条断言）
 
 七个零依赖 node 脚本,全部挂 `.github/workflows/ci.yml`。**它们钉的不是风格,是
 已经付过真机代价的静默故障** —— 每条断言都做过「最小违规反证」,删掉即回归对应 bug。
@@ -468,12 +502,12 @@ HiVi H5MKII 同时以 `airplay:00226C••••••`（HiVi）与 `dlna:FF31
 | `check-airplay-playback-chain.mjs` | 139 | R1~R30 全链路契约 | 卡 PLAYING、误切歌、流转失败、RPC 挂死 |
 | `check-airplay-rtsp-line.mjs` | 6 | RTSP 请求行三段 | 部分接收端 `400` |
 | `check-airplay-ap2-discovery.mjs` | 17 | AP1 造表 / AP2 只打能力 | 死设备、HAP 配对全挂 |
-| `check-airplay-bridge.mjs` | 62 | 桥接环 17 组不变量 | 慢 3.7s / underrun / 切歌无声 / Lost sync |
+| `check-airplay-bridge.mjs` | 98 | 桥接环 20 组不变量(①~⑰ + ⑱⑲⑳) | 慢 3.7s / underrun / 切歌无声 / Lost sync / 同刻不同内容 |
 
 > **条数口径**:上表 = 脚本里 `check(...)` 的**调用点数**(静态可数,`grep -c '^\s*check('` 再扣掉模板)。
 > `check-airplay-bridge.mjs` 有 1 处 `check()` 写在 `uniq()` 模板体内、被调用 8 次 ⇒ 该脚本**运行时**
-> 执行 **69** 条断言(61 固定 + 8 动态);七个脚本合计 **62+19+10+20+139+6+17 = 273** 个调用点(含该模板) ⇒
-> **运行时 272 + 8 = 280** 条。三者对不上时**以脚本实测为准**(`grep -c '^\s*check('` + `grep -c 'console.log("====='`)。
+> 执行 **105** 条断言(97 固定 + 8 动态);七个脚本合计 **98+19+10+20+139+6+17 = 309** 个调用点(含该模板) ⇒
+> **运行时 308 + 8 = 316** 条。三者对不上时**以脚本实测为准**(`grep -c '^\s*check('` + `grep -c 'console.log("====='`)。
 
 ```bash
 cd backend
@@ -699,13 +733,13 @@ flow 解析、回环偏移、DLNA Stop 反向守卫、独立子进程** —— �
 | 132 | renderer 的 discover meta 带 supportsAp2 |
 | 137 | **renderer 的 cast 仍只调 castToAirPlayDevice**(E2 不得提前分流 AP2) |
 
-## 7.7 `check-airplay-bridge.mjs`(①~⑰ 组 / 61 个固定断言点 + 8 条 `uniq()` 动态展开 ⇒ 运行时 69 条)
+## 7.7 `check-airplay-bridge.mjs`(①~⑳ 组 / 97 个固定断言点 + 8 条 `uniq()` 动态展开 ⇒ 运行时 105 条)
 
 ### 7.7.1 ①~⑰ 与脚本 `console.log` 小节逐条对齐（一条不差）
 
-> 脚本现为 **706 行 / 17 节**（`grep -c 'console.log("====='` = 17）。「小节标题」列**逐字照抄**
-> `console.log("===== … =====")` 的正文；行区间 = 该段到下一个 `console.log` 之间的全部行（含断言体与注释）。
-> 断言点数列按**运行时**计（`uniq()` 展开后）。
+> 脚本现为 **981 行 / 20 节**（`grep -c 'console.log("====='` = 20）。下方表格的行区间与逐节条数是
+> **v4.11.0 之前**的实测值：v4.11.0 新增了 ⑱（RAOP 重连先 TEARDOWN）/ ⑲（进程退出先 TEARDOWN）/
+> ⑳（D4~D9 组时间线族，22 条）三节，原有各节整体**向下位移**，最新行号以脚本实测为准。
 
 | 序号 | 行区间 | `console.log` 小节标题（逐字） | 运行时断言 |
 |---|---|---|---|
@@ -724,9 +758,11 @@ flow 解析、回环偏移、DLNA Stop 反向守卫、独立子进程** —— �
 | ⑬ | 566-592 | 不得伪造 acked,上报字段名必须是 scheduledAnchorUs | 3 |
 | ⑭ | 593-635 | 桥 socket 路径必须是 mfab/<短 hash>(deviceId/token 不进文件名) | 6 |
 | ⑮ | 636-657 | 锚点一次性:aligner 非空必须早退(改延迟只能重建桥) | 2 |
-| ⑯ | 658-680 | 群延迟补偿只有一个落点(firstFrameTsUs + anchorShiftUs) | 2 |
+| ⑯ | 658-680 | 群延迟补偿只有一个落点(mapAnchorUs;组时间线基准不含补偿) | 2 |
 | ⑰ | 681-707 | RAOP 重连退避必须双层封顶(指数项与抖动项都 clamp) | 2 |
 | **合计** | 161-707 / **17 节** | — | **69**（61 固定 + 8 动态） |
+| ⑱·⑲·⑳(v4.11.0) | 729-981 / **3 节** | 重连先 TEARDOWN / 退出先 TEARDOWN / D4~D9 组时间线族 | **36**（全固定） |
+| **全脚本** | 168-981 / **20 节** | — | **105**（97 固定 + 8 动态） |
 
 **两处口径必须说清（否则条数对不上）**:
 
@@ -734,11 +770,11 @@ flow 解析、回环偏移、DLNA Stop 反向守卫、独立子进程** —— �
    「字面量 <needle> 全仓只允许出现 1 次」），被调用 **8 次**（`:250-257`，依次 `"= 147"`、`"= 160"`、
    `"4_500_000"`、`"2_500_000"`、`"BRIDGE_MIN_BUFFER_US = 1_000_000;"`、`"384 * 1024"`、`"1536 * 1024"`、`"0.3627"`）
    ⇒ 静态扫描在 ③ 只数到 **4** 处，运行时实际执行 **11** 条。
-2. **`grep -c '^\s*check('` = 62**（含 `uniq()` 模板体内那 1 处）；减掉模板、按展开次数补回 ⇒ **61+8 = 69**。
+2. **`grep -c '^\s*check('` = 98**（含 `uniq()` 模板体内那 1 处）；减掉模板、按展开次数补回 ⇒ **97+8 = 105**。
 
-**⑮⑯⑰ 钉什么**（⑭ 之外的三条「改延迟/重连」侧不变量）：⑮ 锚点一次性（`if (this.aligner !== null) return;` 必须恰好 1 处 + `new BridgeTimelineAligner(` 全仓只 1 处）—— 若改成「热改锚点」又不换 aligner ⇒ 延迟调了没反应、或新旧锚点同时在用（整组缓慢飘音，无报错）；⑯ 群延迟补偿**只有一个落点**（`firstFrameTsUs + anchorShiftUs`），sendspin 侧不得出现 `anchorShift`、airplay 侧不得出现 `dspDelay`，否则同一偏移两头各加一次 = 双倍补偿（调 100ms 实际偏 200ms）；⑰ RAOP 重连退避**双层封顶**（`min(maxMs, base·2^(n-1))` 再 `min(maxMs, exp·jitter)`）—— 指数项不封顶 ⇒ 离线久了永不重连；抖动项不封顶 ⇒ 实际间隔超上限（重连风暴）。
+**⑮⑯⑰ 钉什么**（⑭ 之外的三条「改延迟/重连」侧不变量）：⑮ 锚点一次性（`if (this.aligner !== null) return;` 必须恰好 1 处 + `new BridgeTimelineAligner(` 全仓只 1 处）—— 若改成「热改锚点」又不换 aligner ⇒ 延迟调了没反应、或新旧锚点同时在用（整组缓慢飘音，无报错）；⑯ 群延迟补偿**只有一个落点**（`mapAnchorUs = sync ? anchorUs + shiftUs : anchorUs`，组时间线锚点基准 `anchorUs` 本身**不含**补偿），sendspin 侧不得出现 `anchorShift`、airplay 侧不得出现 `dspDelay`，否则同一偏移两头各加一次 = 双倍补偿（调 100ms 实际偏 200ms）；⑰ RAOP 重连退避**双层封顶**（`min(maxMs, base·2^(n-1))` 再 `min(maxMs, exp·jitter)`）—— 指数项不封顶 ⇒ 离线久了永不重连；抖动项不封顶 ⇒ 实际间隔超上限（重连风暴）。
 
-**钉什么**:桥接环的 17 组不变量（见上表小节标题，编号与脚本 `console.log` 完全一致）。
+**钉什么**:桥接环的 20 组不变量（见上表小节标题，编号与脚本 `console.log` 完全一致）。
 
 **删掉会回归什么**:这些缺陷**全都不报错**,只表现为「声音慢 3.7 秒」「周期性 underrun」
 「切歌后整组无声」「真机 Lost sync 风暴」。⑧ 被破 = 全组时间戳 +3.7s;⑩ 被破 = 桥会话被重建

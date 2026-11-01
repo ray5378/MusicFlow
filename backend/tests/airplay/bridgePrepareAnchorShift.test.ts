@@ -21,6 +21,7 @@ const h = vi.hoisted(() => {
     globalShiftUs: 7_777,
     groupShift: new Map<string, number>(),
     group2Shift: new Map<string, number>(),
+    memberDelayMs: new Map<string, number>(),
   };
   return { devices, dlnaDevices, rpcCalls, state };
 });
@@ -70,6 +71,9 @@ vi.mock("../../src/services/group/delayCalib.js", () => ({
   airplay2DelayUsOf: (groupId: string | null | undefined) =>
     (groupId && h.state.group2Shift.get(groupId)) || 0,
   getGroupDelays: () => ({ airplayMs: 0, airplay2Ms: 0, sendspinMs: 0 }),
+  // 2026-11-01(D 系列):桥补偿改为**按成员**取值(control.ts `getMemberDelayMs(groupId, airplay:<id>)*1000`)。
+  getMemberDelayMs: (groupId: string | null | undefined, memberId: string) =>
+    (groupId && h.state.memberDelayMs.get(`${groupId}|${memberId}`)) || 0,
 }));
 
 import {
@@ -90,6 +94,12 @@ beforeEach(() => {
   h.state.globalShiftUs = 7_777;
   h.state.groupShift = new Map([["g1", 123_000], ["g2", -45_000], ["g-zero", 0]]);
   h.state.group2Shift = new Map([["g1", 66_000], ["g2", -77_000], ["g-zero", 0]]);
+  // 成员级延迟(ms,带符号;正 = 该设备更晚出声)—— D 系列后桥补偿的唯一来源。
+  h.state.memberDelayMs = new Map([
+    ["g1|airplay:a1", 123],
+    ["g2|airplay:a1", -45],
+    ["g-zero|airplay:a1", 0],
+  ]);
   h.state.rpcResult = { listening: true, socketPath: "/tmp/mf-ab.sock" };
   h.devices.a1 = { id: "a1", name: "客厅", host: "192.168.1.20", port: 7000, pk: "PK1", et: "0,1", available: true };
   clearBridgeOwner("a1");
@@ -101,16 +111,33 @@ afterEach(() => {
   delete process.env.MUSICFLOW_AIRPLAY_BRIDGE;
 });
 
-describe("bridgePrepareDevice:anchorShiftUs 必须恒 0(补偿唯一落点=投递时戳)", () => {
-  // 双加教训(2026-10-27):投递时戳(ts' = ts − ahead + shift)已携带全部补偿;
-  // 锚点若再平移,桥内 anchorUs = 投递时戳 + 平移 = 双份 ⇒ 对齐器把多出的那份
-  // 判「内容超前」整段裁掉(切歌吞 2 秒、净补偿归零)。此用例钉死恒 0。
-  it("任何 groupId/协议/正负值组合 ⇒ payload.anchorShiftUs 恒 0", async () => {
+describe("bridgePrepareDevice:anchorShiftUs = 本成员延迟(补偿唯一落点=桥锚点)", () => {
+  // 语义改版(2026-11-01,MA `_anchor_stream`):**组投递时间线全组一条**(同一时刻同内容),
+  // 成员延迟只把本设备的 START 可听锚点平移 shift ⇒ 只有它自己晚/早出声。
+  // 旧钉死「恒 0」的前提是补偿写在投递时戳里 —— 那个模型已废弃(D1–D5),若两处都写
+  // 就是双加(双加教训 2026-10-27 的内核仍然成立,只是唯一落点换了地方)。
+  it("有 groupId ⇒ payload.anchorShiftUs = 该成员延迟(µs,带符号);协议不影响取法", async () => {
     await bridgePrepareDevice("a1", "t1", "raop", "g1");
     await bridgePrepareDevice("a1", "t2", "ap2-realtime", "g1");
-    await bridgePrepareDevice("a1", "t3", "raop"); // 无组上下文
     await bridgePrepareDevice("a1", "t4", "raop", "g2"); // 负值格
-    for (const c of h.rpcCalls) expect(c.payload.anchorShiftUs).toBe(0);
+    expect(h.rpcCalls[0].payload.anchorShiftUs).toBe(123_000);
+    expect(h.rpcCalls[1].payload.anchorShiftUs).toBe(123_000);
+    expect(h.rpcCalls[2].payload.anchorShiftUs).toBe(-45_000);
+  });
+
+  it("无组上下文 ⇒ 0(全局 A/V 旧值不进桥)", async () => {
+    await bridgePrepareDevice("a1", "t3", "raop");
+    expect(h.rpcCalls[0].payload.anchorShiftUs).toBe(0);
+  });
+
+  it("组时间线同步回退开关 OFF ⇒ 0(回退到投递时戳模型)", async () => {
+    process.env.MF_BRIDGE_SYNC_GROUP_TIMELINE = "0";
+    try {
+      await bridgePrepareDevice("a1", "t5", "raop", "g1");
+      expect(h.rpcCalls[0].payload.anchorShiftUs).toBe(0);
+    } finally {
+      delete process.env.MF_BRIDGE_SYNC_GROUP_TIMELINE;
+    }
   });
 });
 

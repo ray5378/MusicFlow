@@ -160,10 +160,15 @@ describe("livenessWatchdogShouldFire(纯判据)", () => {
     reconnectTimerSet: false,
     quietMs: 121_000,
     thresholdMs: 120_000,
+    hasTimingHeartbeat: true,
   };
 
   it("超阈值且在推流 → 触发", () => {
     expect(livenessWatchdogShouldFire(base)).toBe(true);
+  });
+
+  it("设备本会话从未发过 timing ⇒ 判据不适用(不触发)", () => {
+    expect(livenessWatchdogShouldFire({ ...base, hasTimingHeartbeat: false, quietMs: 600_000 })).toBe(false);
   });
 
   it("未超阈值 → 不触发", () => {

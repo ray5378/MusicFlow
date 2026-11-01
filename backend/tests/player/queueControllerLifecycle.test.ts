@@ -66,6 +66,8 @@ vi.mock("../../src/services/group/protocolPlayer.js", () => ({
 }));
 
 vi.mock("../../src/services/airplay/protocolPlayer.js", () => ({
+  // QueueController 现在只经统一入口建 AirPlay 协议 player(桥开关开 ⇒ 单机伪组桥播放器)。
+  createAirPlayPlayerForDevice: (deviceId: string) => mkProto(`airplay:${deviceId}`),
   createAirPlayProtocolPlayer: (deviceId: string) => mkProto(`airplay:${deviceId}`),
 }));
 

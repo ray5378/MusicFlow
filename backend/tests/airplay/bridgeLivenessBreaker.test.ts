@@ -12,6 +12,7 @@
 // 钉死:
 //   ① raopBridgeLivenessMs 缺省 15000、env 可覆盖、下限 5000;
 //   ② livenessWatchdogShouldFire 在 16s/15s 处放行、6s 处拦下;paused/非 streaming 恒拦;
+//      设备本会话零 timing 心跳 ⇒ 恒不触发(v4.11.0 豁免,GGMM 实证);
 //   ③ noteLivenessFire 跨"会话重建"累计(不依赖任何 session 实例);
 //   ④ 窗口内第 2 次起退避 30s、≥3 次退避 120s;
 //   ⑤ 连续 3 次重连都没救回心跳 ⇒ 停用 30min;任何一次救回来就立刻归零。
@@ -43,6 +44,7 @@ function baseOpts(over: Partial<Parameters<typeof livenessWatchdogShouldFire>[0]
     reconnectTimerSet: false,
     quietMs: 0,
     thresholdMs: raopBridgeLivenessMs(),
+    hasTimingHeartbeat: true,
     ...over,
   };
 }
@@ -92,6 +94,10 @@ describe("livenessWatchdogShouldFire:判据边界", () => {
 
   it("静默 15s 恰好等于阈值 ⇒ 不触发(严格大于)", () => {
     expect(livenessWatchdogShouldFire(baseOpts({ quietMs: 15000 }))).toBe(false);
+  });
+
+  it("★ 设备本会话从未发过 timing(GGMM/240A64FED051 实证)⇒ 判据不适用,静默再久也不触发", () => {
+    expect(livenessWatchdogShouldFire(baseOpts({ quietMs: 600_000, hasTimingHeartbeat: false }))).toBe(false);
   });
 
   it("暂停/未起流/重连中/已关闭 一律拦下", () => {

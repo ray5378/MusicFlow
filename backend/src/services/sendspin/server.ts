@@ -43,7 +43,7 @@ import { nowUs } from "./clock.js";
 import { MessageRouter } from "./messages.js";
 import "./roles/index.js";
 import { negotiateRoles } from "./roles/registry.js";
-import { createChunkEncoder, flacCodecHeaderB64, FLAC_BIT_DEPTH, type ChunkEncoder, type EncodedChunk, OPUS_FRAME_MS, SAMPLE_RATE, type SendspinCodec, waitFlacEncoderReady } from "./encoding.js";
+import { CHANNELS, createChunkEncoder, flacCodecHeaderB64, FLAC_BIT_DEPTH, type ChunkEncoder, type EncodedChunk, OPUS_FRAME_MS, SAMPLE_RATE, type SendspinCodec, waitFlacEncoderReady } from "./encoding.js";
 import { peekPump, stopGroupPump } from "./streamEngine.js";
 import { recordSendspinDebug } from "./debugLog.js";
 import { esphomeBridge } from "./esphomeBridge.js";
@@ -55,7 +55,7 @@ import type { PairingStore } from "./pairingStore.js";
 import type { PairingCoordinator } from "./pairServer.js";
 import type { BridgeBoundaryReason } from "../airplay/bridgeChannel.js";
 import type { BridgeSocketSpec } from "./bridgeAttach.js";
-import { BRIDGE_PCM_BYTES_PER_SEC, BRIDGE_QUEUE_HARD_CAP_MS } from "../airplay/rates.js";
+import { BRIDGE_PCM_BYTES_PER_SEC, BRIDGE_QUEUE_HARD_CAP_MS, bridgeSyncGroupTimelineEnabled } from "../airplay/rates.js";
 
 /** 桥投递句柄(sendspin 侧对一座桥的最小接口)。
  *  BridgeMember 满足该接口;单测用桩实现(纯内存)。 */
@@ -810,9 +810,19 @@ export class SendspinGroup {
     return this.members.size > 0;
   }
 
+  /** 当前桥内容代次(只读)。S1 预取的消费方(streamEngine)在预取开始时记下
+   *  `bridgeContentEpoch + 1`,采纳前校验它仍是当前值 —— 中途 seek/rehost/切歌
+   *  都会 ++epoch,预取帧随即作废(不得跨代次复用)。 */
+  bridgeEpochNow(): number {
+    return this.bridgeContentEpoch;
+  }
+
   /** streamEngine 重锚钩子(§4.3 唯一落点,Phase 3 由 GroupPump 重锚分支调用):
-   *  把新流代次推给全部桥 —— 桥清旧代次队列并发 BOUNDARY。 */
-  notifyBridgeGeneration(generation: number, reason: BridgeBoundaryReason): void {
+   *  把新流代次推给全部桥 —— 桥清旧代次队列并发 BOUNDARY。
+   *  `prefetched`(S1 2026-11-01):边界内容已由 `pushBridgePrefetch` 按连续 ts 预先
+   *  写进本代次 ring(桥队列里有新曲开头)⇒ 本次 track 边界**不加垫片**(S3)。
+   *  只有真的预取就绪才传 true;其余(false/undefined)行为与本改造前逐字节一致。 */
+  notifyBridgeGeneration(generation: number, reason: BridgeBoundaryReason, prefetched?: boolean): void {
     if (this.bridges.size === 0) return;
     this.server.log("info", `bridge-generation group=${this.name} gen=${generation} reason=${reason} bridges=${this.bridges.size}`);
     for (const b of this.bridges.values()) {
@@ -839,7 +849,20 @@ export class SendspinGroup {
     //  - 生效 = 冷/暖动态自动挡(v4.9.1 起组值手动口已删;垫片与混合组锚点 lead 是
     //    两道独立防线,分工见 pendingTrackLeadUs 注释)。
     const coldBoundary = reason === "track" && !this.bridgeWarmAttach;
-    this.pendingTrackLeadUs = BigInt(coldBoundary ? BRIDGE_TRACK_LEAD_COLD_US : BRIDGE_TRACK_LEAD_WARM_US);
+    // S3(2026-11-01):**预取就绪的 track 边界不加垫片**。S1 已把新曲前 3s 按
+    // 「沿当前组游标的连续 ts」写进下一代 ring ⇒ 边界时桥队列里有货,垫片原本的
+    // 作用(用新曲开头 Δ 秒换取 Δ 秒队列深度)不再需要;继续加 pad 反而会把预取
+    // 帧整体推后,与 S2 保留的旧曲余料在 ring 上形成 Δ 空洞。
+    // 冷建会话(句柄重建/RAOP 握手)没有预取可用 ⇒ 恒走 cold pad(既有语义)。
+    // 回退:MF_BRIDGE_NEXT_TRACK_PREFETCH 关闭时 prefetched 恒 undefined ⇒ 回到
+    // 暖/冷动态挡(800ms / 2.5s),与本改造前逐字节一致。
+    const padUs = reason === "track" && prefetched === true
+      ? 0n
+      : BigInt(coldBoundary ? BRIDGE_TRACK_LEAD_COLD_US : BRIDGE_TRACK_LEAD_WARM_US);
+    this.pendingTrackLeadUs = padUs;
+    if (reason === "track" && prefetched === true) {
+      this.server.log("info", `bridge-track-pad group=${this.name} padUs=0 reason=prefetched`);
+    }
     this.ensureBridgePushTimer();
   }
 
@@ -878,10 +901,10 @@ export class SendspinGroup {
     //   若窗口仍按原始 ts 判定、交付时再减 sendAhead，首帧 ts' 会落到 now+1.0s <
     //   RAOP 可达线 now+1.05s ⇒ 必然 self-anchor 2.5s(8cb4742 前的 45s 路径)。
     const ahead = BigInt(this.commonSendAheadUs());
-    // 窗口跟随**桥自己的可听域**:audibleAt(帧) = tsUs + anchorShiftUs(桥会话内
-    // anchorUs = firstFrameTsUs + shift)。shift 不进窗口 ⇒ 后移的锚点被对齐器判
-    // 「帧提前到达」用 drop/skip 出清,手动延迟补偿整体失效(2026-10-27 实锤)。
-    const shift = this.bridgeAnchorShiftUs(deviceId);
+    // 窗口与投递戳**全组成员同源**(D1):成员补偿只进桥会话锚点,不进投递节奏。
+    // 旧行为(把 shift 同时塞进窗口与戳)会让同内容帧到不同成员的墙钟整体平移
+    // ⇒ 同一时刻各设备包里的音频内容不同(抓包判据直接不成立)。
+    const shift = this.bridgeDeliveryShiftUs(deviceId);
     const lo = now + BigInt(BRIDGE_PUSH_FLOOR_US) + ahead - shift;
     const hi = now + BigInt(BRIDGE_PUSH_HORIZON_US) + ahead - shift;
     const epoch = this.bridgeContentEpoch;
@@ -896,10 +919,8 @@ export class SendspinGroup {
       if (e.tsUs > hi) break; // 窗口外(未来):交给补投定时器
       if (totalUs + BigInt(e.durUs) > capUs) continue; // 回填总量上限(防御;跳过异常大帧继续扫)
       try {
-        // 可听域+延迟补偿:ts' = ts − send_ahead + shift。shift 进**投递时戳**而非锚点
-        // —— 桥内对齐器看到的仍是首帧 target=0 的纯净节奏,不会再消化锚点平移
-        // (anchorUs 含 shift 时首帧 target=−shift,insert/skip 把补偿整体吞掉,真根因);
-        // 设备出声时刻 = 组时间线 + shift,正是手动延迟补偿的语义。
+        // 可听域换算:ts' = ts − send_ahead(+ 旧模式补偿)。新模型下 shift 恒 0n,
+        // 各桥拿到的戳/字节完全一致 —— 出声时刻的差异全部由桥会话锚点承担。
         b.pushAudio(e.data, e.tsUs - ahead + shift);
       } catch { /* 单桥失败不连累 */ break; }
       n++;
@@ -990,7 +1011,8 @@ export class SendspinGroup {
     if (!ring || ring.length === 0) return;
     const now = nowUs();
     const ahead = BigInt(this.commonSendAheadUs());
-    const shift = this.bridgeAnchorShiftUs(deviceId);
+    // 同上(D1):投递戳/窗口不含成员补偿,全成员同刻投同一内容。
+    const shift = this.bridgeDeliveryShiftUs(deviceId);
     const lo = now + BigInt(BRIDGE_PUSH_FLOOR_US) + ahead - shift;
     // [Fix 2026-10-31 C] 不再用 `hi = lo + BRIDGE_BACKFILL_MAX_US` 封顶:
     //   垫片(pendingTrackLeadUs)+ 纯桥组深锚(anchorLead 4.0s)把**内容起点**顶到
@@ -1099,6 +1121,80 @@ export class SendspinGroup {
     return n;
   }
 
+  /** S1(2026-11-01):下一首预解码 PCM 写入 ring(下一代次 ep)。
+   *
+   *  与 `pushBridgeOnlySilence` 同一范式 —— **只写 ring,绝不写成员**:不调
+   *  `pushFrame`(那会走 members / deliveredByGroup / deliveredPeak / 时间线累计),
+   *  也不碰 `pendingTrackLeadUs` / `group.current`。真正投递仍由 bridgePushTick
+   *  按可听域窗口完成。
+   *
+   *  为什么必须写到**下一代次**(`bridgeContentEpoch + 1`,不 ++epoch):
+   *  下一代次帧在 `notifyBridgeGeneration` 之前被投递侧按 ep 过滤掉(旧曲还没播完);
+   *  notify 时 epoch 恰好 ++ 到这个值,预取帧**立即**成为可投内容 ⇒ 边界处桥队列
+   *  不再断粮。若此处就 ++epoch,旧曲剩余帧(旧 ep)会被瞬间作废(边界前半秒丢音)。
+   *
+   *  @param pcm       s16le 前的 Float32 交错样本(48k/2ch,与 pushFrame 输入同域)。
+   *  @param startTsUs 首帧起点(内容域,不含垫片;由 streamEngine 按「当前组游标 +
+   *                   本曲剩余时长」算出 ⇒ 与旧曲末帧在 ring 上连续)。
+   *  @returns `nextEpoch` = 预取帧所属代次(采纳前校验用);`endTsUs` = 末帧之后的
+   *           时间点(诊断/日志用)。
+   */
+  async pushBridgePrefetch(
+    pcm: Float32Array,
+    startTsUs: bigint,
+  ): Promise<{ nextEpoch: number; endTsUs: bigint }> {
+    const nextEpoch = this.bridgeContentEpoch + 1;
+    let ts = startTsUs;
+    if (this.bridges.size === 0 || pcm.length === 0) {
+      return { nextEpoch, endTsUs: startTsUs };
+    }
+    const ring = this.ringFor(this.encoderKey("pcm", 100));
+    // 25ms 一片,与 pushLoop 喂料粒度同源(帧长 = 组桥唯一的排程单位)。
+    const perFrame = Math.floor((SAMPLE_RATE * CHANNELS * 25) / 1000);
+    for (let off = 0; off < pcm.length; off += perFrame) {
+      const n = Math.min(perFrame, pcm.length - off);
+      // s16le:与 PCM 编码器输出同口径(交错、小端)。逐样本钳制防削波溢出。
+      const buf = Buffer.allocUnsafe(n * 2);
+      for (let k = 0; k < n; k++) {
+        const v = pcm[off + k] ?? 0;
+        const clamped = v > 1 ? 1 : v < -1 ? -1 : v;
+        buf.writeInt16LE(clamped < 0 ? Math.round(clamped * 32768) : Math.round(clamped * 32767), k * 2);
+      }
+      // durUs 用**单声道样本数**口径(与 pushFrame 的 ring durUs 同源):n 是交错样本。
+      const durUs = Math.round((n / CHANNELS * 1_000_000) / SAMPLE_RATE);
+      ring.push({ tsUs: ts, durUs, data: buf, ep: nextEpoch });
+      ts += BigInt(durUs);
+    }
+    this.ensureBridgePushTimer();
+    return { nextEpoch, endTsUs: ts };
+  }
+
+  /** S1:采纳预取时把该代次的预取帧从 ring 移除。
+   *
+   *  为什么必须移除:ring 的不变量是「追加顺序 = ts 递增」(投递侧 `ts > hiEff ⇒
+   *  break`、pruneRecent 从头部淘汰都依赖它)。预取帧的 ts 是**未来**的,而旧曲
+   *  的尾帧在它们之后才追加 ⇒ 顺序被破坏;若不清理,投递侧扫到预取帧就 break,
+   *  之后追加的**正片帧**(ts 更小、落在窗口内)永远扫不到 = 边界后彻底断粮。
+   *
+   *  采纳后正片会从同一 ts 重新产出**同样的内容**(见 GroupPump.commitPrefetch 的
+   *  handoff),所以移除不丢内容;已经投递出去的帧留在桥队列里(水位按 ts 去重)。
+   *  @returns 移除帧数(诊断用)。 */
+  dropBridgePrefetchFrames(epoch: number): number {
+    const ring = this.recentByGroup.get(this.encoderKey("pcm", 100));
+    if (!ring) return 0;
+    let removed = 0;
+    for (let i = ring.length - 1; i >= 0; i--) {
+      if (ring[i].ep === epoch) {
+        ring.splice(i, 1);
+        removed++;
+      }
+    }
+    if (removed > 0) {
+      this.server.log("info", `bridge-prefetch-drop group=${this.name} epoch=${epoch} frames=${removed}`);
+    }
+    return removed;
+  }
+
   // ---- 桥投递可听域窗口化(§6.2):补投定时器是唯一投递写者(timer-only
   //      单写者);pushFrame 只写 ring 并保证定时器在跑。 ----
 
@@ -1132,8 +1228,8 @@ export class SendspinGroup {
         const ring = this.recentByGroup.get(this.encoderKey("pcm", 100));
         if (!ring || ring.length === 0) return;
         const ahead = BigInt(this.commonSendAheadUs());
-        // 同 backfillBridge:窗口按该桥协议读对应延迟格,跟随桥锚点位移。
-        const shift = this.bridgeAnchorShiftUs(deviceId);
+        // 同 backfillBridge(D1):窗口/投递戳不含成员补偿,全成员同源。
+        const shift = this.bridgeDeliveryShiftUs(deviceId);
         const lo = now + BigInt(BRIDGE_PUSH_FLOOR_US) + ahead - shift;
         const hi = now + BigInt(BRIDGE_PUSH_HORIZON_US) + ahead - shift;
         // [诊断 2026-10-31] 窗口对位只读采样(2s 节流)。**不影响投递**,见
@@ -1179,7 +1275,7 @@ export class SendspinGroup {
     ahead: bigint,
   ): number {
     const epoch = this.bridgeContentEpoch;
-    const shift = this.bridgeAnchorShiftUs(deviceId); // 与窗口同一取值(动态读,PUT 后下一 tick 生效)
+    const shift = this.bridgeDeliveryShiftUs(deviceId); // 与窗口同一取值(D1:新模型恒 0n)
     let last = this.bridgeWatermarks.get(deviceId) ?? 0n;
     let n = 0;
     // [Fix D 2026-10-31] 窗口上界**跟随水位**,否则与 bulk 形成永久死锁:
@@ -1247,7 +1343,7 @@ export class SendspinGroup {
       }
       if (e.tsUs > hiEff) break; // 顺延(1 tick 之外留给下一拍)
       try {
-        // ts' = ts − ahead + shift:延迟补偿进投递时戳(见 backfillBridge 注释)。
+        // ts' = ts − ahead(+ 旧模式补偿):新模型下各桥同源(见 backfillBridge 注释)。
         b.pushAudio(e.data, e.tsUs - ahead + shift);
       } catch { /* 单桥失败不连累 */ break; }
       n++;
@@ -1345,6 +1441,16 @@ export class SendspinGroup {
    *  组名非 ug:(单测桩/设备组)或成员没设过 ⇒ 0n(历史行为)。 */
   private bridgeAnchorShiftUs(deviceId: string): bigint {
     return bridgeAnchorShiftUsOf(this.name, deviceId);
+  }
+
+  /** 桥**投递戳/窗口**的位移(µs)。2026-11-01 起恒 0n:成员补偿只进桥会话锚点
+   *  (`bridgePrepare.anchorShiftUs`,control.ts),**绝不再进投递节奏** ——
+   *  否则同内容帧到不同成员的墙钟被 shift 平移,同一时刻投出去的音频内容各不相同
+   *  (240 实测 +2000ms 成员 skip 4.75s / 两次 pacing rebase、-650ms 成员
+   *  droppedFrames 12s ⇒ 抓包「同刻不同内容」+ 丢音静音)。
+   *  回退开关 `MF_BRIDGE_SYNC_GROUP_TIMELINE=0` ⇒ 恢复旧行为(补偿进投递戳)。 */
+  private bridgeDeliveryShiftUs(deviceId: string): bigint {
+    return bridgeSyncGroupTimelineEnabled() ? 0n : this.bridgeAnchorShiftUs(deviceId);
   }
 
   constructor(name: string, server: SendspinServer) {

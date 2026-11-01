@@ -90,7 +90,7 @@ export function createSendspinGroupPlayer(userGroupId: string): ProtocolPlayer {
   const groupName = sendspinGroupName(userGroupId);
   return {
     playerId,
-    async playMedia(item: QueueItem, baseUrl: string, startMs = 0, bridge?: { sockets: BridgeSocketSpec[] }) {
+    async playMedia(item: QueueItem, baseUrl: string, startMs = 0, bridge?: { sockets: BridgeSocketSpec[] }, opts?: { manual?: boolean; nextSongId?: string }) {
       const members = await onlineSendspinMembers(userGroupId);
       // v4.9.3 方向 A:纯 AirPlay 桥组(无直连 sendspin 成员)也起泵 —— 桥是唯一
       // 消费者;带 bridge 规格时空成员放行,不再抛「无在线 sendspin 成员」。
@@ -104,7 +104,8 @@ export function createSendspinGroupPlayer(userGroupId: string): ProtocolPlayer {
       try { await sendspinGroupTransport(groupName, "volume", getGroupManager().getVolume(userGroupId)); }
       catch { /* 回填失败不挡起播,status 仍回持久值 */ }
       // Phase 3:bridge 规格原样透传(index.ts fork/in-proc 双路都不丢弃)。
-      await sendspinGroupPlay(groupName, members, item, startMs, bridge);
+      // S1:下一首预取提示同样透传(泵在曲末 ≤5s 预解码下一首,见 streamEngine)。
+      await sendspinGroupPlay(groupName, members, item, startMs, bridge, opts?.nextSongId);
       schedulePlayingReport(playerId, item.duration ?? 0);
       return { mediaUri: streamUrl };
     },
@@ -251,7 +252,7 @@ function createSendspinInprocPlayer(clientId: string): ProtocolPlayer {
   const playerId = `sendspin:${clientId}`;
   return {
     playerId,
-    async playMedia(item: QueueItem, baseUrl: string, startMs = 0) {
+    async playMedia(item: QueueItem, baseUrl: string, startMs = 0, _bridge?: unknown, opts?: { manual?: boolean; nextSongId?: string }) {
       const srv = getServer();
       if (!srv) throw new Error(`sendspin server not running: ${clientId}`);
       // mediaUri:token 流地址,仅供 track_changed 检测;音频走内部推流。
@@ -260,7 +261,7 @@ function createSendspinInprocPlayer(clientId: string): ProtocolPlayer {
       emitMediaChanged(clientId, item);
       playCore(srv, clientId, item, (cid, songId, message) => {
         srv.log("warn", `sendspin play ${songId} failed(client=${cid}): ${message}`);
-      }, startMs);
+      }, startMs, undefined, undefined, opts?.nextSongId);
       schedulePlayingReport(playerId, item.duration ?? 0);
       return { mediaUri: streamUrl };
     },
@@ -328,13 +329,16 @@ function createSendspinProxyPlayer(clientId: string): ProtocolPlayer {
     sendspinSupervisor.rpc("transport", { clientId, op, arg });
   return {
     playerId,
-    async playMedia(item: QueueItem, baseUrl: string, startMs = 0) {
+    async playMedia(item: QueueItem, baseUrl: string, startMs = 0, _bridge?: unknown, opts?: { manual?: boolean; nextSongId?: string }) {
       // castSession/token 是主进程状态(track_changed 检测用),必须留在本侧生成。
       const streamUrl = createCastSession(item.songId, clientId, baseUrl).streamUrl;
       emitMediaChanged(clientId, item);
       // 子进程做推流侧全部动作(收尾旧流 → 元数据 → 入组宣告 → 后台 pump);
       // RPC 只等同步段返回,解码/推流异步进行(与 in-proc 时序一致)。
-      await sendspinSupervisor.rpc("playMedia", { clientId, item, streamUrl, seekPositionMs: startMs });
+      await sendspinSupervisor.rpc("playMedia", {
+        clientId, item, streamUrl, seekPositionMs: startMs,
+        ...(opts?.nextSongId ? { nextSongId: opts.nextSongId } : {}),
+      });
       schedulePlayingReport(playerId, item.duration ?? 0);
       return { mediaUri: streamUrl };
     },

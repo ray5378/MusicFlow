@@ -8,8 +8,8 @@
 //   - 成员离线自动跳过;成员增删实时读取 GroupManager,无需重新注册
 import { getGroupManager, splitMemberId } from "./index.js";
 import { createDlnaProtocolPlayer, getDevice, getDeviceStatus, isDeviceAvailable } from "../dlna/control.js";
-import { createAirPlayProtocolPlayer } from "../airplay/protocolPlayer.js";
-import { getAirPlayStatus, isAirPlayDeviceDisabled, isAirplayBridgeEnabled, isBridgeOwned, hasActiveSession, bridgePrepareDevice, bridgeStopDevice, selectAirPlayBridgeProtocol } from "../airplay/control.js";
+import { createAirPlayPlayerForDevice } from "../airplay/protocolPlayer.js";
+import { getAirPlayStatus, isAirPlayDeviceDisabled, isAirplayBridgeEnabled, isBridgeOwned, hasActiveSession, bridgePrepareDevice, bridgeStopDevice, bridgeManualDevice, selectAirPlayBridgeProtocol } from "../airplay/control.js";
 import { bridgeSocketPath } from "../airplay/bridgeChannel.js";
 import { raopProbeDevice, retryBridgePrepareWithProbe, isBridgeHandshakeDeviceError } from "../airplay/raopProbe.js";
 import { getAirPlayDevice, rescanAirPlayDevices } from "../airplay/discovery.js";
@@ -25,6 +25,15 @@ import { randomBytes } from "node:crypto";
 // 自然切歌/新 playMedia 重建路由)。模块级:跨 player 实例共享,流内成员变化
 // (bridgeJoinMember/bridgeLeaveMember)与 airplay 子进程重启(rebuildBridgeRoutes)都要读它。
 const activeBridgeRoutes = new Map<string, BridgeSocketSpec[]>();
+
+/** deviceId → 最近一次桥建立失败原因（D7：仅该台失败，状态可读、不回落直连）。
+ *  成功建立即清除；仅作观测面，播放决策一律以 activeBridgeRoutes 为准。 */
+const bridgeUnavailable = new Map<string, { at: number; reason: string }>();
+
+/** 查询某台设备最近一次桥建立失败原因（未失败 = undefined）。 */
+export function getBridgeUnavailableReason(deviceId: string): { at: number; reason: string } | undefined {
+  return bridgeUnavailable.get(deviceId);
+}
 
 /** 生成新的桥会话 token(§5.5 owner token;与 playMedia 路径同一格式)。 */
 const newBridgeToken = (): string => randomBytes(12).toString("hex");
@@ -165,23 +174,10 @@ export async function degradeBridgeMember(deviceId: string, token: string, reaso
     // 摘桥未确认(泵侧未回执/同步抛错):直接拆会话清 owner,宁可让设备回可 cast 状态。
     await bridgeStopDevice(token, deviceId).catch(() => { /* ignore */ });
   }
-  log.warn(`[group][bridge] ${groupId}: AP2 链路断 → 降级 device=${deviceId} reason=${reason}(本流回落 solo cast)`);
-  // ③ 本流回落:取组队列当前项,逐设备 cast(AirPlay 无 in-place seek,重投即新会话)。
-  try {
-    const { getQueueController } = await import("../player/index.js");
-    const snap = getQueueController().snapshot(`group:${groupId}`);
-    const item = snap.items[snap.currentIndex];
-    if (!item) {
-      log.warn(`[group][bridge] ${groupId}: 降级时队列无当前项,device=${deviceId} 仅摘桥(下一首自然走 solo cast)`);
-      return true;
-    }
-    const { getEffectiveBaseUrl } = await import("../dlna/control.js");
-    await createAirPlayProtocolPlayer(deviceId).playMedia(item, getEffectiveBaseUrl());
-    log.info(`[group][bridge] ${groupId}: 降级回落 solo cast 成功 device=${deviceId} song=${item.songId}`);
-  } catch (e) {
-    // 回落失败只 warn:设备本流静音,但桥/owner 已清干净,不会卡住后续播放。
-    log.warn(`[group][bridge] ${groupId}: 降级回落 solo cast 失败 device=${deviceId}: ${(e as Error)?.message || e}`);
-  }
+  // D7：桥降级**不回落 solo cast**——清干净桥/owner 后，本设备标记为「本曲不可用」，
+  // 下一首起播重新走桥（prepare 成功即自动恢复）。
+  bridgeUnavailable.set(deviceId, { at: Date.now(), reason: `bridge-degraded: ${reason}` });
+  log.warn(`[group][bridge] ${groupId}: 链路断 → 摘桥 device=${deviceId} reason=${reason}(D7:本曲不播放,下曲重新建桥)`);
   return true;
 }
 
@@ -397,7 +393,9 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
       return { fulfilled: 0, rejected: 0 };
     }
     const names = [...dlnaIds, ...apIds];
-    const players = [...dlnaIds.map(d => createDlnaProtocolPlayer(d)), ...apIds.map(d => createAirPlayProtocolPlayer(d))];
+    // 桥开关开时，apIds 恒为空（音乐成员全部由组泵/桥承担）；此处仅为 setVolume 的
+    // 桥占用成员与 `MUSICFLOW_AIRPLAY_BRIDGE=0` 回滚路径保留扇出。
+    const players = [...dlnaIds.map(d => createDlnaProtocolPlayer(d)), ...apIds.map(d => createAirPlayPlayerForDevice(d))];
     const t0 = Date.now();
     const results = await Promise.allSettled(players.map(p => op(p)));
     // debug:逐成员记录失败者 —— 原实现只打「N/M 失败」总数,查「到底是谁没跟上」
@@ -446,13 +444,13 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
     apOnline: string[],
     /** B 方案暖复用:上一条路由的 specs —— 同设备同协议沿用旧 token ⇒ 子进程暖复用会话。 */
     reuse?: BridgeSocketSpec[],
-  ): Promise<{ sockets: BridgeSocketSpec[]; soloFallback: string[] } | null> {
+  ): Promise<{ sockets: BridgeSocketSpec[]; failed: string[] } | null> {
     if (!isAirplayBridgeEnabled() || apOnline.length === 0) return null;
     // v4.9.3(§音量语义):桥会话初始音量 = player_groups 落库值(用户裁定:流转/起播
     // 绝不采用成员设备自身音量);随 bridgePrepare 下发,子进程不碰 DB。
     const groupInitialVolume = getGroupManager().getVolume(groupId);
     const sockets: BridgeSocketSpec[] = [];
-    const soloFallback: string[] = [];
+    const failed: string[] = [];
     for (const d of apOnline) {
       // 协议先选(B 方案:暖复用判据含协议一致 ⇒ token 沿用与否取决于协议)。
       const protocol = selectAirPlayBridgeProtocol(d);
@@ -487,12 +485,15 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
             continue;
           }
         }
-        log.warn(`[group][bridge] ${groupId}: bridgePrepare 失败 device=${d} → 本流回落 solo cast: ${reason}`);
-        soloFallback.push(d);
+        // D7：重试后仍失败 ⇒ 仅该台本次不播放并留可读原因；不再回落 solo cast。
+        bridgeUnavailable.set(d, { at: Date.now(), reason });
+        log.warn(`[group][bridge] ${groupId}: bridgePrepare 失败 device=${d} → 本曲该设备不播放(D7): ${reason}`);
+        failed.push(d);
       }
     }
+    for (const s of sockets) bridgeUnavailable.delete(s.deviceId);
     if (sockets.length === 0) return null;
-    return { sockets, soloFallback };
+    return { sockets, failed };
   }
 
   /** R1 方案 A(2026-10-30):resume 前补建桥路由 —— 专治「容器重启后再点播放,
@@ -525,13 +526,19 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
     }
     log.info(`[group][bridge] ${groupId}: resume 补建桥路由 ${prepared.sockets.length} 台`
       + `(synced=${synced} confirmed=${confirmed}) ${Date.now() - t0}ms`
-      + (prepared.soloFallback.length > 0 ? ` ⚠️ ${prepared.soloFallback.length} 台 prepare 失败:${prepared.soloFallback.join(",")}` : ""));
+      + (prepared.failed.length > 0 ? ` ⚠️ ${prepared.failed.length} 台 prepare 失败(D7 本曲不播放):${prepared.failed.join(",")}` : ""));
     return true;
   }
 
   return {
     playerId,
-    async playMedia(item: QueueItem, baseUrl: string) {
+    async playMedia(
+      item: QueueItem,
+      baseUrl: string,
+      _startMs = 0,
+      _bridge?: unknown,
+      opts?: { manual?: boolean },
+    ) {
       const dlnaOnline = getOnlineMemberIds(groupId);
       const apOnline = await getOnlineAirplayIdsTolerant(groupId);
       const spinOnline = getOnlineSendspinIds(groupId);
@@ -557,6 +564,12 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
       // 逐设备回落 solo cast);
       // 否则(无 AP 成员 / 桥禁用)"legacy-cast"(flag=0 时与旧行为逐字节同路径)。
       const bridgeRoute = apOnline.length > 0 ? await prepareBridgeRoute(apOnline, routeReusable ? prevRoute : undefined) : null;
+      // D6/P1:用户手动 next/prev ⇒ 给**复用中的**桥路由打 sticky「手动」标记;
+      // 子进程在下一个 track boundary 执行恰 1 次 FLUSH + ts 回拨。冷建路由没有
+      // 旧轨道边界可消费,不打标记。
+      if (opts?.manual === true && routeReusable && prevRoute) {
+        await Promise.allSettled(prevRoute.map((r) => bridgeManualDevice(r.token)));
+      }
       const jobs: Array<Promise<{ mediaUri: string }>> = [];
       // v4.9.3 方向 A:纯 AirPlay 桥组(sp=0 且桥路由已备)也必须起组泵 —— 泵是桥的
       // 唯一 PCM 源,不起泵桥恒静默;members 空数组由 sendspin/protocolPlayer 放行
@@ -568,17 +581,24 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
           return createSendspinGroupPlayer(groupId).playMedia(
             item, baseUrl, 0,
             bridgeRoute ? { sockets: bridgeRoute.sockets } : undefined,
+            // S1:下一首预取提示原样透传(桥边界连续性靠泵侧预解码,见 streamEngine)。
+            opts,
           );
         })());
       }
       for (const d of dlnaOnline) jobs.push(createDlnaProtocolPlayer(d).playMedia(item, baseUrl));
-      // airplay 成员:bridge 成功者**不**solo cast(桥消费组泵 PCM,§2.1);
-      // prepare 失败者回落 solo cast(MAJ-07:绝不出现「在组里但无声且状态正常」)。
-      const apSolo = bridgeRoute
-        ? apOnline.filter((d) => bridgeRoute.soloFallback.includes(d))
-        : apOnline;
+      // D2/D7：桥开关开时，任何 AirPlay 成员都不允许 solo cast —— prepare 失败者
+      // 仅该台本次不播放（原因记入 bridgeUnavailable），由调用方/状态面给出可读错误。
+      // `MUSICFLOW_AIRPLAY_BRIDGE=0` 时 bridgeRoute 必为 null，走原有 legacy 扇出（整体回滚）。
+      const apSolo = isAirplayBridgeEnabled() ? [] : apOnline;
       if (bridgeRoute) activeBridgeRoutes.set(groupId, bridgeRoute.sockets);
-      for (const d of apSolo) jobs.push(createAirPlayProtocolPlayer(d).playMedia(item, baseUrl));
+      if (isAirplayBridgeEnabled() && apOnline.length > 0) {
+        const failedDevices = bridgeRoute ? bridgeRoute.failed : apOnline;
+        if (failedDevices.length > 0) {
+          log.warn(`[group][bridge] ${groupId}: ${failedDevices.length} 台 AirPlay 桥不可用，本曲不播放(D7): ${failedDevices.join(",")}`);
+        }
+      }
+      for (const d of apSolo) jobs.push(createAirPlayPlayerForDevice(d).playMedia(item, baseUrl));
       const results = await Promise.allSettled(jobs);
       const ok = results.find(r => r.status === "fulfilled");
       if (!ok) {
@@ -663,13 +683,15 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
         // (2026-10-26 隔离环境 A/B 实测:同组仅换 memberIds 顺序,leader=sendspin 稳定
         // PLAYING 且 idle_early=0;leader=airplay 恒 STOPPED 且 idle_early 4 次/22s)。
         // 桥占用(混合组或纯 AP 桥组,v4.9.3 方向 A;桥的 PCM 源即组泵)时,状态从共享组泵派生。
-        if (isBridgeOwned(leader.id)) {
+        // D2：桥开关开时，组内 AirPlay leader 的状态一律从共享组泵派生 —— 不再从
+        // solo 会话视图取（桥占用下该视图恒空，会误判自然结束）。
+        if (isAirplayBridgeEnabled() || isBridgeOwned(leader.id)) {
           const { createSendspinGroupPlayer } = await import("../sendspin/protocolPlayer.js");
           const s = await createSendspinGroupPlayer(groupId).pollState();
           return { ...s, playerId };
         }
-        // airplay leader(非桥占用,独立 solo cast):状态从设备会话态派生(sessionView 同源)。
-        const s = await createAirPlayProtocolPlayer(leader.id).pollState();
+        // `MUSICFLOW_AIRPLAY_BRIDGE=0` 回滚：airplay leader 从设备独立会话态派生。
+        const s = await createAirPlayPlayerForDevice(leader.id).pollState();
         return { ...s, playerId };
       }
       // leader 当前不可达(SOAP 失败已被 isDeviceAvailable 标记)→ 同上,不把离线默认
@@ -739,7 +761,11 @@ export async function getGroupStatus(groupId: string): Promise<{
   if (leader.kind === "airplay") {
     // §5.5 同 pollState:桥占用时 solo 会话视图恒空,必须改从共享组泵派生
     // (否则 /v1/peers/group:<id>/status 在桥播放全程恒报 STOPPED)。
-    if (isBridgeOwned(leader.id)) {
+    // D2:与 pollState 同名分支同一口径 —— 桥开关开时,组内 AirPlay leader 一律从
+    // 共享组泵派生(不只是 isBridgeOwned);solo 会话映射只属于 `MUSICFLOW_AIRPLAY_BRIDGE=0`
+    // 回滚专线。少这一条时纯 AP 组 / 桥已建但尚未登记 owner 的瞬间会回落到设备会话,
+    // 位置/状态与组时间线不一致(测试「airplay solo leader(桥开关开后)→ 从组泵派生」)。
+    if (isAirplayBridgeEnabled() || isBridgeOwned(leader.id)) {
       const { sendspinGroupPoll } = await import("../sendspin/index.js");
       const gname = sendspinGroupName(groupId);
       const gst = await sendspinGroupPoll(gname).catch(() => ({ playing: false, paused: false, positionMs: 0, durationMs: 0, buffering: false }));
@@ -823,6 +849,19 @@ export async function reconcileBridgeRoutesOnce(): Promise<void> {
         wantedTokens.add(`${s.deviceId}:${s.token}`);
       }
     }
+    // 事实源补全(2026-11-01 单会话断裂根因):单机伪组(`__bridge_solo:<deviceId>`)
+    // 的桥路由登记在 airplay/protocolPlayer 的 soloBridgeRoutes,**不**进本文件这张
+    // activeBridgeRoutes(后者只覆盖用户组)。不并入 ⇒ 单机桥在 sendspin 句柄侧与
+    // airplay 会话侧都被判「孤儿」,宽限后每 ~60s 摘一次**正在播**的会话:
+    // 实测 17:16:17 摘句柄 → bridge link live→idle → session 断开 reason=closed →
+    // 泵空转「编码器疑似失效」,并让 QueueController 判 idle_early 切歌。
+    try {
+      const { listSoloBridgeRoutes } = await import("../airplay/protocolPlayer.js");
+      for (const s of listSoloBridgeRoutes()) {
+        wantedDevices.add(s.deviceId);
+        wantedTokens.add(`${s.deviceId}:${s.token}`);
+      }
+    } catch { /* 桥整体关闭/模块不可用 → 沿用原判据,不放大故障 */ }
     const now = Date.now();
     const { sendspinBridgeStatus, sendspinBridgeDetach } = await import("../sendspin/index.js");
     // 侧 1:sendspin 泵侧句柄(以 deviceId 对账)

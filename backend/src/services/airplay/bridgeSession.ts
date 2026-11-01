@@ -37,11 +37,12 @@ import {
   PROTOCOL_CAPS,
   RAOP_SAFETY_MS,
   SENDSPIN_RATE,
+  bridgeSyncGroupTimelineEnabled,
   type BridgeProtocol,
 } from "./rates.js";
 import { computeBridgeBackoffMs } from "./bridgeSource.js";
 import { PolyphaseResampler, floatToPcmS16, pcmS16ToFloat } from "./resampler.js";
-import { audibleAtUs, computeBridgeAnchors, driftCorrection, type BridgeAnchors } from "./bridgeMath.js";
+import { audibleAtUs, computeBridgeAnchors, driftCorrection, groupDelayUs, type BridgeAnchors } from "./bridgeMath.js";
 import { nowUs } from "../../utils/hostClock.js";
 import { RaopPlayer, CHUNK_LEN, raopBridgeConnectPrimeEnabled, type BridgeStreamEndReason, type RaopSession } from "./raop.js";
 import { getAirPlayVolumeState, DEFAULT_AIRPLAY_VOLUME } from "./deviceState.js";
@@ -81,6 +82,24 @@ export function shouldSkipBridgeInitialVolume(sameHostDlnaPeer?: string): boolea
 
 /** exp4:prime 灌包数量(10 包 ≈ 80ms,足够建立 RTP 流存在感)。 */
 const RAOP_CONNECT_PRIME_CHUNKS = 10;
+
+/** D6/P1(2026-10-31):用户手动 next/prev 的 RTP ts 回拨量(毫秒)。
+ *  基线 17 次实测:新流首包 ts 相对上一包回拨 1.588–1.695s(p50 1.662s)。
+ *  落点见 raop.streamBridge 的 `rewindFrames`(352 帧对齐 ⇒ 44.1k 实际 1.660s)。 */
+const BRIDGE_MANUAL_REWIND_MS = 1662;
+
+/** 「手动」sticky 标记的有效期(ms):超时未等到 track boundary 即作废,
+ *  防止 playMedia 失败/被取消时残留,误伤后续自动换歌。 */
+const BRIDGE_MANUAL_STICKY_MS = 30_000;
+
+/** 手动标记从 `stop` 边界「传递」到紧随 `track` 边界的有效期(ms)。
+ *  实测 playFrom = stop→track,两者间隔 <200ms;超过 3s 视为「只停了、没再播」,
+ *  传递作废(不允许残留到后续自动换歌)。 */
+const BRIDGE_MANUAL_CARRY_MS = 3_000;
+
+/** 回拨需求的有效期(ms):boundary 到首帧重新起流之间通常 <100ms,
+ *  10s 只为兜底「新曲迟迟不来」时不把旧需求套到更晚的流上。 */
+const BRIDGE_MANUAL_REWIND_TTL_MS = 10_000;
 
 // ---------------------------------------------------------------------------
 // producer 预填充 / 低水位补货(与 decoder.ts 的 PREFILL_MS 同一层 jitter buffer)
@@ -212,6 +231,8 @@ export class BridgeTimelineAligner {
   ) {}
 
   get contentPos(): number { return this.pos; }
+  /** 内容零点(host µs):早于它的输入帧**整块丢弃、不补静音**(D5,MA `_drop_until_us`)。 */
+  get contentAnchorUs(): bigint { return this.anchorUs; }
   get pendingDrops(): number { return this.drops; }
   get realignments(): number { return this.realignCount; }
   get lastDriftUs(): number { return this.lastDrift; }
@@ -276,13 +297,20 @@ export class BridgeTimelineAligner {
 // ---------------------------------------------------------------------------
 
 export interface BridgeAnchorPlan {
-  /** 落定的 A(可达 = 首帧 tsUs;不可达 = max(now + warmLead, 首帧 tsUs))。 */
+  /** 组时间线锚点 A(host µs,**不含成员补偿**;对齐零点/节拍基准)。
+   *  旧模式(开关关闭)下它仍含成员补偿(逐字节退回改造前语义)。 */
   anchorUs: bigint;
+  /** 节拍锚点 = A + 重采样群延迟(GD,µs):RAOP `sendAt` 的基准。
+   *  **不含成员补偿** ⇒ 同内容在各成员的同刻送包时刻一致(抓包同刻内容一致)。
+   *  旧模式下 = anchors.anchorUsShifted(改造前节拍基准)。 */
+  beatAnchorUs: bigint;
+  /** 出声锚点 = A + 成员补偿(µs):AP2 出口(无 RTP 映射)的可听基准。 */
+  playAnchorUs: bigint;
   /** 四字段锚点(computeBridgeAnchors 产出,baseTs/startTs/headTs/startNtp/A′)。 */
   anchors: BridgeAnchors;
   /** 是否触发了可达性重锚(A − L − SAFETY < now)。 */
   reAnchored: boolean;
-  /** E2 实验:now 锚(MF_BRIDGE_RAOP_NOW_ANCHOR)生效 —— anchorUs = now(+shift)。 */
+  /** E2 实验:now 锚(MF_BRIDGE_RAOP_NOW_ANCHOR)生效 —— anchorUs = now。 */
   forceNow: boolean;
   /** 指令提前量 = A − now(锚点确定时刻;§3.5 commandedLeadUs)。 */
   commandedLeadUs: bigint;
@@ -331,6 +359,16 @@ export function raopNowAnchorEnabled(): boolean {
 export function raopBridgeGapFillEnabled(): boolean {
   const v = process.env.MF_BRIDGE_RAOP_GAP_FILL;
   return !(v === "0" || v === "false");
+}
+
+/** S2(2026-11-01)自然换歌保留桥队列开关。缺省 ON;`MF_BRIDGE_TRACK_KEEP_QUEUE=0/
+ *  false/off` 回退到「边界清空 inQueue/outBuf」的旧行为。
+ *  背景:自动换歌(track 且非手动)本应是同一时间线的纯内容替换 —— 旧曲余料已经在
+ *  桥队列里、ts 全部合法,清掉只会把「旧曲尾巴 + 新曲开头」整段砍掉(§8.5 实测
+ *  0.41–1.26s);保留后旧余料自然播完,新代次帧按 ts 接在其后。 */
+export function bridgeTrackKeepQueueEnabled(): boolean {
+  const v = process.env.MF_BRIDGE_TRACK_KEEP_QUEUE;
+  return !(v === "0" || v === "false" || v === "off");
 }
 
 /** 会话活性看门狗开关(MF_BRIDGE_RAOP_LIVENESS_WATCHDOG)。缺省 ON;0/false = 关。
@@ -449,8 +487,15 @@ export function livenessWatchdogShouldFire(opts: {
   reconnectTimerSet: boolean;
   quietMs: number;
   thresholdMs: number;
+  /** 本会话设备是否**证明过**自己会发 timing(NTP)心跳(player.timingCount > 0)。
+   *  ⚠️ false 表示设备结构上从不发心跳(2026-11-01 240 pcap 实证:GGMM 240A64FED051
+   *  20min 内 0 个 timing 请求,同组 HiVi 399 个)⇒ 「心跳停摆」判据对它恒真、且**无法
+   *  区分僵死与健康**,只会每阈值一次 TEARDOWN + 重锚(实测把健康流切成每 6~7s 跳变)。
+   *  因此本判据只在设备确有过心跳时才启用(与「ctrl 重传请求停摆」同罪的教训见上方演进史)。 */
+  hasTimingHeartbeat: boolean;
 }): boolean {
   if (!opts.enabled) return false;
+  if (!opts.hasTimingHeartbeat) return false;
   if (opts.isAp2 || opts.paused || !opts.connected || opts.closed) return false;
   if (!opts.hasPlayer || !opts.streaming) return false;
   if (opts.reconnectInFlight || opts.reconnectTimerSet) return false;
@@ -465,33 +510,40 @@ export function planBridgeAnchor(opts: {
   resampled: boolean;
   nowUs: bigint;
   warmLeadUs?: number;
-  /** A/V 标定位移(µs,正 = 内容落点整体后移 = 桥延后)。缺省 0(历史行为)。 */
+  /** A/V 标定位移(µs,正 = 内容落点整体后移 = 桥延后)。缺省 0(历史行为)。
+   *  群组同内容同步开启时它**只进映射锚点/AP2 出声锚点**,不进送包节拍(见 D1–D5)。 */
   anchorShiftUs?: number;
-  /** E2 实验:forceNow = now 锚(anchorUs = now(+shift)),首包即发;
-   *  泵 lead 段相对组时间线提前播,对齐器以首帧 tsUs 为零点(见 maybeBeginStream)。 */
+  /** E2 实验:forceNow = now 锚(anchorUs = now),首包即发;
+   *  泵 lead 段相对组时间线提前播,对齐器以该锚点为零点(见 maybeBeginStream)。 */
   forceNow?: boolean;
+  /** D7(2026-11-01):同组已发布的共享锚点(见 BridgeGroupAnchorRegistry)。
+   *  仅 forceNow 分支消费;缺省 = 本会话自行取 now 锚(旧行为)。 */
+  groupAnchorUs?: bigint;
 }): BridgeAnchorPlan {
-  let anchorUs = opts.firstFrameTsUs + BigInt(opts.anchorShiftUs ?? 0);
+  const sync = bridgeSyncGroupTimelineEnabled();
+  const shiftUs = BigInt(opts.anchorShiftUs ?? 0);
+  // 组时间线锚点(**不含成员补偿**)
+  let anchorUs = opts.firstFrameTsUs;
   const warmUs = BigInt(opts.warmLeadUs ?? BRIDGE_WARM_START_LEAD_US);
   const lUs = BigInt(Math.round((opts.latencyFrames / opts.rate) * 1e6));
   const safetyUs = BigInt(RAOP_SAFETY_MS * 1000);
   let reAnchored = false;
   if (opts.forceNow === true) {
-    // E2 实验(MF_BRIDGE_RAOP_NOW_ANCHOR,缺省 ON):now 锚 —— anchorUs = now(+shift)。
+    // E2 实验(MF_BRIDGE_RAOP_NOW_ANCHOR,缺省 ON):now 锚 —— anchorUs = now。
     // 背景(2026-10-28 240 实证):MUZO 类固件只支持「到包即播」语义,对
     // 「SYNC 未来锚 2.3s + 首包延迟 1.25s」的桥会话永不开始渲染(solo 旧墙钟
     // 路径 now 锚可出声)。now 锚下首包立即发;泵 lead 段相对组时间线提前播;
-    // 对齐器以首帧 tsUs 为零点(见 maybeBeginStream)保持内容连续 —— 绝不触发
+    // 对齐器以组锚点为零点(见 maybeBeginStream)保持内容连续 —— 绝不触发
     // skip 跳段时间线(skip 会把 RTP 重新标回未来,等于没修)。
     // exp2:+ raopNowAnchorOffsetUs()(缺省 400ms)—— 设备抖动缓冲深度;
-    // 对齐器零点仍取首帧 tsUs(见 maybeBeginStream),lead≈offset ≪ 2s 补静音上限。
     // exp6(2026-10-29):offset 下限钳到 lUs+safetyUs —— sendAt(0) 绝不能落到过去,
     // 否则首包即欠账且该欠账够不着 rebase 阈值,整首歌带着欠账跑(见函数头注释)。
     // env 仍可上调(想要更深缓冲时);下调被拒绝,逃生门是关掉 forceNow 本身。
     const wantLeadUs = raopNowAnchorOffsetUs();
     const floorLeadUs = lUs + safetyUs;
     const leadUs = wantLeadUs > floorLeadUs ? wantLeadUs : floorLeadUs;
-    anchorUs = opts.nowUs + BigInt(opts.anchorShiftUs ?? 0) + leadUs;
+    // D7:同组同 gen 复用已发布锚点 ⇒ 各成员的内容零点/送包节拍完全同源。
+    anchorUs = opts.groupAnchorUs ?? opts.nowUs + leadUs;
   } else if (anchorUs - lUs - safetyUs < opts.nowUs) {
     const floorUs = opts.nowUs + warmUs;
     if (floorUs > anchorUs) {
@@ -499,17 +551,136 @@ export function planBridgeAnchor(opts: {
       reAnchored = true;
     }
   }
+  // 旧模式:补偿进锚点(改造前逐字节行为;对齐器零点/节拍基准都含 shift)
+  if (!sync) anchorUs += shiftUs;
+  // 映射锚点输入 = 组锚点 + 成员补偿(A′ = 该值 + 重采样群延迟,computeBridgeAnchors 内)
+  const mapAnchorUs = sync ? anchorUs + shiftUs : anchorUs;
   const anchors = computeBridgeAnchors({
-    anchorUs,
+    anchorUs: mapAnchorUs,
     latencyFrames: opts.latencyFrames,
     rate: opts.rate,
     chunkLen: CHUNK_LEN,
     compensateGroupDelay: opts.resampled,
   });
-  return { anchorUs, anchors, reAnchored, commandedLeadUs: anchorUs - opts.nowUs, forceNow: opts.forceNow === true };
+  return {
+    anchorUs,
+    // 节拍基准不含成员补偿 ⇒ 同内容在各成员的同刻送包时刻一致
+    beatAnchorUs: sync ? anchorUs + (opts.resampled ? BigInt(Math.round(groupDelayUs(opts.rate))) : 0n) : anchors.anchorUsShifted,
+    // 出声锚点(AP2 出口;无 RTP 映射)才吃补偿
+    playAnchorUs: sync ? anchorUs + shiftUs : anchors.anchorUsShifted,
+    anchors,
+    reAnchored,
+    commandedLeadUs: anchorUs - opts.nowUs,
+    forceNow: opts.forceNow === true,
+  };
 }
 
 // ---------------------------------------------------------------------------
+// D7(2026-11-01):组时间线**共享锚点**登记表
+// ---------------------------------------------------------------------------
+
+/** 复用共享锚点允许的「lead 不足」容差(µs):被复用的锚点最多比本设备的 lead 下限
+ *  早这么多 ⇒ 首包迟到该量级,由 pacing 立即追发吸收(宁晚不散)。 */
+export const GROUP_ANCHOR_LATE_TOLERANCE_US = 500_000;
+
+/** 同组同 gen 的锚点登记表(跨会话状态,由 BridgeSessionManager 持有)。
+ *
+ *  根因(240 抓包实证 2026-11-01):forceNow 锚 = `nowUs + lead`,**每会话各自取 now**
+ *  ⇒ 同组两台设备因 RECORD 握手完成时差(实测 47.6ms)拿到不同的 `scheduledAnchorUs`
+ *  (1395870728313 vs 1395870775885)。该锚点同时决定「内容零点(对齐器 target)」与
+ *  「送包节拍基准」⇒ 同刻包内内容整体错位 6 个包:payload bytes 仍 100%(同一内容集合),
+ *  但 lag0_corr 掉到 0.76~0.84、best_lag=+6 包 —— 直接违反验收判据
+ *  「同一时刻包内音频内容一致」。
+ *
+ *  修法(与 D1–D6「组时间线唯一」同一不变量):同组同 gen **只允许一个锚点** ——
+ *  首个规划者发布,同组后续规划者复用(内容轴/节拍轴因此逐 µs 同源)。
+ *
+ *  安全边界:①只对带 groupKey 的桥共享(单机桥不参与,也避免不同组 gen 撞车);
+ *  ②复用前校验该锚点对本设备仍可达(`anchorUs ≥ now + floor − 容差`),否则不共享
+ *  (中途重连那种「锚点在几十秒前」的场景属于组级重锚问题,不在本表职责内)。 */
+export class BridgeGroupAnchorRegistry {
+  private readonly byKey = new Map<string, { anchorUs: bigint; atMs: number }>();
+
+  constructor(
+    private readonly ttlMs = 120_000,
+    private readonly maxEntries = 32,
+  ) {}
+
+  /** 取同组同 gen 的共享锚点;无 / 过期 / 对本设备已不可达 ⇒ null(调用方自行规划并发布)。 */
+  peek(groupKey: string, gen: number, nowHostUs: bigint, floorLeadUs: bigint): bigint | null {
+    const k = `${groupKey}#${gen}`;
+    const e = this.byKey.get(k);
+    if (!e) return null;
+    if (Date.now() - e.atMs > this.ttlMs) {
+      this.byKey.delete(k);
+      return null;
+    }
+    if (e.anchorUs + BigInt(GROUP_ANCHOR_LATE_TOLERANCE_US) < nowHostUs + floorLeadUs) return null;
+    return e.anchorUs;
+  }
+
+  /** 发布锚点(同 key 已有则保留先发布者 = 首个规划者的组时间线零点)。 */
+  publish(groupKey: string, gen: number, anchorUs: bigint): void {
+    const k = `${groupKey}#${gen}`;
+    if (this.byKey.has(k)) return;
+    this.byKey.set(k, { anchorUs, atMs: Date.now() });
+    if (this.byKey.size > this.maxEntries) {
+      const oldest = [...this.byKey.entries()].sort((a, b) => a[1].atMs - b[1].atMs)[0];
+      if (oldest) this.byKey.delete(oldest[0]);
+    }
+  }
+
+  clear(): void { this.byKey.clear(); }
+}
+
+// ---------------------------------------------------------------------------
+// D8(2026-11-01):组时间线**边界一致性**登记表
+// ---------------------------------------------------------------------------
+
+/** 同组同 gen 的「换歌边界处置」登记表(clear 优先)。
+ *
+ *  问题(240 实测):BOUNDARY 由组泵逐成员下发,各成员看到的 reason 可能不同
+ *  (一台 stop、另一台 track),而 onBoundary 的处置是**成员本地**决定的 ——
+ *  一台清空桥队列、另一台保留旧余料 ⇒ 同代次的内容起点不唯一;该起点差一旦产生,
+ *  后续每次自然换歌都会带着它走(cap6 实测分裂 2.7~2.95s 跨换歌粘住)。
+ *
+ *  不变量:同组同 gen 的边界处置必须一致 —— 任一成员要「重启型」(清队列)⇒ 全组清;
+ *  只有全组都只看到 track(纯内容替换)时才保留队列。 */
+export class BridgeGroupBoundaryRegistry {
+  private readonly byKey = new Map<string, { clear: boolean; atMs: number }>();
+
+  constructor(
+    private readonly ttlMs = 60_000,
+    private readonly maxEntries = 32,
+  ) {}
+
+  /** 登记本成员的处置(clear 可升级不可降级)。 */
+  publish(groupKey: string, gen: number, clear: boolean): void {
+    const k = `${groupKey}#${gen}`;
+    const prev = this.byKey.get(k);
+    if (prev && (prev.clear || !clear)) return;
+    this.byKey.set(k, { clear, atMs: Date.now() });
+    if (this.byKey.size > this.maxEntries) {
+      const oldest = [...this.byKey.entries()].sort((a, b) => a[1].atMs - b[1].atMs)[0];
+      if (oldest) this.byKey.delete(oldest[0]);
+    }
+  }
+
+  /** 同组同 gen 是否已有成员要求「重启型」处置。 */
+  isClearRequired(groupKey: string, gen: number): boolean {
+    const k = `${groupKey}#${gen}`;
+    const e = this.byKey.get(k);
+    if (!e) return false;
+    if (Date.now() - e.atMs > this.ttlMs) {
+      this.byKey.delete(k);
+      return false;
+    }
+    return e.clear;
+  }
+
+  clear(): void { this.byKey.clear(); }
+}
+
 // AP2 realtime 出口(Phase 6b · T03:与 RAOP 并列的第二出口)
 // ---------------------------------------------------------------------------
 
@@ -683,6 +854,9 @@ export interface BridgeSessionOpts {
   waitDataMs?: number;
   /** stats tick 周期(ms,§10.5 每设备一行 JSON)。默认 2000;≤0 关闭。 */
   statsIntervalMs?: number;
+  /** D7(2026-11-01):所属组 id(仅用于「组时间线共享锚点」,子进程不碰 DB)。
+   *  缺省 = 无组上下文:该会话不参与共享(单机桥无「同刻同内容」要求)。 */
+  groupKey?: string;
 }
 
 export interface BridgeSessionStats {
@@ -724,6 +898,8 @@ export class BridgeSession {
 
   /** 48k s16le 入队(桥帧 payload 原样 + tsUs)。 */
   private inQueue: Array<{ buf: Buffer; tsUs: bigint; generation: number }> = [];
+  /** 群组同内容同步(D1–D5)开关快照:会话建立时读一次,热路径不查 env。 */
+  private readonly groupTimelineSync = bridgeSyncGroupTimelineEnabled();
   private inBytes = 0;
   /** 输出速率 s16le 出缓冲(producer 逐 352 帧切割)。 */
   private outBuf: Buffer = Buffer.alloc(0);
@@ -748,6 +924,16 @@ export class BridgeSession {
   /** E3:锚点落定时刻的 chunksOut 快照(tick deltaUs 用增量)。 */
   private chunksOutAtPlan = 0;
   private generation = 0;
+  /** D6/P1:主进程 `bridgeManual` RPC 置的 sticky「用户手动 next/prev」标记(时间戳;0=无)。 */
+  private manualPendingAt = 0;
+  /** D6/P1:手动操作在泵侧先发 `stop` 再发 `track`(playFrom = stop→play)。
+   *  标记必须在 stop 上**传递**给紧随的 track(否则回拨永不落地)。 */
+  private carriedManualAt = 0;
+  /** D6/P1:本次手动操作的「恰 1 次 FLUSH」是否已在 stop 边界发过(防 track 边界重复 FLUSH)。 */
+  private manualFlushDone = false;
+  /** D6/P1:手动 boundary 之后待应用的一次性 ts 回拨量(输出帧数;0=无)。 */
+  private pendingRewindFrames = 0;
+  private pendingRewindAt = 0;
   private maxQueueMs = 0;
   private deltaSamples: number[] = [];
   private statsTimer: NodeJS.Timeout | null = null;
@@ -764,6 +950,8 @@ export class BridgeSession {
    *  挂在 session 上会随每次触发重建而清零,熔断永远攒不满。 */
   /** 上一次看门狗触发时刻 player.timingCount 的快照(判「这次重连救回来没有」)。 */
   private timingCountAtFire = 0;
+  /** 「本代次已打过『设备从不发 timing,看门狗豁免』日志」的代次号(防 2s tick 刷屏)。 */
+  private livenessNoTimingLoggedGen = "";
   /** C-4 结构性兜底:connected 且有 player 却一直 aligner=null(无消费者)的起始时刻。 */
   private noConsumerSince = 0;
   /** v4.9.7:RAOP 会话重建期间的互斥门 —— 期间禁止 maybeBeginStream 起流,
@@ -776,7 +964,13 @@ export class BridgeSession {
   private raopReconnectTimer: NodeJS.Timeout | null = null;
   private raopReconnectAttempt = 0;
 
-  constructor(opts: BridgeSessionOpts) {
+  constructor(
+    opts: BridgeSessionOpts,
+    /** D7:同组共享锚点登记表(由 BridgeSessionManager 注入;缺省 = 不共享,旧行为)。 */
+    private readonly groupAnchors?: BridgeGroupAnchorRegistry,
+    /** D8:同组边界处置登记表(同上;缺省 = 成员本地处置,旧行为)。 */
+    private readonly groupBoundaries?: BridgeGroupBoundaryRegistry,
+  ) {
     this.opts = opts;
     this.deviceId = opts.deviceId;
     this.token = opts.token;
@@ -969,42 +1163,117 @@ export class BridgeSession {
    *  - track/seek/rehost:清旧代次队列 + 计入 staleFramesDropped + 重锚 —— 新代次
    *    首帧确立新 A ⇒ 新 scheduledAnchorUs(可 grep `ev:"gen"` + `ev:"anchor"`);
    *  - stop:流终态(跨源切歌/组停),停推流;RAOP 会话由编排侧 bridgeStop 拆。 */
+  /** D6/P1:`bridgeManual` RPC 落点 —— 只置 sticky 标记,不立即 FLUSH。
+   *  真正的「1 次 FLUSH + ts 回拨」在下一个 track boundary 到达时执行,
+   *  避免与正在跑的推流节拍/重传路径抢 socket。 */
+  markManual(): void {
+    this.manualPendingAt = Date.now();
+    log.info(`[airplay-bridge] ${JSON.stringify({ ev: "manual-mark", dev: this.deviceId, gen: this.generation })}`);
+  }
+
+  /** 消费 sticky「手动」意图:无论有效与否都清零(过期标记不得泄漏到后续边界)。 */
+  private takeManualIntent(): boolean {
+    const at = this.manualPendingAt;
+    this.manualPendingAt = 0;
+    return at > 0 && Date.now() - at <= BRIDGE_MANUAL_STICKY_MS;
+  }
+
+  /** 消费「从 stop 传递过来」的手动意图(仅紧随的 track/rehost 有效)。 */
+  private takeCarriedManual(): boolean {
+    const at = this.carriedManualAt;
+    this.carriedManualAt = 0;
+    return at > 0 && Date.now() - at <= BRIDGE_MANUAL_CARRY_MS;
+  }
+
   /** 最近一次 onBoundary 的原因(track/seek/rehost/stop)。Fix G 用它判换代->显式重锚。 */
   private lastBoundaryReason: string | null = null;
   private onBoundary(generation: number, reason: string): void {
     if (this.closed) return;
     this.lastBoundaryReason = reason;
     log.info(`[airplay-bridge] ${JSON.stringify({ ev: "gen", dev: this.deviceId, gen: generation >>> 0, prevGen: this.generation, reason })}`);
-    // 清旧代次:入队未消费 + 出缓冲未切割的全部计入丢弃。
-    const stale = (this.inBytes >> 2) + (this.outBuf.length >> 2);
-    this.inQueue = [];
-    this.inBytes = 0;
-    this.outBuf = Buffer.alloc(0);
+    // sticky「手动」意图必须**先**消费(下面的 keepQueue 判据要用):手动 next 在泵侧
+    // 是 stop→track 两步(playFrom = stop→play),也可能被标成 rehost —— 三种都必须认,
+    // 但只能在**重启型**边界上落地。
+    const pendingManual = this.takeManualIntent();
+    const manual = reason === "stop" ? pendingManual : (pendingManual || this.takeCarriedManual());
+    const queueFrames = (this.inBytes >> 2) + (this.outBuf.length >> 2);
+    // S2(2026-11-01):自然换歌(track 且非手动)= 同一时间线的**纯内容替换** ⇒
+    // 保留 inQueue/outBuf:旧曲余料已在桥队列里且 ts 全部合法,让它自然播完,
+    // 新代次帧按 ts 接在其后(清掉等于把旧曲尾 + 新曲头整段砍掉,§8.5 实测
+    // 0.41–1.26s)。只有会重启推流的边界(stop / seek / rehost / 手动)才清队列。
+    // 回退:MF_BRIDGE_TRACK_KEEP_QUEUE=0 ⇒ 与改造前逐字节一致(恒清 + stale 统计)。
+    const localKeep = reason === "track" && !manual && bridgeTrackKeepQueueEnabled();
+    // D8(2026-11-01):边界处置必须**组级统一**。各成员看到的 reason 可能不同
+    // (A=stop / B=track),本地判定会让一台清队列、另一台保留 → 同代次内容起点不唯一
+    // (cap6 实测分裂 2.7~2.95s 且跨换歌粘住)。规则:clear 优先(任一成员要清 ⇒ 全组清)。
+    const groupKey = this.opts.groupKey;
+    let keepQueue = localKeep;
+    if (this.groupTimelineSync && groupKey && this.groupBoundaries) {
+      this.groupBoundaries.publish(groupKey, generation >>> 0, !localKeep);
+      if (localKeep && this.groupBoundaries.isClearRequired(groupKey, generation >>> 0)) {
+        keepQueue = false;
+        log.info(`[airplay-bridge] ${JSON.stringify({ ev: "group-boundary-clear", dev: this.deviceId, gen: generation >>> 0, reason })}`);
+      }
+    }
+    const stale = keepQueue ? 0 : queueFrames;
+    if (!keepQueue) {
+      this.inQueue = [];
+      this.inBytes = 0;
+      this.outBuf = Buffer.alloc(0);
+    }
     if (stale > 0) this.stats.staleFramesDropped += stale;
     if (stale > 0) log.info(`[airplay-bridge] ${JSON.stringify({ ev: "stale", dev: this.deviceId, gen: generation >>> 0, reason, staleFrames: stale, totalStaleFrames: this.stats.staleFramesDropped })}`);
+    if (keepQueue) log.info(`[airplay-bridge] ${JSON.stringify({ ev: "track-keep-queue", dev: this.deviceId, gen: generation >>> 0, reason, keptFrames: queueFrames })}`);
     this.generation = generation >>> 0;
+    if (reason === "stop") {
+      // 终态:停推流(保留 listener 与 RAOP 会话;编排侧 bridgeStop 负责拆会话)。
+      this.firstFrameTsUs = null;
+      this.aligner = null;
+      this.anchors = null;
+      this.anchorUs = null;
+      this.commandedLeadUs = null;
+      this.streamAborted = true;
+      this.player?.flush();
+      // 手动标记**传递**给紧随的 track:回拨必须在重启型边界落地(MA 口径:
+      // 恰 1 次 FLUSH + 新流 ts 回拨),而 FLUSH 已经在上面这条发过了
+      // ⇒ 记 manualFlushDone 防 track 边界重复 FLUSH。
+      this.carriedManualAt = pendingManual ? Date.now() : 0;
+      this.manualFlushDone = pendingManual;
+      return;
+    }
+    if (!manual) this.manualFlushDone = false;
+    if (reason === "track" && !manual) {
+      // 自动换歌(D6/P1)= 同一时间线「纯内容替换」:不 FLUSH、不 RECORD、不重锚。
+      // 关键:保留 aligner / anchors / firstFrameTsUs,且**不 abort 推流循环** ——
+      // 旧 streamBridge 继续消费新代次帧,seq/ts 自然连续(+352/包)。
+      // S2:旧曲余料**保留**(上面 keepQueue 分支),新代次帧按 ts 接在其后;
+      // 只有关掉 MF_BRIDGE_TRACK_KEEP_QUEUE 时才在此前出清队列。
+      void this.stopGapFiller();
+      return;
+    }
+    // 以下为「换代重启」:seek / rehost / 用户手动 next-prev(track+manual)。
     this.firstFrameTsUs = null;
     this.aligner = null;
     this.anchors = null;
     this.anchorUs = null;
     this.commandedLeadUs = null;
-    if (reason === "stop") {
-      // 终态:停推流(保留 listener 与 RAOP 会话;编排侧 bridgeStop 负责拆会话)。
-      this.streamAborted = true;
-      this.player?.flush();
-      return;
-    }
-    // track:换代。Fix G —— 不再起垫片续流;旧 streamBridge 由 pullChunk 返回 null
-    // (generation 已切换)自然退出,新代次首帧经 maybeBeginStream 重调 streamBridge
-    // 并带 explicitReanchor=true 显式重锚(发 FLUSH+RECORD)。
-    if (reason === "track") {
-      void this.stopGapFiller();
-      return;
-    }
-    // seek/rehost:热复用 RAOP 会话,推流循环立刻退出,新代次首帧重新起流
+    // 热复用 RAOP 会话,推流循环立刻退出,新代次首帧重新起流
     // (player.flush 置 started=false ⇒ 新流首包带 0xE0 marker,接收端重锚)。
     this.streamAborted = true;
-    this.player?.flush();
+    if (!(manual && this.manualFlushDone)) this.player?.flush();
+    if (manual) {
+      // 用户操作:MA 实测「恰 1 次 FLUSH、seq +1、新流 ts 回拨 1.588–1.695s」。
+      // stop 边界已发过 FLUSH 时这里不重复发(manualFlushDone)。
+      // 回拨量在流侧落地(只有 RaopPlayer 知道 lastSentTs),这里只记录需求;
+      // AP2 无 RTP 时间线,不参与回拨。
+      this.manualFlushDone = false;
+      if (this.ap2Session === null) {
+        this.pendingRewindFrames = Math.round((BRIDGE_MANUAL_REWIND_MS * this.outRate) / 1000);
+        this.pendingRewindAt = Date.now();
+      }
+      // 基线中断仅 48–160ms:手动路径**不**起静音垫片(垫片会拉长中断并污染 ts 序列)。
+      return;
+    }
     // A(2026-10-29):垫片窗内静音续流 —— 旧流已停、新流未起,RTP 断流 ~2.5-3s
     // 会反复把 MUZO 接收端饿到假死(实证:零 timing/零重传后只有完整重握手能救)。
     // 续流只发静音,可听间隙不变;新流 0xE0 重锚语义不变。
@@ -1131,15 +1400,35 @@ export class BridgeSession {
     // AP2 realtime:L 的等价物 = 我方在 SETUP 里声明的 latencyMin(接收端抖动缓冲深度)。
     // 两条出口各取自己的 L,但**共用同一个 planBridgeAnchor**(锚点只落一次)。
     const latencyFrames = this.ap2Session !== null ? this.ap2DeclaredLatencyFrames : raopLatency;
+    // D7(2026-11-01):同组同 gen **共享锚点** —— 首个规划者发布,其余成员复用,
+    // 保证各成员的「内容零点 = 对齐器 target 基准」与「送包节拍基准」逐 µs 同源。
+    // 只在 forceNow(now 锚)且带 groupKey 时启用;AP2 出口不吃 now 锚(forceNow=false)。
+    const useSharedAnchor =
+      this.ap2Session === null && raopNowAnchorEnabled()
+      && bridgeSyncGroupTimelineEnabled() && !!this.opts.groupKey && !!this.groupAnchors;
+    const nowHostUs = nowUs();
+    const floorLeadUs = BigInt(Math.round((latencyFrames / rate) * 1e6)) + BigInt(RAOP_SAFETY_MS * 1000);
+    const sharedAnchorUs = useSharedAnchor
+      ? this.groupAnchors!.peek(this.opts.groupKey!, this.generation, nowHostUs, floorLeadUs)
+      : null;
     const plan = planBridgeAnchor({
       firstFrameTsUs: this.firstFrameTsUs,
       latencyFrames,
       rate,
       resampled: this.resampler !== null,
-      nowUs: nowUs(),
+      nowUs: nowHostUs,
       anchorShiftUs: this.opts.anchorShiftUs ?? 0,
       forceNow: this.ap2Session === null && raopNowAnchorEnabled(),
+      groupAnchorUs: sharedAnchorUs ?? undefined,
     });
+    if (useSharedAnchor) {
+      if (sharedAnchorUs !== null) {
+        log.info(`[airplay-bridge] group-anchor reuse: device=${this.deviceId} gen=${this.generation} anchorUs=${sharedAnchorUs}(leadUs=${sharedAnchorUs - nowHostUs})`);
+      } else {
+        this.groupAnchors!.publish(this.opts.groupKey!, this.generation, plan.anchorUs);
+        log.info(`[airplay-bridge] group-anchor publish: device=${this.deviceId} gen=${this.generation} anchorUs=${plan.anchorUs}(leadUs=${plan.commandedLeadUs})`);
+      }
+    }
     if (plan.reAnchored) {
       log.warn(`[airplay-bridge] anchor unreachable: device=${this.deviceId} commanded=${this.firstFrameTsUs} now=${nowUs()} → re-anchor ${plan.anchorUs}(丢弃更早内容)`);
     }
@@ -1152,10 +1441,25 @@ export class BridgeSession {
     if (plan.forceNow) {
       log.warn(`[airplay-bridge] forceNow anchor (MF_BRIDGE_RAOP_NOW_ANCHOR): device=${this.deviceId} anchorUs=now+${Number(raopNowAnchorOffsetUs())}µs 首包即发(E2/exp2,组 lead 内容按偏移提前播)`);
     }
-    // forceNow:对齐器零点取首帧 tsUs(内容序)而非 plan.anchorUs(=now)——
-    // 否则泵 lead 段 target−pos ≈ +2.3s > 2s 补静音上限 ⇒ 走 skip 跳段时间线,
-    // startTs 前移把 RTP 重新标回未来,now 锚失效。
-    this.aligner = new BridgeTimelineAligner(plan.forceNow && this.firstFrameTsUs !== null ? this.firstFrameTsUs : plan.anchorUs, rate);
+    // D4(2026-11-01):对齐零点 = 组时间线锚点(plan.anchorUs),**不再**取本会话首帧 ——
+    // 桥重建/迟到加入/bulk 回填时首帧可能是旧内容,零点随之后移 ⇒ 该设备从旧进度起播、
+    // 内容整体错位(用户可见「进度不一样」),且错位只能靠对齐器 drop 追平 ⇒ outBuf 被
+    // 裁空后 pullChunk 补静音 = 丢音变静音(240 实测 droppedFrames 7.5~12s)。
+    // 旧模式保留首帧零点(forceNow 的注释:否则泵 lead 段 target−pos > 2s 走 skip)。
+    this.aligner = new BridgeTimelineAligner(
+      bridgeSyncGroupTimelineEnabled()
+        ? plan.anchorUs
+        : plan.forceNow && this.firstFrameTsUs !== null
+          ? this.firstFrameTsUs
+          : plan.anchorUs,
+      rate,
+      undefined,
+      // D8(2026-11-01):组同步模式把补静音上限从 2s 抬到 10s —— **冷启/迟到加入这类正常
+      // 4~6s 缺口不再走本地跳段**,而是如实补静音(可听时间 = 内容 ts,与跳段等价,但不动
+      // RTP 内容轴:不调用 bridgeSkipFrames ⇒ 没有 startTs 位移可被暖复用/换歌带过去)。
+      // 超过 10s 的极端断料仍保留跳段(内存兜底,1 帧 4B ⇒ 10s ≈ 1.76MB)。
+      bridgeSyncGroupTimelineEnabled() ? rate * 10 : undefined,
+    );
     this.streamAborted = false;
     this.emitAnchorReport(plan, latencyFrames);
     // ---- 双出口(Phase 6b · T03):同一个 plan.anchorUs,只是出口不同 ----
@@ -1169,6 +1473,14 @@ export class BridgeSession {
     // 类型收窄(不可达:上面已判空且 ap2 分支已 return)—— 只为让下面这条 RAOP 语句
     // 保持**逐字节原样**(不带 `!`/强转)。
     if (!player || !session) return;
+    // D6/P1:手动 next/prev 的一次性 ts 回拨需求(在 onBoundary 里登记)。
+    // 只有 RaopPlayer 知道 lastSentTs,所以回拨在 streamBridge 内落地;
+    // 过期(>10s)视为无效 —— 绝不把旧需求套到晚得多的新流上。
+    const rewindFrames =
+      this.pendingRewindFrames > 0 && Date.now() - this.pendingRewindAt <= BRIDGE_MANUAL_REWIND_TTL_MS
+        ? this.pendingRewindFrames
+        : 0;
+    this.pendingRewindFrames = 0;
     this.streamPromise = player
       .streamBridge(() => this.pullChunk(), session, {
         baseTs: plan.anchors.baseTs,
@@ -1177,9 +1489,16 @@ export class BridgeSession {
         startNtp: plan.anchors.startNtp,
         anchorUsShifted: plan.anchors.anchorUsShifted,
         anchorUs: plan.anchorUs,
+        // 送包节拍基准(**不含成员补偿**):同内容在各成员的同刻送包时刻一致
+        beatAnchorUs: plan.beatAnchorUs,
         latencyFrames,
         rate,
-        explicitReanchor: this.lastBoundaryReason === "track",
+        // D6/P1:自动换歌(以及任何 track 换代)= 0 FLUSH、0 RECORD,同一会话内容替换。
+        // 用户操作(seek / 泵移交 rehost)= FLUSH-only;MA 实测新流 ts 相对上一包回拨
+        // 1.588–1.695s(p50 1.662),因此允许时间轴后退(track 仍保留前跳保护)。
+        allowTsRewind: this.lastBoundaryReason === "seek" || this.lastBoundaryReason === "rehost",
+        // 手动 next/prev:显式回拨(基准 = 上一包 ts),与 allowTsRewind 互斥使用。
+        ...(rewindFrames > 0 ? { rewindFrames } : {}),
       })
       .then((endedBy) => {
         // v4.9.7:只有 `send`(sendChunk 返 false,设备侧真断开)才重连。
@@ -1187,10 +1506,6 @@ export class BridgeSession {
         // 停流,交给 onBoundary 换代处置。历史缺陷:此处不区分原因,导致每首歌播完都
         // 触发一次 reconnectRaop,而它在 await connect() 后 forceClose 掉刚起的新流 ⇒
         // 6 轮 / 36s 无声死循环(240 实证 05:33:00)。destroy/stopped 同样不重连。
-        if (endedBy === "reanchor-failed") {
-          if (!this.closed && this.connected) void this.reconnectRaop();
-          return;
-        }
         if (endedBy !== "send") return;
         if (!this.closed && this.connected && !this.streamAborted) this.scheduleRaopReconnect("stream ended");
       })
@@ -1208,7 +1523,7 @@ export class BridgeSession {
   /** AP2 出声循环:拉块(`pullOutChunk`,与 RAOP 同一生产管线)→ 按 sendAt 发送。
    *
    *  硬约束:
-   *   - 节拍只用 `plan.anchorUs`(唯一那次 planBridgeAnchor 的产物),**绝不另起时间线**;
+   *   - 节拍只用 `plan.playAnchorUs`(唯一那次 planBridgeAnchor 的产物),**绝不另起时间线**;
    *   - `RAOP_SAFETY_MS` 不进 sendAt(见 rates.ts 注释:否则 AP2 恒早 50ms);
    *   - 暂停期不拉块、不发送、不写静音(与 RAOP pause 同语义);
    *   - `streamAborted` / `closed` / 链路断 ⇒ 循环立刻退出,不留悬挂定时器;
@@ -1226,7 +1541,9 @@ export class BridgeSession {
       sleepUs: (us) => this.ap2SleepUs(us),
       shouldStop: () => this.closed || this.streamAborted || this.ap2LinkLoss !== null,
       isPaused: () => this.pausedState,
-      anchorUs: plan.anchorUs,
+      // AP2 无 RTP 映射 ⇒ 节拍即出声时刻:用出声锚点(含成员补偿;旧模式与
+      // plan.anchorUs 逐字节相同 —— 那时补偿就在 anchorUs 里)。
+      anchorUs: plan.playAnchorUs,
       rate,
       spf: CHUNK_LEN,
       lEffFrames: AP2_EFFECTIVE_LATENCY_FRAMES,
@@ -1423,6 +1740,19 @@ export class BridgeSession {
     const livenessThresholdMs = raopBridgeLivenessMs();
     const livenessQuietMs = this.player !== null ? Date.now() - this.player.lastTimingAt : 0;
     const livenessBreaker = livenessBreakerState(this.deviceId);
+    // 无心跳设备豁免(判据见 livenessWatchdogShouldFire 的 hasTimingHeartbeat):设备
+    // 结构上从不发 timing 时,quiet 恒超阈值 —— 必须整段跳过,否则每次 TEARDOWN 都把
+    // 组时间线推后 6~7s(重锚 skip),健康流被切成一跳一跳的哑音。
+    const livenessHasHeartbeat = this.player !== null && this.player.timingCount > 0;
+    if (
+      !livenessHasHeartbeat &&
+      this.aligner !== null &&
+      livenessQuietMs > livenessThresholdMs &&
+      this.livenessNoTimingLoggedGen !== String(this.generation)
+    ) {
+      this.livenessNoTimingLoggedGen = String(this.generation);
+      log.info(`[airplay-bridge] liveness watchdog 豁免: device=${this.deviceId} gen=${this.generation} 本会话从未收到 timing 请求(${Math.round(livenessQuietMs / 1000)}s 静默)⇒ 判据不适用,不触发 TEARDOWN`);
+    }
     if (
       Date.now() >= livenessBreaker.cooldownUntil &&
       livenessWatchdogShouldFire({
@@ -1437,6 +1767,7 @@ export class BridgeSession {
         reconnectTimerSet: this.raopReconnectTimer !== null,
         quietMs: livenessQuietMs,
         thresholdMs: livenessThresholdMs,
+        hasTimingHeartbeat: livenessHasHeartbeat,
       })
     ) {
       // 判「上一次重连到底救没救回来」= **同一个 player** 的 timingCount 有没有涨过。
@@ -1632,11 +1963,41 @@ export class BridgeSession {
     const aligner = this.aligner;
     const rate = this.outRate;
     if (aligner && entry.tsUs !== 0n) {
+      // D5(2026-11-01):早于内容零点(组时间线锚点)的输入**整块丢弃、不补静音**
+      // —— MA `_drop_until_us` 语义。旧实现把这份「超前」交给对齐器 drop
+      // (pendingDrops):drop 从**后续输出**里裁帧,outBuf 一旦被裁空,`pullChunk`
+      // 只能补静音 ⇒ 用户听感是「声音丢了 / 静音」(240 实测 droppedFrames 7.5~12s)。
+      // 这里直接裁掉输入前缀(48k / 4 字节每帧),对齐器从 target≈0 起步,不产生 drop。
+      // 仅新模型生效:旧模型的零点取首帧,裁头会改变逐字节行为(回退开关要求等价)。
+      if (this.groupTimelineSync && entry.tsUs < aligner.contentAnchorUs) {
+        const startUs = aligner.contentAnchorUs;
+        const frames = entry.buf.length >> 2;
+        const durUs = BigInt(Math.round((frames / SENDSPIN_RATE) * 1e6));
+        const endUs = entry.tsUs + durUs;
+        if (endUs <= startUs) {
+          // 整帧在锚点之前:不计入插入/跳过,只记丢帧(与 MA「不补静音」一致)。
+          this.stats.droppedFrames += frames;
+          return;
+        }
+        const off = Math.min(frames, Math.round((Number(startUs - entry.tsUs) / 1e6) * SENDSPIN_RATE));
+        if (off > 0) {
+          entry = {
+            ...entry,
+            buf: entry.buf.subarray(off * 4),
+            tsUs: entry.tsUs + BigInt(Math.round((off / SENDSPIN_RATE) * 1e6)),
+          };
+          this.stats.droppedFrames += off;
+        }
+      }
       const act = aligner.onFrame(entry.tsUs);
       if (act.insertFrames > 0) {
-        // 内容落后(有洞)⇒ 补静音(占据真实时间线)。
+        // 内容落后(有洞)⇒ 补静音(占据真实时间线)。D8:组同步模式不设上限(长缺口也补,
+        // 绝不跳段 —— 跳段会把本成员 RTP 内容轴前移,永久错位)。
         this.appendOut(Buffer.alloc(act.insertFrames * 4));
         this.stats.insertedFrames += act.insertFrames;
+        if (act.insertFrames > rate * 2) {
+          log.warn(`[airplay-bridge] ${JSON.stringify({ ev: "pad-insert", dev: this.deviceId, gen: this.generation, frames: act.insertFrames, ms: Math.round((act.insertFrames / rate) * 1000) })}`);
+        }
       }
       if (act.dropFrames > 0) {
         // 内容超前(重叠)⇒ 裁头:从后续重采样输出中丢弃(takeDrop,追加流保持连续,
@@ -1727,6 +2088,111 @@ export class BridgeSession {
     }
   }
 
+  /** D8(2026-11-01):内容轴是否已被本地跳段污染(S 帧偏移会永久带过换代)。 */
+  isContentAxisPoisoned(): boolean {
+    return this.stats.skippedFrames > 0;
+  }
+
+  /** D8(2026-11-01):丢弃当前内容轴(锚点/对齐器)并中止旧推流,让下一帧 AUDIO 重新规划。
+   *
+   *  与「重启型边界(rehost/seek)」同一语义:旧 streamBridge 立即退出、新流首包带 0xE0
+   *  重锚;锚点重新规划时若带 groupKey 会走 D7 共享锚点,因此组内不会因这次复位再分裂。
+   *  用于暖复用路径:旧会话的内容轴被 `bridgeSkipFrames` 平移过(或锚点早已过期),
+   *  继续沿用会把历史偏移/旧锚点带进新代次(240 实测 tick 恒报旧 anchorUs、分裂 2.95s)。 */
+  resetTimeline(reason: string): void {
+    if (this.closed) return;
+    this.firstFrameTsUs = null;
+    this.aligner = null;
+    this.anchors = null;
+    this.anchorUs = null;
+    this.commandedLeadUs = null;
+    this.streamAborted = true;
+    this.stats.skippedFrames = 0;
+    this.player?.flush();
+    log.info(`[airplay-bridge] ${JSON.stringify({ ev: "timeline-reset", dev: this.deviceId, gen: this.generation, reason })}`);
+  }
+
+  /** D6(2026-11-01):运行中改成员补偿 —— **只平移本设备的 RTP↔NTP 映射**,不重建桥。
+   *
+   *  背景(240 实测):`PUT /groups/:id/delays` 旧实现只重发 `bridgePrepare`,而 warm-reuse
+   *  直接复用旧会话、且 `anchorShiftUs` 只在 `maybeBeginStream` 里消费一次 ⇒ 改值对**运行中**
+   *  会话永不生效(两次 PUT 后 anchor 的 shifted−scheduled 恒 old 值)。
+   *
+   *  语义:补偿 = 「本设备相对组时间线的出声偏移」,组时间线(内容/投递节拍)不动
+   *  (D1/D3 已保证同刻同内容) ⇒ 改值只需把设备侧的映射平移 Δ = next − prev。
+   *  未起流时只更新 opts,下一次锚定自然取新值。
+   *
+   *  @returns true = 已落到会话(opts 已更新;流在跑时已 retime);false = AP2 出口
+   *  (无 RTP 时间线,只能重建桥)或参数非法。
+   */
+  applyAnchorShift(shiftUs: number): boolean {
+    const next = Number.isFinite(shiftUs) ? Math.round(shiftUs) : 0;
+    const prev = this.opts.anchorShiftUs ?? 0;
+    this.opts.anchorShiftUs = next;
+    const delta = next - prev;
+    if (delta === 0) return true;
+    if (this.ap2Session !== null) {
+      log.warn(`[airplay-bridge] ${JSON.stringify({
+        ev: "set-delay-unsupported", dev: this.deviceId, gen: this.generation,
+        prevUs: prev, nextUs: next, reason: "ap2-no-rtp-timeline",
+      })}`);
+      return false;
+    }
+    const applied = this.player?.retimeByUs(delta) ?? false;
+    log.info(`[airplay-bridge] ${JSON.stringify({
+      ev: "set-delay", dev: this.deviceId, gen: this.generation,
+      prevUs: prev, nextUs: next, deltaUs: delta, applied,
+    })}`);
+    return true;
+  }
+
+  /** D9(2026-11-01):改补偿的**必生效**兜底 —— 重建本设备侧 RTSP 会话
+   *  (TEARDOWN → 新 ANNOUNCE/SETUP/RECORD),让设备**重新吃一次** RTP↔NTP 映射。
+   *
+   *  为什么必须有这条:SYNC 是单向的、无回执,且实测 GGMM 这类接收端只在 RECORD
+   *  时吃映射、运行中改 SYNC 不一定采纳 ⇒ 仅 `retimeByUs`(D6)无法保证出声时刻真的变。
+   *  内容轴不受影响(可听时间 = 内容 ts;锚点仍走 D7/D8 的组规则),代价 = 重建窗口
+   *  (~1~2s)静音 —— 这是用户明确接受的兜底代价。
+   *
+   *  @returns true = 已接受(流在跑时已完成重建;未起流/AP2 时值已进 opts,
+   *  下一次起流或主进程路由重建自然生效);false = 会话已关闭。 */
+  async rebuildForShift(shiftUs: number, reason = "delay-change"): Promise<boolean> {
+    if (this.closed) return false;
+    // AP2 无 RTP 时间线:opts 已更新,只能靠主进程重建桥路由(调用方兜底)。
+    if (this.ap2Session !== null) {
+      this.applyAnchorShift(shiftUs);
+      return false;
+    }
+    if (!this.applyAnchorShift(shiftUs)) return false;
+    // 流未在跑(起流判定前/已中止)⇒ 新值已进 opts,起流时天然生效,不必拆会话。
+    if (!this.player || this.aligner === null || this.streamAborted) {
+      log.info(`[airplay-bridge] ${JSON.stringify({
+        ev: "rebuild-deferred", dev: this.deviceId, gen: this.generation,
+        shiftUs, reason,
+      })}`);
+      return true;
+    }
+    log.info(`[airplay-bridge] ${JSON.stringify({
+      ev: "rebuild-shift", dev: this.deviceId, gen: this.generation,
+      shiftUs, reason,
+    })}`);
+    // 立刻重建(不走退避):清掉可能挂着的重连定时器,复用现成的
+    // 「TEARDOWN 旧会话 → 新 RECORD → 等新帧重锚」流程。
+    if (this.raopReconnectTimer) {
+      clearTimeout(this.raopReconnectTimer);
+      this.raopReconnectTimer = null;
+    }
+    await this.reconnectRaop();
+    return true;
+  }
+
+  /** D9(2026-11-01):会话是否已关闭 —— manager 据此**跳过僵尸会话**。
+   *  240 实证:同 deviceId 可能残留一条 `reason=closed` 的旧条目(泵断连后未从表里摘除),
+   *  按 deviceId 查找时它会**遮蔽**真正在跑的那座桥 ⇒ 改补偿/音量全部落到死会话上。 */
+  isClosedSession(): boolean {
+    return this.closed;
+  }
+
   /** 诊断快照(bridgeStatus op 用)。 */
   snapshot(): {
     deviceId: string;
@@ -1775,12 +2241,27 @@ export class BridgeSession {
 /** 子进程侧桥会话表(按 sessionToken 索引;同 deviceId 新 prepare 拆旧)。 */
 export class BridgeSessionManager {
   private readonly sessions = new Map<string, BridgeSession>();
+  /** D7:同组同 gen 共享锚点(跨会话状态,随 manager 生命周期;见 BridgeGroupAnchorRegistry)。 */
+  private readonly groupAnchors = new BridgeGroupAnchorRegistry();
+  /** D8:同组同 gen 边界处置一致性(同上;见 BridgeGroupBoundaryRegistry)。 */
+  private readonly groupBoundaries = new BridgeGroupBoundaryRegistry();
+
+  /** D9(2026-11-01):剔除已关闭的僵尸会话 —— 否则按 deviceId 查找会命中死条目,
+   *  改补偿/音量/重建全部落到死会话(240 实证:`reason=closed` 旧条目遮蔽在跑的那座桥,
+   *  `bridgeRebuildDelay` 因此恒返回 false)。 */
+  private pruneClosed(): void {
+    for (const [token, s] of [...this.sessions]) {
+      if (s.isClosedSession()) this.sessions.delete(token);
+    }
+  }
 
   list(): Array<ReturnType<BridgeSession["snapshot"]>> {
+    this.pruneClosed();
     return [...this.sessions.values()].map((s) => s.snapshot());
   }
 
   has(deviceId: string): boolean {
+    this.pruneClosed();
     for (const s of this.sessions.values()) if (s.deviceId === deviceId) return true;
     return false;
   }
@@ -1789,11 +2270,39 @@ export class BridgeSessionManager {
    *  命中即下发并返回 true;未命中返回 false,调用方据此判定「桥上也没人接」。
    *  同一 deviceId 只可能有一座桥(`prepare` 会先拆同 deviceId 旧会话)。 */
   setVolumeDb(deviceId: string, db: number): boolean {
+    this.pruneClosed();
     for (const s of this.sessions.values()) {
       if (s.deviceId === deviceId) {
         s.setVolumeDb(db);
         return true;
       }
+    }
+    return false;
+  }
+
+  /** D6/P1:按 sessionToken 标记「用户手动 next/prev」;未知 token 幂等忽略。 */
+  markManual(token: string): void {
+    this.sessions.get(token)?.markManual();
+  }
+
+  /** D6(2026-11-01):按 deviceId **运行中改成员补偿**(命中即更新并平移设备侧映射)。
+   *  @returns true = 设备有桥会话且已接受;false = 无会话(调用方按重建/加入兜底)。 */
+  setAnchorShift(deviceId: string, shiftUs: number): boolean {
+    this.pruneClosed();
+    for (const s of this.sessions.values()) {
+      if (s.deviceId === deviceId) return s.applyAnchorShift(shiftUs);
+    }
+    return false;
+  }
+
+  /** D9(2026-11-01):按 deviceId **必生效**改补偿 —— 重建该成员的 RTSP 会话
+   *  (设备重新吃一次映射;代价重建窗口 ~1~2s 静音)。
+   *  @returns true = 命中会话并已重建/已入 opts;false = 该设备当前无桥会话。 */
+  async rebuildForShift(deviceId: string, shiftUs: number, reason = "delay-change"): Promise<boolean> {
+    this.pruneClosed();
+    for (const s of this.sessions.values()) {
+      if (s.deviceId !== deviceId) continue;
+      if (await s.rebuildForShift(shiftUs, reason)) return true;
     }
     return false;
   }
@@ -1806,12 +2315,23 @@ export class BridgeSessionManager {
     // 热复用句柄)。token 由主进程 protocolPlayer 的路由复用保证「复用 = 同 token」;
     // token 变 = 上游判定冷启(成员/协议变化),走下方拆旧建新。
     const prev = this.sessions.get(opts.token);
+    this.pruneClosed();
     if (
-      prev && prev.deviceId === opts.deviceId && prev.opts.protocol === opts.protocol
+      prev && !prev.isClosedSession() && prev.deviceId === opts.deviceId
+      && prev.opts.protocol === opts.protocol
       && prev.opts.host === opts.host && prev.opts.port === opts.port
       && prev.warmReusable
     ) {
-      log.info(`[airplay-bridge] sessions: prepare warm-reuse deviceId=${opts.deviceId} token=${opts.token} gen=${prev.snapshot().generation}`);
+      // D6(2026-11-01):暖复用必须把**可变标定**刷进现有会话 —— 否则 `PUT /groups/:id/delays`
+      // 的重建请求会在这里静默丢弃新值(240 实测:两次 PUT 后 anchor 仍是旧 shift)。
+      prev.applyAnchorShift(opts.anchorShiftUs ?? 0);
+      // D8(2026-11-01):旧会话内容轴已被本地跳段污染(skippedFrames>0)⇒ 暖复用必须重锚。
+      // 否则 `bridgeSkipFrames` 平移过的 startTs 会跟着会话带进新代次 —— 240 实测该偏移
+      // 跨换歌粘住(2.95s 分裂),且 tick 一直报旧 anchorUs。
+      if (bridgeSyncGroupTimelineEnabled() && prev.isContentAxisPoisoned()) {
+        prev.resetTimeline("warm-reuse-poisoned");
+      }
+      log.info(`[airplay-bridge] sessions: prepare warm-reuse deviceId=${opts.deviceId} token=${opts.token} gen=${prev.snapshot().generation} shiftUs=${opts.anchorShiftUs ?? 0}`);
       return { listening: true, socketPath: prev.listeningOn ?? opts.socketPath };
     }
     for (const [, s] of [...this.sessions]) {
@@ -1820,7 +2340,7 @@ export class BridgeSessionManager {
         await s.stop().catch(() => {});
       }
     }
-    const session = new BridgeSession(opts);
+    const session = new BridgeSession(opts, this.groupAnchors, this.groupBoundaries);
     await session.start();
     this.sessions.set(opts.token, session);
     log.info(`[airplay-bridge] sessions: prepare deviceId=${opts.deviceId} token=${opts.token} sessions=${this.sessions.size}`);

@@ -227,21 +227,23 @@ describe("connect():RAOP 会话建立", () => {
     expect((p as any).latencyFrames).toBe(88200);
   });
 
-  it("Audio-Latency 小于 1s 帧数 → 仍保底 1s(cliraop 默认;过浅会周期性断音)", async () => {
+  // D9(2026-10-31):设备侧保持深度按时间口径 —— 缺省 MF_BRIDGE_RAOP_HOLD_MS=2000
+  // ⇒ AP1(44.1k)协商深度 88,200 帧(2.000s),1s 是 v4.10.x 及更早的历史值。
+  it("Audio-Latency 小于 2s 帧数 → 仍保底 2s(MF_BRIDGE_RAOP_HOLD_MS=2000 缺省;过浅会周期性断音)", async () => {
     queueHandshake({ audioLatency: "100" });
     const p = new RaopPlayer({ host: HOST });
     await p.connect();
-    expect((p as any).latencyFrames).toBe(SAMPLE_RATE);
+    expect((p as any).latencyFrames).toBe(SAMPLE_RATE * 2);
   });
 
-  it("无 Audio-Latency 头 → 保持默认 1s(不因缺失把延迟打成 0)", async () => {
+  it("无 Audio-Latency 头 → 保持默认 2s(不因缺失把延迟打成 0)", async () => {
     await connected();
     const p2 = new RaopPlayer({ host: HOST });
     H.tcpReplies.push([rtsp()]);
     H.tcpReplies.push([rtsp({ Transport: "RTP/AVP/UDP;unicast;mode=record;server_port=7000;control_port=7001;timing_port=7002" })]);
     H.tcpReplies.push([rtsp()]);
     await p2.connect();
-    expect((p2 as any).latencyFrames).toBe(SAMPLE_RATE);
+    expect((p2 as any).latencyFrames).toBe(SAMPLE_RATE * 2);
   });
 
   it("加密会话(et 含 1):ANNOUNCE 的 SDP 带 rsaaeskey/aesiv", async () => {

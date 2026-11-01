@@ -43,6 +43,9 @@
 //   G10 延迟补偿参数域单一定义 + 写入必经 clamp + AirPlay 变更必须重建组桥
 //   G11 延迟只在读视图,不得进 PlayerGroup 实体 / persist
 //   G12 重复成员语义刻意分叉:全量口 throw / 增量口 no-op(别被「统一」掉)
+//   G16 正缓存不得盖住未过期负缓存(判跳才看得见)
+//   G20 群组「测试延迟」(v4.11.0):样本参数钉死 / songs 行 upsert / 三态还原绝不顺手起播 /
+//       全部组停了才删行 / 两条路由 + 回显 / 前端每组独立按钮
 //
 // 零依赖 node 脚本,挂 ci.yml 的守卫 job(与既有 check-*.mjs 同构)。
 import { readFileSync, readdirSync } from "node:fs";
@@ -756,15 +759,22 @@ console.log("===== G13 延迟补偿按成员(取值口按成员 id 查表,不再
   const gtAt = headAt === -1 ? -1 : ctl.indexOf(">", headAt);
   const openAt = gtAt === -1 ? -1 : ctl.indexOf("{", gtAt);
   const prepB = openAt === -1 ? null : sliceBraces(ctl, openAt);
+  // 2026-11-01 现状(MA `_anchor_stream` 语义):送包节拍/投递窗口/watermark 全组一致,
+  // 成员补偿**只**平移该设备自己的可听锚点 ⇒ prepare 必须把该设备成员补偿当作
+  // anchorShiftUs 传下去(锚点在建会话时算死,改值后靠 D9 重建生效)。
+  // 仍禁止:改用协议格(airplayDelayUsOf / airplay2DelayUsOf)—— 那是 sendspin
+  // 协议分格时代的旧口径,与「按设备成员格」互斥。
   check(
-    "bridgePrepareDevice 的 anchorShiftUs 必须恒 0(延迟补偿唯一落点 = 投递时戳;锚点再平移 = 双加,对齐器裁内容)",
+    "bridgePrepareDevice 的 anchorShiftUs 必须取该设备成员补偿(补偿落点 = 锚点;禁止协议格)",
     prepB !== null &&
       count(prepB, "airplay2DelayUsOf(") === 0 &&
       count(prepB, "airplayDelayUsOf(") === 0 &&
-      /anchorShiftUs:\s*0,/.test(prepB),
+      /anchorShiftUs:\s*bridgeSyncGroupTimelineEnabled\(\)\s*&&\s*groupId\s*\?\s*getMemberDelayMs\(\s*groupId,\s*`airplay:\$\{deviceId\}`\s*\)\s*\*\s*1000\s*:\s*0,/.test(
+        prepB,
+      ),
     prepB === null
       ? miss("bridgePrepareDevice")
-      : `锚点复取组值(双加)= 对齐器把补偿整段裁掉;anchorShiftUs 必须恒 0`,
+      : `成员补偿没进锚点 ⇒ 调延迟该设备不动;仍走 airplay/airplay2DelayUsOf ⇒ 协议分格复活`,
   );
   // AP2 侧同样是把锚点在会话建立时算死 ⇒ 第三格变了不重建桥 = 「只改 AP2」调了没反应。
   const genB = bodyByName(code(SPIN_SERVER), atLineStart("notifyBridgeGeneration"));
@@ -886,8 +896,8 @@ console.log("===== G14 可听前 BUFFERING 瞬态(audibleStarted ⇒ pollCore.bu
   );
   const se14 = code(STREAM_ENGINE);
   check(
-    "streamEngine 必须在 play/seek/rehost 三处复位 audibleStarted(漏一处 ⇒ 该路径回跳回归)",
-    count(se14, "audibleStarted = false") === 3,
+    "streamEngine 必须在 play/预取采纳/seek/rehost 四处复位 audibleStarted(漏一处 ⇒ 该路径回跳回归)",
+    count(se14, "audibleStarted = false") === 4,
     "复位点缺失 ⇒ 对应路径切歌/seek 后进度回跳循环回归",
   );
   check(
@@ -1251,6 +1261,167 @@ console.log("===== G19 混合组切歌等待按组可配 =====");
     "hasActiveSession 已由 control.ts 导出(F4 依赖)",
     read("backend/src/services/airplay/control.ts").includes("export function hasActiveSession("),
     "hasActiveSession 未导出 —— F4 编译期即失败",
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ㉔ G20 群组「测试延迟」:起测/停止/收尾的静默坑(v4.11.0)
+// ---------------------------------------------------------------------------
+// 为什么必须守卫:这套链路只在**人耳**上验证得到,代码错了也不报错 ——
+//   ① 样本参数漂了(间隔/时长/采样率)→ 对齐依据变了,但界面上看不出;
+//   ② 停止时「装载未播」的组被顺手起播 → 用户点「测试→停止」后莫名放歌;
+//   ③ 测试音 songs 行用「先删后插」→ play_history 外键 NO ACTION,第二次起测必炸;
+//   ④ 删行顺序反了 → 主行永远删不掉(曲库留垃圾);
+//   ⑤ 还在别的组出声就把行删了 → 那一组静默断流;
+//   ⑥ 每条断言都锚「唯一语句形态」,不锚参数表(硬性要求 2)。
+{
+  console.log("===== G20 群组「测试延迟」:样本参数/行生命周期/三态还原/路由与回显 =====");
+  const dt = code("backend/src/services/group/delayTest.ts");
+  const apiTxt = code(API_GROUPS);
+
+  // --- a) 样本参数钉死 ---
+  const paramsOk =
+    dt.includes('const TONE_SONG_ID = "mf-delay-test";') &&
+    dt.includes("const CLICK_INTERVAL_SEC = 5;") &&
+    dt.includes("const TONE_DURATION_SEC = 300;") &&
+    dt.includes("const TONE_RATE = 16_000;") &&
+    dt.includes("const CLICK_MS = 20;");
+  check(
+    "G20 测试音参数钉死:id=mf-delay-test / 5s 一次 / 300s 一轮 / 16kHz / 咔哒 20ms",
+    paramsOk,
+    `参数=${paramsOk} ⇒ 样本参数漂移会让「5 秒一次」的对齐依据失效且无任何报错`,
+  );
+
+  // --- b) 样本复用:尺寸正确即跳过重写 ---
+  const toneBody = bodyByName(dt, atLineStart("ensureToneFile"));
+  check(
+    "G20 样本文件已存在且尺寸正确 ⇒ 复用不重写(每次起测不重新生成 9.6MB)",
+    !!toneBody && toneBody.includes("existsSync(file) && statSync(file).size === expectSize"),
+    miss("ensureToneFile 的 existsSync + 尺寸校验"),
+  );
+
+  // --- c) songs 行必须 upsert(先删后插会被外键挡死) ---
+  const rowBody = bodyByName(dt, atLineStart("ensureToneRow"));
+  const upsertOk = !!rowBody && rowBody.includes(".onConflictDoUpdate(") && !rowBody.includes("db.delete(");
+  check(
+    "G20 测试音 songs 行用 upsert(不得先删后插:play_history 是 NO ACTION 外键,删主行必抛)",
+    upsertOk,
+    `upsert=${upsertOk} ⇒ 先删后插 = 第二次点「测试延迟」直接 FOREIGN KEY constraint failed`,
+  );
+
+  // --- d) 删行顺序:先清引用行,再删主行 ---
+  const rmBody = bodyByName(dt, atLineStart("removeToneRow"));
+  let rmOk = false;
+  if (rmBody) {
+    const iPl = rmBody.indexOf("db.delete(playlistSongs)");
+    const iFav = rmBody.indexOf("db.delete(userFavoriteSongs)");
+    const iHist = rmBody.indexOf("db.delete(playHistory)");
+    const iSong = rmBody.indexOf("db.delete(songs)");
+    rmOk = iPl !== -1 && iFav !== -1 && iHist !== -1 && iSong !== -1 &&
+      iPl < iSong && iFav < iSong && iHist < iSong;
+  }
+  check(
+    "G20 收尾删除顺序:playlist_songs / user_favorite_songs / play_history 先清,再删 songs 主行",
+    rmOk,
+    `顺序=${rmOk} ⇒ 反了会因外键 NO ACTION 直接抛错,测试音行永远删不掉`,
+  );
+
+  // --- e) 起测:单曲测试音 + playMode="one"(循环由既有自动推进承担) ---
+  const startBody = bodyByName(dt, atLineStart("startGroupDelayTest"));
+  const startOk = !!startBody &&
+    startBody.includes("await qc.playFrom(groupId, [item], 0, baseUrl);") &&
+    startBody.includes('qc.setPlayMode(groupId, "one");') &&
+    startBody.includes("activeTests.set(groupId, prev);");
+  check(
+    "G20 起测 = 单曲队列 + playMode=one(不自建定时器,循环语义与用户单曲循环同源)",
+    startOk,
+    `起测=${startOk} ⇒ 漏 playMode=one = 5 分钟后停下不再咔哒`,
+  );
+
+  // --- f) 起播失败必须还原现场 + 清行 + 异常上抛 ---
+  const failOk = !!startBody &&
+    startBody.includes("removeToneRow();") &&
+    startBody.includes("await restorePrevQueue(qc, groupId, baseUrl, prev);") &&
+    /\}\s*catch\s*\([\s\S]{0,200}?throw\s+e\s*;/.test(startBody);
+  check(
+    "G20 起播失败:清测试音行 → 还原起测前队列 → 异常仍上抛(不吞错也不留脏现场)",
+    failOk,
+    `失败路径=${failOk} ⇒ 吞错 = 前端以为已在测试;不还原 = 队列被永久换成测试音`,
+  );
+
+  // --- g) 三态还原:暂停/在播/装载未播 必须区分 ---
+  const restoreBody = bodyByName(dt, atLineStart("restorePrevQueue"));
+  const triOk = !!restoreBody &&
+    restoreBody.includes("if (prev.wasPlaying || prev.wasPaused)") &&
+    restoreBody.includes('if (prev.wasPaused) await qc.transport(groupId, "pause");') &&
+    restoreBody.includes("else if (prev.positionSec > 0) await qc.transport(groupId, \"seek\", prev.positionSec);");
+  check(
+    "G20 起测前在播/暂停:按原下标重播并补回进度(暂停则再暂停,不把暂停态变成播放)",
+    triOk,
+    `三态=${triOk} ⇒ 缺 wasPaused 分支 = 用户暂停的音乐在停测后自己响起来`,
+  );
+  // 「装载未播」分支:只 setQueue + stopPlayback,绝不 playFrom。
+  const noAutoplayOk = !!restoreBody &&
+    restoreBody.includes("qc.setQueue(groupId, prev.items, index, baseUrl, prev.contentContext);") &&
+    restoreBody.includes("qc.stopPlayback(groupId);") &&
+    (restoreBody.split("qc.playFrom(").length - 1) === 1;
+  check(
+    "G20 起测前只是装载未播:只 setQueue+stopPlayback,**绝不顺手起播**(playFrom 全函数仅 1 处)",
+    noAutoplayOk,
+    `未播分支=${noAutoplayOk} ⇒ 多一处 playFrom = 「点测试→停测试」会莫名开始放歌`,
+  );
+  check(
+    "G20 起测前无队列:clear(skipDeviceStop) 收尾(设备已由停止流程停过,不重复停)",
+    !!restoreBody && restoreBody.includes("qc.clear(groupId, { skipDeviceStop: true });"),
+    miss("clear(groupId, { skipDeviceStop: true })"),
+  );
+
+  // --- h) 停止:先停设备,再按快照还原;全部组都停了才删行 ---
+  const stopBody = bodyByName(dt, atLineStart("stopGroupDelayTest"));
+  const stopOk = !!stopBody &&
+    stopBody.includes("activeTests.delete(groupId);") &&
+    stopBody.includes("qc.stopPlayback(groupId);") &&
+    stopBody.includes('await qc.transport(groupId, "stop");') &&
+    stopBody.includes("if (activeTests.size === 0) removeToneRow();");
+  check(
+    "G20 停止 = 摘登记 → stopPlayback → transport(\"stop\") → 快照还原;activeTests 空了才删测试音行",
+    stopOk,
+    `停止=${stopOk} ⇒ 提前删行 = 仍在别的组出声的那条链路被抽掉`,
+  );
+
+  // --- i) 路由:两条 POST + 权限/归属/错误码 + GET delays 回显 ---
+  const rStart = apiTxt.indexOf('app.post("/v1/groups/:id/delay-test"');
+  const rStop = apiTxt.indexOf('app.post("/v1/groups/:id/delay-test/stop"');
+  const rStartBody = rStart === -1 ? "" : apiTxt.slice(rStart, rStart + 600);
+  const rStopBody = rStop === -1 ? "" : apiTxt.slice(rStop, rStop + 600);
+  const routeOk = rStart !== -1 && rStop !== -1 &&
+    rStartBody.includes("permMiddleware(PERM.RENDERER_USE)") &&
+    rStartBody.includes("gm.isOwnedBy(") &&
+    rStartBody.includes("startGroupDelayTest(") &&
+    rStopBody.includes("permMiddleware(PERM.RENDERER_USE)") &&
+    rStopBody.includes("stopGroupDelayTest(") &&
+    rStartBody.includes("BusinessErrorCode.INVALID_PARAM");
+  check(
+    "G20 两条路由存在且权限/归属/错误码齐备:POST /delay-test(启动)与 /delay-test/stop(停止)",
+    routeOk,
+    `路由=${routeOk} ⇒ 缺 owner 校验 = 越权操作别人的组;缺 INVALID_PARAM = 前端拿不到可读失败`,
+  );
+  check(
+    "G20 GET /v1/groups/:id/delays 回显 delayTest(刷新页面后仍能点「停止」)",
+    apiTxt.includes("delayTest: isGroupDelayTestActive(id)"),
+    miss("GET delays 的 delayTest 回显字段"),
+  );
+
+  // --- j) 前端:每组独立运行态 + 停止走 .../delay-test/stop ---
+  const fe = read(GROUPS_VUE);
+  const feOk = fe.includes("const delayTesting = ref<Record<string, boolean>>({});") &&
+    fe.includes("const delayTestBusy = ref<Record<string, boolean>>({});") &&
+    fe.includes('`/rest/api/v1/groups/${g.id}/delay-test${running ? "/stop" : ""}`') &&
+    fe.includes("delayTesting.value[g.id] = !!r.data?.delayTest;");
+  check(
+    "G20 前端每组独立按钮:运行态/忙碌态按 g.id 分表,动作按当前态切 start/stop,并从 GET delays 回读状态",
+    feOk,
+    `前端=${feOk} ⇒ 共用全局布尔 = 一台设备在测试时全组按钮都变「停止」`,
   );
 }
 

@@ -65,7 +65,7 @@ describe("planBridgeAnchor.forceNow(now 锚)", () => {
     expect(plan.reAnchored).toBe(false);
   });
 
-  it("anchorShiftUs 平移在 now 锚下保留(A/V 标定不丢)", () => {
+  it("anchorShiftUs 在 now 锚下只进出声锚点(playAnchorUs),组锚点不跟着走", () => {
     const plan = planBridgeAnchor({
       firstFrameTsUs: FIRST_FRAME,
       latencyFrames: 44100,
@@ -75,7 +75,9 @@ describe("planBridgeAnchor.forceNow(now 锚)", () => {
       anchorShiftUs: 150_000,
       forceNow: true,
     });
-    expect(plan.anchorUs).toBe(NOW + 150_000n + 1_050_000n);
+    // D1:组时间线唯一 —— now 锚也不吃补偿,补偿只在出声/映射侧生效
+    expect(plan.anchorUs).toBe(NOW + 1_050_000n);
+    expect(plan.playAnchorUs).toBe(NOW + 1_050_000n + 150_000n);
   });
 
   it("now 锚的 SYNC 映射 = 「音频 now+偏移 开始」:startNtp = ntp(now+offset+群延迟 − L)", () => {

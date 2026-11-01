@@ -141,17 +141,20 @@ vi.mock("../../src/services/airplay/protocolPlayer.js", () => {
       ? { playerId: `airplay:${id}`, playbackState: "PLAYING", position: 9, duration: 80, updatedAt: 0 }
       : { mediaUri: `http://apcast/${id}` };
   };
+  const fakePlayer = (id: string) => ({
+    playerId: `airplay:${id}`,
+    playMedia: (item: any, baseUrl: string, startMs?: number) => rec(id, "playMedia", [item, baseUrl, startMs]),
+    stop: () => rec(id, "stop", []),
+    pause: () => rec(id, "pause", []),
+    resume: () => rec(id, "resume", []),
+    seek: (sec: number) => rec(id, "seek", [sec]),
+    setVolume: (v: number) => rec(id, "setVolume", [v]),
+    pollState: () => rec(id, "pollState", []),
+  });
   return {
-    createAirPlayProtocolPlayer: (id: string) => ({
-      playerId: `airplay:${id}`,
-      playMedia: (item: any, baseUrl: string, startMs?: number) => rec(id, "playMedia", [item, baseUrl, startMs]),
-      stop: () => rec(id, "stop", []),
-      pause: () => rec(id, "pause", []),
-      resume: () => rec(id, "resume", []),
-      seek: (sec: number) => rec(id, "seek", [sec]),
-      setVolume: (v: number) => rec(id, "setVolume", [v]),
-      pollState: () => rec(id, "pollState", []),
-    }),
+    // 统一入口(桥开 ⇒ 单机伪组桥播放器);本文件 mock 的开关恒为关 ⇒ 组层扇出仍走本桩。
+    createAirPlayPlayerForDevice: (id: string) => fakePlayer(id),
+    createAirPlayProtocolPlayer: (id: string) => fakePlayer(id),
   };
 });
 

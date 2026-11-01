@@ -290,6 +290,16 @@
       "codeSent": "Submitted, waiting for the device",
       "approvedToast": "Device approved",
       "unapprovedToast": "Approval revoked"
+    },
+    "bridgePrefetch": {
+      "title": "Next-track prefetch (S1)",
+      "desc": "Decode the head of the next track ahead of time when a track ends naturally: no decode gap at the boundary, and no dropped head caused by a restart. Only affects bridged (AirPlay forced-bridge) playback.",
+      "enable": "Enable next-track prefetch",
+      "enableDesc": "On (default): when the current track has 5 s or less left, decode the first 3 s of the next track; the boundary is then stitched with the prefetched frames (measured track-change wait drops from 8.9 s to 1.2-4.6 s). Off: back to \"drain, then restart\", about 8 s of silence at the boundary, same as the previous behaviour. Applies from the next track; current playback is not interrupted.",
+      "envNote": "Note: the container environment variable MF_BRIDGE_NEXT_TRACK_PREFETCH={env} is set explicitly, so it wins over this switch.",
+      "saved": "Saved (applies from the next track)",
+      "saveFailed": "Failed to save",
+      "loadFailed": "Failed to read the S1 switch"
     }
   },
   "layout": {
@@ -1059,6 +1069,11 @@
     "delayMemberHint": "Positive = this device sounds later, negative = earlier. AirPlay members rebuild the bridge session on save (~1-2 s of silence); Sendspin members apply live per frame. Each device in the group is set independently",
     "delayReset": "Reset to 0",
     "delayApply": "Save and apply",
+    "delayTestStart": "Test delay",
+    "delayTestStop": "Stop test",
+    "delayTestStarted": "Started: one click every 5 s in this group. Align by ear, then press Stop test",
+    "delayTestStopped": "Stopped",
+    "delayTestFailed": "Delay test failed",
     "mixedLeadEntry": "Track switch wait",
     "mixedLeadAuto": "Auto",
     "mixedLeadTitle": "Track switch wait (mixed group)",

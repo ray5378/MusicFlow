@@ -41,6 +41,9 @@ const eng = vi.hoisted(() => {
     resume: vi.fn(),
     seek: vi.fn(),
     armSeek: vi.fn(),
+    // S1(2026-11-01):起播前要问「有没有可采纳的预取」,停止路径会取消预解码。
+    hasPendingPrefetch: vi.fn(() => false),
+    cancelNextTrackPrefetch: vi.fn(),
   });
   return {
     pumps,

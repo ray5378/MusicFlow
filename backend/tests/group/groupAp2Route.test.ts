@@ -6,7 +6,7 @@
 //   ③ 未配对 AP2 成员选 raop(未配对不得入组由 group/index 准入拦,这里只保证不误选 AP2);
 //   ④ 混合组里**每个成员各按自己的协议**进桥(协议是逐成员的,不是组级),
 //      且 `BridgeSocketSpec.protocol` 一路透传到组泵(CONFIG 用)。
-// 另钉运行期降级:AP2 链路断 ⇒ 摘桥 + 清 owner + 该设备本流回落 solo cast(不留 owner=bridge)。
+// 另钉运行期降级:AP2 链路断 ⇒ 摘桥 + 清 owner + 该设备本曲不播放(D7:不回落 solo)。
 //
 // 全部依赖 mock:桥 prepare/stop、组泵 sync、设备状态都不碰真实网络与子进程。
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -112,6 +112,8 @@ vi.mock("../../src/services/airplay/bridgeChannel.js", () => ({
 }));
 
 vi.mock("../../src/services/airplay/protocolPlayer.js", () => ({
+  // 统一入口(桥开 ⇒ 单机伪组桥播放器);组层仅在 `MUSICFLOW_AIRPLAY_BRIDGE=0` 回滚时扇出。
+  createAirPlayPlayerForDevice: (id: string) => H.airplayPlayer(id),
   createAirPlayProtocolPlayer: (id: string) => H.airplayPlayer(id),
 }));
 
@@ -166,6 +168,7 @@ import {
   bridgeJoinMember,
   checkBridgeDegradedOnce,
   degradeBridgeMember,
+  getBridgeUnavailableReason,
   isBridgeRouteActive,
   resetBridgeRouteReconcilerForTest,
   setBridgeRoutesForTest,
@@ -248,15 +251,19 @@ describe("prepareBridgeRoute · 逐成员选协议", () => {
     expect(isBridgeRouteActive("g4")).toBe(true);
   });
 
-  it("prepare 失败 ⇒ 该设备进 soloFallback(仍是原语句形态),其它成员协议不受影响", async () => {
+  // D7:失败者本曲不播放(标 bridgeUnavailable),绝不回落 solo cast;协议选择不受影响。
+  it("prepare 失败 ⇒ 该台标 bridgeUnavailable 且不 solo cast,其它成员协议不受影响", async () => {
     mkGroup("g5", ["ap1", "ap2"]);
     H.protocolOf.ap1 = "raop";
     H.protocolOf.ap2 = "ap2-realtime";
     H.state.failPrepare.add("ap2");
     await createGroupProtocolPlayer("g5").playMedia(ITEM, BASE);
     const byDevice = Object.fromEntries(H.prepareCalls.map((c) => [c.deviceId, c.protocol]));
-    expect(byDevice).toEqual({ ap1: "raop", ap2: "ap2-realtime" });
-    expect(H.soloPlay.map((s) => s.deviceId)).toEqual(["ap2"]); // 失败者回落 solo cast
+    expect(byDevice).toEqual({ ap1: "raop", ap2: "ap2-realtime" }); // 协议仍逐成员选
+    expect(H.soloPlay).toHaveLength(0); // D7:失败者不再回落 solo cast
+    expect(H.syncCalls[0]!.specs).toEqual([{ deviceId: "ap1", protocol: "raop" }]); // 泵只挂成功者
+    expect(getBridgeUnavailableReason("ap2")?.reason).toMatch(/prepare failed/);
+    expect(getBridgeUnavailableReason("ap1")).toBeUndefined();
   });
 
   it("播中加入(bridgeJoinMember)同样逐成员选协议", async () => {
@@ -278,7 +285,9 @@ describe("运行期降级(AP2 链路断)", () => {
     return { deviceId, token, socketPath: `/tmp/b_${deviceId}_${token}.sock`, protocol: protocol as any };
   }
 
-  it("★ degradeBridgeMember:摘桥 + 清 owner=bridge + 本流回落 solo cast", async () => {
+  // D7(2026-10-31):链路断 ⇒ 摘桥 + 清 owner=bridge + 标 bridgeUnavailable;
+  // 本曲该台**不播放**(不再回落 solo cast),下一首起播重新走桥(prepare 成功即自动恢复)。
+  it("★ degradeBridgeMember:摘桥 + 清 owner=bridge + 本曲不播放(D7 不回落 solo)", async () => {
     mkGroup("gd", ["ap2"]);
     setBridgeRoutesForTest(new Map([["gd", [routeOf("ap2", "tok-1", "ap2-realtime")]]]));
     H.bridgeOwned.add("ap2");
@@ -289,8 +298,10 @@ describe("运行期降级(AP2 链路断)", () => {
     // owner=bridge 已清(否则设备被桥永久占用:音量失效、native cast 被互斥拒)
     expect(H.bridgeStopCalls.some((c) => c.token === "tok-1" && c.deviceId === "ap2")).toBe(true);
     expect(H.bridgeOwned.has("ap2")).toBe(false);
-    // 本流回落 solo cast(不是「静音等下一首」)
-    expect(H.soloPlay).toEqual([{ deviceId: "ap2", songId: "song-42", baseUrl: "http://127.0.0.1:8686" }]);
+    // D7:本曲不播放,且**不得**出现逐曲 solo cast
+    expect(H.soloPlay).toHaveLength(0);
+    // 失败原因可读,状态面上报(用户看得见「桥握手失败/链路断」)
+    expect(getBridgeUnavailableReason("ap2")?.reason).toMatch(/bridge-degraded: udp-unreachable/);
     // 幂等:第二次上报不残留
     expect(await degradeBridgeMember("ap2", "tok-1", "udp-unreachable")).toBe(false);
   });
@@ -303,7 +314,8 @@ describe("运行期降级(AP2 链路断)", () => {
     expect(H.soloPlay).toHaveLength(0);
   });
 
-  it("队列无当前项 ⇒ 只摘桥(下一首自然走 solo),不抛错", async () => {
+  // 队列无当前项不影响降级动作本身:摘桥是独立于「有没有歌」的清理步骤(D7:本曲不播放)。
+  it("队列无当前项 ⇒ 只摘桥(本曲不播放,下曲重新建桥),不抛错", async () => {
     mkGroup("gd3", ["ap2"]);
     setBridgeRoutesForTest(new Map([["gd3", [routeOf("ap2", "tok-3", "ap2-realtime")]]]));
     H.state.currentItem = null;

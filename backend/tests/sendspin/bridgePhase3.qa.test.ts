@@ -4,8 +4,8 @@
 //    PCM 字节(不吃 flac);单桥 pushAudio 抛错不连累另一桥与组泵返回值;
 // ② stop→play(epoch+2)→ 重锚钩子恰各发 1 次代次通知,generation 跳变 = epoch 差 × 1_000_003,
 //    组桩 bridges/bridgeSpecs 全程不被泵触碰(桥生命周期只归 sync/clear 管理);
-// ③ prepareBridgeRoute 路由状态机:全成功=bridge / 单失败=degraded(失败者回落 solo cast)/
-//    全失败=legacy-cast(bridge 参数不出现);stop → 逐设备 bridgeStopDevice;
+// ③ prepareBridgeRoute 路由状态机:全成功=bridge / 单失败=degraded(失败者本曲不播放,
+//    D7 不回落 solo cast)/ 全失败=无 bridge 参数且所有失败者静默(D7);stop → 逐设备 bridgeStopDevice;
 // ④ BridgeSessionManager:同 deviceId 二次 prepare → 旧会话拆除(socket 文件被摘)、
 //    会话计数 == 1;isAirplayBridgeEnabled flag 门控(=0 关死,其余开)。
 import "../plugins/_env.js";
@@ -75,7 +75,7 @@ import { SAMPLE_RATE, type EncodedChunk } from "../../src/services/sendspin/enco
 import { nowUs } from "../../src/services/sendspin/clock.js";
 import { BridgeSessionManager } from "../../src/services/airplay/bridgeSession.js";
 import { isAirplayBridgeEnabled } from "../../src/services/airplay/control.js";
-import { createGroupProtocolPlayer } from "../../src/services/group/protocolPlayer.js";
+import { createGroupProtocolPlayer, getBridgeUnavailableReason } from "../../src/services/group/protocolPlayer.js";
 
 // ===========================================================================
 // ① BLK-01 组合反例 + 单桥故障隔离
@@ -336,8 +336,8 @@ vi.mock("../../src/services/airplay/control.js", () => ({
   },
 }));
 
-vi.mock("../../src/services/airplay/protocolPlayer.js", () => ({
-  createAirPlayProtocolPlayer: (id: string) => ({
+vi.mock("../../src/services/airplay/protocolPlayer.js", () => {
+  const fakeSolo = (id: string) => ({
     playerId: `airplay:${id}`,
     playMedia: async (item: any, _baseUrl: string, startMs?: number) => {
       R.apSoloCalls.push({ id, startMs });
@@ -349,8 +349,13 @@ vi.mock("../../src/services/airplay/protocolPlayer.js", () => ({
     seek: async () => {},
     setVolume: async () => {},
     pollState: async () => ({ playerId: `airplay:${id}`, playbackState: "PLAYING", position: 0, duration: 100, updatedAt: 0 }),
-  }),
-}));
+  });
+  return {
+    // 统一入口:桥开 ⇒ 单机伪组桥播放器;组层只在 `MUSICFLOW_AIRPLAY_BRIDGE=0` 回滚时扇出本桩。
+    createAirPlayPlayerForDevice: (id: string) => fakeSolo(id),
+    createAirPlayProtocolPlayer: (id: string) => fakeSolo(id),
+  };
+});
 
 vi.mock("../../src/services/sendspin/index.js", () => ({
   getSendspinFront: () => ({ clients: new Map([["c1", { ready: true }]]), groups: new Map() }),
@@ -415,7 +420,7 @@ describe("QA③ prepareBridgeRoute 三态路由", () => {
     expect(R.apSoloCalls).toHaveLength(0); // 桥成功者绝不 solo cast
   });
 
-  it("单设备失败 → degraded:sockets 仅含成功者,失败者回落 solo cast", async () => {
+  it("单设备失败 → degraded:sockets 仅含成功者,失败者本曲不播放(D7 不回落 solo cast)", async () => {
     const player = createGroupProtocolPlayer("g-qa3-deg");
     R.prepareBehavior.set("ap-1", "ok");
     R.prepareBehavior.set("ap-2", "fail");
@@ -425,10 +430,13 @@ describe("QA③ prepareBridgeRoute 三态路由", () => {
 
     expect(R.spinPlayCalls[0]!.bridge?.sockets).toHaveLength(1);
     expect(R.spinPlayCalls[0]!.bridge!.sockets[0].deviceId).toBe("ap-1");
-    expect(R.apSoloCalls.map((c) => c.id)).toEqual(["ap-2"]); // 失败者回落
+    // D7:失败者仅该台本次不播放,绝不回落 solo cast;失败原因可从观测面读到
+    expect(R.apSoloCalls).toHaveLength(0);
+    expect(getBridgeUnavailableReason("ap-2")?.reason).toMatch(/prepare 失败/);
+    expect(getBridgeUnavailableReason("ap-1")).toBeUndefined();
   });
 
-  it("全失败 → legacy-cast:bridge 参数不出现,全部 airplay solo cast", async () => {
+  it("全失败 → 无 bridge 参数且全部 airplay 成员静默(D7 不回落 solo cast)", async () => {
     const player = createGroupProtocolPlayer("g-qa3-leg");
     R.prepareBehavior.set("ap-1", "fail");
     R.prepareBehavior.set("ap-2", "fail");
@@ -437,7 +445,9 @@ describe("QA③ prepareBridgeRoute 三态路由", () => {
     await player.playMedia(ITEM, "http://base");
 
     expect(R.spinPlayCalls[0]!.bridge).toBeUndefined();
-    expect(R.apSoloCalls.map((c) => c.id).sort()).toEqual(["ap-1", "ap-2"]);
+    expect(R.apSoloCalls).toHaveLength(0); // D7:全失败也不回落 legacy solo cast
+    expect(getBridgeUnavailableReason("ap-1")?.reason).toMatch(/prepare 失败/);
+    expect(getBridgeUnavailableReason("ap-2")?.reason).toMatch(/prepare 失败/);
   });
 
   it("stop → teardown:逐设备 bridgeStopDevice(token+deviceId),幂等", async () => {

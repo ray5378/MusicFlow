@@ -121,57 +121,34 @@ function ugGroup(name: string, specs: Array<{ deviceId: string; protocol: string
   return g;
 }
 
-// ==================== ⑥ 投递窗口跟随桥锚点位移(手动延迟补偿的生效前提) ====================
-// 修前:窗口只以 now 选帧 ⇒ anchor 后移被对齐器当「帧提前到达」drop/skip 出清,
-// 补偿整体失效(2026-10-27 真机 8 秒实验:realigned 激增、deltaUs 两拍回落)。
-describe("⑥ 投递窗口跟随桥锚点位移(anchorShiftUs)", () => {
-  it("AP1 桥 + 成员格 airplay:ap-1=2000 ⇒ 选帧窗口整体后移 2s(audibleAt = ts + shift 落窗),投递 ts 换算不变", async () => {
+// ==================== ⑥ 投递窗口 = 组时间线(成员补偿不进投递) ====================
+// 2026-11-01(D1,MA `_anchor_stream`):改造前 ±shift 折进「选帧窗口 + 投递时戳」⇒
+// 同组各成员按自己的补偿错开取料 ⇒ 进度差 ⇒ 一台无料可投丢音静音,且同刻两包内容不同。
+// 新模型:窗口/投递戳一律不含 shift(同组逐字节同源),补偿只在桥会话出声锚点生效。
+describe("⑥ 投递窗口 = 组时间线(不含成员补偿)", () => {
+  it("同组 +2000ms 与 0:同一帧两桥收到**逐字节相同**的投递 ts(旧实现相差 2s)", async () => {
     // 不 invalidate:setMemberDelay 更新内存缓存(生产 PUT 同一路径),DB 无此行不能重读
     setMemberDelay("delay-win-1", "airplay:ap-1", 2000);
-    const g = ugGroup("ug:delay-win-1", [{ deviceId: "ap-1", protocol: "raop" }]);
-    (g as any).encoders.set("pcm:100", new PhaseEncoder([1000, 1000]));
-    const b = bridgeStub("ap-1");
-    g.bridges.set("ap-1", b as any);
-
-    const ahead = BigInt(g.commonSendAheadUs());
-    // shift=0 时的窗口 = [now+1.5s, now+2.5s]+ahead;+2s 后 = [now−0.5s, now+0.5s]+ahead
-    // 顺序:先投新窗内帧(ring 有序,窗外帧会 break 挡住后续;生产 rebuild 换代无此卡点)
-    const tsInside = nowUs() + ahead + 300_000n; // audible=ts+2s=now+2.3s ∈ [now+1.5,now+2.5]+ahead ✓
-    await g.pushFrame(tsInside, PCM());
-    g.bridgePushTick();
-    expect(b.pushed).toHaveLength(1);
-    // 投递时戳 = ts − ahead + shift(桥内时间线整体平移 ⇒ 设备晚 shift 出声)
-    expect(b.pushed[0]!.ts).toBe(tsInside - ahead + 2_000_000n);
-
-    const tsOutside = nowUs() + ahead + 2_000_000n; // 原窗内、新窗外(>hi)⇒ 不投
-    await g.pushFrame(tsOutside, PCM());
-    g.bridgePushTick();
-    expect(b.pushed).toHaveLength(1); // 无新增
-  });
-
-  it("每桥读各自设备的成员格:airplay:ap-2 与同组 ap-1=5000 互不串(按成员,不按协议)", async () => {
-    setMemberDelay("delay-win-2", "airplay:ap-1", 5000); // 同组另一台 —— 不得影响 ap-2 的窗口
-    const g = ugGroup("ug:delay-win-2", [
+    const g = ugGroup("ug:delay-win-1", [
       { deviceId: "ap-1", protocol: "raop" },
-      { deviceId: "ap-2", protocol: "ap2-realtime" },
+      { deviceId: "ap-2", protocol: "raop" },
     ]);
     (g as any).encoders.set("pcm:100", new PhaseEncoder([1000, 1000]));
-    const b = bridgeStub("ap-2");
-    g.bridges.set("ap-2", b as any);
+    const b1 = bridgeStub("ap-1");
+    const b2 = bridgeStub("ap-2");
+    g.bridges.set("ap-1", b1 as any);
+    g.bridges.set("ap-2", b2 as any);
 
     const ahead = BigInt(g.commonSendAheadUs());
-    // 若误读 AP1 格(5000ms) ⇒ 窗口=[now−3.5s,now−2.5s]+ahead ⇒ ts0 落窗外不投;正确(读 0)⇒ 原窗 ⇒ 投
+    // 窗口 = [now+1.5s, now+2.5s] + ahead(shift 恒 0;+2s 不再把窗口后移)
     const ts0 = nowUs() + ahead + 2_000_000n;
     await g.pushFrame(ts0, PCM());
     g.bridgePushTick();
-    expect(b.pushed).toHaveLength(1);
-
-    // PUT airplay:ap-2=1500 ⇒ 下一 tick 窗口=[now+ahead, now+1s+ahead];新帧 ts=now+2s+ahead ⇒ 不投
-    setMemberDelay("delay-win-2", "airplay:ap-2", 1500);
-    const ts1 = nowUs() + ahead + 2_000_000n;
-    await g.pushFrame(ts1, PCM());
-    g.bridgePushTick();
-    expect(b.pushed).toHaveLength(1); // 无新增:动态读生效,无需任何重建通知
+    expect(b1.pushed).toHaveLength(1);
+    expect(b2.pushed).toHaveLength(1);
+    expect(b1.pushed[0]!.ts).toBe(ts0 - ahead);
+    expect(b2.pushed[0]!.ts).toBe(ts0 - ahead); // 同刻同内容(旧实现 = ts−ahead+2s)
+    expect(Array.from(b2.pushed[0]!.data)).toEqual(Array.from(b1.pushed[0]!.data));
   });
 
   it("切歌垫片动态·冷边界(A 方案):未配置组 + track 冷启 ⇒ 动态冷 lead(测试 env=1000ms),投递时戳整体 +Δ", async () => {
@@ -207,7 +184,7 @@ describe("⑥ 投递窗口跟随桥锚点位移(anchorShiftUs)", () => {
     expect(b.pushed[0]!.ts).toBe(ts0 - ahead);
   });
 
-  it("负 shift(更早出声):窗口前移 —— 原窗内的帧改为不投,更远的未来帧提前投", async () => {
+  it("负 shift(更早出声):窗口不前移 —— 原窗内的帧照常投,投递 ts 不含补偿", async () => {
     setMemberDelay("delay-win-3", "airplay:ap-3", -800);
     const g = ugGroup("ug:delay-win-3", [{ deviceId: "ap-3", protocol: "raop" }]);
     (g as any).encoders.set("pcm:100", new PhaseEncoder([1000, 1000]));
@@ -215,17 +192,33 @@ describe("⑥ 投递窗口跟随桥锚点位移(anchorShiftUs)", () => {
     g.bridges.set("ap-3", b as any);
 
     const ahead = BigInt(g.commonSendAheadUs());
-    // 新窗 = [now+1.5s,now+2.5s]+ahead+0.8s = [now+2.3s, now+3.3s]+ahead
-    const tsEarly = nowUs() + ahead + 1_000_000n; // 原窗内、新窗外(<lo)⇒ 丢弃并推水位
-    await g.pushFrame(tsEarly, PCM());
-    g.bridgePushTick();
-    expect(b.pushed).toHaveLength(0);
-
-    const tsFar = nowUs() + ahead + 2_800_000n; // 新窗内(原窗外)⇒ 提前投
-    await g.pushFrame(tsFar, PCM());
+    // 旧实现:窗口前移 0.8s ⇒ [now+0.7s,now+1.7s]+ahead ⇒ 本帧(2s)落窗外被推水位丢弃
+    const ts0 = nowUs() + ahead + 2_000_000n;
+    await g.pushFrame(ts0, PCM());
     g.bridgePushTick();
     expect(b.pushed).toHaveLength(1);
-    expect(b.pushed[0]!.ts).toBe(tsFar - ahead - 800_000n); // 负 shift:投递时戳前移
+    expect(b.pushed[0]!.ts).toBe(ts0 - ahead); // 旧实现 = ts−ahead−800ms
+  });
+
+  it("legacy 回退(MF_BRIDGE_SYNC_GROUP_TIMELINE=0):窗口/ts 重新含 shift(现场可一键二分)", async () => {
+    process.env.MF_BRIDGE_SYNC_GROUP_TIMELINE = "0";
+    try {
+      setMemberDelay("delay-win-legacy", "airplay:ap-1", 2000);
+      const g = ugGroup("ug:delay-win-legacy", [{ deviceId: "ap-1", protocol: "raop" }]);
+      (g as any).encoders.set("pcm:100", new PhaseEncoder([1000, 1000]));
+      const b = bridgeStub("ap-1");
+      g.bridges.set("ap-1", b as any);
+
+      const ahead = BigInt(g.commonSendAheadUs());
+      // 旧窗(+2s)= [now−0.5s, now+0.5s]+ahead ⇒ audible 2.3s 的帧落窗
+      const tsInside = nowUs() + ahead + 300_000n;
+      await g.pushFrame(tsInside, PCM());
+      g.bridgePushTick();
+      expect(b.pushed).toHaveLength(1);
+      expect(b.pushed[0]!.ts).toBe(tsInside - ahead + 2_000_000n);
+    } finally {
+      delete process.env.MF_BRIDGE_SYNC_GROUP_TIMELINE;
+    }
   });
 });
 

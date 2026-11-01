@@ -290,6 +290,16 @@
       "codeSent": "已提交,等待设备端完成",
       "approvedToast": "已批准该设备",
       "unapprovedToast": "已撤销批准"
+    },
+    "bridgePrefetch": {
+      "title": "下一首预解码（S1）",
+      "desc": "自然换歌时提前解码下一首的开头：边界不再有解码空窗，也不会因重投丢掉刚解好的曲头。仅对走桥的播放（AirPlay 全量强制走桥）生效。",
+      "enable": "开启下一首预解码",
+      "enableDesc": "开（默认）：本曲剩余 ≤5 秒时预解码下一首前 3 秒，曲末不再等排空，边界由预解码帧按连续时间戳直接接续（实测换歌等待 8.9 秒 → 1.2~4.6 秒）。关：回到「曲末排空 + 重新起播」，切歌停顿约 8 秒，行为与旧版一致。改完下一首生效，不打断当前播放。",
+      "envNote": "注意：容器环境变量 MF_BRIDGE_NEXT_TRACK_PREFETCH={env} 已显式设置，实际以环境变量为准（本开关不生效）。",
+      "saved": "已保存（下一首生效）",
+      "saveFailed": "保存失败",
+      "loadFailed": "读取 S1 开关失败"
     }
   },
   "layout": {
@@ -1059,6 +1069,11 @@
     "delayMemberHint": "正数 = 这台设备更晚出声，负数 = 更早。AirPlay 成员保存后自动重建桥会话生效（约 1–2 秒静音）；Sendspin 成员帧级实时生效。组内每台设备独立设置，互不影响",
     "delayReset": "重置为 0",
     "delayApply": "保存并生效",
+    "delayTestStart": "测试延迟",
+    "delayTestStop": "停止测试",
+    "delayTestStarted": "已开始：本组每 5 秒一次咔哒，听声对齐后点「停止测试」",
+    "delayTestStopped": "已停止",
+    "delayTestFailed": "测试延迟操作失败",
     "mixedLeadEntry": "切歌等待",
     "mixedLeadAuto": "自动",
     "mixedLeadTitle": "切歌等待（混合组）",

@@ -57,6 +57,8 @@ const H = vi.hoisted(() => ({
   resolvedRow: null as Any,
   // ---- 调用轨迹 ----
   log: [] as string[],
+  /** createAirPlayPlayerForDevice(统一入口)被调用的 deviceId 序列。 */
+  airplayUnifiedEntry: [] as string[],
 }));
 
 // dlna/control:协议 player 的创建、设备可达性、媒体缓存清除、位置对齐全部换成假体。
@@ -100,6 +102,13 @@ vi.mock("../../src/services/group/protocolPlayer.js", () => ({
 }));
 
 vi.mock("../../src/services/airplay/protocolPlayer.js", () => ({
+  // D2/R1:QueueController 只经**统一入口**建 AirPlay 协议 player —— 桥开关开时它是
+  // 「单机伪组桥播放器」(audio 唯一来源 = sendspin 组泵),`MUSICFLOW_AIRPLAY_BRIDGE=0`
+  // 才落回旧直连实现。下面的记录表让用例能钉住「走的是哪个入口」。
+  createAirPlayPlayerForDevice: (deviceId: string) => {
+    H.airplayUnifiedEntry.push(deviceId);
+    return mkProto(`airplay:${deviceId}`);
+  },
   createAirPlayProtocolPlayer: (deviceId: string) => mkProto(`airplay:${deviceId}`),
 }));
 
@@ -257,6 +266,7 @@ beforeAll(() => {
 beforeEach(() => {
   // 模块级状态与假体账本跨用例必须清干净。
   H.log = [];
+  H.airplayUnifiedEntry = [];
   H.clearedMedia = [];
   H.alignTargets = [];
   H.evicted = [];
@@ -328,12 +338,16 @@ describe("注册与注销", () => {
     expect(any.players.get("g1")).toBe(first);
   });
 
-  it("registerAirPlayDevice:建 UniversalPlayer(airplay:<id>)+ 绑 AirPlay 协议", () => {
+  // D2/R1:印签不变(UniversalPlayer + playerId=airplay:<id>),但协议 player 由
+  // **统一入口** createAirPlayPlayerForDevice 建 —— 桥开关开 ⇒ 单机伪组桥播放器,
+  // 不再是「旧 UniversalPlayer + 直连 AirPlay 协议」的逐曲 solo cast。
+  it("registerAirPlayDevice:建 UniversalPlayer(airplay:<id>)+ 经统一入口绑桥播放器", () => {
     const { any } = mkQC("unused", { items: null });
     any.registerAirPlayDevice("ap1", "卧室 HomePod");
     const up = any.players.get("ap1");
     expect(up.playerId).toBe("airplay:ap1");
     expect(up.getProtocol().playerId).toBe("airplay:ap1");
+    expect(H.airplayUnifiedEntry).toEqual(["ap1"]);   // 走统一入口(非直连 createAirPlayProtocolPlayer)
     expect(any.ctrls.get("ap1")).toBe(H.pc);
   });
 

@@ -570,13 +570,15 @@ console.log("===== R18 流转接续:起播即落位 + 建会话硬预算(HiVi �
     "playFrom/playCurrent 透传起播落点 startPositionMs",
     /startPositionMs\?: number/.test(qc)
       && /playCurrent\(playerId, baseUrl, startPositionMs\)/.test(qc)
-      && /player\.playMedia\(fullItem, baseUrl, castStartMs\)/.test(qc),
+      // D6/P1 起,playMedia 追加 bridge/opts 参数;落点仍必须是第 3 参。
+      && /player\.playMedia\(fullItem, baseUrl, castStartMs(?:,|\))/.test(qc),
     "起播落点没有传进 cast",
   );
   check(
     "UniversalPlayer 透传 startMs(其余协议忽略即为零变化)",
-    /playMedia\(item: QueueItem, baseUrl: string, startMs\?: number\)/.test(uni)
-      && /this\.protocol\.playMedia\(item, baseUrl, startMs\)/.test(uni),
+    // D6/P1 起签名追加 bridge/opts;落点仍必须是第 3 参并原样透传。
+    /playMedia\(\s*item: QueueItem,\s*baseUrl: string,\s*startMs\?: number/.test(uni)
+      && /this\.protocol\.playMedia\(item, baseUrl, startMs(?:,|\))/.test(uni),
     "UniversalPlayer 把落点参数吞掉了",
   );
   check(

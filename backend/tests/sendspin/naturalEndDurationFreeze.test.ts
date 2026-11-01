@@ -35,6 +35,10 @@ const eng = vi.hoisted(() => {
     resume: vi.fn(),
     seek: vi.fn(),
     armSeek: vi.fn(),
+    // S1(2026-11-01):playCore/playGroupCore 起播前要问「有没有可采纳的预取」,
+    // 停止路径会顺带取消预解码 —— 桩必须提供,否则起播直接抛 TypeError(不走失败回调)。
+    hasPendingPrefetch: vi.fn(() => false),
+    cancelNextTrackPrefetch: vi.fn(),
   });
   return {
     pumps,

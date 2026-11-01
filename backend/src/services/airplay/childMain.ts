@@ -154,6 +154,26 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
         await this.bridgeSessions.stop(String(p?.token ?? ""));
         return null;
       }
+      case "bridgeManual": {
+        // D6/P1:只置 sticky「手动」标记 —— boundary 到达时才 FLUSH + ts 回拨。
+        this.bridgeSessions.markManual(String(p?.token ?? ""));
+        return null;
+      }
+      case "bridgeSetDelay": {
+        // D6(2026-11-01):运行中改成员补偿 —— 只平移该设备会话的 RTP↔NTP 映射。
+        // 返回 false = 该设备当前没有桥会话(主进程按重建/加入兜底)。
+        return this.bridgeSessions.setAnchorShift(String(p?.deviceId ?? ""), Number(p?.shiftUs ?? 0));
+      }
+      case "bridgeRebuildDelay": {
+        // D9(2026-11-01):改补偿的**必生效**兜底 —— 重建该成员 RTSP 会话
+        // (TEARDOWN → 新 ANNOUNCE/SETUP/RECORD = 设备重新吃一次映射),代价 ~1~2s 静音。
+        // 返回 false = 该设备当前没有桥会话(主进程按路由重建/成员 join 兜底)。
+        return await this.bridgeSessions.rebuildForShift(
+          String(p?.deviceId ?? ""),
+          Number(p?.shiftUs ?? 0),
+          String(p?.reason ?? "delay-change"),
+        );
+      }
       case "raopProbe": {
         // S1/S3:TEARDOWN 探测(S1 重试前置 / S3 boot clear-probe)。host/port 由
         // 主进程随载荷下发(子进程 discovery 注册表恒空,不能按 deviceId 反查)。
@@ -171,7 +191,7 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
   // ------------------------- Phase 3:桥会话管理 -------------------------
 
   private async prepareBridge(args: BridgePrepareArgs): Promise<BridgePreparedResult> {
-    const { deviceId, socketPath, token, protocol, host, port, pk, et, anchorShiftUs, ap2, initialVolume, sameHostDlnaPeer } = args;
+    const { deviceId, socketPath, token, protocol, host, port, pk, et, anchorShiftUs, ap2, initialVolume, sameHostDlnaPeer, groupKey } = args;
     if (!deviceId || !socketPath || !token) {
       throw new Error("bridgePrepare: deviceId/socketPath/token 必填");
     }
@@ -197,6 +217,8 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
         sameHostDlnaPeer,
         // AP2 realtime 建链载荷(仅 ap2-* 协议时非空;RAOP 传 undefined ⇒ 行为不变)。
         ap2,
+        // D7:组 id —— 同组同 gen 共享锚点的键(必须透传,否则桥上 groupKey 恒 undefined)。
+        groupKey,
         dry: !host,
       });
     } catch (e) {

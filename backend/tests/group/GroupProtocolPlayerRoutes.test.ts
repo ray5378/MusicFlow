@@ -124,6 +124,9 @@ vi.mock("../../src/services/dlna/control.js", () => ({
 }));
 
 vi.mock("../../src/services/airplay/protocolPlayer.js", () => ({
+  // 统一入口(D2/R1):桥开关开 ⇒ 单机伪组桥播放器,否则落回旧直连实现。
+  // 组层用它做 `MUSICFLOW_AIRPLAY_BRIDGE=0` 的整体回滚扇出,不直连旧工厂。
+  createAirPlayPlayerForDevice: (id: string) => h.protoPlayer("airplay", id),
   createAirPlayProtocolPlayer: (id: string) => h.protoPlayer("airplay", id),
 }));
 
@@ -206,6 +209,7 @@ import {
   bridgeJoinMember,
   bridgeLeaveMember,
   createGroupProtocolPlayer,
+  getBridgeUnavailableReason,
   getGroupLeader,
   getGroupLeaderDeviceId,
   getGroupStatus,
@@ -549,7 +553,9 @@ describe("playMedia 扇出与桥接降级", () => {
     expect(r.mediaUri).toBe("spin-g1"); // mediaUri 取首个成功
   });
 
-  it("单设备 prepare 失败 → 该设备回落 solo cast,其余走桥(绝不出现「在组里但无声」)", async () => {
+  // D7(2026-10-31):桥握手失败 = **仅该台本次不播放**(标 bridgeUnavailable 并留可读
+  // 原因),不再回落 solo cast;组内其它成员照常走桥。
+  it("单设备 prepare 失败 → 该台本曲不播放(D7 不回落 solo),其余照常走桥", async () => {
     setGroup(["sendspin:sp1", "airplay:a1", "airplay:a2"]);
     h.state.front = { clients: new Map([["sp1", { ready: true }]]), groups: new Map() };
     apOn("a1");
@@ -558,9 +564,13 @@ describe("playMedia 扇出与桥接降级", () => {
     const p = createGroupProtocolPlayer("g1");
     await p.playMedia(makeItem(), "http://base");
 
-    expect(h.calls.a1).toContain("play"); // 回落 solo
+    expect(h.calls.a1 ?? []).toEqual([]); // 绝不 solo cast(旧 MAJ-07 降级口已按 D7 关闭)
     expect(h.calls.a2 ?? []).toEqual([]); // 走桥
-    expect(h.spinPlayCalls[0].extra.sockets.map((s: any) => s.deviceId)).toEqual(["a2"]);
+    expect(h.spinPlayCalls[0].extra.sockets.map((s: any) => s.deviceId)).toEqual(["a2"]); // 泵侧只挂成功者
+    expect(h.prepareCalls.map((c: any) => c.deviceId).sort()).toEqual(["a1", "a2"]); // 两台都尝试建桥
+    // 失败原因必须可读(状态面上报,而不是静默无声)
+    expect(getBridgeUnavailableReason("a1")?.reason).toMatch(/prepare failed/);
+    expect(getBridgeUnavailableReason("a2")).toBeUndefined(); // 成功者不标失败
   });
 
   it("全部成员 cast 失败 → 抛错(不返回伪成功)", async () => {
@@ -695,9 +705,23 @@ describe("状态派生(pollState / getGroupStatus)", () => {
     expect(s.position).toBe(33); // 组泵口径,不是 airplay 会话(桥下恒空)
   });
 
-  it("pollState:airplay leader 独立 solo cast → 从设备会话派生", async () => {
+  // D2(2026-10-31):桥开关开 ⇒ 组内 AirPlay 成员的唯一 PCM 源就是组泵,leader 状态
+  // 一律从共享组泵派生;单机 solo 会话视图在桥模式下不再作为事实源(且恒空 ⇒ 恒 STOPPED)。
+  it("pollState:airplay leader 且桥开关开 → 从共享组泵派生(不再读 solo 会话)", async () => {
     setGroup(["airplay:a1"]);
     apOn("a1");
+    const s = await createGroupProtocolPlayer("g1").pollState();
+    expect(s.playerId).toBe("group:g1");
+    expect(s.position).toBe(33); // 组泵口径(33S),不是设备 solo 视图(12S)
+    expect(s.mediaUri).toBe("spin-uri");
+    expect(h.calls.a1 ?? []).not.toContain("poll"); // 设备会话未被查询
+  });
+
+  // `MUSICFLOW_AIRPLAY_BRIDGE=0` 整体回滚专线:此路径仍按旧语义从设备会话派生。
+  it("pollState:桥总开关关闭 ⇒ airplay leader 仍从设备会话派生(回滚路径)", async () => {
+    setGroup(["airplay:a1"]);
+    apOn("a1");
+    h.state.bridgeEnabled = false;
     const s = await createGroupProtocolPlayer("g1").pollState();
     expect(s.playerId).toBe("group:g1");
     expect(s.position).toBe(12);
@@ -767,9 +791,22 @@ describe("状态派生(pollState / getGroupStatus)", () => {
     expect(st.volume).toBe(20); // 持久音量(泵侧实时未就绪)
   });
 
-  it("getGroupStatus:airplay solo leader → 会话态映射 PLAYING/PAUSED/STOPPED 与静音回显", async () => {
+  // D2:桥开关开时 airplay leader 的状态一律从共享组泵派生;设备会话映射只属于
+  // `MUSICFLOW_AIRPLAY_BRIDGE=0` 回滚专线(与 pollState 同名用例同一口径)。
+  it("getGroupStatus:airplay solo leader(桥开关开后) → 也从组泵派生,不再读设备会话", async () => {
     setGroup(["airplay:a1"]);
     apOn("a1", { muted: true });
+    h.state.front = { clients: new Map([["sp1", { ready: true }]]), groups: new Map() };
+    const st = await getGroupStatus("g1");
+    expect(st.state).toBe("PLAYING");
+    expect(st.position).toBe(33); // 组泵口径,不是设备会话的 5s
+    expect(st.volume).toBe(20); // 持久组音量
+  });
+
+  it("getGroupStatus:桥总开关关闭 ⇒ airplay solo leader 从设备会话态映射 PLAYING/PAUSED/STOPPED 与静音回显", async () => {
+    setGroup(["airplay:a1"]);
+    apOn("a1", { muted: true });
+    h.state.bridgeEnabled = false;
     let st = await getGroupStatus("g1");
     expect(st).toMatchObject({ state: "PLAYING", position: 5, duration: 100, muted: true, volume: 20 });
 
@@ -817,7 +854,7 @@ describe("S1:握手失败 TEARDOWN 探测重试(救回不落 solo)", () => {
     expect(h.calls.a1 ?? []).not.toContain("play"); // 没落 solo cast
   });
 
-  it("probe 不可达(设备真离线)⇒ 不重试,立即回落 soloFallback", async () => {
+  it("probe 不可达(设备真离线)⇒ 不重试,本曲该台不播放(D7 不回落 solo)", async () => {
     spinOnlySetup();
     h.prepareFailReset.add("a1");
     h.probeReply.reachable = false;
@@ -826,27 +863,33 @@ describe("S1:握手失败 TEARDOWN 探测重试(救回不落 solo)", () => {
     await p.playMedia(makeItem(), "http://base");
     expect(h.probeCalls).toEqual(["a1"]);
     expect(h.prepareCalls.filter((c: any) => c.deviceId === "a1")).toHaveLength(1); // 无重试
-    expect(h.calls.a1).toContain("play"); // solo cast
+    expect(h.calls.a1 ?? []).toEqual([]); // D7:绝不 solo cast
+    expect(h.spinPlayCalls).toHaveLength(1);
+    expect(h.spinPlayCalls[0]!.extra).toBeUndefined(); // 无桥规格 ⇒ 泵只推 WS/DLNA
+    expect(getBridgeUnavailableReason("a1")?.reason).toMatch(/ECONNRESET/); // 原因可读
   });
 
-  it("两档全败 ⇒ 最终落 soloFallback(与旧行为一致,不无限重试)", async () => {
+  // D7:两档(5s/15s)重试全败也只标记该台不可用,不无限重试,更不回落 solo cast。
+  it("两档全败 ⇒ 最终该台本曲不播放(D7),不无限重试", async () => {
     spinOnlySetup();
     h.prepareFailReset.add("a1"); // probe 清不掉:两次重试都 ECONNRESET
     const p = createGroupProtocolPlayer("g1");
     await p.playMedia(makeItem(), "http://base");
     expect(h.probeCalls).toEqual(["a1", "a1"]); // 每档重试前各 probe 一次
     expect(h.prepareCalls.filter((c: any) => c.deviceId === "a1")).toHaveLength(3); // 首次 + 2 重试
-    expect(h.calls.a1).toContain("play");
+    expect(h.calls.a1 ?? []).toEqual([]); // 不再落 solo
+    expect(getBridgeUnavailableReason("a1")?.reason).toMatch(/ECONNRESET/);
   });
 
-  it("语义性失败(prepare failed,非设备类)⇒ 不 probe 不重试(旧行为)", async () => {
+  it("语义性失败(prepare failed,非设备类)⇒ 不 probe 不重试,本曲不播放(D7)", async () => {
     spinOnlySetup();
     h.prepareFail.add("a1");
     const p = createGroupProtocolPlayer("g1");
     await p.playMedia(makeItem(), "http://base");
     expect(h.probeCalls).toEqual([]);
     expect(h.prepareCalls.filter((c: any) => c.deviceId === "a1")).toHaveLength(1);
-    expect(h.calls.a1).toContain("play");
+    expect(h.calls.a1 ?? []).toEqual([]); // 语义错误同样不回落 solo(旧 MAJ-07 已按 D7 关闭)
+    expect(getBridgeUnavailableReason("a1")?.reason).toMatch(/prepare failed/);
   });
 });
 

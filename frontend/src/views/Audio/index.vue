@@ -118,6 +118,34 @@
       </div>
     </el-card>
 
+    <!-- ===== AirPlay 桥接：S1 下一首预解码 =====
+         服务端**全局**播放行为（所有账号、所有设备一致），故仅管理员可见。
+         值落在 sendspin-renderer 插件配置 `next_track_prefetch`（缺省开），
+         预取判定在 sendspin 子进程里直读 plugins 表 —— 改完下一首换歌即生效，
+         无需重启、不打断当前播放。 -->
+    <el-card v-if="authStore.isAdmin" class="mt-card">
+      <h3>{{ t('settings.bridgePrefetch.title') }}</h3>
+      <div class="card-desc">{{ t('settings.bridgePrefetch.desc') }}</div>
+
+      <div class="setting-item">
+        <div class="setting-label">
+          <div class="title">{{ t('settings.bridgePrefetch.enable') }}</div>
+          <div class="desc">{{ t('settings.bridgePrefetch.enableDesc') }}</div>
+        </div>
+        <div class="setting-value">
+          <el-switch
+            v-model="bridgePrefetch.enabled"
+            :loading="bridgePrefetch.loading || bridgePrefetch.saving"
+            @change="saveBridgePrefetch"
+          />
+        </div>
+      </div>
+
+      <div v-if="bridgePrefetch.envOverride" class="card-desc">
+        {{ t('settings.bridgePrefetch.envNote', { env: bridgePrefetch.envOverride }) }}
+      </div>
+    </el-card>
+
     <!-- ===== 音色（每台设备，P4-3）=====
          与「响度归一化」职责不同：② 段管「每首歌一样响」，这里管「按口味调音色」。
          音色是设备属性（书架箱/耳机各自的补偿曲线），故按 peerId 存、不跟账号走。
@@ -377,6 +405,48 @@ async function saveDeviceFallback(d: { deviceId: string; name: string; fallback:
   } catch (e: any) {
     d.fallback = !d.fallback;
     ElMessage.error(apiErrorText(e, t("settings.pipeline.saveFailed")));
+  }
+}
+
+// ---------- ③ AirPlay 桥接：S1 下一首预解码（服务端全局，仅管理员）----------
+// 值存 sendspin-renderer 插件配置 `next_track_prefetch`（缺省开）。预取判定跑在
+// sendspin 子进程，它直读 plugins 表 ⇒ 改完下一首换歌即生效，不用重启。
+// `envOverride` 非空表示容器环境变量已显式指定（排障总闸，优先于本开关），
+// 此时面板照常可拨，但实际以 env 为准 —— 界面上给出提示，避免误判。
+const bridgePrefetch = reactive<{ enabled: boolean; loading: boolean; saving: boolean; envOverride: string | null }>({
+  enabled: true,
+  loading: false,
+  saving: false,
+  envOverride: null,
+});
+
+async function loadBridgePrefetch(): Promise<void> {
+  bridgePrefetch.loading = true;
+  try {
+    const res = await api.get("/rest/api/v1/sendspin/bridge-prefetch");
+    bridgePrefetch.enabled = res.data?.enabled !== false;
+    bridgePrefetch.envOverride = res.data?.envOverride ?? null;
+  } catch (e: any) {
+    ElMessage.error(apiErrorText(e, t("settings.bridgePrefetch.loadFailed")));
+  } finally {
+    bridgePrefetch.loading = false;
+  }
+}
+
+/** 单键保存：失败把开关拨回去，避免界面显示的与库里存的不一致。 */
+async function saveBridgePrefetch(): Promise<void> {
+  const want = bridgePrefetch.enabled;
+  bridgePrefetch.saving = true;
+  try {
+    const res = await api.put("/rest/api/v1/sendspin/bridge-prefetch", { enabled: want });
+    bridgePrefetch.enabled = res.data?.enabled !== false;
+    bridgePrefetch.envOverride = res.data?.envOverride ?? null;
+    ElMessage.success(t("settings.bridgePrefetch.saved"));
+  } catch (e: any) {
+    bridgePrefetch.enabled = !want;
+    ElMessage.error(apiErrorText(e, t("settings.bridgePrefetch.saveFailed")));
+  } finally {
+    bridgePrefetch.saving = false;
   }
 }
 
@@ -650,8 +720,8 @@ async function clearDsp(): Promise<void> {
 }
 
 onMounted(() => {
-  // 两个 admin 区块（归一化 / 管道）共用一个 GET；非管理员只看到「设备音色」。
-  if (authStore.isAdmin) { loadAudio(); loadMeasure(); }
+  // 三个 admin 区块（归一化 / 管道 / S1 预解码）各自 GET；非管理员只看到「设备音色」。
+  if (authStore.isAdmin) { loadAudio(); loadMeasure(); loadBridgePrefetch(); }
 });
 onUnmounted(stopMeasurePoll);
 </script>

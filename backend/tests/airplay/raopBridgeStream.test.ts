@@ -19,7 +19,10 @@ import { setNowUsOverride } from "../../src/utils/hostClock.js";
 
 const HOST = "192.168.1.50";
 const RATE = 44100;
-const LATENCY_FRAMES = 44100; // libraop 缺省 1s 深度(RECORD 协商,不得归零)
+// 本文件**显式注入**的锚点深度(1s = 44100 帧),只用于锁 streamBridge 的发送节拍判据;
+// 生产缺省已是 D9 的 2s 口径(MF_BRIDGE_RAOP_HOLD_MS=2000 ⇒ 88,200 帧),见
+// `negotiatedLatencyFrames` 用例。
+const LATENCY_FRAMES = 44100;
 
 /** 假 UDP socket:记录每个包的发出时刻(Date.now,与 setNowUsOverride 的 Date.now 纪元一致)。 */
 class FakeUdp extends EventEmitter {
@@ -205,8 +208,8 @@ describe("bridgeSkipFrames / negotiatedLatencyFrames(§4.5 裁头支撑)", () =>
     expect(anyP.startTs).toBe((anchors.baseTs + 700) >>> 0); // 无效输入不动
   });
 
-  it("negotiatedLatencyFrames:RECORD 协商深度的唯一出口(缺省 1s)", () => {
+  it("negotiatedLatencyFrames:RECORD 协商深度的唯一出口(缺省 2s)", () => {
     const { p } = makeBridgePlayer();
-    expect(p.negotiatedLatencyFrames).toBe(RATE);
+    expect(p.negotiatedLatencyFrames).toBe(RATE * 2);
   });
 });

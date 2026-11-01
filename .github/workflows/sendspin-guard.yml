@@ -23,6 +23,19 @@ name: Sendspin Guard
 #       "The spec reserves stream/end for queue-empty, not track changes."
 #       —— trackChangeKeepStream.test.ts
 #
+#   P5 帧级成员延迟补偿（v4.11.0）：组内每个成员的延迟补偿**逐帧、按成员**加在
+#      下发时间戳上 —— `sendAudio(ts + sendspinDelayUsOf(clientId), data)`。
+#       偏移只作用于「该成员收到的 ts」，ring / 桥投递仍用组时间线原戳；
+#       迟入组(late-join)回填必须用**同一偏移**，否则新成员进场瞬间跳变。
+#       静默失效形态：漏加偏移 → 该成员永远不生效；只加一处 → 进场/稳态不同步。
+#       —— tests/sendspin/sendspinFrameDelay.test.ts
+#
+#   P6 下一首预解码开关（v4.11.0）：switcher 落在 sendspin-renderer 插件配置
+#       `next_track_prefetch`（**缺省开**，显式 false 才关，读不到/坏 JSON 也开），
+#       子进程直读 plugins 表（不缓存 ⇒ 改完下一首即生效）；
+#       容器环境变量 `MF_BRIDGE_NEXT_TRACK_PREFETCH` 作排障总闸且**优先**于 Web 开关。
+#       退回「缺省关」= 用户明明开着却不预取；丢掉 env 总闸 = 出问题关不掉。
+#
 # 为什么除了 vitest 还要源码扫描：上面三类里最危险的是**静默失效** ——
 # 参数漏传 / 分支被短路时既有单测仍全绿，只有真机才暴露。源码守卫把
 # 「符号必须在位」钉死，不依赖测试用例是否覆盖到那条路径。
@@ -72,7 +85,8 @@ jobs:
             src/services/sendspin/pauseStopIpc.test.ts \
             src/services/sendspin/trackChangeKeepStream.test.ts \
             tests/sendspin/playerCoreUnits.test.ts \
-            tests/sendspin/indexWrappers.test.ts 2>&1 | tee /tmp/sendspin-guard.log
+            tests/sendspin/indexWrappers.test.ts \
+            tests/sendspin/sendspinFrameDelay.test.ts 2>&1 | tee /tmp/sendspin-guard.log
 
       # —— P0：组状态三态表达式 ——
       # 退回两态（删掉 g.paused 分支）后设备无法区分暂停与断流，P1 续播随之失效。
@@ -201,6 +215,82 @@ jobs:
             miss=1
           fi
           if [ "$miss" -eq 0 ]; then echo "OK: 暂停中 seek 保持暂停在位"; fi
+          exit "$miss"
+
+      # —— P5：帧级成员延迟补偿（v4.11.0）——
+      # 偏移只加在「该成员收到的 ts」上（逐帧、按成员），ring/桥投递仍用组时间线原戳；
+      # late-join 回填必须复用同一偏移。静默失效形态：单测桩 server 缺 groupDelayUs
+      # 会兜底 0n，消费侧全绿而真机该成员永不生效 —— 所以这里钉生产侧三个点。
+      - name: "Guard P5 - per-member frame delay offset (send + late-join)"
+        shell: bash
+        run: |
+          miss=0
+          SERV=backend/src/services/sendspin/server.ts
+          if ! grep -qF 'for (const c of g.members) c.sendAudio(ts + this.sendspinDelayUsOf(c.clientId ?? ""), data);' "$SERV"; then
+            echo "::error::P5 回归:帧下发必须是 sendAudio(ts + sendspinDelayUsOf(clientId), data)(漏加偏移 = 该成员补偿永远不生效)"
+            miss=1
+          fi
+          if grep -qF 'c.sendAudio(ts, data)' "$SERV"; then
+            echo "::error::P5 回归:仍存在未加成员偏移的 sendAudio(ts, data)(组内个别成员与其他人错位)"
+            miss=1
+          fi
+          if ! grep -qF 'return typeof this.server.groupDelayUs === "function" ? this.server.groupDelayUs(this.name, clientId) : 0n;' "$SERV"; then
+            echo "::error::P5 回归:sendspinDelayUsOf 必须委托 server.groupDelayUs,并对单测桩兜底 0n"
+            miss=1
+          fi
+          if ! grep -qF 'return sendspinDelayUsOfClient(groupName, clientId);' "$SERV"; then
+            echo "::error::P5 回归:SendspinServer.groupDelayUs 必须走 delayCalib 的 sendspinDelayUsOfClient(按成员格取值)"
+            miss=1
+          fi
+          if ! grep -qF 'const dspDelayUs = this.sendspinDelayUsOf(c.clientId ?? "");' "$SERV"; then
+            echo "::error::P5 回归:late-join 回填缺少成员偏移快照(新成员进场会比老成员早/晚一个补偿量)"
+            miss=1
+          fi
+          if ! grep -qF 'for (const it of items) c.sendAudio(it.tsUs + dspDelayUs, it.data);' "$SERV"; then
+            echo "::error::P5 回归:late-join 回填必须用同一偏移 it.tsUs + dspDelayUs"
+            miss=1
+          fi
+          if [ "$miss" -eq 0 ]; then echo "OK: 帧级/迟入组回填的按成员补偿在位"; fi
+          exit "$miss"
+
+      # —— P6：下一首预解码开关（缺省开 + env 总闸优先）——
+      # 开关落 plugins 表(子进程直读、不缓存);缺省开,仅显式 false 才关;
+      # 环境变量 MF_BRIDGE_NEXT_TRACK_PREFETCH 优先于 Web 开关。
+      - name: "Guard P6 - next-track prefetch switch (default on, env overrides)"
+        shell: bash
+        run: |
+          miss=0
+          SE=backend/src/services/sendspin/streamEngine.ts
+          PREF=backend/src/services/sendspin/bridgePrefetchConfig.ts
+          if ! grep -qF 'export function nextTrackPrefetchEnabled(): boolean {' "$SE"; then
+            echo "::error::P6 回归:streamEngine 缺少 nextTrackPrefetchEnabled()(预解码态机的唯一开关入口)"
+            miss=1
+          fi
+          if ! grep -qF 'const raw = process.env.MF_BRIDGE_NEXT_TRACK_PREFETCH;' "$SE"; then
+            echo "::error::P6 回归:环境变量总闸 MF_BRIDGE_NEXT_TRACK_PREFETCH 被删(出问题关不掉预解码)"
+            miss=1
+          fi
+          if ! tr '\n' ' ' < "$SE" | tr -s ' ' | grep -qF 'if (raw === "0" || raw === "false" || raw === "off") return false;'; then
+            echo "::error::P6 回归:env 关闭档(0/false/off)缺失"
+            miss=1
+          fi
+          if ! tr '\n' ' ' < "$SE" | tr -s ' ' | grep -qF 'if (raw === "1" || raw === "true" || raw === "on") return true;'; then
+            echo "::error::P6 回归:env 强制开档(1/true/on)缺失"
+            miss=1
+          fi
+          if ! grep -qF 'return readBridgePrefetchConfig();' "$SE"; then
+            echo "::error::P6 回归:env 必须只作覆盖,未设置时仍要读 Web 开关(否则音频页的开关完全不生效)"
+            miss=1
+          fi
+          if ! grep -qF "SELECT config FROM plugins WHERE id = 'sendspin-renderer' OR name = 'sendspin-renderer'" "$PREF"; then
+            echo "::error::P6 回归:必须直读 plugins 表(走主进程内存缓存 = 子进程改了不生效)"
+            miss=1
+          fi
+          if ! grep -qF 'return cfg?.next_track_prefetch !== false;' "$PREF"; then
+            echo "::error::P6 回归:缺省必须为开(仅显式 false 才关);写成 != true 会让从未配置的用户直接失去预解码"
+            miss=1
+          fi
+          if [ "$miss" -eq 0 ]; then echo "OK: 预解码开关(缺省开/env 优先/直读 plugins)在位"; fi
           exit "$miss"
 
       - name: Upload guard log on failure

@@ -822,12 +822,30 @@ MA 的回填**不是为了对齐**（MA 同样用绝对时间戳），而是为�
 
 组里每个成员独立一格：`player_groups.member_delays_json`（成员 id `sendspin:<clientId>` / `airplay:<deviceId>` → ms，±30000 / 步进 10）。**正数 = 该设备更晚出声**；旧按协议三格（airplay/airplay2/sendspin_delay_ms）已删除，**旧值不迁移**（v4.8.0，升级后归零重调）。
 
-- **sendspin 侧生效（帧级、真·实时）**：`sendspinDelayUsOfClient(groupName, clientId)` 动态读缓存 → 逐拍下发 `c.sendAudio(ts + offset, data)`（`server.ts:1522`）+ 迟到回填逐客户端（`:1658`）；下一次 `pushFrame`（约 0.5~1s，取决于设备 `send_ahead`）即按新值打戳，无会话重建。
-- **airplay 侧生效（桥）**：投递窗口/时戳位移（`bridgeAnchorShiftUs(deviceId)`，`server.ts:818-820` / `:885-887` / `:908`）；随**桥会话建立**锚定，改值需重建/自愈该成员桥。
-- **铁律**：`ring` 的 `tsUs` 一律不打偏移（时间线唯一基准，§2.6）；桥内锚点恒 0（双加会被对齐器判「内容超前」整段裁掉）。
+- **sendspin 侧生效（帧级、真·实时）**：`sendspinDelayUsOfClient(groupName, clientId)` 动态读缓存 → 逐帧下发 `c.sendAudio(ts + sendspinDelayUsOf(clientId), data)`（`server.ts:2031`）+ 迟到回填逐客户端同偏移（`server.ts:2167-2168`，`const dspDelayUs = sendspinDelayUsOf(c.clientId ?? "")`）；下一次 `pushFrame`（约 0.5~1s，取决于设备 `send_ahead`）即按新值打戳，无会话重建。
+  - `SendspinServer.groupDelayUs(groupName, clientId)` 只是 `sendspinDelayUsOfClient` 的转发口（`server.ts:455`）；单测桩 server 没有该方法时 `sendspinDelayUsOf` 兜底 `0n`（`server.ts:1933`）——这条兜底是「单测全绿、真机不生效」的经典静默失效点，已由 sendspin guard P5 钉死。
+- **airplay 侧生效（桥会话锚点，v4.11.0）**：成员补偿**只**进桥锚点 —— `control.ts` 的 `bridgePrepareDevice` 传 `anchorShiftUs = getMemberDelayMs(groupId, "airplay:<deviceId>") * 1000`（组时间线模式且带 groupId 时）；桥内 `planBridgeAnchor` 得到 `mapAnchorUs = sync ? anchorUs + shiftUs : anchorUs`，而送包节拍 `beatAnchorUs` 只含组延迟补偿（`groupDelayUs(rate)`，全组同一值）。
+  - **投递戳/窗口不再带补偿**：`bridgeDeliveryShiftUs` 在 `bridgeSyncGroupTimelineEnabled()` 下恒 `0n`（`server.ts:1452`）。旧行为（补偿进投递戳）实测会造成「同刻不同内容」：+2000ms 成员 skip 4.75s / 两次 pacing rebase、-650ms 成员 `droppedFrames` 12s。
+  - 锚点在**建会话时算死** ⇒ 改值必须重建该成员桥：`PUT /v1/groups/:id/delays` 的 D9 三段兜底（`bridgeRebuildDelayDevice` → 子进程 `rebuildForShift` → `reconnectRaop`；失败再 `rebuildBridgeRoutes`，最后逐成员 `bridgeJoinMember`），代价 1~2s 静音。
+  - 回退开关 `MF_BRIDGE_SYNC_GROUP_TIMELINE=0` ⇒ 恢复旧口径（补偿进投递戳、锚点不含补偿）。
+- **铁律**：`ring` 的 `tsUs` 一律不打偏移（时间线唯一基准，§2.6）；同组同 gen 由 `BridgeGroupAnchorRegistry` 共享同一个 `anchorUs`，各成员只是各自锚点再平移自己的 shift ⇒ 送包节拍全组对齐、只有可听时刻按成员错开。
 - **late-join 回填必须逐客户端带各自偏移**，否则新成员「一进场就错位、后进门」。
 - 接口 `GET/PUT /v1/groups/:id/delays`（PUT 收 `{memberId, ms}`，越组 400）；细节唯一出处 [group-权威方案文档.md](./group-权威方案文档.md) §6。
 - **混合组锚点 lead 组级可配（v4.9.0）**：`player_groups.mixed_anchor_lead_ms`（0/NULL = 自动 = 常量 `BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US` 默认 5000ms；>0 = 用户值，0~30000 / 步进 100）。streamEngine 重锚混合组分支组值优先（`mixedAnchorLeadUsOf` 回退常量）；**读值绕 delayCalib cache 直查 db**——子进程 fork 后 cache「写时更新、无失效广播」结构性陈旧，读频率 = 每次重锚一次，WAL 直查一致性足够；PUT 后**下一首切歌生效**，无重建。纯桥组深锚 `bridgeStartLeadUs` 与非桥分支零改动。
+
+## 5.6 下一首预解码开关（v4.11.0，缺省开）
+
+本曲剩余 ≤ 5s 时提前解码下一首，缓存在 `ring` 的下一代次帧里；边界换曲不再等解码，由「切歌垫片」只管必要的 lead。开关只控制这套**预取态机**是否启动：关掉时边界行为（锚点 / 垫片 / 曲末排空）与本改造前逐字节一致 —— 单开关整体回退。
+
+**判定入口唯一**：`streamEngine.ts` 的 `nextTrackPrefetchEnabled()`（只有 `maybeStartNextPrefetch` 一处消费），优先级从高到低：
+
+1. 容器环境变量 `MF_BRIDGE_NEXT_TRACK_PREFETCH`（排障总闸）：`0/false/off` ⇒ 关，`1/true/on` ⇒ 开；
+2. 音频页「下一首预解码」开关：`sendspin-renderer` 插件配置的 `next_track_prefetch` 键 —— **缺省开**，只有显式写过 `false` 才关（从未配置 / 插件行缺失 / JSON 坏 ⇒ 一律按开），见 `bridgePrefetchConfig.ts`；
+3. 关闭后 `maybeStartNextPrefetch` 直接 return：不建立预取、不提前开第二代编码器，一切按无预取的旧路径走。
+
+**为什么读 plugins 表而不是 settings**：判定跑在 sendspin **子进程**里，主进程的 settings 缓存/内存态它一概看不见；plugins 表由主/子进程各自直读 sqlite（WAL 多进程安全，与 `readSendspinPluginConfig` 同口径）。**刻意不缓存** ⇒ 音频页改完下一首换歌即生效，无需重启、不打断当前播放。
+
+**守卫**：sendspin guard **P6** 钉死「缺省开 / env 优先 / 直读 plugins」三件事；`sendspinFrameDelay.test.ts` 用 `plugins` 表真实配置覆盖开/关两分支。
 
 # 第六部分：踩坑记录（**特色错误必须记住**）
 

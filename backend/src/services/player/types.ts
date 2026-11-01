@@ -85,12 +85,20 @@ export interface ProtocolPlayer {
   playerId: string;
   /** 执行播放一首(Stop→Set→wait→Play)。返回上报用的 mediaUri。
    *  Phase 3 桥接(可选第 4 参):组路由为 bridge 时,主进程把 bridgePrepare 好
-   *  的 socket 规格传给 sendspin 组 player(其余协议实现忽略该参数)。 */
+   *  的 socket 规格传给 sendspin 组 player(其余协议实现忽略该参数)。
+   *  可选第 5 参 `opts.manual`(2026-10-31 D6/P1):**仅用户手动 next/prev 为 true**
+   *  —— AirPlay 桥据此把下一次 track 边界标成「用户操作」(1 次 FLUSH + ts 回拨);
+   *  自动推进 / 恢复重投 / 外部 API 一律不传(保持纯内容替换)。
+   *  可选第 5 参 `opts.nextSongId`(2026-11-01 S1):队列**下一首**的 songId(不知道/不适用
+   *  ⇒ 不传)。sendspin 泵据此在曲末 ≤5s 用**独立解码器**预取下一首 PCM,按**沿用当前
+   *  组时间线**的连续 ts 写入 pcm:100 ring,让切歌边界不再断粮(见 streamEngine 预取段)。
+   *  只传 id 不传整项:泵侧只用它取源,元数据(subtitle/封面)由真正的起播再写。 */
   playMedia(
     item: QueueItem,
     baseUrl: string,
     startMs?: number,
     bridge?: { sockets: Array<{ deviceId: string; socketPath: string; token: string; protocol: string }> },
+    opts?: { manual?: boolean; nextSongId?: string },
   ): Promise<{ mediaUri: string }>;
   stop(): Promise<void>;
   pause(): Promise<void>;

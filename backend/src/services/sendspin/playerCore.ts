@@ -263,6 +263,9 @@ export function playCore(
    *  负缓存是 module-local Map,主进程看不见(详见 streamEngine「判死跨进程回传」段)。
    *  undefined = 沿用泵上既有回传口(seek 重建路径不重复传),与 `bridge?` 同款范式。 */
   onUnplayable?: SongUnplayableSink,
+  /** S1(2026-11-01):队列下一首 songId(仅提示;泵在曲末 ≤5s 预解码下一首 PCM 写 ring)。
+   *  undefined = 不预取(单曲循环 / 队列末尾 / 老调用方),行为与引入前逐字节一致。 */
+  nextSongId?: string,
 ): void {
   clearPauseState(srv, clientId);
   if (!srv) return; // 无 server 时无推流可言(原 playMedia 在 !srv 时 throw,由调用方处理)
@@ -300,7 +303,13 @@ export function playCore(
   //   扬声器上下文并看到 stopped 一闪,下一首还要完整重建流。
   //   组过 keep_stream 门禁(成员里没有 legacy)走新路径;legacy 成员在场则退回
   //   `stream/end` 档(门禁在 canKeepStream 内判定)—— 与 MA 对 legacy 客户端行为一致。
-  if (g.canKeepStream()) {
+  // ★ S1(2026-11-01 真机):纯桥组 members.size===0 ⇒ canKeepStream() 恒 false,
+  //   起播先走 finishPlayback ⇒ 桥收 BOUNDARY{stop} ⇒ RAOP FLUSH ⇒ 旧曲尾连同刚预解
+  //   的下一首头全被清(实测 staleFrames=250618 / keptFrames=0),S1 与 S2 双双失效。
+  //   本曲已有**当前代次可采纳**的预取时改走 clearPlayback(只发 BOUNDARY{track},
+  //   队列由 S2 保留),边界内容由预取帧按连续 ts 接续、旧曲尾自然播完。
+  const keepQueueForPrefetch = pump.hasPendingPrefetch(item.songId);
+  if (g.canKeepStream() || keepQueueForPrefetch) {
     g.clearPlayback();
   } else {
     // MA legacy 档(keep_stream=False):只发 `stream/end` 收尾旧流,**不报 stopped**
@@ -330,7 +339,7 @@ export function playCore(
     g.pendingAnnounces.push(conn);
   }
   // 后台起播:解码→按组时间线推流。不阻塞调用方(pollState 反映进度)。
-  void pump.play(item.songId).catch((e) => {
+  void pump.play(item.songId, nextSongId).catch((e) => {
     // 无可播源等:置空 current,交 QueueController 走跳过/换源。
     // MA 对齐:失败即跳歌属过渡 —— 只发 stream/end 收尾(若 start 已发),**不报
     // stopped**(报 stopped 会让固件镜像 IDLE 并锁死下一首的 stream/start)。
@@ -350,7 +359,14 @@ export function stopCore(srv: SendspinServer | null, clientId: string, keepCurre
   clearPauseWatchdog(clientId);
   const _pg = srv?.group(clientId);
   if (_pg && !keepCurrent) _pg.paused = false;  const g = ephemeralOrReal(srv, clientId);
-  if (srv) pumpFor(srv, srv.group(clientId)).stop();
+  if (srv) {
+    const p = pumpFor(srv, srv.group(clientId));
+    p.stop();
+    // S1:真实停止(不是 playCore 的「stop → 换歌」中间态)⇒ 预取一并取消,
+    // 否则预解码的下一首 ffmpeg 会留在后台空转(见 GroupPump.cancelNextTrackPrefetch)。
+    // 可选调用:单测的最小泵桩只实现 pause/stop/resume,没有这个方法。
+    p.cancelNextTrackPrefetch?.();
+  }
   if (!keepCurrent) {
     g.positionMs = 0;
     g.current = null;
@@ -382,6 +398,8 @@ export function playGroupCore(
    *  负缓存是 module-local Map,主进程看不见(详见 streamEngine「判死跨进程回传」段)。
    *  undefined = 沿用泵上既有回传口(seek 重建路径不重复传),与 `bridge?` 同款范式。 */
   onUnplayable?: SongUnplayableSink,
+  /** S1(2026-11-01):队列下一首 songId(语义同 playCore;用户组同样需要预取)。 */
+  nextSongId?: string,
 ): void {
   clearPauseState(srv, groupName);
   if (!srv) return;
@@ -406,7 +424,10 @@ export function playGroupCore(
   g.close();
   // ★ 切歌/seek 只 stream/clear 绝不 stream/end(MA keep_stream 语义,详见
   //   playCore 同名段落注释)。用户组各成员逐一清缓冲,流上下文保留 → gapless。
-  if (g.canKeepStream()) {
+  // ★ S1:纯桥组 canKeepStream() 恒 false,有可采纳预取时改走 clearPlayback,
+  //   避免 BOUNDARY{stop} → RAOP FLUSH 清掉旧曲尾(同 playCore 段落说明)。
+  const keepQueueForPrefetch = pump.hasPendingPrefetch(item.songId);
+  if (g.canKeepStream() || keepQueueForPrefetch) {
     g.clearPlayback();
   } else {
     // MA legacy 档:只发 `stream/end` 收尾旧流,**不报 stopped**(同 playCore)。
@@ -425,7 +446,7 @@ export function playGroupCore(
     g.pendingAnnounces.push(conn);
   }
   // 后台起播:解码→按组时间线推流。不阻塞调用方(pollState 反映进度)。
-  void pump.play(item.songId).catch((e) => {
+  void pump.play(item.songId, nextSongId).catch((e) => {
     // MA 对齐:同 playCore —— 失败即跳歌属过渡,只发 stream/end,**不报 stopped**。
     g.current = null;
     g.frozenDurationMs = 0;
@@ -440,7 +461,11 @@ export function playGroupCore(
 export function stopGroupCore(srv: SendspinServer | null, groupName: string): void {
   if (!srv) return;
   const g = srv.group(groupName);
-  pumpFor(srv, g).stop();
+  const p = pumpFor(srv, g);
+  p.stop();
+  // S1:组真实停止 ⇒ 取消下一首预取(同 stopCore;playGroupCore 的 stop→换歌中间态不动)。
+  // 可选调用:单测的最小泵桩没有该方法。
+  p.cancelNextTrackPrefetch?.();
   clearGroupBridges(g);
   g.positionMs = 0;
   g.current = null;

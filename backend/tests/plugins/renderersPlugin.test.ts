@@ -314,44 +314,34 @@ describe("AirPlay 渲染器 discover:am 字段双用 + RSA 能力透传", () => 
   });
 });
 
-describe("AirPlay 渲染器 cast:守卫 + durationSec 只在真数字时下发", () => {
-  it("拿不到出流基址 → 抛(文案落在 DLNA_BASE_URL 上)", async () => {
+// R6/D8:音乐投放一律走 AirPlay 桥(airplay/protocolPlayer.ts + 组泵),插件不再自建
+// RAOP 会话 —— `cast()` 是**抛错桩**(RendererPlugin 契约必填),任何入参都必须抛,
+// 且绝不触达底层 `castToAirPlayDevice`。durationSec 映射随直连分支一并删除。
+describe("AirPlay 渲染器 cast:抛错桩(音乐投放一律走桥,插件不得被当作直连入口)", () => {
+  it("无出流基址配置也照抛:文案落在「统一走桥」,不再提 DLNA_BASE_URL", async () => {
     h.effectiveBaseUrl = null;
-    await expect(airplayRendererPlugin.cast("a1", "s1")).rejects.toThrow(/DLNA_BASE_URL/);
+    await expect(airplayRendererPlugin.cast("a1", "s1")).rejects.toThrow(/统一走桥/);
     expect(h.castToAirPlayDevice).not.toHaveBeenCalled();
   });
 
-  it("歌曲不存在 → 抛『歌曲不存在』", async () => {
+  it("歌曲不存在 → 仍抛统一走桥文案(不再查库、不报『歌曲不存在』)", async () => {
     h.effectiveBaseUrl = "http://h:1";
-    await expect(airplayRendererPlugin.cast("a1", "ghost")).rejects.toThrow("歌曲不存在");
+    await expect(airplayRendererPlugin.cast("a1", "ghost")).rejects.toThrow(/统一走桥/);
     expect(h.castToAirPlayDevice).not.toHaveBeenCalled();
   });
 
-  it("成功:返回空 mediaUri(AirPlay 由设备自行拉流,无服务端媒体 URL)", async () => {
+  it("合法设备 + 已入库歌曲 → 仍抛(不再返回 mediaUri,绝不建 RAOP 会话)", async () => {
     seedSong("s1", { title: "曲", artist: "人", album: "辑", duration: 321 });
     h.castToAirPlayDevice.mockResolvedValue(undefined);
-    const r = await airplayRendererPlugin.cast("a1", "s1");
-    expect(r).toEqual({ mediaUri: "" });
-    expect(h.castToAirPlayDevice).toHaveBeenCalledWith({
-      deviceId: "a1",
-      songId: "s1",
-      title: "曲",
-      artist: "人",
-      album: "辑",
-      durationSec: 321,
-      baseUrl: "http://192.168.1.5:46400",
-    });
+    await expect(airplayRendererPlugin.cast("a1", "s1")).rejects.toThrow(/统一走桥/);
+    expect(h.castToAirPlayDevice).not.toHaveBeenCalled();
   });
 
-  it("duration 不是数字 → durationSec 为 undefined(不塞 NaN/字符串给 RAOP)", async () => {
+  it("duration 非数字/缺失 → 同样抛,不把 NaN/字符串塞给 RAOP(底层零调用)", async () => {
     seedSong("s2", { title: "", artist: "", album: "", duration: null });
     h.castToAirPlayDevice.mockResolvedValue(undefined);
-    await airplayRendererPlugin.cast("a2", "s2");
-    const arg = h.castToAirPlayDevice.mock.calls[0][0];
-    expect(arg.title).toBe("未知");
-    expect(arg.artist).toBeUndefined();
-    expect(arg.album).toBeUndefined();
-    expect(arg.durationSec).toBeUndefined();
+    await expect(airplayRendererPlugin.cast("a2", "s2")).rejects.toThrow(/统一走桥/);
+    expect(h.castToAirPlayDevice).not.toHaveBeenCalled();
   });
 });
 

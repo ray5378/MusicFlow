@@ -54,24 +54,32 @@ describe("planBridgeAnchor.anchorShiftUs", () => {
     expect(a.commandedLeadUs).toBe(b.commandedLeadUs);
   });
 
-  it("正值精确平移落点 A(桥延后),保持深度 latencyFrames 不变", () => {
+  // 2026-11-01(D1/D2,MA `_anchor_stream`):补偿**只进出声锚点**,不进组锚点/送包节拍 ——
+  // 否则同组各成员的投递窗口不同 ⇒ 同刻投出的内容不同(进度差 ⇒ 一台无料可投 ⇒ 静音)。
+  it("正值只平移出声锚点(playAnchorUs),组锚点与送包节拍不动", () => {
     const base = plan(0);
     const shifted = plan(250_000);
-    expect(shifted.anchorUs).toBe(base.anchorUs + 250_000n);
-    expect(shifted.commandedLeadUs).toBe(base.commandedLeadUs + 250_000n);
-    // 保持深度不参与平移:startNtp 只跟 A 走,受 L 影响的部分不变
-    const baseStartNtpOffset = base.anchorUs - BigInt(Math.round((LAT / RATE) * 1e6));
-    const shiftedStartNtpOffset = shifted.anchorUs - BigInt(Math.round((LAT / RATE) * 1e6));
-    expect(shiftedStartNtpOffset - baseStartNtpOffset).toBe(250_000n);
+    expect(shifted.anchorUs).toBe(base.anchorUs);
+    expect(shifted.commandedLeadUs).toBe(base.commandedLeadUs);
+    expect(shifted.beatAnchorUs).toBe(base.beatAnchorUs);
+    expect(shifted.playAnchorUs).toBe(base.playAnchorUs + 250_000n);
+    // 保持深度不参与平移:映射(NTP/RTP)跟着出声锚点走,L 的部分不变
+    const lUs = BigInt(Math.round((LAT / RATE) * 1e6));
+    const baseMap = base.anchors.anchorUsShifted - lUs;
+    const shiftedMap = shifted.anchors.anchorUsShifted - lUs;
+    expect(shiftedMap - baseMap).toBe(250_000n);
   });
 
-  it("负值精确提前;极端负值仍走可达性重锚(不硬塞过去的内容)", () => {
+  it("负值只把出声锚点提前;送包基准仍是内容锚点 ⇒ 不需要可达性重锚", () => {
     const base = plan(0);
     const early = plan(-250_000);
-    expect(early.anchorUs).toBe(base.anchorUs - 250_000n);
-    // 首帧刚好在可达线上,再提前 500ms 就不可达 → 重锚到 now + warmLead
+    expect(early.anchorUs).toBe(base.anchorUs);
+    expect(early.beatAnchorUs).toBe(base.beatAnchorUs);
+    expect(early.playAnchorUs).toBe(base.playAnchorUs - 250_000n);
+    // 旧实现把 shift 折进 A ⇒ sendAt(0) 落到过去 ⇒ 必须重锚(代价是内容跳段)。
+    // 新模型 A 不含 shift,首帧恒可达 ⇒ 不再重锚(负补偿只吃掉设备侧到达余量)。
     const near = plan(-500_000, NOW + 1_100_000n);
-    expect(near.reAnchored).toBe(true);
-    expect(near.anchorUs > NOW).toBe(true);
+    expect(near.reAnchored).toBe(false);
+    expect(near.playAnchorUs).toBe(NOW + 1_100_000n - 500_000n);
   });
 });

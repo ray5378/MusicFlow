@@ -78,6 +78,9 @@ export interface BridgePrepareArgs {
    *  SKIP_VOLUME_WITH_DLNA_PEER 仍照发 SET_PARAMETER)。pushInitialVolume 的
    *  Linkplay(RAOP 忽略 SET_PARAMETER)豁免唯一依据。 */
   sameHostDlnaPeer?: string;
+  /** D7(2026-11-01):所属组 id —— 子进程只用它作「组时间线共享锚点」的键(same key
+   *  = 同组同 gen 只允许一个锚点,内容零点/送包节拍逐 µs 同源)。子进程不碰 DB。 */
+  groupKey?: string;
 }
 
 /** bridgePrepare 返回。Phase 3:桥会话已对设备完成 RTSP 握手(或 dry 模式仅 listener);
@@ -90,6 +93,22 @@ export interface BridgePreparedResult {
 /** bridgeStop 参数:按 sessionToken 停对应 bridge listener(§6.2 token 语义)。 */
 export interface BridgeStopArgs {
   token: string;
+}
+
+/** bridgeManual 参数(D6/P1,2026-10-31):用户手动 next/prev 的意图标记。
+ *  **只置 sticky 标记、不立即 FLUSH**(与推流路径同步执行会打架);真正的
+ *  1 次 RTSP FLUSH 与 ts 回拨在下一个 `track` boundary 到达时执行。 */
+export interface BridgeManualArgs {
+  token: string;
+}
+
+/** bridgeSetDelay 参数(D6,2026-11-01):按 deviceId 运行中改成员补偿。
+ *  `shiftUs` = 该成员相对组时间线的出声偏移(正 = 更晚出声),与 `bridgePrepare.anchorShiftUs`
+ *  同一口径。子进程**只平移该设备会话的 RTP↔NTP 映射**(startNtp + Δ + 立即一段 SYNC),
+ *  不拆会话、不重发音频;无会话时返回 false,主进程按重建/加入兜底。 */
+export interface BridgeSetDelayArgs {
+  deviceId: string;
+  shiftUs: number;
 }
 
 /** 主进程 → 子进程:除通用 req/stop 外无附加消息。 */

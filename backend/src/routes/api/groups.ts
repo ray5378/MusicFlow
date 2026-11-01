@@ -6,6 +6,7 @@ import {
   PERM,
   alignGroupMembers,
   apiError,
+  getDlnaBaseUrl,
   gm,
   permMiddleware,
   resolveContentSongs,
@@ -27,6 +28,11 @@ import {
   isBridgeRouteActive,
   rebuildBridgeRoutes,
 } from "../../services/group/protocolPlayer.js";
+import {
+  isGroupDelayTestActive,
+  startGroupDelayTest,
+  stopGroupDelayTest,
+} from "../../services/group/delayTest.js";
 
 export function registerGroups(app: Hono): void {
 app.get("/v1/groups", (c) => {
@@ -128,6 +134,8 @@ app.get("/v1/groups/:id/delays", permMiddleware(PERM.RENDERER_USE), (c) => {
     minMs: GROUP_DELAY_MIN_MS,
     maxMs: GROUP_DELAY_MAX_MS,
     stepMs: GROUP_DELAY_STEP_MS,
+    // 该组是否正在跑「测试延迟」咔哒音(前端按钮回显;页面刷新后仍能继续点停止)。
+    delayTest: isGroupDelayTestActive(id),
   });
 });
 
@@ -155,10 +163,20 @@ app.put("/v1/groups/:id/delays", permMiddleware(PERM.RENDERER_USE), async (c) =>
     const before = getMemberDelays(id)[memberId] ?? 0;
     // 内存值先更新(落库在后):Sendspin 侧下一次 pushFrame 立刻按新值打戳 = 真·实时。
     const after = setMemberDelay(id, memberId, body.ms);
-    // AirPlay 侧的补偿随桥会话建立锚定 ⇒ 只有「该 airplay 成员的值真的变了且该组桥
-    // 在跑」时才重建该组桥换立即生效(代价:该组 AirPlay 成员约 1~2s 静音;Sendspin 不受影响)。
+    // AirPlay 侧的补偿 = 该设备相对组时间线的出声偏移。D9(2026-11-01)起走**必生效**路径:
+    // 先平移映射(立即一段 SYNC),随后**重建该成员 RTSP 会话**(TEARDOWN → 新 RECORD =
+    // 设备重新吃一次映射),代价 ~1~2s 静音 —— SYNC 无回执,实测 GGMM 只在 RECORD 时采纳,
+    // 只靠运行中平移无法保证出声时刻真的变。组时间线/其它成员的进度与内容不受影响。
+    // 兜底顺序:该成员会话重建 → 该组桥在跑但设备无会话 ⇒ 重建该组桥 →
+    // 登记缺失(容器重启后 resume-active 恢复的桥/历史泄漏)⇒ 逐成员幂等 join。
     if (memberId.startsWith("airplay:") && after !== before) {
-      if (isBridgeRouteActive(id)) {
+      const devId = memberId.slice("airplay:".length);
+      const live = await import("../../services/airplay/control.js")
+        .then((m) => m.bridgeRebuildDelayDevice(devId, after * 1000))
+        .catch(() => false);
+      if (live) {
+        rebuilt = 1;
+      } else if (isBridgeRouteActive(id)) {
         try {
           rebuilt = await rebuildBridgeRoutes(id);
         } catch { /* 重建失败不影响保存结果:下次会话按新值建立 */ }
@@ -187,6 +205,36 @@ app.put("/v1/groups/:id/delays", permMiddleware(PERM.RENDERER_USE), async (c) =>
     stepMs: GROUP_DELAY_STEP_MS,
     rebuilt,
   });
+});
+
+// 群组「测试延迟」:只有该组内的播放器出声,每 5 秒一次极短咔哒(单曲循环),
+// 用于人耳对齐组内各成员延迟。前端每组一个按钮:开始 / 停止(停止时恢复起测前队列)。
+// Body 无;owner/管理员可操作。
+
+app.post("/v1/groups/:id/delay-test", permMiddleware(PERM.RENDERER_USE), async (c) => {
+  const user = c.get("user")!;
+  const id = c.req.param("id")!;
+  if (!gm.get(id) || !gm.isOwnedBy(id, user?.id ?? "", !!user?.isAdmin)) {
+    return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.group.notFoundOrNoPerm"), 404);
+  }
+  try {
+    return c.json(await startGroupDelayTest(id, getDlnaBaseUrl(c)));
+  } catch (e: any) {
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, e?.message || "errors.group.delayTestStartFailed"), apiErrorStatus(BusinessErrorCode.INVALID_PARAM));
+  }
+});
+
+app.post("/v1/groups/:id/delay-test/stop", permMiddleware(PERM.RENDERER_USE), async (c) => {
+  const user = c.get("user")!;
+  const id = c.req.param("id")!;
+  if (!gm.get(id) || !gm.isOwnedBy(id, user?.id ?? "", !!user?.isAdmin)) {
+    return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.group.notFoundOrNoPerm"), 404);
+  }
+  try {
+    return c.json(await stopGroupDelayTest(id, getDlnaBaseUrl(c)));
+  } catch (e: any) {
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, e?.message || "errors.group.delayTestStopFailed"), apiErrorStatus(BusinessErrorCode.INVALID_PARAM));
+  }
 });
 
 // 删除组(组队列随之删除,成员设备恢复单独控制)。仅组 owner(或管理员)。需要 renderer.use。

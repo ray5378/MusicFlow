@@ -4,17 +4,13 @@
 // exactly like the DLNA renderer plugin wraps services/dlna/*. The heavy lifting
 // (mDNS discovery, RTSP+RSA-encrypted transport, ffmpeg>RAW-ALAC streaming, queue
 // persistence, auto-advance) lives in the airplay package + the unified
-// QueueController; this plugin is a thin, capability-shaped adapter so the core
-// can cast to AirPlay receivers through the same discover/cast/control surface.
+// QueueController; this plugin is a thin, capability-shaped adapter limited to
+// discovery / transport control. Music playback goes through the AirPlay bridge
+// (airplay/protocolPlayer.ts), so the plugin has no cast() entry any more.
 //
-// DLNA is untouched — this is a fully parallel subsystem sharing only the exports
-// record layer of dlna/control.ts (createCastSession for stream URLs).
+// DLNA is untouched — this is a fully parallel subsystem.
 
-import { getEffectiveBaseUrl } from "../../../services/dlna/control.js";
-import { listAirPlayDevices, castToAirPlayDevice } from "../../../services/airplay/control.js";
-import { db } from "../../../db/index.js";
-import { songs } from "../../../db/schema.js";
-import { eq } from "drizzle-orm";
+import { listAirPlayDevices } from "../../../services/airplay/control.js";
 import type { RendererPlugin, PluginManifest } from "../../../plugins/types.js";
 
 export const AIRPLAY_RENDERER_ID = "airplay-renderer";
@@ -22,7 +18,7 @@ export const AIRPLAY_RENDERER_ID = "airplay-renderer";
 export const airplayRendererManifest: PluginManifest = {
   id: AIRPLAY_RENDERER_ID,
   name: "AirPlay 渲染器",
-  version: "1.0.0",
+  version: "1.1.0",
   type: "renderer",
   description: "通过 AirPlay (RAOP / AirPlay 2) 协议将音乐投放到局域网内的 AirPlay 音箱、电视等设备",
   capabilities: ["renderer"],
@@ -44,7 +40,7 @@ Casts music to AirPlay speakers, TVs and other devices on the LAN as a renderer.
 
 ### How it works
 - \`discoverRenderers()\` discovers devices over mDNS: \`_raop._tcp\` provides the RAOP (AP1) instance; a device is only treated as AP2-capable when it also advertises \`_airplay._tcp\` and that record reports \`protovers >= 1.1\` (both services must be present plus the version gate — either check alone is fooled by older devices);
-- On cast, \`castToRenderer()\` opens a session per member with that member's own protocol: paired AP2-capable devices use AP2 realtime, everything else falls back to AP1;
+- On playback, the AirPlay bridge consumes the group pump's PCM and delivers it to each member with that member's own protocol: paired AP2-capable devices use AP2 realtime, everything else falls back to AP1. Music casting always goes through the bridge; the plugin no longer opens its own RAOP session;
 - \`controlRenderer()\` forwards play / pause / stop / volume / seek;
 - Queue handling is shared with DLNA through the unified \`QueueController\` (persistent queue, auto-advance, resume after restart).
 
@@ -81,7 +77,7 @@ Casts music to AirPlay speakers, TVs and other devices on the LAN as a renderer.
 
 ### 处理逻辑
 - \`discoverRenderers()\` 通过 mDNS 发现设备:\`_raop._tcp\` 给出 RAOP(AP1)实例;只有**同时**广播 \`_airplay._tcp\` 且该记录 \`protovers ≥ 1.1\` 才判定为 AP2 能力设备(两个服务同时在册 + 版本门槛,单看任一条都会被老设备骗过);
-- 投屏时 \`castToRenderer()\` 按**每个成员各自的协议**建会话:已配对且支持 AP2 → AP2 realtime;其余一律回落 AP1;
+- 起播时由 **AirPlay 桥**消费组泵 PCM 并按**每个成员各自的协议**投递:已配对且支持 AP2 → AP2 realtime;其余一律回落 AP1。音乐投放一律走桥,插件不再自建 RAOP 会话;
 - AP1:建立 RTSP 会话(RSA 密钥交换),把加密后的音频分块推给设备;AP2:用配对派生的密钥加密 RTSP 信令与音频包,经 RTP/UDP 发送;
 - \`controlRenderer()\` 转发播放 / 暂停 / 停止 / 音量 / 进度 等控制指令;
 - 与 DLNA 共用统一队列控制器(\`QueueController\`),支持持久化队列、自动切歌、重启恢复。
@@ -126,28 +122,15 @@ export const airplayRendererPlugin: RendererPlugin = {
         model: d.am || "RAOP",
         hasVolumeControl: true,
         supportsRsa: d.supportsRsa,
-        // E2:能力分级。**只上报能力,不改投屏路径** —— E3~E5 的 AP2 发送端落地前,
-        // 所有设备仍走 AP1(见 cast() 的调用点未变)。
         supportsAp2: d.supportsAp2,
         ap2Protovers: d.ap2?.protovers,
       },
     }));
   },
-  async cast(deviceId: string, songId: string) {
-    const baseUrl = getEffectiveBaseUrl();
-    if (!baseUrl) throw new Error("未确定流地址(请先进行一次投屏或设置 DLNA_BASE_URL)");
-    const song: any = db.select().from(songs).where(eq(songs.id, songId)).get();
-    if (!song) throw new Error("歌曲不存在");
-    await castToAirPlayDevice({
-      deviceId,
-      songId,
-      title: song.title || "未知",
-      artist: song.artist || undefined,
-      album: song.album || undefined,
-      durationSec: typeof song.duration === "number" ? song.duration : undefined,
-      baseUrl,
-    });
-    return { mediaUri: "" };
+  // 音乐投放一律走 AirPlay 桥(airplay/protocolPlayer.ts + 组泵);插件不再自建 RAOP 会话。
+  // 保留该方法仅为满足 RendererPlugin 契约(本插件不得被当作直连投屏入口)。
+  async cast(_deviceId: string, _songId: string): Promise<{ mediaUri: string }> {
+    throw new Error("AirPlay 音乐投放已统一走桥,请使用播放器/队列接口(勿走渲染器插件 cast)");
   },
   async control(deviceId: string, action: string, payload?: any) {
     const {

@@ -8,8 +8,10 @@
 // DLNA-only headers onto the AirPlay decoder and pinned the filter channel to `dlna`.
 // It now mints its own token (services/airplay/session.ts) and pulls
 // /rest/airplay/stream/:token; the streaming core stays shared (serveCastStream).
+import { randomBytes } from "node:crypto";
 import { PlaybackState, type PlayerState, type ProtocolPlayer, type QueueItem } from "../player/types.js";
 import { createAirPlaySession } from "./session.js";
+import { bridgeSocketPath } from "./bridgeChannel.js";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("AirPlay");
@@ -17,12 +19,18 @@ import {
   castToAirPlayDevice,
   getAirPlayMediaUri,
   getAirPlayStatus,
+  isAirplayBridgeEnabled,
+  bridgePrepareDevice,
+  bridgeStopDevice,
+  bridgeManualDevice,
+  selectAirPlayBridgeProtocol,
   pauseAirPlay,
   resumeAirPlay,
   seekAirPlay,
   setAirPlayVolume,
   stopAirPlay,
 } from "./control.js";
+import type { BridgeSocketSpec } from "../sendspin/bridgeAttach.js";
 
 export function createAirPlayProtocolPlayer(deviceId: string): ProtocolPlayer {
   const playerId = `airplay:${deviceId}`;
@@ -85,4 +93,114 @@ export function createAirPlayProtocolPlayer(deviceId: string): ProtocolPlayer {
       };
     },
   };
+}
+
+// ==================== 单机桥播放器（D2/D7：单机 = 单成员伪组） ====================
+
+/** 单机伪组 id：只用于 sendspin 泵命名空间，不写 GroupManager、不污染用户组。 */
+export function soloBridgeGroupId(deviceId: string): string {
+  return `__bridge_solo:${deviceId}`;
+}
+
+/** deviceId → 当前桥规格。同设备同协议热复用 token ⇒ 切歌不重建 RAOP 会话。 */
+const soloBridgeRoutes = new Map<string, BridgeSocketSpec>();
+
+/** 单机桥路由快照(供主进程桥路由对账):单机伪组的路由**不**登记在
+ *  group/protocolPlayer 的 activeBridgeRoutes(那张表只覆盖用户组),若对账只看
+ *  那张表,单机桥会被判成「孤儿」并在宽限后被摘句柄/摘会话 —— 实测每 ~60s
+ *  稳定杀掉一次活会话(bridge link live→idle → session 断开 reason=closed)。
+ *  对账必须把本表并入事实源。 */
+export function listSoloBridgeRoutes(): BridgeSocketSpec[] {
+  return [...soloBridgeRoutes.values()];
+}
+
+async function sendspinSoloGroup(deviceId: string): Promise<ProtocolPlayer> {
+  // 动态导入：sendspin/protocolPlayer ← player/index ← QueueController 与本文件构成
+  // 加载环，沿用 QueueController 的既有规避方式。
+  const { createSendspinGroupPlayer } = await import("../sendspin/protocolPlayer.js");
+  return createSendspinGroupPlayer(soloBridgeGroupId(deviceId));
+}
+
+/** 单机 AirPlay 的**唯一**音乐播放实现：桥建立成功后，PCM 只来自 sendspin 组泵。
+ *  桥建立失败直接抛错（D7：重试后显式失败，绝不回落直连）。 */
+export function createAirPlayBridgePlayer(deviceId: string): ProtocolPlayer {
+  const playerId = `airplay:${deviceId}`;
+  let lastMediaUri: string | undefined;
+  return {
+    playerId,
+    async playMedia(
+      item: QueueItem,
+      baseUrl: string,
+      startMs = 0,
+      _bridge?: unknown,
+      opts?: { manual?: boolean; nextSongId?: string },
+    ) {
+      const prev = soloBridgeRoutes.get(deviceId);
+      // D6/P1:用户手动 next/prev ⇒ 给**已存在**的桥会话打 sticky 标记;
+      // 真正的 1 次 FLUSH + ts 回拨由子进程在下一个 track boundary 执行。
+      // 冷启(无 prev)没有旧轨道可换,标记无意义。
+      if (opts?.manual === true && prev) await bridgeManualDevice(prev.token);
+      const protocol = selectAirPlayBridgeProtocol(deviceId);
+      const warm = !!prev && prev.protocol === protocol;
+      const token = warm ? prev!.token : randomBytes(12).toString("hex");
+      bridgeSocketPath(deviceId, token); // <100B 断言，与组路径同源
+      const status = getAirPlayStatus(deviceId);
+      await bridgePrepareDevice(deviceId, token, protocol, null, {
+        initialVolume: status.volume,
+        settleDlna: !warm,
+      });
+      const spec: BridgeSocketSpec = {
+        deviceId,
+        socketPath: bridgeSocketPath(deviceId, token),
+        token,
+        protocol,
+      };
+      soloBridgeRoutes.set(deviceId, spec);
+      const gp = await sendspinSoloGroup(deviceId);
+      // opts 必须透传：nextSongId 是 S1「下一首预解码」的唯一触发链
+      // (QueueController 只对桥路径下传；漏传 ⇒ 组泵 nextSongId 恒空 ⇒ 预取永不启动)。
+      const r = await gp.playMedia(item, baseUrl, startMs, { sockets: [spec] }, opts);
+      lastMediaUri = r.mediaUri;
+      log.info(`[bridge-solo] ${deviceId} 起播 protocol=${protocol} warm=${warm} start=${Math.round(startMs / 1000)}s`);
+      return r;
+    },
+    async stop() {
+      await (await sendspinSoloGroup(deviceId)).stop();
+      const spec = soloBridgeRoutes.get(deviceId);
+      if (spec) {
+        await bridgeStopDevice(spec.token, deviceId).catch(() => { /* 子进程没跑 → 无会话 */ });
+        soloBridgeRoutes.delete(deviceId);
+      }
+    },
+    async pause() { await (await sendspinSoloGroup(deviceId)).pause(); },
+    async resume() { await (await sendspinSoloGroup(deviceId)).resume(); },
+    async seek(seconds: number) { await (await sendspinSoloGroup(deviceId)).seek(seconds); },
+    // 音量走设备侧（与直连路径同一 volumeState/落库），泵侧不加增益。
+    async setVolume(vol: number) { await setAirPlayVolume(deviceId, vol); },
+    async isAvailable() { return getAirPlayStatus(deviceId).available; },
+    async pollState(): Promise<PlayerState> {
+      const st = await (await sendspinSoloGroup(deviceId)).pollState();
+      // 泵侧的 BUFFERING 是**内部预填充**口径(组泵的 `audibleStarted` 未越过
+      // 4.5s lead 前为 false),不是 AirPlay 设备状态。若原样透传,PlayerController
+      // 的乐观窗口(5s 等 PLAYING)必然超时(lead 4.5s + 起播延迟 > 5s)⇒ 每首
+      // 都被判 stalled ⇒ QueueController 重投/切歌(实测:同曲无限重播、连续 3 首
+      // 卡死直接停流断会话)。RAOP 侧 RTP 已按锚点投递,设备就是在播 —— 对齐 MA
+      // (推流一起来即 PLAYING;buffering 只用于客户端进度插值),这里把 BUFFERING
+      // 归一为 PLAYING,位置/时长/mediaUri 原样保留。
+      const playbackState = st.playbackState === PlaybackState.BUFFERING
+        ? PlaybackState.PLAYING
+        : st.playbackState;
+      return {
+        ...st,
+        playerId,
+        playbackState,
+        ...(lastMediaUri ? { mediaUri: lastMediaUri } : {}),
+      };
+    },
+  };
+}
+
+/** 统一入口：桥开关开 → 桥播放器；`MUSICFLOW_AIRPLAY_BRIDGE=0` 只作整体回滚。 */
+export function createAirPlayPlayerForDevice(deviceId: string): ProtocolPlayer {
+  return isAirplayBridgeEnabled() ? createAirPlayBridgePlayer(deviceId) : createAirPlayProtocolPlayer(deviceId);
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// ==================== AirPlay/Sendspin 桥接静态守卫(Phase 8 · 17 条不变量) ====================
+// ==================== AirPlay/Sendspin 桥接静态守卫(Phase 8 · 19 条不变量 + D4~D9) ====================
 //
 // 背景:AirPlay 1/2 与 Sendspin 桥接是一条「全静默」链路 —— 时序锚点用错时钟源、缓冲深度被
 // 归零、组公共 send_ahead 被桥 lead 污染、桥集合被并进 WS 成员集合、播放结束误清桥……
@@ -15,7 +15,7 @@
 // 🔴 硬性要求 2:每条断言都必须**能真的失败**,且失败时**只红那一条**。
 //   实现时一条断言 = 一个 check(),互不共享判定中间量;每条都做过最小违规反证。
 //
-// 17 条:
+// 19 条 + D4~D9(v4.11.0 组时间线族):
 //   ① 锚点链不得用墙钟:tsUs / RAOP NTP 必须同源于 host 单调时钟;
 //   ② latencyFrames 不得归零(接收端播放保持深度),不得 Math.min(...,0) 钳零;
 //   ③ 常量唯一源 + 取值钉死(147/160、4.5M/2.5M、384K/1.5M、0.3627…);
@@ -158,6 +158,9 @@ const SPIN_SERVER = `${SRC}/services/sendspin/server.ts`;
 const SPIN_ENGINE = `${SRC}/services/sendspin/streamEngine.ts`;
 const BRIDGE_ATTACH = `${SRC}/services/sendspin/bridgeAttach.ts`;
 const PLAYER_CORE = `${SRC}/services/sendspin/playerCore.ts`;
+const CONTROL = `${SRC}/services/airplay/control.ts`;
+const CHILD_MAIN = `${SRC}/services/airplay/childMain.ts`;
+const GROUPS_ROUTE = `${SRC}/routes/api/groups.ts`;
 
 // ---------------------------------------------------------------------------
 // ① 锚点链不得用墙钟(tsUs / RAOP NTP 必须同源于 host 单调时钟)
@@ -349,10 +352,16 @@ console.log("===== ⑥ 组指令 fanOut 必须跳过桥占用设备(避免与桥
     countInSrc("getOnlineAirplayIds(groupId).filter((d) => !isBridgeOwned(d))").n === 1,
     `命中 ${countInSrc("getOnlineAirplayIds(groupId).filter((d) => !isBridgeOwned(d))").n} 次`,
   );
+  // D2/D7(2026-10-31):桥开关开启时 AirPlay 成员**一律不允许**回落 solo cast。
   check(
-    "回落 solo cast 的设备由 prepareBridgeRoute 的 soloFallback 单独记名(与 fanOut 分流)",
-    /soloFallback\.push\(d\)/.test(gp) && /soloFallback\.includes\(d\)/.test(gp),
-    "prepareBridgeRoute 未记录或未消费 soloFallback",
+    "prepareBridgeRoute 失败设备只记名 bridgeUnavailable(D7),不得再出现 soloFallback",
+    !/soloFallback/.test(gp) && /bridgeUnavailable\.set\(d,/.test(gp),
+    "仍存在 soloFallback 或未记录 bridgeUnavailable",
+  );
+  check(
+    "playMedia 在桥开关开启时不得对 AirPlay 成员 solo cast(`apSolo` 必须由 isAirplayBridgeEnabled 门控)",
+    /const\s+apSolo\s*=\s*isAirplayBridgeEnabled\(\)\s*\?\s*\[\]\s*:\s*apOnline\s*;/.test(gp),
+    "未找到 `const apSolo = isAirplayBridgeEnabled() ? [] : apOnline;`",
   );
 }
 
@@ -659,13 +668,21 @@ console.log("===== ⑮ 锚点一次性:aligner 非空必须早退(改延迟只�
 // 2026-10-26 补:按组 A/V 延迟补偿落地后,这个偏移**只能**加在锚点算术里(:209)。
 // 若同时在 sendspin 侧也加 anchorShift(或 airplay 侧也加 dspDelay),同一偏移会被
 // 两头各加一次 = 双倍补偿,表现是「调 100ms 实际偏 200ms」,用户只会觉得"这功能不准"。
-console.log("===== ⑯ 群延迟补偿只有一个落点(firstFrameTsUs + anchorShiftUs) =====");
+console.log("===== ⑯ 群延迟补偿只有一个落点(mapAnchorUs;组时间线基准不含补偿) =====");
 {
   const bs = code(BRIDGE_SESSION);
+  // D1/D4(2026-11-01)后锚点基准 = 组时间线锚点(不含成员补偿);补偿只落在 mapAnchorUs
+  // / 非同步模式的 anchorUs 之一(互斥),仍满足「同一偏移不得两头各加一次」。
   check(
-    "planBridgeAnchor 内锚点 = opts.firstFrameTsUs + BigInt(opts.anchorShiftUs ?? 0)",
-    /let\s+anchorUs\s*=\s*opts\.firstFrameTsUs\s*\+\s*BigInt\(\s*opts\.anchorShiftUs\s*\?\?\s*0\s*\)/.test(bs),
-    "未找到 `let anchorUs = opts.firstFrameTsUs + BigInt(opts.anchorShiftUs ?? 0)` —— 补偿落点被改/被删",
+    "planBridgeAnchor 的补偿落点唯一:`sync ? anchorUs + shiftUs : anchorUs`(映射锚点)",
+    /const\s+mapAnchorUs\s*=\s*sync\s*\?\s*anchorUs\s*\+\s*shiftUs\s*:\s*anchorUs\s*;/.test(bs),
+    "未找到 `const mapAnchorUs = sync ? anchorUs + shiftUs : anchorUs;` —— 补偿落点被改/被删",
+  );
+  check(
+    "组时间线锚点基准不得直接叠加补偿:`let anchorUs = opts.firstFrameTsUs;`(shiftUs 只能在落点出现)",
+    /let\s+anchorUs\s*=\s*opts\.firstFrameTsUs\s*;/.test(bs) &&
+      !/let\s+anchorUs\s*=\s*opts\.firstFrameTsUs\s*\+\s*BigInt\(\s*opts\.anchorShiftUs/.test(bs),
+    "锚点基准被写成 firstFrameTsUs + anchorShiftUs(D1 前的旧形态)",
   );
   const inSpin = matchInSrc(/anchorShift/i, (p) => p.startsWith(`${SRC}/services/sendspin/`));
   const inAirplay = matchInSrc(/dspDelay/i, (p) => p.startsWith(`${SRC}/services/airplay/`));
@@ -785,9 +802,180 @@ console.log("===== ⑲ 进程退出(SIGTERM/SIGINT)必须先 TEARDOWN AirPlay �
 }
 
 // ---------------------------------------------------------------------------
+// ⑳ D4~D9(v4.11.0 组时间线唯一 + 成员补偿必生效)
+// ---------------------------------------------------------------------------
+// 2026-11-01 立项:AirPlay 组同步从「每台设备各自一套时间线」改成「组时间线唯一 +
+// 补偿只落在桥映射锚点」。这一族改动**全部是静默缺陷**:
+//   D4 零点取本会话首帧 ⇒ 重建/迟到加入的成员从旧进度起播(用户只看到「进度不一样」);
+//   D5 早于零点的输入不裁前缀 ⇒ 交给对齐器 drop,outBuf 被裁空后补静音 = 丢音;
+//   D6 运行中改补偿只重发 prepare ⇒ 暖复用直接丢新值(「延迟调了没反应」);
+//      手动 next/prev 的回拨若没 TTL 守卫,会套到晚得多的新流上;
+//   D7 同组各成员各自规划锚点 ⇒ 同刻不同内容(分裂数秒);
+//   D8 边界处置按本地 reason 判 ⇒ 一台清队列一台保留(跨换歌粘住 2.95s);
+//   D9 只靠 SYNC 平移 ⇒ 接收端只在 RECORD 吃映射,出声时刻其实没变。
+console.log("===== ⑳ D4~D9:组时间线唯一(D4/D5/D7/D8)+ 成员补偿必生效(D6/D9) =====");
+{
+  const bs = code(BRIDGE_SESSION);
+  const ctl = code(CONTROL);
+  const child = code(CHILD_MAIN);
+  const route = code(GROUPS_ROUTE);
+
+  // ---- D4:对齐零点 = 组时间线锚点 ----
+  check(
+    "D4: 组同步模式下 BridgeTimelineAligner 零点取 plan.anchorUs(首帧零点只在旧模式保留)",
+    /new\s+BridgeTimelineAligner\(\s*bridgeSyncGroupTimelineEnabled\(\)\s*\?\s*plan\.anchorUs\s*:\s*plan\.forceNow\s*&&\s*this\.firstFrameTsUs\s*!==\s*null\s*\?\s*this\.firstFrameTsUs\s*:\s*plan\.anchorUs\s*,/.test(bs),
+    "未找到 `new BridgeTimelineAligner(bridgeSyncGroupTimelineEnabled() ? plan.anchorUs : ...)` —— 零点退回首帧",
+  );
+  check(
+    "D4: 锚点不可达时必须重锚到 plan.anchorUs(记 anchor unreachable,不得沿用旧首帧零点)",
+    /anchor unreachable[\s\S]{0,300}?this\.anchorUs\s*=\s*plan\.anchorUs\s*;/.test(bs),
+    "未找到 anchor unreachable 之后 this.anchorUs = plan.anchorUs",
+  );
+
+  // ---- D5:contentAnchorUs 前缀整块丢弃(不补静音) ----
+  check(
+    "D5: 对齐器内容零点 contentAnchorUs 直接暴露 anchorUs(投递侧据此裁前缀)",
+    /get\s+contentAnchorUs\(\)\s*:\s*bigint\s*\{\s*return\s+this\.anchorUs\s*;\s*\}/.test(bs),
+    "未找到 `get contentAnchorUs(): bigint { return this.anchorUs; }`",
+  );
+  check(
+    "D5: 组同步模式下早于内容零点的输入在 resampleIn 入口整块裁掉(条件含 groupTimelineSync)",
+    /if\s*\(\s*this\.groupTimelineSync\s*&&\s*entry\.tsUs\s*<\s*aligner\.contentAnchorUs\s*\)\s*\{/.test(bs),
+    "未找到 `if (this.groupTimelineSync && entry.tsUs < aligner.contentAnchorUs) {` —— 前缀又交给对齐器 drop",
+  );
+  const dropBody = bodyOf(bs, /if\s*\(\s*this\.groupTimelineSync\s*&&\s*entry\.tsUs\s*<\s*aligner\.contentAnchorUs\s*\)\s*\{/);
+  check(
+    "D5: 整帧早于零点时只记 droppedFrames 并 return(绝不 appendOut 补静音)",
+    dropBody !== null && /this\.stats\.droppedFrames\s*\+=\s*frames/.test(dropBody) && !/appendOut/.test(dropBody),
+    dropBody === null ? "未定位裁前缀分支" : "裁前缀分支内出现了 appendOut(补静音 = 丢音路径复现)",
+  );
+
+  // ---- D6/P1:手动 next/prev 一次性回拨 + 自动换歌纯内容替换 ----
+  check(
+    "D6: BRIDGE_MANUAL_REWIND_MS 钉死 1662(MA 实测 ts 回拨 1.588~1.695s)",
+    count(bs, "const BRIDGE_MANUAL_REWIND_MS = 1662;") === 1,
+    `命中 ${count(bs, "const BRIDGE_MANUAL_REWIND_MS = 1662;")} 次(应恰 1)`,
+  );
+  check(
+    "D6: 回拨需求带 TTL(过期视为无效,不把旧需求套到晚得多的新流上)",
+    count(bs, "const BRIDGE_MANUAL_REWIND_TTL_MS = 10_000;") === 1 &&
+      /pendingRewindFrames\s*>\s*0\s*&&\s*Date\.now\(\)\s*-\s*this\.pendingRewindAt\s*<=\s*BRIDGE_MANUAL_REWIND_TTL_MS/.test(bs),
+    "缺 TTL 常量或流侧未做 TTL 守卫",
+  );
+  check(
+    "D6: 回拨只在手动分支登记(AP2 无 RTP 时间线不参与),且消费后清零",
+    /if\s*\(\s*manual\s*\)\s*\{/.test(bs) &&
+      /if\s*\(\s*this\.ap2Session\s*===\s*null\s*\)\s*\{\s*this\.pendingRewindFrames\s*=\s*Math\.round\(\s*\(BRIDGE_MANUAL_REWIND_MS\s*\*\s*this\.outRate\)\s*\/\s*1000\s*\)\s*;/.test(bs) &&
+      /this\.pendingRewindFrames\s*=\s*0\s*;/.test(bs),
+    "手动分支未登记 pendingRewindFrames / 未排除 AP2 / 未清零",
+  );
+  const trackBody = bodyOf(bs, /if\s*\(\s*reason === "track" && !manual\s*\)\s*\{/);
+  check(
+    "D6: 自动换歌(track 且非手动)是纯内容替换:不 FLUSH、不重锚、不中断推流",
+    trackBody !== null && /void\s+this\.stopGapFiller\(\)\s*;/.test(trackBody) &&
+      !/player\?\.flush\(\)/.test(trackBody) && !/reconnectRaop/.test(trackBody) &&
+      !/streamAborted\s*=\s*true/.test(trackBody),
+    trackBody === null ? "未定位 `if (reason === \"track\" && !manual)` 分支" : "自动换歌分支出现 FLUSH / reconnectRaop / streamAborted",
+  );
+  check(
+    "D6: 暖复用时把可变标定刷进现有会话(否则 PUT delays 的新值被静默丢弃)",
+    /prev\.applyAnchorShift\(\s*opts\.anchorShiftUs\s*\?\?\s*0\s*\)\s*;/.test(bs),
+    "未找到 prev.applyAnchorShift(opts.anchorShiftUs ?? 0)",
+  );
+
+  // ---- D7:同组同代次共享锚点 ----
+  check(
+    "D7: BridgeGroupAnchorRegistry.peek 必须校验「该锚点对本设备仍可达」(过期/够不到回 null)",
+    /export\s+class\s+BridgeGroupAnchorRegistry\s*\{/.test(bs) &&
+      /e\.anchorUs\s*\+\s*BigInt\(\s*GROUP_ANCHOR_LATE_TOLERANCE_US\s*\)\s*<\s*nowHostUs\s*\+\s*floorLeadUs\s*\)\s*return\s+null\s*;/.test(bs),
+    "缺 BridgeGroupAnchorRegistry 或 peek 的可达性校验",
+  );
+  check(
+    "D7: 先 peek 共享锚点、未命中才 publish 本设备规划值(同组同 gen 只有一个锚点)",
+    /this\.groupAnchors!\.peek\(\s*this\.opts\.groupKey!\s*,\s*this\.generation\s*,\s*nowHostUs\s*,\s*floorLeadUs\s*\)/.test(bs) &&
+      /this\.groupAnchors!\.publish\(\s*this\.opts\.groupKey!\s*,\s*this\.generation\s*,\s*plan\.anchorUs\s*\)/.test(bs),
+    "peek / publish 调用形态不符(共享锚点可能只剩一头)",
+  );
+  check(
+    "D7: 共享锚点只在组同步模式 + 有 groupKey 时启用(设备组行为零变化)",
+    /bridgeSyncGroupTimelineEnabled\(\)\s*&&\s*!!this\.opts\.groupKey\s*&&\s*!!this\.groupAnchors\s*;/.test(bs),
+    "未找到 `&& bridgeSyncGroupTimelineEnabled() && !!this.opts.groupKey && !!this.groupAnchors;`",
+  );
+  check(
+    "D7: 管理器以 new BridgeSession(opts, this.groupAnchors, this.groupBoundaries) 注入两本登记册",
+    /new\s+BridgeSession\(\s*opts\s*,\s*this\.groupAnchors\s*,\s*this\.groupBoundaries\s*\)\s*;/.test(bs),
+    "未找到 new BridgeSession(opts, this.groupAnchors, this.groupBoundaries)",
+  );
+
+  // ---- D8:边界处置组级统一 + 补静音上限 + 暖复用污染复位 ----
+  check(
+    "D8: 边界处置按组统一(clear 优先:任一成员要清 ⇒ 全组清)",
+    /this\.groupBoundaries\.publish\(\s*groupKey\s*,\s*generation\s*>>>\s*0\s*,\s*!localKeep\s*\)/.test(bs) &&
+      /this\.groupBoundaries\.isClearRequired\(\s*groupKey\s*,\s*generation\s*>>>\s*0\s*\)/.test(bs),
+    "缺 BridgeGroupBoundaryRegistry 的 publish / isClearRequired 调用",
+  );
+  check(
+    "D8: 组同步模式把补静音上限从 2s 抬到 10s(冷启/迟到加入 4~6s 缺口不跳段)",
+    /bridgeSyncGroupTimelineEnabled\(\)\s*\?\s*rate\s*\*\s*10\s*:\s*undefined/.test(bs),
+    "未找到 `bridgeSyncGroupTimelineEnabled() ? rate * 10 : undefined`",
+  );
+  check(
+    "D8: 超长断料的本地跳段兜底仍在(insertFrames > rate * 2 才跳)",
+    /act\.insertFrames\s*>\s*rate\s*\*\s*2/.test(bs),
+    "未找到 act.insertFrames > rate * 2 的极端断料兜底",
+  );
+  check(
+    "D8: 内容轴污染判据 = skippedFrames > 0(本地跳段会永久带过换代)",
+    /isContentAxisPoisoned\(\)\s*:\s*boolean\s*\{\s*return\s+this\.stats\.skippedFrames\s*>\s*0\s*;\s*\}/.test(bs),
+    "未找到 `isContentAxisPoisoned(): boolean { return this.stats.skippedFrames > 0; }`",
+  );
+  check(
+    "D8: resetTimeline 清锚点/对齐器并中止旧推流(锚点/游标/统计一并复位)",
+    /resetTimeline\(\s*reason\s*:\s*string\s*\)\s*:\s*void\s*\{[\s\S]{0,400}?this\.aligner\s*=\s*null\s*;[\s\S]{0,200}?this\.streamAborted\s*=\s*true\s*;[\s\S]{0,200}?this\.stats\.skippedFrames\s*=\s*0\s*;/.test(bs),
+    "resetTimeline 未清 aligner / streamAborted / skippedFrames",
+  );
+  check(
+    "D8: 暖复用前若内容轴被跳段污染 ⇒ resetTimeline(\"warm-reuse-poisoned\")",
+    /if\s*\(\s*bridgeSyncGroupTimelineEnabled\(\)\s*&&\s*prev\.isContentAxisPoisoned\(\)\s*\)\s*\{\s*prev\.resetTimeline\(\s*"warm-reuse-poisoned"\s*\)\s*;/.test(bs),
+    "未找到暖复用污染复位分支",
+  );
+
+  // ---- D9:改补偿必生效(重建该成员 RTSP 会话) ----
+  check(
+    "D9: control.ts 提供 bridgeRebuildDelayDevice 并下发 bridgeRebuildDelay(而不是只 bridgeSetDelay)",
+    /export\s+async\s+function\s+bridgeRebuildDelayDevice\(/.test(ctl) &&
+      /airplaySupervisor\.rpc<boolean>\(\s*"bridgeRebuildDelay"\s*,\s*\{/.test(ctl),
+    "未找到 bridgeRebuildDelayDevice → rpc(\"bridgeRebuildDelay\")",
+  );
+  check(
+    "D9: 子进程 bridgeRebuildDelay 落到 bridgeSessions.rebuildForShift(重建该成员会话)",
+    /case\s+"bridgeRebuildDelay"\s*:\s*\{[\s\S]{0,400}?this\.bridgeSessions\.rebuildForShift\(/.test(child),
+    "childMain 未把 bridgeRebuildDelay 落到 rebuildForShift",
+  );
+  check(
+    "D9: 会话侧必生效路径 = applyAnchorShift + 立即 reconnectRaop,并记 rebuild-shift 事件",
+    /ev:\s*"rebuild-shift"/.test(bs) && /await\s+this\.reconnectRaop\(\)\s*;/.test(bs) &&
+      /if\s*\(\s*!this\.applyAnchorShift\(\s*shiftUs\s*\)\s*\)\s*return\s+false\s*;/.test(bs),
+    "缺 rebuild-shift 事件 / reconnectRaop / applyAnchorShift 前置",
+  );
+  check(
+    "D9: AP2 出口无 RTP 时间线 ⇒ rebuildForShift 只更新 opts 并返回 false(交由路由重建兜底)",
+    /if\s*\(\s*this\.ap2Session\s*!==\s*null\s*\)\s*\{\s*this\.applyAnchorShift\(\s*shiftUs\s*\)\s*;\s*return\s+false\s*;/.test(bs),
+    "AP2 分支未返回 false(调用方会误以为已生效)",
+  );
+  check(
+    "D9: PUT /groups/:id/delays 的三段兜底顺序 = 重建成员会话 → 重建组桥 → 逐成员 join",
+    /bridgeRebuildDelayDevice\(\s*devId\s*,\s*after\s*\*\s*1000\s*\)/.test(route) &&
+      /else\s+if\s*\(\s*isBridgeRouteActive\(\s*id\s*\)\s*\)\s*\{[\s\S]{0,200}?rebuilt\s*=\s*await\s+rebuildBridgeRoutes\(\s*id\s*\)/.test(route) &&
+      /await\s+bridgeJoinMember\(\s*id\s*,/.test(route),
+    "路由未按 成员会话重建 → 组桥重建 → 成员 join 的兜底顺序",
+  );
+}
+
+// ---------------------------------------------------------------------------
 if (failures.length) {
   console.error(`\n[AirPlay 桥接守卫] FAIL:${failures.length} 项`);
   for (const f of failures) console.error("  · " + f);
   process.exit(1);
 }
-console.log("\n[AirPlay 桥接守卫] 19 条全部通过");
+console.log("\n[AirPlay 桥接守卫] 19 条 + D4~D9 全部通过");

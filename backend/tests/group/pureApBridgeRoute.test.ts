@@ -3,7 +3,7 @@
 //   ① spin=0 且 ap>0 → prepareBridgeRoute 照走(不再要求组内有 sendspin 成员),
 //     且组落库音量随 bridgePrepare 下发(initialVolume);
 //   ② 纯 AP 桥组仍起组泵(spin job 带 bridge 规格下发)且桥成员不 solo cast;
-//   ③ prepare 全失败 → 逐设备回落 solo cast(MAJ-07 不变);
+//   ③ prepare 全失败 → 本曲该设备不播放(D7:不回落 solo cast),本组无可用出流即抛错;
 //   ④ 暖复用:同集合同协议二连播沿用 token、不拆桥;
 //   ⑤ 传输 op(暂停/停)落到组泵(spinOp 对纯 AP 桥组不再早退);
 //   ⑥ pollState / getGroupStatus:leader=桥占用 airplay 的纯 AP 组从组泵派生;
@@ -110,6 +110,8 @@ vi.mock("../../src/services/dlna/control.js", () => ({
 }));
 
 vi.mock("../../src/services/airplay/protocolPlayer.js", () => ({
+  // 统一入口:桥开 ⇒ 单机伪组桥播放器;组层只在 `MUSICFLOW_AIRPLAY_BRIDGE=0` 回滚时扇出本桩。
+  createAirPlayPlayerForDevice: (id: string) => h.protoPlayer("airplay", id),
   createAirPlayProtocolPlayer: (id: string) => h.protoPlayer("airplay", id),
 }));
 
@@ -167,6 +169,7 @@ vi.mock("../../src/services/player/index.js", () => ({
 
 import {
   createGroupProtocolPlayer,
+  getBridgeUnavailableReason,
   getGroupStatus,
   isGroupBridgeSessionAttached,
   setBridgeRoutesForTest,
@@ -207,14 +210,17 @@ describe("v4.9.3 方向 A:纯 AirPlay 组强制走桥", () => {
     expect(r.mediaUri).toBe("spin-g1");
   });
 
-  it("prepare 全失败 → 桥路由为 null,纯 AP 成员逐设备回落 solo cast(MAJ-07 不变)", async () => {
+  it("prepare 全失败 → 桥路由为 null,纯 AP 成员本曲不播放(D7 不回落 solo cast),本组无可用出流即抛错", async () => {
     setGroup(["airplay:ap1"]);
     apOn("ap1");
     h.prepareFail.add("ap1");
-    const r = await createGroupProtocolPlayer("g1").playMedia(makeItem(), "http://b");
+    // D7:失败者不 solo cast ⇒ jobs 为空 ⇒ 本组无任何出流,playMedia 抛「全部成员 cast 失败」
+    await expect(createGroupProtocolPlayer("g1").playMedia(makeItem(), "http://b")).rejects.toThrow(
+      /全部成员 cast 失败/,
+    );
     expect(h.spinPlayCalls).toHaveLength(0); // 无桥规格不起泵
-    expect(h.calls["ap1"]).toContain("play");
-    expect(r.mediaUri).toBe("airplay-ap1");
+    expect(h.calls["ap1"]).toBeUndefined(); // ★ 不得回落 legacy solo cast
+    expect(getBridgeUnavailableReason("ap1")?.reason).toMatch(/prepare failed/);
   });
 
   it("暖复用:同集合同协议二连播沿用 token、不拆桥(routeReusable 判据改 ap 集合)", async () => {

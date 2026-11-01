@@ -542,6 +542,16 @@
             size="small"
             @click="openMixedLead(g)"
           ><MfIcon name="Clock" />{{ t('groups.mixedLeadEntry') }}<span class="member-delay-badge">{{ mixedLeadLabel(g) }}</span></el-button>
+          <!-- 测试延迟（每组一个）：只有本组内播放器出声，每 5 秒一次极短咔哒，便于人耳对齐。 -->
+          <el-button
+            v-if="canUse"
+            size="small"
+            :type="delayTesting[g.id] ? 'danger' : 'default'"
+            :plain="!!delayTesting[g.id]"
+            :loading="!!delayTestBusy[g.id]"
+            :disabled="onlineCount(g) === 0"
+            @click="toggleDelayTest(g)"
+          ><MfIcon name="AudioLines" />{{ t(delayTesting[g.id] ? 'groups.delayTestStop' : 'groups.delayTestStart') }}</el-button>
           <div class="device-hide-toggle" :title="t('groups.hideToggleGroupTitle')">
             <el-switch
               :model-value="isHidden(`group:${g.id}`)"
@@ -1224,6 +1234,27 @@ const mixedLeadSaving = ref(false);
 /** 组 id → 当前生效值(ms)：卡片徽标回显。列表加载后批量拉一次。 */
 const mixedLeadVals = ref<Record<string, number>>({});
 
+/** 组 id → 是否正在跑「测试延迟」咔哒音(后端权威,刷新页面也能接着停)。 */
+const delayTesting = ref<Record<string, boolean>>({});
+/** 组 id → 启停请求在飞。 */
+const delayTestBusy = ref<Record<string, boolean>>({});
+
+/** 开始/停止该组的测试延迟:只有该组内播放器出声,每 5 秒一次极短咔哒。 */
+async function toggleDelayTest(g: any): Promise<void> {
+  if (!g?.id) return;
+  const running = !!delayTesting.value[g.id];
+  delayTestBusy.value[g.id] = true;
+  try {
+    await api.post(`/rest/api/v1/groups/${g.id}/delay-test${running ? "/stop" : ""}`);
+    delayTesting.value[g.id] = !running;
+    ElMessage.success(t(running ? "groups.delayTestStopped" : "groups.delayTestStarted"));
+  } catch (e) {
+    ElMessage.error(apiErrorText(e, t("groups.delayTestFailed")));
+  } finally {
+    delayTestBusy.value[g.id] = false;
+  }
+}
+
 /** 卡片上的回显文案：未拉到 / 0 = 自动；>0 = `8000ms`。 */
 function mixedLeadLabel(g: any): string {
   const v = mixedLeadVals.value[g?.id];
@@ -1238,6 +1269,7 @@ async function loadMixedLeads(): Promise<void> {
     try {
       const r = await api.get(`/rest/api/v1/groups/${g.id}/delays`);
       mixedLeadVals.value[g.id] = Number(r.data?.mixedAnchorLeadMs ?? 0);
+      delayTesting.value[g.id] = !!r.data?.delayTest;
       if (typeof r.data?.mixedAnchorLeadStepMs === "number" && r.data.mixedAnchorLeadStepMs > 0) {
         mixedLeadStep.value = r.data.mixedAnchorLeadStepMs;
       }

@@ -545,42 +545,51 @@ audible  = max(audible, floorMs)              // 本轮目标（起播/seek）�
 
 缓存策略：懒加载 + 写时更新（无 TTL）；延迟值只经 `setMemberDelay`/`setMixedAnchorLeadMs` 变更，不需要失效轮询。
 
-### 6.3 AirPlay 成员生效链路（投递窗口/时戳位移，动态读）
+### 6.3 AirPlay 成员生效链路（桥会话锚点，建会话时算死）
 
 ```
 member_delays_json["airplay:<deviceId>"]
-   ↓ bridgeAnchorShiftUsOf(groupName, deviceId)        (delayCalib.ts；动态读缓存)
-   ↓ SendspinGroup.bridgeAnchorShiftUs(deviceId)        (server.ts:947-949)
-   ├→ 补投窗口: lo/hi = now + FLOOR/HORIZON + ahead − shift   (server.ts:818-820 / 885-887)
-   └→ 投递时戳: 与窗口同一取值,ts' 同加 shift                  (server.ts:908)
+   ↓ getMemberDelayMs(groupId, "airplay:<deviceId>") * 1000     (control.ts bridgePrepareDevice)
+   ↓ bridgePrepareDevice 的 anchorShiftUs
+   ↓ BridgeSession.planBridgeAnchor: mapAnchorUs = sync ? anchorUs + shiftUs : anchorUs
+   └→ 投递窗口/投递时戳: bridgeDeliveryShiftUs 在组时间线模式下恒 0n (server.ts:1452)
 ```
 
-**铁律不变：桥内锚点 `anchorShiftUs` 恒 0（G13-b）**。补偿若写进锚点，对齐器把多出的位移判「内容超前」整段裁掉（v4.7.1 前真机实锤：切歌吞 2 秒、净补偿归零）。`ring` 的 `tsUs` 一律不动（§5）。
+**v4.11.0 口径（MA `_anchor_stream` 语义：命令带设备的 `sync_adjust`，组时间线不带）**：成员补偿**只**平移该设备自己的**可听锚点**（`mapAnchorUs`），送包节拍 `beatAnchorUs` 只含全组同值的 `groupDelayUs(rate)` ⇒ **同一时刻投出去的内容全组一致**，只有出声时刻按成员错开。
 
-**动态读的含义**：PUT 写缓存 ⇒ 下一补投 tick 即按新值算窗口/戳，无需任何通知链；但 AirPlay 的可听落点随**桥会话建立**锚定，要对已建会话立即生效必须重建/自愈该成员桥（§6.5）。
+> ⚠️ **旧口径已作废**：v4.7.1~v4.10.x 把补偿加在**投递窗口/投递时戳**上（并要求「桥内锚点恒 0」）。真机实测该形态会让同刻内容分发到不同成员时被 shift 平移 ⇒ +2000ms 成员 `skip 4.75s` + 两次 pacing rebase、-650ms 成员 `droppedFrames 12s`（抓包「同刻不同内容」+ 丢音）。回退开关 `MF_BRIDGE_SYNC_GROUP_TIMELINE=0` 恢复旧口径。
+
+**`ring` 的 `tsUs` 一律不动**（§5）。补偿只进锚点、不进 ring、不进投递戳。
+
+**生效时机**：锚点在**桥会话建立时**算死 ⇒ 改值必须重建该成员桥（§6.5，代价 1~2s 静音）；不再有「下一补投 tick 即生效」这种说法。
 
 ### 6.4 Sendspin 成员生效链路（帧级、真·实时）
 
 ```
 member_delays_json["sendspin:<clientId>"]
    ↓ sendspinDelayUsOfClient(groupName, clientId)       (delayCalib.ts；动态读缓存)
-   ↓ SendspinGroup.sendspinDelayUsOf(clientId)           (server.ts:1428)
-   ├→ 逐拍下发: c.sendAudio(ts + sendspinDelayUsOf(...), data)   (server.ts:1522)
-   └→ 迟到回填: 每客户端各自偏移                           (server.ts:1658)
+   ↓ SendspinGroup.sendspinDelayUsOf(clientId)           (server.ts:1933)
+   ├→ 逐帧下发: c.sendAudio(ts + sendspinDelayUsOf(...), data)   (server.ts:2031)
+   └→ 迟到回填: 每客户端各自偏移 dspDelayUs              (server.ts:2167-2168)
 ```
 
 **`ring` 的 `tsUs` 绝不能被污染。** ring 里的时间戳是内容时间线的真相；偏移只在下发那一刻加。若把偏移写进 ring：① 改延迟后历史条目的戳就错了，回填会把老内容塞到错位置；② 桥的投递窗口判定（读同一 ring）跟着漂。下一次 `pushFrame`（约 0.5~1s，等于设备 `send_ahead`）即按新值打戳——无会话重建。
 
+**桩口径（静默失效高发点）**：`SendspinServer.groupDelayUs(groupName, clientId)` 只是转发口（`server.ts:455`）；单测桩 server 若没有该方法，`sendspinDelayUsOf` 兜底 `0n` ⇒ 用例全绿而真机该成员永不生效。sendspin guard **P5** 已把「逐帧偏移」「迟到回填同偏移」「委托真实实现」三件事钉死。
+
 ### 6.5 重建/自愈（仅 `airplay:` 成员值变化时）
 
-现行处置（`routes/api/groups.ts:129-188`）：
+现行处置（`routes/api/groups.ts` 的 PUT delays，**v4.11.0 起 D9 三段兜底**，顺序不得改）：
 
 | 条件 | 处置 | 代价 |
 |---|---|---|
-| `airplay:` 成员值变了 且 `isBridgeRouteActive(id)` | `rebuildBridgeRoutes(id)` 重建该组桥 | 该组 AirPlay 成员约 1~2s 静音 |
-| `airplay:` 成员值变了 但路由登记缺失而桥在播 | **join 兜底自愈（2026-10-27）**：逐 airplay 成员 `bridgeJoinMember`（幂等）—— 现场初始化路由 + prepare 新会话（子进程自拆同设备旧会话）+ 泵 sync 停旧句柄起新句柄并回填 | 同上；新值随新会话锚定立即生效 |
-| 只改 `sendspin:` 成员 / `mixedAnchorLeadMs` | 不重建 | 无感（下一拍生效） |
-| 重建/自愈失败 | 保存仍成功 | 下次会话按新值建立 |
+| `airplay:` 成员值变了 | ① `bridgeRebuildDelayDevice(devId, after * 1000)` → 子进程 `rebuildForShift`（记 `ev:"rebuild-shift"` + `reconnectRaop`）；返回 `true` 即完成 | **该成员** 1~2s 静音 |
+| ① 不可用/失败 | ② `rebuildBridgeRoutes(id)` 重建整组桥 | **全组** AirPlay 成员 1~2s 静音 |
+| ② 也不行，但桥登记缺失而桥在播 | ③ 逐 airplay 成员 `bridgeJoinMember(id, …)`（幂等：先建路由再 prepare 新会话，子进程自拆同设备旧会话，泵 sync 停旧句柄起新句柄并回填） | 同上；新值随新会话锚定立即生效 |
+| 只改 `sendspin:` 成员 / `mixedAnchorLeadMs` | 不重建 | 无感（下一帧 / 下一首生效） |
+| 三段全失败 | 保存仍成功 | 下次会话按新值建立 |
+
+> ⚠️ 只剩 `bridgeSetDelay`（只改子进程内存 opts、不重连）是不够的：接收端只在 RECORD 阶段吃映射，**出声时刻其实没变**（用户现象：调了延迟没反应）。这就是 D9 要求「必须重建该成员会话」的原因。
 
 ### 6.6 接口
 
@@ -609,6 +618,42 @@ PUT 语义：`memberId` 必须是本组成员（命名空间 id **原样整条**
 | chip 徽标 | 该成员非 0 补偿回显（`member-delay-badge`） |
 | 已删除（v4.8.0 裁定） | 组级双 slider 弹窗、「延迟补偿」组级按钮、「复制设备 ID」交互 |
 | 切歌等待（v4.9.0 新增） | 群组卡片操作区「切歌等待」按钮（Clock 图标 + 徽标回显 `自动`/`8000ms`）→ 弹窗 el-input-number（0~30000/步进 100，`:append-to-body="true"` 铁律）；0 = 自动（默认 5000ms）；保存 PUT `{mixedAnchorLeadMs}`，**下一首切歌即生效**（子进程每次重锚直查 db，无需重建/重启）；同协议组（无 AirPlay 成员）不受影响 |
+| 测试延迟（v4.11.0 新增） | 群组卡片操作区「测试延迟」按钮（每组**独立**运行态/忙碌态，按 `g.id` 分表），见 §6.9 |
+
+### 6.9 群组「测试延迟」（v4.11.0，`services/group/delayTest.ts`）
+
+用途：用户调完成员补偿后，用**固定节拍咔哒声**确认「各台是否同时出声」。测的是**真实出声** —— 走的是组内正常出流路径，即按当前各成员已设置的补偿发声；不是只播一份「标准音」让人猜。
+
+**测试音样本（参数钉死）**：总时长 `TONE_DURATION_SEC = 300`、节拍 `CLICK_INTERVAL_SEC = 5`（每 5s 一次）、单次咔哒 `CLICK_MS = 20`、`TONE_RATE = 16_000` 单声道 16bit（约 9.6MB）。固定 songs id `mf-delay-test`，文件路径 `l:delaytest:<数据目录>/delay-test/click-5s.wav`；文件已存在且 `statSync().size === expectSize` 时**复用**，不每次重写 9.6MB。
+
+**播放方式**：`qc.playFrom(groupId, [item], 0, baseUrl)` + `qc.setPlayMode(groupId, "one")` —— 单曲队列 + 单曲循环。**不自建定时器**：循环语义与用户手动单曲循环同源，组内所有成员走的还是正常出流/补偿路径。
+
+**songs 行的坑**：`ensureToneRow` 必须 **upsert**（`.onConflictDoUpdate`），**不得先删后插** —— `play_history` / `user_favorite_songs` / `playlist_songs` 都是 `NO ACTION` 外键，删主行必抛 `FOREIGN KEY constraint failed`。收尾 `removeToneRow` 顺序固定：先清 `playlistSongs` / `userFavoriteSongs` / `playHistory`，再删 `songs` 主行。
+
+**起测前后现场保护（三态，按快照还原）**：
+
+| 起测前 | 停止后 |
+|---|---|
+| 在播（有 current 且未暂停） | 按原下标重播并 `seek` 回原进度 |
+| 暂停（有 current 且 paused） | 重播 + `seek`，然后**再 `pause`**（绝不把暂停态变成播放） |
+| 只装载未播（有队列无 current） | 只 `qc.setQueue(...)` + `qc.stopPlayback(groupId)`，**绝不顺手起播**（全函数 `qc.playFrom(` 仅 1 处） |
+| 无队列 | `qc.clear(groupId, { skipDeviceStop: true })`（设备已在停止流程停过，不重复停） |
+
+起播失败（`playFrom` 抛错）⇒ `removeToneRow()` + `restorePrevQueue(...)` + 异常**仍上抛**：不吞错，也不留脏现场。
+
+**停止**：`activeTests.delete(groupId)` → `qc.stopPlayback(groupId)` → `qc.transport(groupId, "stop")` → 按上面的快照还原；**只有 `activeTests.size === 0`（所有组都停了）才删测试音行** —— 提前删行 = 仍在别的组出声的那条链路被抽掉。
+
+**接口**：
+
+| 方法/路径 | 说明 |
+|---|---|
+| `POST /v1/groups/:id/delay-test` | 起测；`PERM.RENDERER_USE` + `gm.get(id)` + `gm.isOwnedBy` ⇒ 404；失败 `INVALID_PARAM` 400 |
+| `POST /v1/groups/:id/delay-test/stop` | 停止（同上权限/归属/错误码） |
+| `GET /v1/groups/:id/delays` | 多回显一个 `delayTest: isGroupDelayTestActive(id)`（刷新页面后按钮仍显示「停止」） |
+
+**前端**：运行态/忙碌态用 `delayTesting` / `delayTestBusy` 两个 `Record<string, boolean>` 按组 id 分表，动作按当前态切 `.../delay-test` 或 `.../delay-test/stop`，并从 GET delays 回读状态。**不得用全局布尔** —— 否则一台设备在测试时全组按钮都变「停止」。
+
+**守卫与测试**：`check-group-invariants.mjs` **G20**（12 条：样本参数钉死 / 复用不重写 / upsert / 删除顺序 / 单曲循环 / 三态还原 / 绝不顺手起播 / 全部组停了才删行 / 两路由 + 回显 / 前端每组独立）；单测 `tests/group/delayTest.test.ts`（16 例）+ `tests/routes/apiGroupDelayTest.test.ts`（8 例）。
 
 
 ## 7 容量与预算
@@ -780,17 +825,17 @@ PUT 语义：`memberId` 必须是本组成员（命名空间 id **原样整条**
 
 ## 10 回归守卫清单
 
-### 10.1 现状：群组守卫已落地（`check-group-invariants.mjs`，G1~G19，83 条断言）
+### 10.1 现状：群组守卫已落地（`check-group-invariants.mjs`，G1~G20，103 条断言）
 
-`backend/scripts/check-group-invariants.mjs`（2026-10-26 新增并挂 CI；v4.8.0 起 G10/G11 改钉成员级、新增 G13；v4.8.4 新增 G16/G17）。实测运行结果（`node backend/scripts/check-group-invariants.mjs`）：
+`backend/scripts/check-group-invariants.mjs`（2026-10-26 新增并挂 CI；v4.8.0 起 G10/G11 改钉成员级、新增 G13；v4.8.4 新增 G16/G17；**v4.11.0 新增 G20「测试延迟」**）。实测运行结果（`node backend/scripts/check-group-invariants.mjs`）：
 
 ```
-[群组不变量守卫] 83 条断言全部通过;4 项 TODO 缺口已登记(不阻断 CI,见上);1 项已裁定例外(2026-10-26 裁定,勿当 bug 修)
+[群组不变量守卫] 103 条断言全部通过;4 项 TODO 缺口已登记(不阻断 CI,见上);1 项已裁定例外(2026-10-26 裁定,勿当 bug 修)
 ```
 
 | 类别 | 内容 |
 |---|---|
-| **已通过（G1~G19）** | G1 成员命名空间原样透传 / G2 DLNA 不得入组（后端 kind 校验 + 前端候选过滤）/ G3 起播即落位 / G4 位置基准取真实内容时间线 / G5 单泵（桥侧不得自建选歌）/ G6 换源上限 3 + 负缓存 TTL 统一（`markUnplayable` 读 `negativeTtlSeconds` 配置，默认 2 小时）/ G7 延迟补偿不进 ring 的 `tsUs` / G8 watchdog 走 `qc.resumeActive` / G9 tick 埋点字段仍在 / G10 延迟参数域 ±30s·步进 10·单一源（**v4.8.0 改钉成员级取值口**）/ G11 延迟写路径只走 `delayCalib`（**createGroup 禁播种，成员级默认 0**，不经 `PlayerGroup` 实体与 `persist`）/ G12 重复成员：全量口 `throw`、增量口 `no-op`（语义刻意分叉）/ **G12b** `setMembers` 必须自带重复判定且早于差集过滤（变异 32 条）/ **G13 延迟补偿按成员（v4.8.0）**：取值口按成员 id 查表不串格（`bridgeAnchorShiftUsOf(groupName, deviceId)` / `sendspinDelayUsOfClient`）、select 必须列 `member_delays_json`、写路径落库、**桥内锚点恒 0（G13-b）**、PUT 重建条件覆盖、垫片组值手动口已删(v4.9.1) / **G14 可听前 BUFFERING 瞬态（v4.8.1）**：`audibleStarted` 声明/复位/置位 + `pollCore.buffering` + 四处映射 + fork 兜底（9 条）/ **G15 预取完整性三闸（v4.8.3）**：`attemptOnce` 上游截断对账（`TRUNCATION_TOLERANCE = 0.9`，实收 < 90% ⇒ stalled）+ 判官硬算术下界（`PREFETCH_HARD_MIN_BYTES_PER_SEC = 4000`，装不下期望时长 ⇒ `too-small-hard`） / **G16 正缓存不得盖负缓存（v4.8.4）**：`isNegativeFresh` 单一声明 + `addPlayable` 写前 `if (isNegativeFresh(songId)) return;` + `markUnplayable` 立即 `playableCache.delete(songId)` / **G17 判官中段缓冲兜底（v4.8.4）**：分支内顺序「硬下界 → 中段兜底 → 弱信号」+ 按真实时长用同一把尺子 `icfg.deltaSec` 判死（返回唯一）+ 解析失败 `catch` 保守放行 / **G18 试听片段跨进程判死回传 + 起播前第六闸（v4.8.5）**：`SongUnplayableSink` 类型 + `GroupPump.onUnplayable` 字段 + 判死拍回传、`pumpFor` 装填语义（不传 = 沿用已有）、**未装填不得静默**（告警 + `warnedNoSink` 去重）、IPC `songUnplayable` 事件 + supervisor 分发 + 主进程 `markSongUnplayableInMain` ⇒ `markUnplayable`、childMain 双分支装填、第六闸四条保守条件（已有结论不重复 / 无基准不杀 / 仅网络源 / 判官开）+ 有界等待（`Math.min(9000,…)` < 10s 外层）、先于 `resolvePlayableRow`、预取闸门 0 双闸（同步入口 + doPrefetch 权威版） / **G19 混合组锚点 lead 组级可配（v4.9.0）**：streamEngine 混合组分支用 `mixedAnchorLeadUsOf` 且回退常量 `BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US`（唯一表达式）+ 纯桥深锚与非桥分支原样 + delayCalib 读写口/钳制（0~30000·步进 100）/ **消费点绕 cache 直查 db**（子进程 cache 无失效广播，结构性陈旧）/ API GET/PUT 双向 + 新装一致性（CREATE TABLE 直含列；v4.9.2 起无迁移代码，G19-e 禁 ALTER TABLE 回流）/ 前端弹窗 `append-to-body` + step-strictly |
+| **已通过（G1~G19）** | G1 成员命名空间原样透传 / G2 DLNA 不得入组（后端 kind 校验 + 前端候选过滤）/ G3 起播即落位 / G4 位置基准取真实内容时间线 / G5 单泵（桥侧不得自建选歌）/ G6 换源上限 3 + 负缓存 TTL 统一（`markUnplayable` 读 `negativeTtlSeconds` 配置，默认 2 小时）/ G7 延迟补偿不进 ring 的 `tsUs` / G8 watchdog 走 `qc.resumeActive` / G9 tick 埋点字段仍在 / G10 延迟参数域 ±30s·步进 10·单一源（**v4.8.0 改钉成员级取值口**）/ G11 延迟写路径只走 `delayCalib`（**createGroup 禁播种，成员级默认 0**，不经 `PlayerGroup` 实体与 `persist`）/ G12 重复成员：全量口 `throw`、增量口 `no-op`（语义刻意分叉）/ **G12b** `setMembers` 必须自带重复判定且早于差集过滤（变异 32 条）/ **G13 延迟补偿按成员（v4.8.0）**：取值口按成员 id 查表不串格（`bridgeAnchorShiftUsOf(groupName, deviceId)` / `sendspinDelayUsOfClient`）、select 必须列 `member_delays_json`、写路径落库、**桥内锚点恒 0（G13-b）**、PUT 重建条件覆盖、垫片组值手动口已删(v4.9.1) / **G14 可听前 BUFFERING 瞬态（v4.8.1）**：`audibleStarted` 声明/复位/置位 + `pollCore.buffering` + 四处映射 + fork 兜底（9 条）/ **G15 预取完整性三闸（v4.8.3）**：`attemptOnce` 上游截断对账（`TRUNCATION_TOLERANCE = 0.9`，实收 < 90% ⇒ stalled）+ 判官硬算术下界（`PREFETCH_HARD_MIN_BYTES_PER_SEC = 4000`，装不下期望时长 ⇒ `too-small-hard`） / **G16 正缓存不得盖负缓存（v4.8.4）**：`isNegativeFresh` 单一声明 + `addPlayable` 写前 `if (isNegativeFresh(songId)) return;` + `markUnplayable` 立即 `playableCache.delete(songId)` / **G17 判官中段缓冲兜底（v4.8.4）**：分支内顺序「硬下界 → 中段兜底 → 弱信号」+ 按真实时长用同一把尺子 `icfg.deltaSec` 判死（返回唯一）+ 解析失败 `catch` 保守放行 / **G18 试听片段跨进程判死回传 + 起播前第六闸（v4.8.5）**：`SongUnplayableSink` 类型 + `GroupPump.onUnplayable` 字段 + 判死拍回传、`pumpFor` 装填语义（不传 = 沿用已有）、**未装填不得静默**（告警 + `warnedNoSink` 去重）、IPC `songUnplayable` 事件 + supervisor 分发 + 主进程 `markSongUnplayableInMain` ⇒ `markUnplayable`、childMain 双分支装填、第六闸四条保守条件（已有结论不重复 / 无基准不杀 / 仅网络源 / 判官开）+ 有界等待（`Math.min(9000,…)` < 10s 外层）、先于 `resolvePlayableRow`、预取闸门 0 双闸（同步入口 + doPrefetch 权威版） / **G19 混合组锚点 lead 组级可配（v4.9.0）**：streamEngine 混合组分支用 `mixedAnchorLeadUsOf` 且回退常量 `BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US`（唯一表达式）+ 纯桥深锚与非桥分支原样 + delayCalib 读写口/钳制（0~30000·步进 100）/ **消费点绕 cache 直查 db**（子进程 cache 无失效广播，结构性陈旧）/ API GET/PUT 双向 + 新装一致性（CREATE TABLE 直含列；v4.9.2 起无迁移代码，G19-e 禁 ALTER TABLE 回流）/ 前端弹窗 `append-to-body` + step-strictly / **G20 群组「测试延迟」（v4.11.0，13 条）**：样本参数钉死（`mf-delay-test` / 5s / 300s / 16kHz / 20ms）、文件已存在且尺寸正确即复用、songs 行 **upsert**（禁先删后插）、收尾先清引用行再删主行、起测 = 单曲队列 + `playMode="one"`、起播失败回滚现场且异常上抛、三态还原（在播重播补进度 / 暂停再暂停 / 装载未播绝不顺手起播）、无队列 `clear(skipDeviceStop)`、停止后 `activeTests.size === 0` 才删行、两条路由权限+归属+`INVALID_PARAM`、GET delays 回显 `delayTest`、前端按组 id 分表 |
 | **TODO 缺口（4，不阻断 CI）** | G1「`airplay:`/`sendspin:`/`dlna:` 前缀常量只有一处定义」、G3「`castLanding.applied` 语义」的命名、G4「位置基准必须取 `contentClock`」、G9「`stats` 的 `w=`/`m=`/`clock=`/`delta` 四字段」。**四条的共同点：都是旧文档口径与现状不符**（这三个名字在代码里不存在，见 §5.1 术语纠偏与附录 B-1/B-3）；守卫的处置是「登记缺口、要求产品侧确认后再改埋点，不由守卫凭空造」 |
 | **已裁定例外（1）** | G3：**DLNA 路径**的「先起播再校准 seek」属既定例外；AirPlay 路径仍必须把起点经 `startMs`/`seekSec` 一次编入 |
 

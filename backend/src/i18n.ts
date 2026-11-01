@@ -194,6 +194,8 @@ const CATALOG: Record<BackendLocale, Catalog> = {
     "errors.group.notFoundOrNoPerm": "组不存在或无权限",
     "errors.group.memberNotInGroup": "该成员不在此群组中",
     "errors.group.empty": "组内无成员",
+    "errors.group.delayTestStartFailed": "测试延迟启动失败",
+    "errors.group.delayTestStopFailed": "测试延迟停止失败",
 
     "errors.flow.notExist": "流程不存在",
     "errors.flow.nameRequired": "需要 name",
@@ -388,6 +390,8 @@ const CATALOG: Record<BackendLocale, Catalog> = {
     "errors.group.notFoundOrNoPerm": "Group not found or no permission",
     "errors.group.memberNotInGroup": "Member is not in this group",
     "errors.group.empty": "Group has no members",
+    "errors.group.delayTestStartFailed": "Failed to start delay test",
+    "errors.group.delayTestStopFailed": "Failed to stop delay test",
 
     "errors.flow.notExist": "Flow does not exist",
     "errors.flow.nameRequired": "Need name",

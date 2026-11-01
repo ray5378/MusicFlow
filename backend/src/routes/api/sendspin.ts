@@ -6,12 +6,16 @@ import {
   adminMiddleware,
   apiError,
   apiErrorStatus,
+  db,
+  eq,
   getCachedDevices,
   getEventManager,
   hasPerm,
   permMiddleware,
+  plugins,
   sendspinServerOr404,
 } from "./shared.js";
+import { readBridgePrefetchConfig } from "../../services/sendspin/bridgePrefetchConfig.js";
 
 export function registerSendspin(app: Hono): void {
 app.get("/v1/sendspin/clients", async (c) => {
@@ -439,4 +443,40 @@ app.post("/v1/sendspin/unpair", adminMiddleware, async (c) => {
 
 // Set the play mode (order | one | all | shuffle) for a device's queue.
 // Body: { mode: PlayMode }
+
+// ==================== S1「下一首预解码」Web 开关(音频页)====================
+// 值存 sendspin-renderer 插件配置的 next_track_prefetch(缺省**开**)。
+// 为什么不放 settings 表:预取判定跑在 sendspin **子进程**(streamEngine),它只直读
+// plugins 表(WAL 多进程安全),读不到主进程内存态 —— 见
+// services/sendspin/bridgePrefetchConfig.ts。改完下一首换歌即生效,无需重启。
+// 容器环境变量 MF_BRIDGE_NEXT_TRACK_PREFETCH 仍作排障总闸,且在 streamEngine 里
+// **优先**于本值;这里把它一并回给前端,避免「界面开着、env 关着」的错觉。
+function prefetchEnvOverride(): string | null {
+  const raw = process.env.MF_BRIDGE_NEXT_TRACK_PREFETCH;
+  return raw === "0" || raw === "false" || raw === "off" || raw === "1" || raw === "true" || raw === "on"
+    ? raw
+    : null;
+}
+
+app.get("/v1/sendspin/bridge-prefetch", adminMiddleware, (c) => {
+  return c.json({ enabled: readBridgePrefetchConfig(), envOverride: prefetchEnvOverride() });
+});
+
+// Body: { enabled: boolean } —— 只合并这一个键进插件 config JSON,不动其它配置。
+app.put("/v1/sendspin/bridge-prefetch", adminMiddleware, async (c) => {
+  const body = await c.req.json().catch(() => ({} as any));
+  const enabled = body?.enabled !== false;
+  const p =
+    db.select().from(plugins).where(eq(plugins.id, "sendspin-renderer")).get() ??
+    db.select().from(plugins).where(eq(plugins.name, "sendspin-renderer")).get();
+  if (!p) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.plugin.notFound"), 404);
+  let cfg: any = {};
+  try { cfg = p.config ? JSON.parse(p.config) : {}; } catch { cfg = {}; }
+  cfg.next_track_prefetch = enabled;
+  db.update(plugins)
+    .set({ config: JSON.stringify(cfg), updatedAt: new Date().toISOString() })
+    .where(eq(plugins.id, p.id))
+    .run();
+  return c.json({ enabled, envOverride: prefetchEnvOverride() });
+});
 }

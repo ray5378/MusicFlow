@@ -11,7 +11,7 @@ import { PlayMode, PlayerState, PlaybackState, QueueItem, QueueSnapshot } from "
 import { UniversalPlayer } from "./UniversalPlayer.js";
 import { getPlayerController } from "./index.js";
 import { createDlnaProtocolPlayer, getEffectiveBaseUrl, clearCurrentMedia, getDevice, alignDeviceToPosition } from "../dlna/control.js";
-import { createAirPlayProtocolPlayer } from "../airplay/protocolPlayer.js";
+import { createAirPlayPlayerForDevice } from "../airplay/protocolPlayer.js";
 import { createSendspinProtocolPlayer } from "../sendspin/protocolPlayer.js";
 import { getCachedPlayability } from "../source/online/streamFallback.js";
 import { getPreProbeScheduler } from "./preProbeScheduler.js";
@@ -305,7 +305,9 @@ export class QueueController extends EventEmitter {
   registerAirPlayDevice(deviceId: string, name: string): void {
     if (this.players.has(deviceId)) return;
     const up = new UniversalPlayer(`airplay:${deviceId}`, name);
-    up.attachProtocol(createAirPlayProtocolPlayer(deviceId));
+    // D2：桥开关开 → 单机也走「单成员伪组」桥（PCM 唯一来源 = sendspin 组泵）；
+    // `MUSICFLOW_AIRPLAY_BRIDGE=0` 时退回原直连实现（整体回滚开关）。
+    up.attachProtocol(createAirPlayPlayerForDevice(deviceId));
     this.registerPlayer(deviceId, up, getPlayerController());
     log.info(`[QueueController] registered AirPlay device: ${deviceId} (${name})`);
   }
@@ -360,7 +362,18 @@ export class QueueController extends EventEmitter {
     log.debug(`[QueueController][transport] ${playerId} op=${op} arg=${arg}`);
     // seek 冷静期打标必须在**下发之前**:请求在途/重定位进行中就可能有一拍状态上报
     // 落进"设备非 PLAYING"的真空里(见 services/player/seekSettle.ts 顶部注释)。
-    if (op === "seek") markSeekIssued(playerId);
+    if (op === "seek") {
+      markSeekIssued(playerId);
+      // ★ S1(2026-11-01 真机):seek 本身就是"这一拍的用户意图",起播/重投留下的
+      //   5s「等设备确认 PLAYING」乐观窗口必须就此作废。
+      //   窗口开着时 reportState 会**吞掉**非 PLAYING 上报(只回一行"窗口内忽略"),
+      //   而近曲末 seek(剩余 ≤ 预取长度)会立刻触发 S1 跳过排空 → 泵在 seek 后
+      //   60ms 内收尾并把位置钉到时长;那一拍 IDLE(pos=时长)正好被窗口吞掉,
+      //   5s 到点误判 stalled → stall-reinvest 从 0s 重投(真机:seek 183s 被打回
+      //   0s,auto i=0 空等 35s)。seek 后的状态真空由 seekSettle(8s)负责,
+      //   窗口留着只会制造误判。
+      this.ctrls.get(playerId)?.endOptimistic?.(player.playerId);
+    }
     // C 方案：seek 改写了「这一首还剩多久」，上一轮的曲末预热标记随之作废 ——
     // 用户可能从尾部拖回开头再听到一次曲末，那时要能重新预热（幂等标记按 player 记）。
     if (op === "seek") resetDrainPreheat(playerId);
@@ -927,6 +940,33 @@ export class QueueController extends EventEmitter {
     return (cur + 1) % n;
   }
 
+  /** **只读**预判「下一首」下标(S1 下一首预解码用;`pickNext` 的纯函数版)。
+   *
+   *  为什么不能直接复用 `pickNext`:`shuffleNextIndex` 会**推进** `q.shufflePos`
+   *  (那是真实切歌的动作)。起播时顺手调一次会把洗牌游标多走一格 ⇒ 后面真正的
+   *  自动切歌再调一次就**跳掉一首**,客户端镜像的 shuffleOrder 也对不上
+   *  (既有用例「后续自动切歌沿服务端 shuffleOrder 走」直接失败)。
+   *  这里只回答「按现状态接下来会放哪首」:
+   *  - 洗牌序列已到尾 / 待重建(下一拍才会重建出新顺序)⇒ -1(不预取,宁可少预取
+   *    也不预取错歌);
+   *  - 单曲循环 ⇒ -1(下一首就是当前曲,没有预取意义)。
+   *  @returns 下一首下标;-1 = 无可预取对象 */
+  private peekNext(q: QueueData): number {
+    const n = q.items.length;
+    if (n === 0 || q.currentIndex < 0) return -1;
+    if (q.playMode === "one") return -1;
+    if (q.playMode === "shuffle") {
+      const order = q.shuffleOrder || [];
+      const pos = q.shufflePos ?? -2;
+      // 与 shuffleNextIndex 的「重建」判据同一口径:序列与队列不同步 / 走到尾 ⇒ 这一轮
+      // 的下首取决于重建结果(随机),预判不可靠 ⇒ 放弃预取。
+      if (q.shuffleLen !== n || order.length !== n || pos + 1 >= order.length) return -1;
+      return order[pos + 1] ?? -1;
+    }
+    if (q.currentIndex + 1 < n) return q.currentIndex + 1;
+    return q.playMode === "all" ? 0 : -1;
+  }
+
   private pickNext(q: QueueData, nativeGapless: boolean): number {
     const n = q.items.length;
     if (n === 0) return -1;
@@ -1160,7 +1200,15 @@ export class QueueController extends EventEmitter {
     throw new Error(`playMedia 超过 ${timeoutMs}ms 未返回(cast 挂死)`);
   }
 
-  private async playCurrent(deviceId: string, baseUrl: string, startPositionMs?: number, source = "direct"): Promise<void> {
+  private async playCurrent(
+    deviceId: string,
+    baseUrl: string,
+    startPositionMs?: number,
+    source = "direct",
+    /** D6/P1(2026-10-31):仅用户手动 next/prev 为 true —— AirPlay 桥据此把下一次
+     *  track 边界标成「用户操作」(1 次 FLUSH + ts 回拨),其余起播来源一律 false。 */
+    manual = false,
+  ): Promise<void> {
     const q = this.queues.get(deviceId);
     const player = this.players.get(deviceId);
     const ctrl = this.ctrls.get(deviceId);
@@ -1306,8 +1354,21 @@ export class QueueController extends EventEmitter {
         : 30_000;
       // 起点只对**本次要起播的那一首**有意义:中途跳过了死源后就不能再套用。
       const castStartMs = skips > 0 ? undefined : startPositionMs;
+      // S1(2026-11-01,下一首预解码):把**队列下一首**的 songId 一并交给 player(只用 id,
+      // 元数据由下次真正起播再补)。用只读的 `peekNext`(**不能**用 pickNext —— 洗牌
+      // 模式会推进 shufflePos,起播顺手走一格会让真正切歌跳曲,见 peekNext 注释);
+      // 与自动推进同源(同一套 playMode 规则)⇒ 预取的就是接下来要播的那首;
+      // 单曲循环 / order 末尾 / 洗牌序列待重建 ⇒ -1 ⇒ 不传(没有可预取的对象)。
+      // 其它协议实现忽略该字段(DLNA 拉流无需预取),故对非 bridge 路由是零行为变化。
+      const nextIdx = this.peekNext(q);
+      const nextSongId = nextIdx >= 0 && nextIdx !== q.currentIndex
+        ? q.items[nextIdx]?.songId
+        : undefined;
+      const castOpts = (manual || nextSongId)
+        ? { ...(manual ? { manual: true } : {}), ...(nextSongId ? { nextSongId } : {}) }
+        : undefined;
       const { mediaUri } = (await withTimeout(
-        player.playMedia(fullItem, baseUrl, castStartMs),
+        player.playMedia(fullItem, baseUrl, castStartMs, undefined, castOpts),
         castTimeoutMs,
         `${playerId} playMedia(${fullItem.songId})`,
         () => null as { mediaUri: string } | null,
@@ -1553,7 +1614,7 @@ export class QueueController extends EventEmitter {
     if (idx === -1) { this.markEnded(playerId); return; }
     if (this.advancing.has(playerId)) return;
     this.advancing.add(playerId);
-    try { q.currentIndex = idx; q.ended = false; q.isActive = true; await this.playCurrent(playerId, baseUrl); this.persist(playerId); this.emit("queue_changed", playerId, this.snapshot(playerId)); this.schedulePreProbe(playerId); this.schedulePrefetch(playerId); }
+    try { q.currentIndex = idx; q.ended = false; q.isActive = true; await this.playCurrent(playerId, baseUrl, undefined, "direct", true); this.persist(playerId); this.emit("queue_changed", playerId, this.snapshot(playerId)); this.schedulePreProbe(playerId); this.schedulePrefetch(playerId); }
     finally { this.advancing.delete(playerId); }
   }
 
@@ -1564,7 +1625,7 @@ export class QueueController extends EventEmitter {
     this.advancing.add(playerId);
     try {
       q.isActive = true; q.ended = false;
-      if (q.playMode === "one") { await this.playCurrent(playerId, baseUrl); }
+      if (q.playMode === "one") { await this.playCurrent(playerId, baseUrl, undefined, "direct", true); }
       else if (q.playMode === "shuffle") {
         this.ensureShuffleReady(q);
         if ((q.shufflePos ?? 0) > 0) {
@@ -1572,10 +1633,10 @@ export class QueueController extends EventEmitter {
           q.currentIndex = q.shuffleOrder![q.shufflePos!];
         }
         // 已在序列头部:不绕回,保持当前曲
-        await this.playCurrent(playerId, baseUrl);
+        await this.playCurrent(playerId, baseUrl, undefined, "direct", true);
       }
-      else if (q.currentIndex > 0) { q.currentIndex--; await this.playCurrent(playerId, baseUrl); }
-      else if (q.playMode === "all") { q.currentIndex = q.items.length - 1; await this.playCurrent(playerId, baseUrl); }
+      else if (q.currentIndex > 0) { q.currentIndex--; await this.playCurrent(playerId, baseUrl, undefined, "direct", true); }
+      else if (q.playMode === "all") { q.currentIndex = q.items.length - 1; await this.playCurrent(playerId, baseUrl, undefined, "direct", true); }
       this.persist(playerId); this.emit("queue_changed", playerId, this.snapshot(playerId));
       this.schedulePreProbe(playerId); this.schedulePrefetch(playerId);
     } finally { this.advancing.delete(playerId); }
@@ -1900,11 +1961,21 @@ export class QueueController extends EventEmitter {
       log.warn("组状态查询失败,回退 position=0", { groupId, err: e?.message || e });
     }
     const startMs = position > 0 ? Math.round(position * 1000) : 0;
+    // D2/D7：桥开关开 → 新成员只允许加入组泵桥（从 pump ring 回填，与组同一时间线）；
+    // 桥路由不存在或建立失败一律显式失败，绝不回落 solo cast。
+    const bridgeOn = (await import("../airplay/control.js")).isAirplayBridgeEnabled();
     for (const deviceId of online) {
       try {
-        const p = createAirPlayProtocolPlayer(deviceId);
-        await p.playMedia(fullItem, baseUrl, startMs);
-        if (playState === "PAUSED" || playState === "PAUSED_PLAYBACK") await p.pause();
+        if (bridgeOn) {
+          const { bridgeJoinMember } = await import("../group/protocolPlayer.js");
+          if (!(await bridgeJoinMember(groupId, deviceId))) {
+            throw new Error("桥路由未激活或 bridgePrepare 失败（D7：不回落直连）");
+          }
+        } else {
+          const p = createAirPlayPlayerForDevice(deviceId);
+          await p.playMedia(fullItem, baseUrl, startMs);
+          if (playState === "PAUSED" || playState === "PAUSED_PLAYBACK") await p.pause();
+        }
         const pq = this.queues.get(deviceId);
         if (pq?.isActive) {
           pq.isActive = false;

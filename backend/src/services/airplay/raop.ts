@@ -17,6 +17,7 @@
 // and reused by services/airplay/control.ts.
 import * as net from "net";
 import * as dgram from "dgram";
+import { existsSync } from "node:fs";
 import { publicEncrypt, createPublicKey, randomBytes, constants, createCipheriv } from "crypto";
 import { ntpFromHostUs, nowUs } from "../../utils/hostClock.js";
 import { audibleAtUs, ntpToRtpMod, sendAtUs } from "./bridgeMath.js";
@@ -24,6 +25,13 @@ import { BRIDGE_RESUME_REBASE_US, RAOP_SAFETY_MS } from "./rates.js";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("RAOP");
+
+/** 抓包验收辅助开关(见 bindUdp 的落日志点):仅当标记文件存在时输出 —— 容器内
+ *  `touch/rm /app/backend/data/.raop-keylog` 即可开关,无需重启、无需改 compose。 */
+function raopKeyLogEnabled(): boolean {
+  const p = process.env.MF_RAOP_KEY_LOG || "/app/backend/data/.raop-keylog";
+  try { return existsSync(p); } catch { return false; }
+}
 
 export const SAMPLE_RATE = 44100;
 export const SAMPLE_SIZE = 16;
@@ -305,14 +313,25 @@ export interface RaopBridgeAnchor {
   startNtp: bigint;
   /** 补偿后的映射锚点 A′(host µs):接收端播放 RTP baseTs 的时刻。 */
   anchorUsShifted: bigint;
+  /** 送包节拍基准(host µs,**不含成员补偿**,含重采样群延迟)。
+   *  群组同内容同步(2026-11-01):节拍必须全组同源 —— 同内容在各成员的同刻送包
+   *  时刻一致,抓包才能「同一时刻包内音频内容一致」;成员补偿只出现在 RTP/NTP 映射
+   *  (anchorUsShifted)⇒ 只有该设备出声时刻平移。缺省(旧调用方)回落 anchorUsShifted。 */
+  beatAnchorUs?: bigint;
   /** 内容首样本应可听时刻 A(host µs,组时间线域;对齐/漂移换算基准)。 */
   anchorUs: bigint;
   /** L(帧;RECORD 协商,不得为 0 —— 接收端保持缓冲深度,§3.3)。 */
   latencyFrames: number;
   /** 输出采样率(AP1 = 44100;48k 直通协议 = 48000)。 */
   rate: number;
-  /** L2 跨曲显式重锚:true 时 streamBridge 写锚后发 FLUSH+RECORD 让接收端按新映射重锚。仅「换代(track)」置位。 */
-  explicitReanchor?: boolean;
+  /** 用户 seek/next/prev 换代：允许新流 RTP ts **回拨**（MA 实测回拨 1.588–1.695s）。
+   *  缺省 false = 保持旧行为（强制前跳到上一包之后，禁止时间轴后退）。 */
+  allowTsRewind?: boolean;
+  /** 用户手动 next/prev 的**显式**回拨量（帧；>0 = 已由 BridgeSession 判定为手动）。
+   *  与 `allowTsRewind` 的区别：这里以「上一包 ts」为基准精确落点
+   *  `newTs = lastSentTs + 352 − R`，复现基线「seq +1、ts 回拨 1.588–1.695s」；
+   *  只下移 RTP ts，`startNtp` 不变 ⇒ **可听时刻不变**。 */
+  rewindFrames?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -331,13 +350,17 @@ export interface RaopBridgeAnchor {
  *  - 本文件既有注释已写明该故障形态:too-small value ⇒ "periodic total silence
  *    while progress keeps advancing",与真机签名逐字吻合。
  *
- * 缺省 **1000ms = 历史行为,零变化**。调到 2500~3000 可覆盖最坏空口空洞。
+ * 缺省 **2000ms**（2026-10-31 对齐 MA 实测：设备侧 `ts_head − ts_player ≡ 2.000s`）。
+ * 1s 是 v4.10.x 及更早的历史值；2s 同时覆盖「空口 240 包 ≈1.92s」的最坏空洞。
  * 下限 1000ms 不可再降(会周期性跑空);上限 8000ms 纯防御(端到端延迟线性增加)。
  * 代价:端到端延迟随该值增加,组内一致故不破坏同步。
  */
 export function raopHoldMs(): number {
   const v = Number(process.env.MF_BRIDGE_RAOP_HOLD_MS);
-  if (!Number.isFinite(v) || v < 1000) return 1000;
+  // 缺省 2000ms（对齐 MA 实测：设备侧 ts_head − ts_player ≡ 2.000s）；显式设值仍以设值为准，
+  // 下限 1000ms 不可再降（会周期性跑空），上限 8000ms 纯防御。
+  if (!Number.isFinite(v)) return 2000;
+  if (v < 1000) return 1000;
   return v > 8000 ? 8000 : v;
 }
 
@@ -437,7 +460,7 @@ export async function raopTeardownProbe(host: string, port: number, timeoutMs = 
  *  - `send`:sendChunk 返 false(会话已销毁 / 无 audio socket)—— 设备侧断连。
  *  - `destroy`:`destroying` 被置位(主动销毁)。
  *  - `stopped`:`streaming` 被外部置 false(flush / 换代)。 */
-export type BridgeStreamEndReason = "producer" | "send" | "destroy" | "stopped" | "reanchor-failed";
+export type BridgeStreamEndReason = "producer" | "send" | "destroy" | "stopped";
 
 export class RaopPlayer {
   opts: RaopConnectOptions & { host: string; port: number; sampleRate: number };
@@ -462,6 +485,8 @@ export class RaopPlayer {
    *  表现就是**拖动进度后彻底无声**(HiVi 用户反馈同症状)。
    *  正确做法:RTP 时间线只负责包间连续性,NTP 锚点 = 真正开始推流的墙钟时刻。 */
   private startNtp = 0n;
+  /** 本会话累计的运行中补偿平移(µs;retimeByUs 累加,诊断用 —— 不参与任何换算)。 */
+  private retimeUs = 0;
   private baseTs = 0; // RTP ts of file-time 0 (fixed at RECORD; seek re-anchors startTs on it)
   // libraop default latency_frames = 1s of frames (cliraop passes MS2TS(1000,sr));
   // the device derives its RTP hold depth mostly from this sync field, and a
@@ -615,6 +640,31 @@ export class RaopPlayer {
     this.startTs = (this.startTs + Math.round(frames)) >>> 0;
   }
 
+  /** 桥接路径**运行中改成员补偿**:把 RTP↔NTP 映射整体平移 `deltaUs`(正 = 内容更晚出声)。
+   *
+   *  只动 `startNtp`(SYNC 的 NTP = startNtp + (headTs − startTs)),**不动**内容轴、
+   *  `baseTs`/`startTs`/`headTs`,也不重发任何音频包 —— 设备按新映射把「已在它缓冲里的
+   *  内容」与后续内容一起平移到新的出声时刻。等价于把 `anchorShiftUs` 的增量落到设备侧,
+   *  因此 `PUT /groups/:id/delays` 无需拆会话/重建桥(旧实现必须重建才生效)。
+   *  立即补发一段 SYNC,避免设备在下一次 1s 定时 SYNC 前仍按旧映射出声。
+   *
+   *  @returns true = 已生效(流在跑);false = 未起流/正在销毁(调用方按「下次锚定生效」处理)。 */
+  retimeByUs(deltaUs: number): boolean {
+    if (!this.started || this.destroying) return false;
+    if (!Number.isFinite(deltaUs) || deltaUs === 0) return true;
+    // µs → NTP tick:每秒 2^32 tick ⇒ 每 µs = 4294.967296 tick(整数量级误差 < 1µs/1000s)。
+    this.startNtp += BigInt(Math.round(deltaUs * 4294.967296));
+    this.retimeUs += deltaUs;
+    this.sendSync(true);
+    log.info(`RAOP retime device=${this.opts.deviceId ?? "?"} deltaUs=${deltaUs} totalUs=${this.retimeUs}`);
+    return true;
+  }
+
+  /** 本会话累计的运行中补偿平移(µs;诊断快照用)。 */
+  get bridgeRetimeUs(): number {
+    return this.retimeUs;
+  }
+
   private async bindUdp(): Promise<void> {
     const mk = (reuse: boolean) =>
       new Promise<dgram.Socket>((res, rej) => {
@@ -626,6 +676,13 @@ export class RaopPlayer {
     this.ctrlSocket = await mk(true);
     this.audioSocket = await mk(false);
     this.localIp = this.audioSocket.address().address;
+    // 临时验收辅助(2026-11-01,抓包「同刻同内容」验收):设备侧音频是 AES-128-CBC
+    // 加密的(每设备独立会话密钥),被动抓包无法逐字节比对明文 —— 把本会话的
+    // key/iv/ssrc/audio 端口落到日志,离线解密 pcap 做比对。仅当标记文件存在时输出
+    // (容器内可运行时 touch/rm,无需重启);不影响任何投递路径。
+    if (raopKeyLogEnabled()) {
+      log.warn(`[raop-key] dev=${this.opts.deviceId ?? "?"} host=${this.opts.host} lport=${this.audioSocket.address().port} ssrc=${(this.ssrc >>> 0).toString(16)} enc=${this.rsa} key=${this.aesKey.toString("base64")} iv=${this.aesIv.toString("base64")}`);
+    }
   }
 
   /**
@@ -1287,7 +1344,24 @@ export class RaopPlayer {
     // ---- 跨曲重锚(L1+L2,Fix G,对标 MA 的 FLUSH+重 START)----
     // L1:若新锚起点早于上一包(headTs 回退),强制 baseTs/startTs/headTs 三者同量前跳,
     //   保证 positionSec 与 SYNC 映射不变(只动 RTP 起点,不重标内容)。
-    if (this.lastSentTs >= 0) {
+    // 用户 seek/next/prev 允许 ts 回拨（MA 实测 −1.588~−1.695s）：此时不得强制前跳，
+    // 否则会把「回拨」抹成「续接」，与基线签名不符。自动换歌仍走前跳保护。
+    if (this.lastSentTs >= 0 && anchor.rewindFrames !== undefined && anchor.rewindFrames > 0) {
+      // D6/P1(2026-10-31):用户手动 next/prev —— 以「上一包 ts」为基准显式回拨。
+      // 基线 17 次实测:seq +1、新流首包 ts 相对上一包 **−1.588～−1.695s**(p50 1.662)。
+      // 只下移 RTP ts 三者(startNtp 不变)⇒ 可听时刻不变;R 按 352 对齐保持模域自洽。
+      const sr = this.opts.sampleRate;
+      const R = Math.min(
+        Math.max(CHUNK_LEN, Math.round(anchor.rewindFrames / CHUNK_LEN) * CHUNK_LEN),
+        0x8000_0000,
+      );
+      const base = (this.lastSentTs + CHUNK_LEN - R) >>> 0;
+      this.baseTs = base;
+      this.startTs = base;
+      this.headTs = base;
+      this.positionSec = ts2ms((this.headTs - this.baseTs) >>> 0, sr) / 1000;
+      log.info(`bridge manual rewind: -${R} frames (${(R / sr).toFixed(3)}s) seq=${(this.seq + 1) & 0xffff}`);
+    } else if (this.lastSentTs >= 0 && anchor.allowTsRewind !== true) {
       const sr = this.opts.sampleRate;
       const minNext = (this.lastSentTs + CHUNK_LEN) >>> 0;
       const ahead = (minNext - this.startTs) >>> 0;
@@ -1296,17 +1370,6 @@ export class RaopPlayer {
         this.startTs = (this.startTs + ahead) >>> 0;
         this.headTs = (this.headTs + ahead) >>> 0;
         log.warn(`bridge re-anchor: 时间线强制前跳 ${ahead} frames (${((ahead / sr) * 1000).toFixed(1)}ms)`);
-      }
-      // L2:换代(track)显式重锚 —— 发 FLUSH 冲刷旧时间线 + RECORD 开新录制会话。
-      //   失败(设备不回 2xx)抛错 -> 上层 reconnectRaop 冷重建。
-      if (anchor.explicitReanchor === true) {
-        try {
-          await this.reanchorForNewStream();
-          log.info(`bridge re-anchor ok: FLUSH + RECORD(seq=${(this.seq + 1) & 0xffff}, rtptime=${this.headTs})`);
-        } catch (e) {
-          log.warn(`bridge re-anchor failed: ${(e as Error)?.message || e} -> 交回上层冷重建`);
-          return "reanchor-failed";
-        }
       }
     }
     this.bridgeLatePackets = 0;
@@ -1331,10 +1394,14 @@ export class RaopPlayer {
         break;
       }
       // 发送节拍(§3.3):sendAt = audibleAt − L − SAFETY(换算唯一出处 bridgeMath)。
+      // 基准 = beatAnchorUs(**不含成员补偿**;旧调用方回落 anchorUsShifted)⇒ 同内容
+      // 在各成员的同刻送包时刻一致(2026-11-01 群组同内容同步)。RTP 映射仍用
+      // anchorUsShifted ⇒ 成员补偿只把该设备出声时刻平移。
       // pacingShiftUs:暂停恢复/长饥饿后的 pacing 重锚(§5.4)—— sendAt 落后墙钟超过
       // BRIDGE_RESUME_REBASE_US ⇒ 内容时间线未变而墙钟前跳,把 pacing 参考前移,
       // RTP 映射(startTs/startNtp)不动,恢复段不计 latePackets;恢复首包立即发出。
-      const audible = audibleAtUs(idx * CHUNK_LEN, anchor.anchorUsShifted, rate);
+      const beatUs = anchor.beatAnchorUs ?? anchor.anchorUsShifted;
+      const audible = audibleAtUs(idx * CHUNK_LEN, beatUs, rate);
       const sendAt = sendAtUs(audible, anchor.latencyFrames, rate) + pacingShiftUs;
       if (nowUs() < sendAt) {
         burst = 0;
@@ -1459,7 +1526,12 @@ export class RaopPlayer {
     log.info(`SET_PARAMETER volume=${db.toFixed(2)} (no-wait)`);
   }
 
-  /** Reset the stream so a new source can start at a given second. */
+  /** Reset the stream so a new source can start at a given second.
+   *
+   *  2026-10-31(D6/P1)对齐 MA：**用户操作(seek/next/prev)恰 1 次 RTSP FLUSH、0 RECORD**。
+   *  - 只冲刷接收端旧时间线,不重置 `seq`(RTP seq 跨曲/跨操作严格连续);
+   *  - `rtptime` 取当前 `headTs`,供接收端按新映射重锚;新流首包 0xE0 marker 兜底;
+   *  - no-wait:flush 在推流路径上被同步调用,等回包会把音频节拍拖住(实测 HiVi 不答)。 */
   async flush(): Promise<void> {
     this.started = false;
     this.streaming = false;
@@ -1468,26 +1540,11 @@ export class RaopPlayer {
     this.backlogSeq = 0;
     this.backlogHeadKey = -1;
     this.backlogTailKey = -1;
-  }
-
-  /** 跨曲显式重锚(L2,对标 MA 的 FLUSH+重 START):发 RTSP FLUSH 冲刷旧时间线,
-   *  再以新 seq/rtptime 发 RECORD 开新录制会话,让接收端彻底关闭旧流、按新映射重锚。
-   *  仅「换代(track)」触发;seek/拖动走别路。失败抛错 -> 上层回退冷重建。 */
-  async reanchorForNewStream(): Promise<void> {
-    if (!this.socket || this.socket.destroyed) throw new Error("rtsp socket gone");
-    if (this.syncTimer) { clearInterval(this.syncTimer); this.syncTimer = null; }
-    this.started = false;
-    this.audioBacklog.clear();
-    this.backlogSeq = 0;
-    this.backlogHeadKey = -1;
-    this.backlogTailKey = -1;
-    const rtptime = this.headTs >>> 0;
-    const nextSeq = (this.seq + 1) & 0xffff;
-    const flush = await this.sendRtsp("FLUSH", null, null, [["RTP-Info", `seq=${this.seq};rtptime=${rtptime}`]]);
-    if (!(flush.status >= 200 && flush.status < 300)) throw new Error(`FLUSH ${flush.status}`);
-    const record = await this.sendRtsp("RECORD", null, null, [["Range", "npt=0-"], ["RTP-Info", `seq=${nextSeq};rtptime=${rtptime}`]]);
-    if (!(record.status >= 200 && record.status < 300)) throw new Error(`RECORD ${record.status}`);
-    this.syncLoop();
+    if (this.socket && !this.socket.destroyed) {
+      const rtptime = this.headTs >>> 0;
+      this.sendRtspNoWait("FLUSH", null, null, [["RTP-Info", `seq=${this.seq};rtptime=${rtptime}`]]);
+      log.info(`RAOP FLUSH (no-wait) seq=${this.seq} rtptime=${rtptime}`);
+    }
   }
 
   async stop(): Promise<void> {

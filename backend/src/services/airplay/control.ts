@@ -29,7 +29,8 @@ import { createLogger } from "../../utils/logger.js";
 import { getAirPlayVolumeState, saveAirPlayVolumeState, deleteAirPlayVolumeState, DEFAULT_AIRPLAY_VOLUME } from "./deviceState.js";
 import { bridgeSocketPath } from "./bridgeChannel.js";
 import type { BridgeProtocol } from "./rates.js";
-import { AP2_PAIR_TIMEOUT_MS } from "./rates.js";
+import { AP2_PAIR_TIMEOUT_MS, bridgeSyncGroupTimelineEnabled } from "./rates.js";
+import { getMemberDelayMs } from "../group/delayCalib.js";
 import { getSetting, setSetting } from "../settings.js";
 import { getHapCredentials } from "./ap2/hapCredentials.js";
 import { recordPairSetupSuccess } from "./ap2/pairingContract.js";
@@ -369,15 +370,22 @@ export async function bridgePrepareDevice(
     // A/V 标定位移:HiVi 不回报 Audio-Latency ⇒ L_true 不可知,靠该值补齐常量差。
     // **正数 = 内容落点整体后移 = AirPlay 更晚出声;负数 = 更早**。
     // 有组上下文一律取按组值(用户可在播放器里逐组调);无组上下文回落全局旧值。
-    // **延迟补偿的唯一落点 = 投递时戳**(sendspin/server.ts 的 ts' = ts − ahead + shift,
-    // 按成员协议动态读对应格子)。这里必须恒 0:锚点若也平移,桥内 anchorUs = 投递时戳
-    // + 锚点平移 = 双份 shift ⇒ 对齐器把多出的那份判「内容超前」整段裁掉
-    // (2026-10-27 双加实锤:切歌被吞 2 秒、净补偿归零)。
-    anchorShiftUs: 0,
+    // **补偿的唯一落点 = 桥会话锚点**(2026-11-01,MA `_anchor_stream` 语义:「命令带
+    // 设备的 sync_adjust,组时间线不带」):桥投递戳/窗口已全组一致(同一时刻同内容),
+    // 该值只把本设备的 START 可听锚点平移 shift ⇒ 只有它自己晚/早出声。
+    // 改完需重建该成员桥才生效(锚点在建会话时算死)—— groups.ts 的 PUT 已自动重建。
+    anchorShiftUs:
+      bridgeSyncGroupTimelineEnabled() && groupId
+        ? getMemberDelayMs(groupId, `airplay:${deviceId}`) * 1000
+        : 0,
     // v4.9.3(§音量语义):桥会话初始音量(0-100,player_groups 落库值);子进程不碰 DB。
     initialVolume: opts?.initialVolume,
     // exp4:同 host DLNA renderer(主进程判定;undefined = 无,Linkplay 豁免不生效)。
     sameHostDlnaPeer: dlnaPeer,
+    // D7(2026-11-01):组 id 仅作「同组同 gen 共享锚点」的键 —— 子进程据此让同组各成员
+    // 用**同一个** anchorUs(内容零点 + 送包节拍同源),消除 RECORD 握手时差导致的
+    // 几十毫秒「同刻内容错位」(抓包 best_lag=6 包)。无组上下文不下发(不共享)。
+    groupKey: groupId ?? undefined,
     // AP2 realtime:建链载荷(controllerId + 已切分凭据)。**只在协议确为 AP2 时下发** ——
     // RAOP 载荷逐字节不变(未配对导致 undefined 时桥侧按「AP2 载荷缺失」快速失败,
     // 主进程按 MAJ-07 回落该设备本流 solo cast,不会静默无声)。
@@ -387,11 +395,64 @@ export async function bridgePrepareDevice(
   return r;
 }
 
+/** 主进程编排:运行中改某台 AirPlay 的成员补偿(D6,2026-11-01)。
+ *  子进程只平移该会话的 RTP↔NTP 映射(`startNtp += Δ` + 立即一段 SYNC),**不拆会话、
+ *  不重发音频、不动组时间线** —— 因此改值立刻生效且没有静音,其它成员进度/内容不变。
+ *  @returns true = 设备有桥会话且已接受;false = 无会话/子进程未跑(调用方按重建兜底)。 */
+export async function bridgeSetDelayDevice(deviceId: string, shiftUs: number): Promise<boolean> {
+  if (!airplaySupervisor.isRunning()) return false;
+  const v = Number(shiftUs);
+  if (!Number.isFinite(v)) return false;
+  try {
+    return await airplaySupervisor.rpc<boolean>("bridgeSetDelay", { deviceId, shiftUs: Math.round(v) });
+  } catch (e) {
+    log.warn("桥成员补偿运行中下发失败(回落重建)", { deviceId, shiftUs: v, err: (e as Error)?.message || e });
+    return false;
+  }
+}
+
+/** 主进程编排:改某台 AirPlay 的成员补偿的**必生效**路径(D9,2026-11-01)。
+ *  重建该设备侧 RTSP 会话(TEARDOWN → 新 ANNOUNCE/SETUP/RECORD),让设备重新吃一次
+ *  RTP↔NTP 映射 —— SYNC 无回执,实测 GGMM 只在 RECORD 时采纳映射,运行中改值不保证生效。
+ *  代价 = 重建窗口 ~1~2s 静音(内容轴不变,仍按 D7/D8 的组锚点规则)。
+ *  @returns true = 已重建;false = 无桥会话/子进程未跑(调用方按路由重建/成员 join 兜底)。 */
+export async function bridgeRebuildDelayDevice(deviceId: string, shiftUs: number): Promise<boolean> {
+  const running = airplaySupervisor.isRunning();
+  log.info(`[bridge-rebuild-delay] enter dev=${deviceId} shiftUs=${shiftUs} running=${running}`);
+  if (!running) return false;
+  const v = Number(shiftUs);
+  if (!Number.isFinite(v)) return false;
+  try {
+    const r = await airplaySupervisor.rpc<boolean>("bridgeRebuildDelay", { deviceId, shiftUs: Math.round(v) });
+    log.info(`[bridge-rebuild-delay] result dev=${deviceId} r=${String(r)}`);
+    return r;
+  } catch (e) {
+    log.warn("桥成员补偿重建失败(回落路由重建)", { deviceId, shiftUs: v, err: (e as Error)?.message || e });
+    return false;
+  }
+}
+
 /** 主进程编排:按 token 拆桥会话(bridgeStop)并清 owner。deviceId 供清 owner,可省。 */
 export async function bridgeStopDevice(token: string, deviceId?: string): Promise<void> {
   if (deviceId) bridgeOwners.delete(deviceId);
   if (airplaySupervisor.isRunning()) {
     await airplaySupervisor.rpc("bridgeStop", { token }).catch(() => { /* 子进程没跑 → 无会话 */ });
+  }
+}
+
+/** D6/P1(2026-10-31):用户手动 next/prev 的意图标记(按 sessionToken)。
+ *
+ *  只置**sticky 标记**,不在此刻 FLUSH —— boundary 到达时由 BridgeSession 统一
+ *  执行「恰 1 次 RTSP FLUSH + ts 回拨」。失败只记 debug:桥不在(冷建/已拆)时
+ *  没有旧轨道可换,标记本身无意义。 */
+export async function bridgeManualDevice(token: string): Promise<void> {
+  if (!token) return;
+  if (!airplaySupervisor.isRunning()) return;
+  try {
+    await airplaySupervisor.rpc("bridgeManual", { token });
+    log.debug(`[bridge-manual] token=${token} marked`);
+  } catch (e: any) {
+    log.debug(`[bridge-manual] token=${token} 标记失败(忽略): ${e?.message || e}`);
   }
 }
 
