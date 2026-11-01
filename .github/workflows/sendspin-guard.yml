@@ -160,9 +160,12 @@ jobs:
             echo "::error::P2 回归:SendspinGroup 缺少 clearPlayback()(切歌只清缓冲,不发 stream/end)"
             miss=1
           fi
-          n=$(grep -cF 'if (g.canKeepStream()) {' backend/src/services/sendspin/playerCore.ts)
-          if [ "$n" -lt 2 ]; then
-            echo "::error::P2 回归:playCore 与 playGroupCore 都必须走 canKeepStream() 分支(当前命中 $n 处,期望 2)"
+          # 分支条件允许附加入口(如预取采纳 `|| keepQueueForPrefetch`),这里只钉
+          # 「两处都过 canKeepStream 门禁且随后只 clearPlayback」,不钉完整表达式。
+          n=$(grep -cF 'g.canKeepStream()' backend/src/services/sendspin/playerCore.ts)
+          m=$(grep -cF 'g.clearPlayback();' backend/src/services/sendspin/playerCore.ts)
+          if [ "$n" -lt 2 ] || [ "$m" -lt 2 ]; then
+            echo "::error::P2 回归:playCore 与 playGroupCore 都必须走 canKeepStream() 分支并 clearPlayback(当前 gate=$n clear=$m,期望 2/2)"
             miss=1
           fi
           # 强制放开阀门:`=1` 时即便有 legacy 成员也走 keep_stream(临时对照用)
