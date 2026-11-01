@@ -2,6 +2,26 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.11.1] - 2026-11-01
+
+### Fix / v4.11.0 的 CI 红（仅守卫与依赖锁定，无运行时代码变更）
+
+- **Sendspin Guard P1**:`protocolPlayer.ts` 的 `rpc("playMedia", {...})` 参数改为跨行后，
+  原单行 `grep -F` 断言假红。改为先把源码折成单行再比对，钉的仍是「参数按序在位」而不是排版。
+- **Sendspin Guard P2**:S1 让切歌分支多了预取入口(如 `|| keepQueueForPrefetch`)后，
+  原断言 `if (g.canKeepStream()) {` 命中 0。改为钉「两处都过 `g.canKeepStream()` 门禁且随后
+  只 `g.clearPlayback();`」(各 ≥2 次)，不钉完整条件表达式。
+- **ci / MfIcon 注册表守卫**:群组「测试延迟」按钮用到 `AudioLines`，`MfIcon.vue` 的 import
+  与 `ICONS` 表都没有登记。补登记(仍保持显式清单，lucide 可 tree-shake)。
+- **ci / AirPlay2 发现分级守卫 R4**:音乐投放统一走桥(`b350c188`)后，渲染器插件不再自建
+  RAOP 会话，`cast()` 只保留契约并抛错，原断言「renderer 只调 `castToAirPlayDevice`」已过时。
+  改为钉「renderer 不得自开投屏会话」，并新增「`castToAirPlayDevice` 仍在 control 层且由桥调用」
+  正向断言，保证 AP1 直连能力没丢。
+- **security / npm audit**:`follow-redirects 1.16.1`(GHSA-mrwp-f3q8-3g9p, high，
+  链路 `axios@1.20.0 → follow-redirects@1.16.1`)。改为 `overrides: { "follow-redirects": "1.16.2" }`。
+
+> 说明:`v4.11.0` 的 tag 与镜像内容不变(产品代码无差异)，本版只是把 CI 口径修绿并补齐追溯点。
+
 ## [4.11.0] - 2026-11-01
 
 ### Feature / 群组「测试延迟」——每 5 秒一次短促咔哒,只有该组成员出声
