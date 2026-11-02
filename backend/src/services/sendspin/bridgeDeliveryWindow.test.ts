@@ -72,18 +72,18 @@ describe("桥投递可听域窗口化", () => {
     const { g, ring } = makeGroup();
     const b = new StubBridge("d1");
     g.bridges.set("d1", b as any);
-    frame(ring, NOW + AHEAD + 1_000_000n); // < now+FLOOR(1.5s) → 丢弃
-    frame(ring, NOW + AHEAD + 2_000_000n); // ∈ [1.5s, 2.5s] → 投递
-    frame(ring, NOW + AHEAD + 3_000_000n); // > now+HORIZON(2.5s) → 顺延
+    frame(ring, NOW + AHEAD + 1_000_000n); // < now+FLOOR(2.5s) → 丢弃
+    frame(ring, NOW + AHEAD + 3_000_000n); // ∈ [2.5s, 4.0s] → 投递
+    frame(ring, NOW + AHEAD + 4_500_000n); // > now+HORIZON(4.0s) → 顺延
     g.bridgePushTick();
     expect(b.frames.length).toBe(1);
     // 投递转换:ts' = ts − commonSendAheadUs(无成员回落 800ms)。
-    expect(b.frames[0].ts).toBe(NOW + 2_000_000n);
+    expect(b.frames[0].ts).toBe(NOW + 3_000_000n);
     // 推进 1s 再 tick:顺延帧进入窗口被投;floor 丢弃帧永不出现。
     setNowUsOverride(() => NOW + 1_000_000n);
     g.bridgePushTick();
     expect(b.frames.length).toBe(2);
-    expect(b.frames[1].ts).toBe(NOW + 3_000_000n);
+    expect(b.frames[1].ts).toBe(NOW + 4_500_000n);
     expect(b.frames.every((f) => f.ts !== NOW + 1_000_000n)).toBe(true);
   });
 
@@ -93,13 +93,13 @@ describe("桥投递可听域窗口化", () => {
     const b = new StubBridge("d1");
     g.bridges.set("d1", b as any);
     frame(ring, NOW + AHEAD + 1_000_000n); // 窗口下:不回填
-    frame(ring, NOW + AHEAD + 2_000_000n); // 窗口内
-    frame(ring, NOW + AHEAD + 2_400_000n); // 窗口内
-    frame(ring, NOW + AHEAD + 3_000_000n); // 窗口上:顺延
+    frame(ring, NOW + AHEAD + 3_000_000n); // 窗口内
+    frame(ring, NOW + AHEAD + 3_400_000n); // 窗口内
+    frame(ring, NOW + AHEAD + 4_500_000n); // 窗口上:顺延
     expect(g.backfillBridge("d1")).toBe(2);
     expect(b.frames.map((f) => f.ts)).toEqual([
-      NOW + 2_000_000n,
-      NOW + 2_400_000n,
+      NOW + 3_000_000n,
+      NOW + 3_400_000n,
     ]);
     // 水位已登记:同 now 再 tick 不重复;窗口外帧等时间推进后由 tick 补投。
     g.bridgePushTick();
@@ -107,7 +107,7 @@ describe("桥投递可听域窗口化", () => {
     setNowUsOverride(() => NOW + 1_000_000n);
     g.bridgePushTick();
     expect(b.frames.length).toBe(3);
-    expect(b.frames[2].ts).toBe(NOW + 3_000_000n);
+    expect(b.frames[2].ts).toBe(NOW + 4_500_000n);
   });
 
   it("backfillBridge:总量上限跳过异常大帧继续扫(不整体断流)", () => {
@@ -115,11 +115,11 @@ describe("桥投递可听域窗口化", () => {
     const { g, ring } = makeGroup();
     const b = new StubBridge("d1");
     g.bridges.set("d1", b as any);
-    frame(ring, NOW + AHEAD + 2_000_000n, BRIDGE_BACKFILL_MAX_US + 1_000_000); // 单帧超上限 → 跳过
-    frame(ring, NOW + AHEAD + 2_200_000n, 20_000); // 正常帧 → 回填
+    frame(ring, NOW + AHEAD + 3_000_000n, BRIDGE_BACKFILL_MAX_US + 1_000_000); // 单帧超上限 → 跳过
+    frame(ring, NOW + AHEAD + 3_200_000n, 20_000); // 正常帧 → 回填
     expect(g.backfillBridge("d1")).toBe(1);
     expect(b.frames.length).toBe(1);
-    expect(b.frames[0].ts).toBe(NOW + 2_200_000n);
+    expect(b.frames[0].ts).toBe(NOW + 3_200_000n);
   });
 
   it("notifyBridgeGeneration:旧代次帧被过滤(即使落在新窗口内),水位清零后新代次正常投递", () => {
@@ -127,19 +127,19 @@ describe("桥投递可听域窗口化", () => {
     const { g, ring } = makeGroup();
     const b = new StubBridge("d1");
     g.bridges.set("d1", b as any);
-    frame(ring, NOW + AHEAD + 2_000_000n); // ep0:投递 → 水位 = 此 ts
+    frame(ring, NOW + AHEAD + 3_000_000n); // ep0:投递 → 水位 = 此 ts
     g.bridgePushTick();
     expect(b.frames.length).toBe(1);
-    frame(ring, NOW + AHEAD + 2_200_000n); // ep0 旧代次帧,仍在 ring 且在新窗口内
+    frame(ring, NOW + AHEAD + 3_200_000n); // ep0 旧代次帧,仍在 ring 且在新窗口内
     g.notifyBridgeGeneration(2, "seek");
     expect(b.gens).toEqual([{ generation: 2, reason: "seek" }]);
     // 新代次帧,ts 低于旧水位 —— 若未清水位会被误跳(中途 seek 场景)。
-    frame(ring, NOW + AHEAD + 1_900_000n, 20_000, 1);
+    frame(ring, NOW + AHEAD + 2_700_000n, 20_000, 1);
     g.bridgePushTick();
     expect(b.frames.length).toBe(2);
-    expect(b.frames[1].ts).toBe(NOW + 1_900_000n);
-    // ep0 的 NOW+2.2s 帧虽然落在窗口内也不投(代次过滤,防旧 cursor 误投)。
-    expect(b.frames.every((f) => f.ts !== NOW + 2_200_000n)).toBe(true);
+    expect(b.frames[1].ts).toBe(NOW + 2_700_000n);
+    // ep0 的 NOW+3.2s 帧虽然落在窗口内也不投(代次过滤,防旧 cursor 误投)。
+    expect(b.frames.every((f) => f.ts !== NOW + 3_200_000n)).toBe(true);
   });
 
   it("生命周期:sync 启定时器,摘桥/清桥停表并清水位,空转 tick 安全", () => {
@@ -151,9 +151,9 @@ describe("桥投递可听域窗口化", () => {
     syncGroupBridges(g as any, specs, (s) => new StubBridge(s.deviceId) as any);
     expect(g.bridges.size).toBe(1);
     expect((g as any).bridgePushTimer).toBeDefined(); // sync → 补投定时器在跑
-    frame(ring, NOW + AHEAD + 2_000_000n);
+    frame(ring, NOW + AHEAD + 3_000_000n);
     g.bridgePushTick();
-    expect((g as any).bridgeWatermarks.get("d1")).toBe(NOW + AHEAD + 2_000_000n);
+    expect((g as any).bridgeWatermarks.get("d1")).toBe(NOW + AHEAD + 3_000_000n);
     // 单桥摘除:水位清除;最后一座桥摘除 → 停表。
     detachGroupBridge(g as any, "d1");
     expect((g as any).bridgeWatermarks.has("d1")).toBe(false);

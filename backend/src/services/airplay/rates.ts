@@ -113,38 +113,38 @@ export const BRIDGE_STALL_NO_FRAME_MS = 2_000;
  *  🔴 注意方向:**它是从「排空需求」里减,不是从「上限 8000」里扣**(见下一条注释)。
  *
  *  **推导**(三个既有常量,任一变动都要重推本值):
- *   - 桥的投递窗口下沿 = `BRIDGE_PUSH_FLOOR_US`(1500ms,见 sendspin/constants.ts)
- *     + `ahead`(800ms)⇒ 桥**结构上永远拿不到「距此刻 2300ms 以内」的内容**
- *     (比下沿更早的可听位置桥直接水位推过,不投);
+ *   - 桥的投递窗口下沿 = `BRIDGE_PUSH_FLOOR_US`(2500ms,见 sendspin/constants.ts;
+ *     2026-11-02 全局上调前是 1500ms)+ `ahead`(800ms)⇒ 桥**结构上永远拿不到
+ *     「距此刻 3300ms 以内」的内容**(比下沿更早的可听位置桥直接水位推过,不投);
  *   - 而排空公式 `rawDrainMs = (cursorUs − nowUs() − ANCHOR_SAFE_LEAD_US)/1000` **已经**
  *     先扣掉了 `ANCHOR_SAFE_LEAD_US`(800ms)。
- *   ⇒ 还需再减掉的那一段 = 2300 − 800 = **1500ms**。
+ *   ⇒ 还需再减掉的那一段 = 3300 − 800 = **2500ms**。
  *
  *  **真机判据(不要凭直觉改数值)**:曲末 pushLoop 退出瞬间,内容累计还剩
  *  `extraDrain(9784) + ANCHOR_SAFE_LEAD(800) = 10584ms`;其中**真能投出去**的只有
- *  `10584 − 2300 = 8284ms`;抓包实测桥在 pushLoop 退出后 **8.06 秒断料**,与 8284ms
- *  差一个 250ms 投递 tick,吻合。⇒ 设备侧真实可播音频 ≈ 8.06s,既不是 8s(队列上限),
- *  更不是 9.78s(排空需求)。
- *  ⚠️ 因此排空量只能由 `min(raw − 1500, 8000)` 决定:**若改成「8000 − 1500 = 6500」,
- *  排到 6500ms 就 advance,设备侧还剩约 1.5 秒真实音频没播**,随后的
+ *  `10584 − 3300 = 7284ms`(旧下沿 1500ms 时为 `10584 − 2300 = 8284ms`,抓包实测
+ *  pushLoop 退出后 8.06 秒断料);⇒ 设备侧真实可播音频 ≈ 排空需求 − 结构性不可达段,
+ *  既不是队列上限,也不是排空需求本身。
+ *  ⚠️ 因此排空量只能由 `min(raw − 2500, 8000)` 决定:**若写成「8000 − 2500 = 5500」
+ *  当作固定上限,排到 5500ms 就 advance,设备侧还剩约 2.5 秒真实音频没播**,随后的
  *  `BOUNDARY{track}` 会 `streamAborted + player.flush()` 把它直接砍掉 ⇒ 每首歌结尾
- *  少 1.5 秒(比边界静默严重得多)。历史上这一版已被打回,勿再改回 6500。
+ *  少 2.5 秒(比边界静默严重得多)。勿把「需求 − 余量」和「上限 − 余量」混为一谈。
  *
  *  消费点:`bridgeMath.capEndDrainMs`(只对**纯桥组**生效;混合组/纯直连组一律原值)。 */
-export const BRIDGE_END_DRAIN_MARGIN_MS = 1_500;
+export const BRIDGE_END_DRAIN_MARGIN_MS = 2_500;
 
 /** 纯桥组排空量的**硬上限**(ms)= 8s,**不再跟随** `BRIDGE_QUEUE_HARD_CAP_MS`。
  *
  *  2026-11-02:队列硬上限为消灭「稳态 8s 积压 ⇒ recv-overflow」升到 16s(见上一条),
  *  但**排空上限必须留在 8s**,否则换歌等待会被无谓拉长一倍:
- *   - 真机判据:曲末 pushLoop 退出瞬间,设备侧真实可播音频 ≈ **8.06s**(见上一条推导),
- *     排空超过 8s 只是对着空队列白等;
+ *   - 真机判据:曲末 pushLoop 退出瞬间,设备侧真实可播音频 ≈ 8s 量级(旧下沿下实测
+ *     **8.06s**,见上一条推导),排空超过 8s 只是对着空队列白等;
  *   - 抬到 16s ⇒ 每首歌结尾多等 ≈8s 才 advance,体验直接回退。
  *  ⇒ 两个「上限」语义不同:队列上限 = 允许积压多久(容忍度),排空上限 = 值得等多久(体验)。
  *
- *  🔴 **不要写成 `BRIDGE_QUEUE_HARD_CAP_MS − BRIDGE_END_DRAIN_MARGIN_MS`**:1500 的余量
+ *  🔴 **不要写成 `BRIDGE_QUEUE_HARD_CAP_MS − BRIDGE_END_DRAIN_MARGIN_MS`**:2500 的余量
  *  已经在上一条里从「排空需求」中减掉了,这里再扣一次就是双重扣减 ⇒ 每首歌结尾被
- *  `player.flush()` 砍掉约 1.5 秒真实音频(推导与真机判据见 BRIDGE_END_DRAIN_MARGIN_MS)。 */
+ *  `player.flush()` 砍掉约 2.5 秒真实音频(推导与真机判据见 BRIDGE_END_DRAIN_MARGIN_MS)。 */
 export const BRIDGE_END_DRAIN_SAFE_MAX_MS = 8_000;
 
 /** RAOP 发送节拍安全余量(吸收 25ms 泵抖动与 socket 调度)。
@@ -189,6 +189,26 @@ export const BRIDGE_MAX_HELD_AUDIO_US = 45_000_000;
 /** 发送节拍 rebase 阈值:sendAt 落后墙钟超过该值(暂停恢复/长饥饿)⇒ 对齐 pacing
  *  参考而不计 latePackets(§5.4「暂停期不计 latePackets」;RTP 映射不动)。 */
 export const BRIDGE_RESUME_REBASE_US = 2_000_000;
+
+/** 发送节拍的**小滞后**判据(µs):sendAt 已过去这么久仍连续 ≥
+ *  `BRIDGE_REBASE_PERSIST_MS` ⇒ 同样向前重锚 pacing。
+ *
+ *  2026-11-02 HiVi 真机根因:锚点/节拍长期落后 **0.52s**,够不着 2s 的
+ *  `BRIDGE_RESUME_REBASE_US` ⇒ rebase 永不触发,整首歌带着固定欠账跑 ⇒ 每秒欠一块
+ *  (「一卡一卡」循环)。150ms ≈ 19 个 8ms chunk,正常 socket/泵抖动摸不到。 */
+export const BRIDGE_REBASE_LAG_US = 150_000;
+/** 上述判据的**持续时间**(ms):滞后再短也要连续这么久才前移。
+ *  前移 = 主动停喂一段时间让设备缓冲排空,单拍抖动绝不能触发(会把正常节拍
+ *  切成「停喂-追发」振荡)。 */
+export const BRIDGE_REBASE_PERSIST_MS = 1_000;
+/** 内容前沿距墙钟的**最小可听余量**(µs):桥 stats tick 的 `deltaUs`
+ *  (= 已写入 RAOP 的最后一帧的可听时刻 − now)低于它 ⇒ 设备缓冲已被打穿
+ *  (老 LinkPlay 无重缓冲能力,必然卡顿)⇒ 该 tick 把 pacing 参考前移
+ *  `该值 − deltaUs`,把余量垫回。
+ *
+ *  与上面两条是**同一语义的两个观测点**:前者在发送循环里看「节拍滞后」,
+ *  后者在 2s 统计 tick 里看「内容前沿」;两者都不改 RTP 映射/内容轴。 */
+export const BRIDGE_REBASE_MIN_AHEAD_US = 1_500_000;
 
 // ---------------------------------------------------------------------------
 // 群组「同内容同步」(2026-11-01,MA `_anchor_stream` 模型)

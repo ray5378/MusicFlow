@@ -5,7 +5,12 @@ import { describe, it, expect, afterEach } from "vitest";
 import { SendspinServer, SendspinGroup } from "./server.js";
 import type { BridgeBoundaryReason } from "../airplay/bridgeChannel.js";
 import { setNowUsOverride } from "./clock.js";
-import { BRIDGE_BACKFILL_MAX_US, BRIDGE_PUSH_TICK_MS } from "./constants.js";
+import {
+  BRIDGE_BACKFILL_MAX_US,
+  BRIDGE_PUSH_FLOOR_US,
+  BRIDGE_PUSH_HORIZON_US,
+  BRIDGE_PUSH_TICK_MS,
+} from "./constants.js";
 
 const PCM_KEY = "pcm:100";
 // 组无成员 → computeCommonSendAhead 回落 DEFAULT_MIN_BUFFER_MS(800ms)。
@@ -105,7 +110,7 @@ describe("桥开局 bulk 投递(曲中失声根因修复)", () => {
     g.bridges.set("d2", b2 as any);
     g.notifyBridgeGeneration(2, "track"); // epoch 0→1;两桥登记 pending
     const ep = (g as any).bridgeContentEpoch as number;
-    injectRange(ring, durByTs, ep, 500_000, 9_000_000); // lo(1.5s)之上存量 7.5s ≥ 6s
+    injectRange(ring, durByTs, ep, 500_000, 9_000_000); // lo(2.5s)之上存量 6.5s ≥ 6s
     await runBulk(g, [b1, b2]);
 
     for (const b of [b1, b2]) {
@@ -117,23 +122,27 @@ describe("桥开局 bulk 投递(曲中失声根因修复)", () => {
       for (let i = 1; i < b.frames.length; i++) {
         expect(b.frames[i].ts).toBeGreaterThan(b.frames[i - 1].ts);
       }
-      // 全部落在可听域窗口底之上(lo = NOW+1.5s)
-      expect(b.frames[0].ts).toBeGreaterThanOrEqual(NOW + 1_500_000n);
-      // floor 之下的帧(X<1.5s)绝不出现
-      expect(b.frames.every((f) => f.ts >= NOW + 1_500_000n)).toBe(true);
+      // 全部落在可听域窗口底之上(交付戳 = 原 ts − ahead ⇒ 底 = NOW+FLOOR)
+      expect(b.frames[0].ts).toBeGreaterThanOrEqual(NOW + BigInt(BRIDGE_PUSH_FLOOR_US));
+      // floor 之下的帧(X<2.5s)绝不出现
+      expect(b.frames.every((f) => f.ts >= NOW + BigInt(BRIDGE_PUSH_FLOOR_US))).toBe(true);
     }
     // pending 已消费:同 NOW 再 tick 不得重投已投帧,也不得凭空放大领先量。
     // [Fix D 2026-10-31] 旧断言写的是「帧数完全不变」——那是把窗口死锁当契约:
     // 窗口恒为 (watermark, hi],而 bulk 建立的领先量远高于 hi,两者同速前进 ⇒ 窗口
     // 永远为空 ⇒ bulk 的 6s 吃完即断粮(真机:bulk 4.625s 吃完 → rebase +2.768s)。
-    // 正确语义 = ① 绝不重投已投帧(严格 ts 升序且大于 bulk 末帧);② 稳态 tick 至多
-    // 把水位补到 lo+BRIDGE_BACKFILL_MAX_US 这个领先硬上限。
+    // 正确语义 = ① 绝不重投已投帧(严格 ts 升序且大于 bulk 末帧);② 稳态 tick 每拍
+    // 只按 1 tick follow 续杯(领先量由 bulk 建立、不塌陷也不追前沿)。
     const before1 = b1.frames.length;
     const before2 = b2.frames.length;
     const lastTs1 = b1.frames[before1 - 1].ts;
     const lastTs2 = b2.frames[before2 - 1].ts;
     g.bridgePushTick();
-    const leadCapTs = NOW + AHEAD + 1_500_000n + BigInt(BRIDGE_BACKFILL_MAX_US);
+    // [Fix E] 稳态 tick 的领先上限 = bulk 底(lo ⇒ 交付域 NOW+FLOOR)+ 6s 内容量
+    //   + 一拍 follow(last + 1 tick);不是泵预填充前沿(9s)。
+    const leadCapTs =
+      NOW + BigInt(BRIDGE_PUSH_FLOOR_US) + BigInt(BRIDGE_BACKFILL_MAX_US)
+      + BigInt(BRIDGE_PUSH_TICK_MS) * 1000n;
     for (const [b, lastTs, before] of [
       [b1, lastTs1, before1] as const,
       [b2, lastTs2, before2] as const,
@@ -155,17 +164,23 @@ describe("桥开局 bulk 投递(曲中失声根因修复)", () => {
     g.bridges.set("d1", b as any);
     g.notifyBridgeGeneration(2, "track");
     const ep = (g as any).bridgeContentEpoch as number;
-    injectRange(ring, durByTs, ep, 500_000, 3_000_000); // lo 之上存量仅 1.5s < 6s
+    injectRange(ring, durByTs, ep, 500_000, 3_000_000); // lo 之上存量仅 0.5s < 6s
     g.bridgePushTick();
     await new Promise((r) => setImmediate(r));
 
     expect((g as any).bridgeBulkPending.has("d1")).toBe(true);
     expect((g as any).bridgeBulkInFlight.has("d1")).toBe(false);
-    // 只走了常态窗口投递([1.5s, 2.5s] ≈ 1s),没有任何 bulk 超量灌入
+    // 只走了常态窗口投递([2.5s, 4.0s],实际 ≈0.5s),没有任何 bulk 超量灌入
     const dur = deliveredDurUs(b, durByTs);
     expect(dur).toBeGreaterThan(0);
     expect(dur).toBeLessThanOrEqual(1_100_000);
-    expect(b.frames.every((f) => f.ts >= NOW + 1_500_000n && f.ts <= NOW + 2_500_000n)).toBe(true);
+    expect(
+      b.frames.every(
+        (f) =>
+          f.ts >= NOW + BigInt(BRIDGE_PUSH_FLOOR_US)
+          && f.ts <= NOW + BigInt(BRIDGE_PUSH_HORIZON_US),
+      ),
+    ).toBe(true);
   });
 
   it("(c) bulk 与常态 tick 并发交错,桥收到的帧仍严格 ts 升序", async () => {

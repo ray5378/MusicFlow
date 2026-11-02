@@ -21,7 +21,12 @@ import { existsSync } from "node:fs";
 import { publicEncrypt, createPublicKey, randomBytes, constants, createCipheriv } from "crypto";
 import { ntpFromHostUs, nowUs } from "../../utils/hostClock.js";
 import { audibleAtUs, ntpToRtpMod, sendAtUs } from "./bridgeMath.js";
-import { BRIDGE_RESUME_REBASE_US, RAOP_SAFETY_MS } from "./rates.js";
+import {
+  BRIDGE_REBASE_LAG_US,
+  BRIDGE_REBASE_PERSIST_MS,
+  BRIDGE_RESUME_REBASE_US,
+  RAOP_SAFETY_MS,
+} from "./rates.js";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("RAOP");
@@ -570,6 +575,13 @@ export class RaopPlayer {
    *  连续过期说明启动 lead 不足 —— 由上层(BridgeSession stats tick)报警/重锚。 */
   private bridgeLatePackets = 0;
 
+  /** 桥接 pacing 重锚偏移(µs):只把 sendAt 前移,**不动 RTP 映射/内容轴**。
+   *  推进者两处(同一语义的两个观测点):
+   *   ① `streamBridge` 内的节拍滞后判据(>150ms 且连续 1s);
+   *   ② `BridgeSession` stats tick 的内容前沿判据(deltaUs < +1.5s,见 rates.ts)。
+   *  每次 `streamBridge` 起始归零(新流 = 新锚点,旧偏移无意义)。 */
+  private bridgePacingShiftUs = 0n;
+
   // runtime state for the app layer
   positionSec = 0;
   durationSec = 0;
@@ -618,6 +630,15 @@ export class RaopPlayer {
   /** 桥接路径 latePackets(§3.3;BridgeSession stats tick 消费)。 */
   get bridgeLateCount(): number {
     return this.bridgeLatePackets;
+  }
+
+  /** 请求把桥接发送节奏参考前移 `us`(µs,只影响 sendAt,不动 RTP 映射树)。
+   *  由 `BridgeSession` stats tick 在「内容前沿 deltaUs < BRIDGE_REBASE_MIN_AHEAD_US」
+   *  时调用:内容已经贴着墙钟播 ⇒ 主动停喂 `us`,让设备缓冲先排空、前沿重新垫高。
+   *  非有限值/≤0 忽略;下一次 `streamBridge` 归零。 */
+  requestPacingRebase(us: number): void {
+    if (!Number.isFinite(us) || us <= 0) return;
+    this.bridgePacingShiftUs += BigInt(Math.round(us));
   }
 
   /** RECORD 协商的接收端缓冲深度(帧)—— 锚点公式 L 的唯一来源(§3.3:L = latencyFrames/rate
@@ -1373,13 +1394,16 @@ export class RaopPlayer {
       }
     }
     this.bridgeLatePackets = 0;
+    this.bridgePacingShiftUs = 0n;
     const rate = this.opts.sampleRate;
     let idx = 0; // 已发包数(内容样本 [idx·352, (idx+1)·352) 的序号)
     let endedBy: BridgeStreamEndReason = "stopped";
     let firstSyncSent = false;
     let burst = 0;
-    /** pacing 重锚偏移(§5.4 暂停恢复):只影响 sendAt,RTP 映射不动。 */
-    let pacingShiftUs = 0n;
+    /** 「小滞后」连续计数起点(host µs;null = 当前不滞后)。
+     *  只有滞后**连续** ≥ BRIDGE_REBASE_PERSIST_MS 才前移 pacing —— 单拍抖动
+     *  (欠料等待 40ms + socket 调度)绝不能触发,否则会切成「停喂-追发」振荡。 */
+    let lagRunSinceUs: bigint | null = null;
     while (this.streaming && !this.destroying) {
       if (this.paused) {
         // 冻结 RTP 时钟(与 stream() 同语义):不出包,headTs 不推进。
@@ -1402,22 +1426,45 @@ export class RaopPlayer {
       // RTP 映射(startTs/startNtp)不动,恢复段不计 latePackets;恢复首包立即发出。
       const beatUs = anchor.beatAnchorUs ?? anchor.anchorUsShifted;
       const audible = audibleAtUs(idx * CHUNK_LEN, beatUs, rate);
-      const sendAt = sendAtUs(audible, anchor.latencyFrames, rate) + pacingShiftUs;
+      const sendAt = sendAtUs(audible, anchor.latencyFrames, rate) + this.bridgePacingShiftUs;
       if (nowUs() < sendAt) {
         burst = 0;
+        lagRunSinceUs = null;
         await this.waitUntilUs(sendAt);
         if (this.paused) {
           // 等待期间被暂停:冻结(不发包、headTs 不推进;本包 ≤8ms 内容让位给暂停点)。
           continue;
         }
       } else {
-        const lagUs = Number(nowUs() - sendAt);
+        const now = nowUs();
+        const lagUs = Number(now - sendAt);
         if (lagUs > BRIDGE_RESUME_REBASE_US) {
           // 暂停恢复/长饥饿:整体时间线落后墙钟 → pacing 前移,恢复首包立即发,
           // 后续包按新节拍(不重取料,已取到的本包照发 —— 不得造成内容缺口)。
-          pacingShiftUs += BigInt(lagUs);
+          this.bridgePacingShiftUs += BigInt(lagUs);
+          lagRunSinceUs = null;
           log.info(`bridge pacing rebase: +${lagUs}µs (pause/starvation recovery, RTP 映射不动) idx=${idx}`);
+        } else if (lagUs > BRIDGE_REBASE_LAG_US) {
+          // 2026-11-02 判据修复:小幅但**持续**的滞后(HiVi 实测恒定 ~522ms)永远够不到
+          // 上面的 2s 阈值 ⇒ 整首歌带着欠账跑、每秒欠一块。这里给第二条阈值:
+          // 连续 ≥1s 仍 >150ms ⇒ 同样前移 pacing(lag 全量),让设备缓冲先排空。
+          // 前移期间本包仍照发(不制造内容缺口);前移后 sendAt 落未来,自然停喂。
+          if (lagRunSinceUs === null) lagRunSinceUs = now - BigInt(lagUs);
+          if (now - lagRunSinceUs >= BigInt(BRIDGE_REBASE_PERSIST_MS) * 1000n) {
+            this.bridgePacingShiftUs += BigInt(lagUs);
+            log.warn(`bridge pacing rebase(lag): +${lagUs}µs (持续 ≥${BRIDGE_REBASE_PERSIST_MS}ms > ${BRIDGE_REBASE_LAG_US}µs, RTP 映射不动) idx=${idx}`);
+            lagRunSinceUs = null;
+          } else {
+            // 尚未达到持续阈值:按普通 late 追发(与改动前同口径)。
+            this.bridgeLatePackets++;
+            if (++burst >= 4) {
+              burst = 0;
+              await new Promise((r) => setImmediate(r));
+            }
+          }
         } else {
+          lagRunSinceUs = null;
+          // 短滞后(欠料等待/调度抖动):追发 + 计 late(与改动前逐字节一致)。
           this.bridgeLatePackets++;
           if (++burst >= 4) {
             // 连续追赶也让出事件循环(与 stream() 同理:勿饿死 IPC/RTSP 处理;

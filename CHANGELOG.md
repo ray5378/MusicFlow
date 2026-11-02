@@ -2,6 +2,71 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.11.3] - 2026-11-03
+
+### Fix / AirPlay 桥缓冲全局上调 + 重锚判据修复（1.6 倍方案）
+
+- **投递窗口全局后移 1s（不按设备分支、无按型号配置）**：`BRIDGE_PUSH_FLOOR_US`
+  1.5s→**2.5s**、`BRIDGE_PUSH_HORIZON_US` 2.5s→**4.0s**（宽度保持 ≈1.5s）。老
+  LinkPlay（HiVi H5MKII）实测有效设备缓冲仅 ~200ms，原窗口桥侧可听余量不足 ⇒ 每秒欠一块。
+- **强耦合落点同步**：`BRIDGE_END_DRAIN_MARGIN_MS` 1_500→**2_500**；桥组锚点 lead 取
+  `max(ahead, floor + tick)` = **2.75s**；自然接续 `contigUs` 按下沿 + 一补投周期抬升。
+  队列硬上限 16s、`LATE_JOIN_RING_MAX_US=35s`、`BRIDGE_PUSH_TICK_MS=250` 均不变。
+- **重锚判据修复**：stats tick 新增内容前沿判据 —— `deltaUs < 1.4s` ⇒
+  `requestPacingRebase(1.6s − deltaUs)`（单次 ≤4s）；RAOP 节拍判据 —— 滞后 >150ms
+  且持续 1s ⇒ 同样前移。只动 `sendAt`，RTP 映射与内容轴不动。新增常量
+  `BRIDGE_REBASE_LAG_US=150_000` / `BRIDGE_REBASE_PERSIST_MS=1_000` /
+  `BRIDGE_REBASE_MIN_AHEAD_US=1_500_000`。
+- **排空期门控**：内容前沿本 tick 未推进，或 `closed / streamAborted / !isStreaming`
+  时不重锚 —— 排空期 `deltaUs` 深度为负属「内容轴走完」，实测旧代次曾空转 37 次 ×4s。
+
+### 真机实测（240，HiVi + MUZO + GGMM 全屋组，跨多首）
+
+| 指标 | 补丁前 | 补丁后 |
+| --- | --- | --- |
+| `deltaUs` | −3.72s（HiVi） | **+2.06s** 稳定（GGMM +4.46s，含 2400ms 成员延迟） |
+| `late`（单首累计） | 34857（≈100%） | 87~206（≈0.5%） |
+| 音频流 | 每秒卡顿 | 125.3 pps，单流 `maxGap` ≤41ms，`>100ms` 空洞 **0** |
+| `queueMs` | ~205ms（靠 16s 排空兜底） | ~205ms 稳态，不归零 |
+| `raop-loss future` | 风暴 | **0** |
+
+### Fix / 换歌空窗续静音 + 组桥逐设备复用（真机验收）
+
+- **自动换歌空窗续静音**（`server.ts` `noteBridgeAutoTrackGap` / `fillBridgeAutoTrackGap`）：
+  `track && !manual` 自然换歌那一拍记下内容尾，桥 250ms tick 从尾按
+  `BRIDGE_DRAIN_SILENCE_SLICE_US=25ms` 切片续静音到「下沿 + 1 tick + ahead」
+  （≈now+2.75s+ahead，**不追到 HORIZON(4s)**，否则静音排到下一首落点、被投递水位判
+  已投过 ⇒ 吞头）。最长保持 `BRIDGE_GAP_FILL_MAX_MS=12s`；下一首帧到达 / 预取 /
+  停 tick 即收工，日志 `bridge-gap-fill start/stop`。
+- **组桥路由逐设备复用**（`protocolPlayer.ts`）：路由判据由「整条设备集合必须完全一致」
+  改为逐设备过滤（在线 + 协议一致才复用）；掉线/不可达的那台只 `bridgeStopDevice` 自己，
+  不再 `teardownBridgeRoute` 整组冷拆。修掉 GGMM/老 LinkPlay 离线时每首重建会话
+  （重连 5~6s）导致的换歌空洞。
+- **`streamEngine` 接续**：锚点取 `max(continuityFromUs, 空窗续静音尾)`；下一首首帧
+  落地后 `endBridgeAutoTrackGap("next-track")`。
+
+### 真机实测（240，修复后重测，HiVi/MUZO 跨曲）
+
+| 场景 | 修复前 | 修复后 |
+| --- | --- | --- |
+| 换歌处跨流最大空洞 | **2220ms**（01:03:43），RAOP 源端口重建 41229→43117 | 34ms / 30ms，**单一源端口**（57338 / 39701） |
+| 换歌处每秒 pps | 34 → 73 → 125 | **125 全程不降** |
+| 会话日志 | 每首 `bridge session 断开 reason=closed` + 重连 5.2~5.8s | `prepare warm-reuse`（MUZO/HiVi 同 token 跨曲），GGMM 离线只影响自己（D7） |
+| RTP 连续性 | 序号断点 1 次；时间戳跳 ~1987ms | 序号断点 **0**；增量恒 `(dseq=1, drts=352)` |
+
+第 2 轮关掉下一首预解码制造内容晚到：自动边界仍无空洞，仅手动 jump/seek 产生
+382ms / RTP 344.7ms 跳变 —— 手动入口不在本机制范围。
+
+### 回归
+
+- `tsc` 无错；桥相关 7 套件 115 例 + `bridgeDrainFill` 15 例（新增 5 例钉住续静音
+  切片/目标/超时/无桥/收工）全过。
+- 部署链路：230 `docker build --build-arg APP_VERSION=4.11.3`（镜像 `ef62e086826e`）
+  → save/scp/load 240 → `docker compose up -d` 重建容器（`/rest/ping` ok）。
+
+已知遗留：外部 sendspin socket 关闭（`other side closed`）→ rehost → bulk backfill
+撞 16s 硬上限 → 约 8s 空窗；手动 jump/seek 仍有一次 RTP 时间戳跳变（非自动换歌路径）。
+
 ## [4.11.2] - 2026-11-02
 
 ### Feature / 群组切歌等待自适应（P3，纯桥 + 混合统一）

@@ -32,6 +32,7 @@ import {
 } from "../../src/services/sendspin/streamEngine.js";
 import { SendspinGroup } from "../../src/services/sendspin/server.js";
 import { SAMPLE_RATE } from "../../src/services/sendspin/encoding.js";
+import { BRIDGE_PUSH_FLOOR_US, BRIDGE_PUSH_TICK_MS } from "../../src/services/sendspin/constants.js";
 
 const FRAME_SAMPLES = 2400; // 25ms @48k 立体声交错样本
 const FRAME_MS = 25;
@@ -427,3 +428,125 @@ describe("排空循环:开关 ON ⇒ 逐步续静音,总量 == 排空时长", ()
     expect(out.skipLog!.msg).toContain("song=song-fill-true");
   }, 30_000);
 });
+
+// ---------------------------------------------------------------------------
+// ② 自动换歌空窗续静音(noteBridgeAutoTrackGap / fillBridgeAutoTrackGap)
+// ---------------------------------------------------------------------------
+//
+// 真机 2026-11:自动换歌(track && !manual)时 pushLoop 已退出、下一首还没解出 PCM,
+// 桥 ring 断料 ⇒ RTP 掉到 ~1pps。做法:换歌判定那一拍记下内容尾,桥 tick 每 250ms
+// 从尾按 25ms 续静音到「窗口下沿 + 1 tick + ahead」,**不追到 HORIZON** —— 追到 4s
+// 会把静音排到下一首落点之后,新曲首帧被投递水位判「已投过」而吞头。
+describe("自动换歌空窗:桥侧续静音", () => {
+  it("尾在窗口之后 ⇒ 一帧不补(否则会盖住下一首首帧)", () => {
+    const srv = makeSrv();
+    const g = srv.group("g-gap-ahead") as SendspinGroup;
+    try {
+      attachBridgeStub(g);
+      const now = 1_000_000n;
+      g.noteBridgeAutoTrackGap(now + 10_000_000n);
+      (g as any).fillBridgeAutoTrackGap(now);
+      expect(ringOf(g)).toHaveLength(0);
+      expect(g.currentBridgeGapFillTailUs()).toBe(now + 10_000_000n);
+    } finally {
+      g.endBridgeAutoTrackGap("test");
+      g.stopBridgePushTimer();
+      (g as any).bridges.clear();
+    }
+  });
+
+  it("尾落后窗口 ⇒ 25ms 切片补到「下沿+1 tick+ahead」,尾随之推进、全零静音", () => {
+    const srv = makeSrv();
+    const g = srv.group("g-gap-fill") as SendspinGroup;
+    try {
+      attachBridgeStub(g);
+      const now = 5_000_000n;
+      const tail = now - 1_000_000n;
+      g.noteBridgeAutoTrackGap(tail);
+
+      (g as any).fillBridgeAutoTrackGap(now);
+
+      const ahead = BigInt(g.commonSendAheadUs());
+      const target = now + BigInt(BRIDGE_PUSH_FLOOR_US + BRIDGE_PUSH_TICK_MS * 1000) + ahead;
+      expect(g.currentBridgeGapFillTailUs()).toBe(target);
+
+      const ring = ringOf(g);
+      expect(ring.length).toBe(Math.ceil(Number(target - tail) / SLICE_US));
+      let expectTs = tail;
+      for (const e of ring) {
+        expect(e.tsUs).toBe(expectTs);
+        const dur = Math.min(SLICE_US, Number(target - expectTs));
+        expect(e.durUs).toBe(dur);
+        expectAllZero(e.data);
+        expectTs += BigInt(dur);
+      }
+      expect(expectTs).toBe(target);
+      expect((g as any).bridgeGapFillMs).toBe(Number(target - tail) / 1000);
+      expect((g as any).bridgeGapFillChunks).toBe(ring.length);
+    } finally {
+      g.endBridgeAutoTrackGap("test");
+      g.stopBridgePushTimer();
+      (g as any).bridges.clear();
+    }
+  });
+
+  it("下一首到达(endBridgeAutoTrackGap)后 ⇒ 尾清零、tick 不再补", () => {
+    const srv = makeSrv();
+    const g = srv.group("g-gap-end") as SendspinGroup;
+    try {
+      attachBridgeStub(g);
+      const now = 5_000_000n;
+      g.noteBridgeAutoTrackGap(now - 1_000_000n);
+      (g as any).fillBridgeAutoTrackGap(now);
+      const filled = ringOf(g).length;
+      expect(filled).toBeGreaterThan(0);
+
+      g.endBridgeAutoTrackGap("next-track");
+      expect(g.currentBridgeGapFillTailUs()).toBe(0n);
+
+      (g as any).fillBridgeAutoTrackGap(now + 10_000_000n);
+      expect(ringOf(g).length).toBe(filled); // 不再新增
+    } finally {
+      g.endBridgeAutoTrackGap("test");
+      g.stopBridgePushTimer();
+      (g as any).bridges.clear();
+    }
+  });
+
+  it("无桥 ⇒ note 直接不生效(纯直连组零影响)", () => {
+    const srv = makeSrv();
+    const g = srv.group("g-gap-nobridge") as SendspinGroup;
+    g.noteBridgeAutoTrackGap(123_000n);
+    expect(g.currentBridgeGapFillTailUs()).toBe(0n);
+    (g as any).fillBridgeAutoTrackGap(456_000n);
+    expect(ringOf(g)).toHaveLength(0);
+  });
+
+  it("超过 12s 仍未接上 ⇒ 收工(reason=timeout),不再白涨 ring", () => {
+    const srv = makeSrv();
+    const g = srv.group("g-gap-timeout") as SendspinGroup;
+    try {
+      attachBridgeStub(g);
+      const now = 9_000_000n;
+      g.noteBridgeAutoTrackGap(now - 1_000_000n);
+      const before = ringOf(g).length;
+      (g as any).bridgeGapFillSinceMs = Date.now() - 13_000;
+
+      (g as any).fillBridgeAutoTrackGap(now);
+
+      expect(g.currentBridgeGapFillTailUs()).toBe(0n);
+      expect(ringOf(g).length).toBe(before);
+      const msgs = (srv.log as any).mock.calls.map((c: any[]) => String(c[1]));
+      expect(msgs.some((m: string) => m.includes("bridge-gap-fill-stop") && m.includes("reason=timeout"))).toBe(true);
+    } finally {
+      g.stopBridgePushTimer();
+      (g as any).bridges.clear();
+    }
+  });
+});
+
+function expectAllZero(data: Uint8Array): void {
+  for (let i = 0; i < data.length; i++) {
+    expect(data[i]).toBe(0);
+  }
+}

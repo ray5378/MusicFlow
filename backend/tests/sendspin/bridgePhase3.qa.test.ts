@@ -145,7 +145,7 @@ describe("QA① BLK-01 组合反例:members=∅ + 2 桥 + flac 编码器在场",
     g.bridges.set("ap-1", b1 as any);
     g.bridges.set("ap-2", b2 as any);
     const ahead = BigInt(g.commonSendAheadUs()); // ring ts 是协议域(含 send_ahead);窗口按 +ahead 平移
-    const ts0 = nowUs() + ahead + 2_000_000n; // 可听域 [now+FLOOR 1.5s, now+HORIZON 2.5s] 内
+    const ts0 = nowUs() + ahead + 3_000_000n; // 可听域 [now+FLOOR 2.5s, now+HORIZON 4.0s] 内
 
     const got = await g.pushFrame(ts0, PCM());
     g.bridgePushTick(); // §6.2 窗口化:pushFrame 只入 ring,投递由补投 tick(单写者)完成
@@ -176,14 +176,14 @@ describe("QA① BLK-01 组合反例:members=∅ + 2 桥 + flac 编码器在场",
     g.bridges.set("ap-good", good as any);
 
     const ahead = BigInt(g.commonSendAheadUs());
-    const got = await g.pushFrame(nowUs() + ahead + 2_000_000n, PCM());
+    const got = await g.pushFrame(nowUs() + ahead + 3_000_000n, PCM());
     g.bridgePushTick();
 
     expect(got).toBe(1000);
     expect(bad.pushFailures).toBe(1); // 单桥失败不连累组泵与另一桥
     expect(good.pushed).toHaveLength(1);
     // 下一帧进窗 → tick 续投:好桥继续收,坏桥继续被隔离,组泵无感
-    await g.pushFrame(nowUs() + ahead + 2_100_000n, PCM());
+    await g.pushFrame(nowUs() + ahead + 3_100_000n, PCM());
     g.bridgePushTick();
     expect(good.pushed).toHaveLength(2);
     expect(bad.pushFailures).toBe(2);

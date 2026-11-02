@@ -5,9 +5,10 @@
 //      旧实现每帧按**绝对** drift 重记 pendingDrops ⇒ 1.48s 重叠三角累计成 43s
 //      (真机日志切歌那一秒 sumDrop=1914975 帧)⇒ 43 秒 100% 输出被裁 = 45s 无声。
 //      修法:pendingDrops 只补记「尚未排队」的重叠量 ⇒ 恒 ≤ 真实重叠,且可被消化完。
-//   ② 投递窗口 FLOOR(1.5s)+ RAOP L(1s)+ SAFETY(50ms) 下,原 ts 打戳的首个交付帧
-//      **可达**(A − L − SAFETY ≥ now)⇒ 窗口化投递本身不需要每次切歌都自锚到
-//      now+2.5s;旧实现(ts − sendAhead)把首帧压到 now+1.0s < now+1.05s ⇒ 必重锚。
+//   ② 投递窗口 FLOOR(2.5s,2026-11-02 全局上调)+ RAOP L(1s)+ SAFETY(50ms) 下,
+//      原 ts 打戳的首个交付帧**可达**(A − L − SAFETY ≥ now)⇒ 窗口化投递本身不需要
+//      每次切歌都自锚到 now+2.5s;旧实现(ts − sendAhead)把首帧压到 now+1.0s
+//      < now+1.05s ⇒ 必重锚。
 import { describe, expect, it } from "vitest";
 
 import { BridgeTimelineAligner, planBridgeAnchor } from "../../src/services/airplay/bridgeSession.js";
@@ -71,7 +72,7 @@ describe("planBridgeAnchor:窗口 FLOOR 打戳可达(切歌不再自锚 +2.5s)",
   const now = 3_000_000_000n;
   const L = 44100; // RAOP 协商延迟 1s(真机 latencyFrames=44100)
 
-  it("★ 原 ts 打戳:首帧 = now+FLOOR(1.5s) → 可达,不重锚,锚点 = 首帧原值(A/V 对齐设备)", () => {
+  it("★ 原 ts 打戳:首帧 = now+FLOOR(2.5s) → 可达,不重锚,锚点 = 首帧原值(A/V 对齐设备)", () => {
     const firstFrame = now + BigInt(BRIDGE_PUSH_FLOOR_US);
     const plan = planBridgeAnchor({
       firstFrameTsUs: firstFrame, latencyFrames: L, rate: RATE, resampled: true, nowUs: now,
@@ -80,8 +81,10 @@ describe("planBridgeAnchor:窗口 FLOOR 打戳可达(切歌不再自锚 +2.5s)",
     expect(plan.anchorUs).toBe(firstFrame); // 贴组时间线:锚点就是组 ts,不再 now+2.5s
   });
 
-  it("旧实现(ts − sendAhead 0.5s)在真机几何下**必然**不可达 → 每次切歌自锚 +2.5s(回归防护)", () => {
-    const firstFrame = now + BigInt(BRIDGE_PUSH_FLOOR_US) - 500_000n; // 真机 commandedLeadUs≈1.02s
+  it("旧实现(ts − sendAhead 1.5s)在真机几何下**必然**不可达 → 每次切歌自锚 +2.5s(回归防护)", () => {
+    // 旧实现把首帧压到 now+1.0s(commandedLeadUs ≈ 1.02s)⇒ 低于 RAOP 可达线 now+1.05s。
+    // 该几何与 FLOOR 当前取值无关,故直接按 1.0s 构造(不跟随 FLOOR 上调)。
+    const firstFrame = now + 1_000_000n;
     const plan = planBridgeAnchor({
       firstFrameTsUs: firstFrame, latencyFrames: L, rate: RATE, resampled: true, nowUs: now,
     });

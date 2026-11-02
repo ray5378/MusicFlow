@@ -399,7 +399,7 @@ DLNA 设备区块仍然渲染在群组页左侧（`index.vue:51-123`，`data-laz
 |---|---|---|
 | 内容源 | 同一个 `recentByGroup["pcm:100"]` ring | `server.ts:787`、`:852` |
 | 投递节奏 | 每 250ms 一次 `bridgePushTick`（组级单一定时器，`unref` 不阻进程退出） | `server.ts:825-838`、`:842-860`；`constants.ts:79` |
-| 窗口 | 原始 ts 域 `[now + 1.5s + ahead, now + 2.5s + ahead]`；交付时 `ts' = ts − ahead` | `server.ts:854-857`、`constants.ts:85`、`:88` |
+| 窗口 | 原始 ts 域 `[now + 2.5s + ahead, now + 4.0s + ahead]`（2026-11-02 全局后移 1s，宽 1.5s 不变）；交付时 `ts' = ts − ahead` | `server.ts:854-857`、`constants.ts:86`、`:100` |
 | 帧协议 | MFAB 28 字节小端头 + payload；`magic "MFAB" / version 1 / type / flags / generation / sequence / tsUs(i64) / payloadLen(u32)` | `services/airplay/bridgeChannel.ts:1-16`、`:30-51` |
 | 帧类型 | `AUDIO=1 / BOUNDARY=2 / CONFIG=3 / HEARTBEAT=4 / STATS=5` | `bridgeChannel.ts:36` |
 | 帧上限 | payload ≤ 1 MiB，超限立即抛错（调用方必须断连，不得错位续读） | `bridgeChannel.ts:33-34`、`:7-8` |
@@ -964,10 +964,10 @@ PUT 语义：`memberId` 必须是本组成员（命名空间 id **原样整条**
 | `BRIDGE_RECONCILE_GRACE_MS` | 55_000 | `protocolPlayer.ts:481` |
 | 对账间隔 | 60_000 | `protocolPlayer.ts:484` |
 | `BRIDGE_PUSH_TICK_MS` | 250 | `sendspin/constants.ts:79` |
-| `BRIDGE_PUSH_HORIZON_US` | 2_500 * 1000 | `sendspin/constants.ts:85` |
-| `BRIDGE_PUSH_FLOOR_US` | 1_500_000 | `sendspin/constants.ts:88` |
-| `BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US` | 1_750_000 | `sendspin/constants.ts:96` |
-| `BRIDGE_BACKFILL_MAX_US` | 6_000_000 | `sendspin/constants.ts:98` |
+| `BRIDGE_PUSH_HORIZON_US` | 4_000_000 | `sendspin/constants.ts:86` |
+| `BRIDGE_PUSH_FLOOR_US` | 2_500 * 1000 | `sendspin/constants.ts:100` |
+| `mixed_anchor_lead_ms` 默认 | 5_000（NULL/0 = 自动） | `group/delayCalib.ts`（`BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US` 已随 4.9.0 组级配置移除） |
+| `BRIDGE_BACKFILL_MAX_US` | 6_000_000 | `sendspin/constants.ts:157` |
 | `DEFAULT_MIN_BUFFER_MS` | 800 | `sendspin/group.ts:47` |
 | `BRIDGE_WARM_START_LEAD_US` | 2_500_000 | `airplay/rates.ts:37` |
 | `FRAME_HEADER_SIZE` / `MAX_PAYLOAD_BYTES` | 28 / 1 MiB | `airplay/bridgeChannel.ts:32-34` |

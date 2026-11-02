@@ -259,15 +259,16 @@ describe("切歌垫片(D2=逐帧衰减)时间线 / bulk 判据 / 稳态窗口对
     const ring: RingEntry[] = g.recentByGroup.get(PCM_KEY) ?? [];
     expect(ring.length).toBe(TOTAL);
     // 旧实现的上界是 `hi = lo + BRIDGE_BACKFILL_MAX_US`(位置口径,不是 now+HORIZON)
-    //   ⇒ 可用窗只剩 hi − contentStart = 1.8s(≈73 帧),这正是 run① 只投 1.725s 的形状
+    //   ⇒ 可用窗只剩 hi − contentStart = 2.8s(≈112 帧),这正是 run① 只投 1.725s 的形状
+    //   (2026-11-02 floor 全局上调 1.5s→2.5s 后该差由 1.8s 变成 2.8s)
     const oldHi = lo + BigInt(BRIDGE_BACKFILL_MAX_US);
-    expect(oldHi - contentStart).toBe(1_800_000n);
+    expect(oldHi - contentStart).toBe(2_800_000n);
     // 新判据:内容量口径,6s 成立
     expect(g.currentGenDeliverableUs(ring, lo, 0n) as bigint).toBe(BigInt(TOTAL) * FRAME_US);
 
     await drainBulk(g);
 
-    // 投满 6s(旧实现:hi 挡在 1.8s ⇒ ≈1.825s / 73 帧)
+    // 投满 6s(旧实现:hi 挡在 2.8s ⇒ ≈2.825s / 112 帧)
     const deliveredUs = BigInt(bridge.frames.length) * FRAME_US;
     expect(deliveredUs).toBe(BigInt(BRIDGE_BACKFILL_MAX_US));
     expect(bridge.frames.length).toBe(240);
@@ -351,8 +352,8 @@ describe("切歌垫片(D2=逐帧衰减)时间线 / bulk 判据 / 稳态窗口对
   });
 
   it("P9: 稳态窗口对位必须恒定且落在窗内(常数垫片形态在此必红)", async () => {
-    // 泵游标领先 now 2.8s(稳态预填充深度):窗口 [now+2.3s, now+3.3s] ⇒ 尾帧落在窗内
-    const LEAD = 2_800_000n;
+    // 泵游标领先 now 3.8s(稳态预填充深度):窗口 [now+3.3s, now+4.8s] ⇒ 尾帧落在窗内
+    const LEAD = 3_800_000n;
     let clock = NOW;
     setNowUsOverride(() => clock);
 

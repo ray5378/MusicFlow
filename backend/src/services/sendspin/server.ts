@@ -90,6 +90,10 @@ export interface SendspinBridgeHandle {
  *  桥按 s16le/48k/2ch 消费 MFAB AUDIO payload,故每片字节数 = 帧数 × 4。 */
 const BRIDGE_DRAIN_SILENCE_SLICE_US = 25_000;
 
+/** 自动换歌空窗续静音的最长保持时间(ms)。超时即收工并留一行日志:正常情况下一首
+ *  内容在数秒内到达;超过说明队列尾/成员异常,再写只会白涨 ring 与投递水位。 */
+const BRIDGE_GAP_FILL_MAX_MS = 12_000;
+
 /** 桥窗口诊断日志(bridge-window)节流间隔(µs)= 2s,与 bridgeSession 的 ev:"tick"
  *  同频,便于两侧对数。只影响日志行数,**不参与任何判据、不影响投递**。 */
 const BRIDGE_WINDOW_DIAG_THROTTLE_US = 2_000_000n;
@@ -759,6 +763,19 @@ export class SendspinGroup {
    *  投递时只投当前代次 —— 旧代次帧即使 ts 落在新窗口内也不可信(中途 seek/
    *  rehost 时旧 cursor 可达 now+10s,仅重置水位挡不住)。 */
   private bridgeContentEpoch = 0;
+  /** [C 方案 2026-11-03] 自动换歌空窗续静音的当前静音尾(内容域 ts);null = 不在空窗期。
+   *
+   *  语义:自动换歌(`track && !manual`)不中断推流,但上游取下一首/解码期间不产帧 ⇒
+   *  ring 尾跌到窗口下沿以下 ⇒ 投递侧断粮 ⇒ RAOP producer 只能按 `waitDataMs`(1s)
+   *  吐一块 8ms 静音 ⇒ RTP 掉到 ~1pps、设备干涸(240 实测换歌处 maxGap 4008ms)。
+   *  空窗期由桥侧按 25ms 片、每 tick 把静音尾追到「窗口下沿 + 一个补投周期」,
+   *  维持 1x;下一首首帧由 streamEngine 锚在静音尾之后,两段不重叠。
+   *  **只写 ring、绝不写成员**(与 pushBridgeOnlySilence 同一范式)。 */
+  private bridgeGapFillTailUs: bigint | null = null;
+  private bridgeGapFillStartTsUs = 0n;
+  private bridgeGapFillSinceMs = 0;
+  private bridgeGapFillMs = 0;
+  private bridgeGapFillChunks = 0;
   /** 切歌垫片(µs):新代次时间线**前移 Δ**,并随内容推进**逐帧消耗归零**。
    *
    *  ⚠️ 「逐帧消耗」不是实现细节,它**就是还债机制**(2026-10-31 QA 复核口径):
@@ -1161,6 +1178,84 @@ export class SendspinGroup {
     return n;
   }
 
+  /** [C 方案 2026-11-03] 自动换歌开始等待下一首内容:从上一曲内容尾续静音。
+   *
+   *  为什么需要:自动换歌**不中断**推流(S2 纯内容替换),但上游取下一首/解码期间
+   *  不产帧 ⇒ ring 尾跌到窗口下沿以下 ⇒ 投递侧断粮 ⇒ RAOP producer 只能按
+   *  `waitDataMs`(1s)超时补一块 8ms 静音 ⇒ RTP 从 125pps 掉到 ~1pps,
+   *  设备缓冲被抽干(240 实测换歌处 maxGap 4008ms / 单流完全静默 4s)。
+   *  由桥侧每 tick 按 25ms 片把静音尾追到「窗口下沿 + 一个补投周期」:喂料速率仍是
+   *  1x,RTP 保持 125pps,可听内容仍是静音;下一首首帧由 streamEngine 锚在静音尾
+   *  之后(`currentBridgeGapFillTailUs`),两段不重叠、不会被水位跳过。
+   *
+   *  @param tailTsUs 上一曲内容尾(含曲末排空静音),内容域。
+   */
+  noteBridgeAutoTrackGap(tailTsUs: bigint): void {
+    if (this.bridges.size === 0) return;
+    if (this.bridgeGapFillTailUs === null) {
+      this.bridgeGapFillTailUs = tailTsUs;
+      this.bridgeGapFillStartTsUs = tailTsUs;
+      this.bridgeGapFillSinceMs = Date.now();
+      this.bridgeGapFillMs = 0;
+      this.bridgeGapFillChunks = 0;
+      this.server.log(
+        "info",
+        `bridge-gap-fill group=${this.name} start tailTsUs=${tailTsUs} bridges=${this.bridges.size}`,
+      );
+    }
+    else if (tailTsUs > this.bridgeGapFillTailUs) {
+      // 已在空窗期又收到更晚的内容尾(排空静音晚于首报):以后者为准,不重置计数。
+      this.bridgeGapFillTailUs = tailTsUs;
+    }
+    this.ensureBridgePushTimer();
+  }
+
+  /** 结束空窗续静音。每次收工都留一行可 grep 的日志(与 drain-fill 的三选一同款纪律:
+   *  绝不允许静默收工)。 */
+  endBridgeAutoTrackGap(reason: string): void {
+    if (this.bridgeGapFillTailUs === null) return;
+    this.server.log(
+      "info",
+      `bridge-gap-fill-stop group=${this.name} reason=${reason} ` +
+        `filledMs=${this.bridgeGapFillMs} chunks=${this.bridgeGapFillChunks} ` +
+        `heldMs=${Date.now() - this.bridgeGapFillSinceMs} tailTsUs=${this.bridgeGapFillTailUs}`,
+    );
+    this.bridgeGapFillTailUs = null;
+    this.bridgeGapFillSinceMs = 0;
+    this.bridgeGapFillMs = 0;
+    this.bridgeGapFillChunks = 0;
+  }
+
+  /** 空窗续静音的当前静音尾(内容域);0n = 不在空窗期。streamEngine 用它把下一首
+   *  首帧锚在静音之后 —— 否则首帧 ts ≤ 已投水位,被 deliverBridgeWindow 跳过(吞头)。 */
+  currentBridgeGapFillTailUs(): bigint {
+    return this.bridgeGapFillTailUs ?? 0n;
+  }
+
+  /** 每个补投 tick 调一次:把静音尾追到「窗口下沿 + 一个 tick」。
+   *  不追到 HORIZON(4s):那会把静音排到下一首可能落点(now+FLOOR+tick)之后,
+   *  新曲首帧与已投静音重叠 ⇒ 水位判「已投过」⇒ 开头被吞。 */
+  private fillBridgeAutoTrackGap(now: bigint): void {
+    const tail = this.bridgeGapFillTailUs;
+    if (tail === null) return;
+    if (this.bridges.size === 0) {
+      this.endBridgeAutoTrackGap("no-bridge");
+      return;
+    }
+    if (Date.now() - this.bridgeGapFillSinceMs > BRIDGE_GAP_FILL_MAX_MS) {
+      this.endBridgeAutoTrackGap("timeout");
+      return;
+    }
+    const ahead = BigInt(this.commonSendAheadUs());
+    const target = now + BigInt(BRIDGE_PUSH_FLOOR_US + BRIDGE_PUSH_TICK_MS * 1000) + ahead;
+    if (target <= tail) return;
+    const n = this.pushBridgeOnlySilence(tail, Number(target - tail));
+    if (n === 0) return;
+    this.bridgeGapFillTailUs = target;
+    this.bridgeGapFillMs += Math.round(Number(target - tail) / 1000);
+    this.bridgeGapFillChunks += n;
+  }
+
   /** S1(2026-11-01):下一首预解码 PCM 写入 ring(下一代次 ep)。
    *
    *  与 `pushBridgeOnlySilence` 同一范式 —— **只写 ring,绝不写成员**:不调
@@ -1183,6 +1278,8 @@ export class SendspinGroup {
     pcm: Float32Array,
     startTsUs: bigint,
   ): Promise<{ nextEpoch: number; endTsUs: bigint }> {
+    // 预取就绪 = 下一首内容马上进 ring,空窗续静音没有意义(继续写会与预取帧同 ts 重叠)。
+    this.endBridgeAutoTrackGap("prefetch");
     const nextEpoch = this.bridgeContentEpoch + 1;
     let ts = startTsUs;
     if (this.bridges.size === 0 || pcm.length === 0) {
@@ -1249,6 +1346,7 @@ export class SendspinGroup {
   /** 停止补投定时器(摘桥/清桥/组关闭时;下批音频进 pushFrame 会按需重启)。 */
   stopBridgePushTimer(): void {
     if (!this.bridgePushTimer) return;
+    this.endBridgeAutoTrackGap("timer-stop");
     clearInterval(this.bridgePushTimer);
     this.bridgePushTimer = undefined;
   }
@@ -1257,10 +1355,14 @@ export class SendspinGroup {
    *  public 仅供单测确定性驱动(绕开真实定时器);生产由 ensureBridgePushTimer 调。 */
   bridgePushTick(): void {
     if (this.bridges.size === 0) {
+      this.endBridgeAutoTrackGap("no-bridge");
       this.stopBridgePushTimer();
       return;
     }
     const now = nowUs();
+    // [C 2026-11-03] 自动换歌空窗期:先把静音尾追到「下沿 + 1 tick」再投递。
+    // 放在 per-bridge 循环之前 —— ring 是组共享的,只需补一次。
+    this.fillBridgeAutoTrackGap(now);
     for (const [deviceId, b] of this.bridges) {
       try {
         // S3(QA):ring 获取与公共 sendAhead 计算都可能触到异常成员/组状态,
@@ -1985,6 +2087,8 @@ export class SendspinGroup {
   }
 
   async pushFrame(tsUs: bigint, pcm: Float32Array): Promise<number> {
+    // [C 2026-11-03] 真内容到达 = 空窗结束(下一首首帧已由 streamEngine 锚在静音尾之后)。
+    this.endBridgeAutoTrackGap("content");
     // ---- 分组:同 (codec, gain) 的成员共享一次编码 ----
     const groups = new Map<
       string,

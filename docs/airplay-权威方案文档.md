@@ -13,7 +13,7 @@
 > **根因（2026-10-31 真机抓包+日志+源码三位一体确证）**：
 >
 > ```
-> 桥投递侧速率被精确钳在 1x（250ms bridgePushTick × [now+1.5s+ahead, now+2.5s+ahead] 窗口）
+> 桥投递侧速率被精确钳在 1x（250ms bridgePushTick × [now+2.5s+ahead, now+4.0s+ahead] 窗口）
 >   ⇒ airplay 子进程 outBuf 恒 0~8ms（供=耗=1x，缓冲永远攒不起来）
 >     ⇒ late 以 ~22/秒（18%）单调累积 ⇒ 发送节拍抖动
 >       ⇒ 设备 1.05s 播放缓冲被抽干 ⇒ 设备进追赶模式，2 秒内发 657 条重传请求
@@ -1190,7 +1190,7 @@ npx vitest run tests/airplay tests/dlna/controlTransportGuards.test.ts tests/ser
 | 项 | 内容 |
 |---|---|
 | 职责 | 采样率 / 重采样 / 桥接全部**常量唯一源**(改值只能改这里) |
-| 对外导出 | `SENDSPIN_RATE=48000`(:6)/`AIRPLAY1_RATE=44100`(:9)/`AP2_RATES=[48000,44100]`(:12)/`RESAMPLE_L=147`(:19)/`RESAMPLE_M=160`(:21)/`RESAMPLE_GROUP_DELAY_OUT_SAMPLES=16`(:25)/`RESAMPLE_GROUP_DELAY_MS=0.3627`(:28)<br>`BRIDGE_COLD_START_LEAD_US=4_500_000`(:35)/`BRIDGE_WARM_START_LEAD_US=2_500_000`(:37)/`BRIDGE_MIN_BUFFER_US=1_000_000`(:39)/`ANCHOR_SAFE_LEAD_US=800_000`(:54)<br>`BRIDGE_QUEUE_HIGH_WATER_BYTES=384*1024`(:61)/`BRIDGE_QUEUE_HARD_CAP_BYTES=1536*1024`(:63)/`BRIDGE_BACKOFF_BASE_MS=5_000`(:65)/`BRIDGE_BACKOFF_MAX_MS=30_000`(:67)<br>`BRIDGE_PCM_BYTES_PER_SEC=192_000`(:80,48k×2ch×2B)/`BRIDGE_QUEUE_HIGH_WATER_MS=2_000`(:83)/`BRIDGE_QUEUE_HARD_CAP_MS=16_000`(:95)/`BRIDGE_RECEIVE_OVERFLOW_MS=16_000`(:101)/`BRIDGE_HEARTBEAT_INTERVAL_MS=1_000`(:103)/`BRIDGE_STALL_NO_FRAME_MS=2_000`(:105)/`BRIDGE_END_DRAIN_MARGIN_MS=1_500`(:134)/`BRIDGE_END_DRAIN_SAFE_MAX_MS=8_000`(:148,曲末排空独立上限,不随队列硬上限抬高)<br>`RAOP_SAFETY_MS=50`(:155,RAOP 可达安全余量)/`BRIDGE_MAX_HELD_AUDIO_US=45_000_000`(:188)/`BRIDGE_RESUME_REBASE_US=2_000_000`(:191)<br>`PROTOCOL_CAPS: Record<BridgeProtocol, ProtocolCaps>`(:123) |
+| 对外导出 | `SENDSPIN_RATE=48000`(:6)/`AIRPLAY1_RATE=44100`(:9)/`AP2_RATES=[48000,44100]`(:12)/`RESAMPLE_L=147`(:19)/`RESAMPLE_M=160`(:21)/`RESAMPLE_GROUP_DELAY_OUT_SAMPLES=16`(:25)/`RESAMPLE_GROUP_DELAY_MS=0.3627`(:28)<br>`BRIDGE_COLD_START_LEAD_US=4_500_000`(:35)/`BRIDGE_WARM_START_LEAD_US=2_500_000`(:37)/`BRIDGE_MIN_BUFFER_US=1_000_000`(:39)/`ANCHOR_SAFE_LEAD_US=800_000`(:54)<br>`BRIDGE_QUEUE_HIGH_WATER_BYTES=384*1024`(:61)/`BRIDGE_QUEUE_HARD_CAP_BYTES=1536*1024`(:63)/`BRIDGE_BACKOFF_BASE_MS=5_000`(:65)/`BRIDGE_BACKOFF_MAX_MS=30_000`(:67)<br>`BRIDGE_PCM_BYTES_PER_SEC=192_000`(:80,48k×2ch×2B)/`BRIDGE_QUEUE_HIGH_WATER_MS=2_000`(:83)/`BRIDGE_QUEUE_HARD_CAP_MS=16_000`(:95)/`BRIDGE_RECEIVE_OVERFLOW_MS=16_000`(:101)/`BRIDGE_HEARTBEAT_INTERVAL_MS=1_000`(:103)/`BRIDGE_STALL_NO_FRAME_MS=2_000`(:105)/`BRIDGE_END_DRAIN_MARGIN_MS=2_500`(:134,随 floor 2.5s 同步)/`BRIDGE_END_DRAIN_SAFE_MAX_MS=8_000`(:148,曲末排空独立上限,不随队列硬上限抬高)<br>`RAOP_SAFETY_MS=50`(:155,RAOP 可达安全余量)/`BRIDGE_MAX_HELD_AUDIO_US=45_000_000`(:188)/`BRIDGE_RESUME_REBASE_US=2_000_000`(:191)/`BRIDGE_REBASE_LAG_US=150_000`(:199,节拍滞后判据)/`BRIDGE_REBASE_PERSIST_MS=1_000`(:203,滞后持续时长)/`BRIDGE_REBASE_MIN_AHEAD_US=1_500_000`(:211,前沿最小余量判据)<br>`PROTOCOL_CAPS: Record<BridgeProtocol, ProtocolCaps>`(:123) |
 | 关键常量(为什么) | `ANCHOR_SAFE_LEAD_US=800ms` = 真机验证可用的**最浅**水位(再浅 esp32 就 underrun);`BRIDGE_MIN_BUFFER_US=1s` 是桥的最浅;`RAOP_SAFETY_MS=50`:桥首帧必须 ≥ `now + L/rate + 50ms` 才可能被 RAOP 排上 |
 | 状态归属 | 常量 |
 | 上下游 | 全链路 import;守卫 7.7 组③ 钉「唯一声明」 |
@@ -1385,10 +1385,10 @@ seek 后为 `sendspin timeline RE-anchored after seek: pos=<ms>ms base=…`。
 
 | 概念 | 代码 | 规则 |
 |---|---|---|
-| 窗口下沿 | `bridgePushTick`(:842) + `BRIDGE_PUSH_FLOOR_US = 1_500_000`(`constants.ts:88`) | `ts' < now + 1.5s` 的帧**丢弃并推水位**(桥来不及排程) |
-| 窗口上沿 | `BRIDGE_PUSH_HORIZON_US = 2_500 * 1000`(`constants.ts:85`) | `ts' > now + 2.5s` **顺延**到下一 tick,不投不推 |
+| 窗口下沿 | `bridgePushTick`(:842) + `BRIDGE_PUSH_FLOOR_US = 2_500 * 1000`(`constants.ts:100`) | `ts' < now + 2.5s` 的帧**丢弃并推水位**(桥来不及排程) |
+| 窗口上沿 | `BRIDGE_PUSH_HORIZON_US = 4_000_000`(`constants.ts:86`) | `ts' > now + 4.0s` **顺延**到下一 tick,不投不推 |
 | 投递换算 | `deliverBridgeWindow`(:868) | `pushAudio(e.data, e.tsUs − commonSendAheadUs())` —— 桥的对齐器是 `send_ahead=0` 语义,换算后「桥可听时刻 = 设备出声时刻」 |
-| 补投周期 | `BRIDGE_PUSH_TICK_MS = 250`(:828) | 1s 宽窗口,每 250ms 投一次,字节平滑 |
+| 补投周期 | `BRIDGE_PUSH_TICK_MS = 250`(:828) | 1.5s 宽窗口,每 250ms 投一次,字节平滑 |
 | 水位 | `bridgeWatermarks`(:720) | 每桥一份「已投到哪个 ts」;`0n` = 本代次尚未投递 |
 | 回填 | `backfillBridge`(:784) | 播中新桥加入:只投窗口内的**当前代次**帧,总量封顶 `BRIDGE_BACKFILL_MAX_US = 6s`(`constants.ts:98`) |
 | 代次戳 | `bridgeContentEpoch`(:724) + `notifyBridgeGeneration`(:742) | 换代即 `epoch++` + 清水位 + 停旧代次帧;`ep` 缺失 = 不可信 = 不投 |
@@ -1396,6 +1396,19 @@ seek 后为 `sendspin timeline RE-anchored after seek: pos=<ms>ms base=…`。
 **排障口径**:投不出音频先看三件事 —— ①`ep` 是否等于当前 `bridgeContentEpoch`;②水位是否
 已经被推过(`ts < lo` 的帧会被水位吃掉,永不补投);③`commonSendAheadUs()` 是否被桥污染
 (守卫 ⑦ 组⑧ 钉死「体内不得出现 bridge/lead」)。
+
+**窗口迁移(2026-11-02,全局,无按设备分支)**:`1.5s/2.5s ⇒ 2.5s/4.0s`(宽度保持 1.5s)。
+老 LinkPlay(HiVi H5MKII)实测有效设备缓冲只剩 ~200ms,原窗口下桥侧可听余量不足 ⇒ 每秒欠一块。
+同批强耦合落点:`BRIDGE_END_DRAIN_MARGIN_MS 1_500 ⇒ 2_500`、桥组锚点 lead 取
+`max(ahead, floor + tick) = 2.75s`、自然接续锚点 `contigUs` 按下沿 + 一补投周期抬升。
+240 实测(23:31–00:19,跨多首):音频 125.3pps、单流 `maxGap` ≤ 41ms、`>100ms` 空洞 0、
+三桥 `deltaUs` +2.06/+4.46s 稳定、单首 `latePackets` 87~206(旧版 34857)。
+
+**内容前沿判据(front-rebase,2026-11-02)**:stats tick 里 `deltaUs < 1.4s` ⇒ 调
+`player.requestPacingRebase(1.6s − deltaUs)`(单次 ≤4s,只动 `sendAt`,RTP 映射不动)。
+门控 = `frontier` 本 tick 仍在推进 且 `!closed && !streamAborted && player.isStreaming`
+—— 排空/停流期 `deltaUs` 深度为负属「内容轴走完」,不得重锚(实测旧代次排空期曾空转 37 次 ×4s)。
+另有节拍判据:滞后 >150ms 且持续 1s ⇒ 同样向前重锚(`raop.ts`)。
 
 ## 10.5 桥侧出声：锚点一次性算死
 
@@ -1602,7 +1615,7 @@ routes/api/groups.ts:129  PUT /v1/groups/:id/delays  {memberId, ms}
 | 4.6.70 | AirPlay 默认独立子进程(与 sendspin 对齐):RTSP close reject / 收尾 4s 硬顶 / 追赶让出事件循环 / fork 偏移对齐,守卫 R30(§1.2、§2.12) |
 | 4.6.7x | 桥接环落地:MFAB 通道 / 可听域窗口化投递 / 组内按组打戳(b93efc1)/ 深锚仅纯桥组 / aligner drop 钳制 / `realigned` 降噪;详见 §9~§10 |
 | **4.6.77** | **群组 A/V 延迟补偿(R31)**:`player_groups.airplay_delay_ms` / `sendspin_delay_ms`(±30s,步进 10ms,正=更晚);AirPlay 侧接 `bridgePrepareDevice.anchorShiftUs`(取代全局 `bridge.avShiftMs`,迁移一次性继承),改完只重建**该组**桥;Sendspin 侧帧级实时(`pushFrame` 戳偏移 + `seedLateJoin` 同偏移);接口 `GET/PUT /v1/groups/:id/delays`(响应带 `rebuilt`);**铁律:环里 `tsUs` 一律不动**(§11) |
-| 4.6.77 同时 | 混合组锚点 lead 由 `min(sendAhead,800ms)=500ms` 抬到 `BRIDGE_PUSH_FLOOR_US + BRIDGE_PUSH_TICK_MS*1000 = 1.75s`(修「每首歌开头丢 1s」,`sendspin/constants.ts:96`);桥投递恢复 `ts' = ts − sendAhead` 并把窗口边界整体 +sendAhead 搬回原 ts 域(修桥恒晚 500ms + 首帧自锚 2.5s) |
+| 4.6.77 同时 | 混合组锚点 lead 由 `min(sendAhead,800ms)=500ms` 抬到 `BRIDGE_PUSH_FLOOR_US + BRIDGE_PUSH_TICK_MS*1000`(修「每首歌开头丢 1s」;2026-11-02 floor 1.5s→2.5s 后该值由 1.75s 抬到 **2.75s**,`sendspin/constants.ts:100` + `streamEngine.ts`);桥投递恢复 `ts' = ts − sendAhead` 并把窗口边界整体 +sendAhead 搬回原 ts 域(修桥恒晚 500ms + 首帧自锚 2.5s) |
 | 4.7.x | 延迟三格化(AP1/AP2/Sendspin 独立格)+ 补偿落点改**投递时戳位移**(桥内锚点恒 0,G13-b,修「锚点双加被对齐器裁掉」)+ join 兜底自愈 + 混合组锚点 lead 抬到 5s(`BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US`,修切歌吞新歌开头) |
 | **4.8.0** | **延迟补偿改按成员**:`member_delays_json`(成员 id → ms)取代三格列(旧列 DROP,值不迁移);取消 300ms 播种;取值口 `bridgeAnchorShiftUsOf(groupName, deviceId)` / `sendspinDelayUsOfClient`;PUT 改 `{memberId, ms}`(越组 400);前端改成员弹窗(§11 全节重写) |
 | **4.9.0** | **混合组切歌等待按组可配**:`player_groups.mixed_anchor_lead_ms`(可空;NULL/0 = 自动 5000ms,>0 = 用户值,0~30000 步进 100)取代混合组锚点 lead 的全局常量;消费点 `streamEngine` 混合组分支组值优先回退 `BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US`,读值**绕 delayCalib cache 直查 db**(cache 懒加载+写时更新、无失效广播 ⇒ 子进程结构性陈旧);`GET/PUT /v1/groups/:id/delays` 收发 `mixedAnchorLeadMs`,前端群组卡片「切歌等待」弹窗;PUT 后下一首切歌生效、无需重建;纯桥组深锚与非桥分支不变;守卫 G19(+7 条,76→83) |
@@ -2009,7 +2022,7 @@ tar xzf - -C /app/backend`)→ restart**;先注入后 recreate 补丁会丢。
 | 项 | 内容 |
 |---|---|
 | 现象 | 同一首歌播放途中失声 2~10 秒（近期最长更长）后自愈 |
-| 真根因 | **投递侧速率被精确钳在 1x**：250ms `bridgePushTick` × `[now+1.5s+ahead, now+2.5s+ahead]` 窗口，每 tick 只放 ~1s 新料 |
+| 真根因 | **投递侧速率被精确钳在 1x**：250ms `bridgePushTick` × `[now+2.5s+ahead, now+4.0s+ahead]` 窗口（2026-11-02 由 1.5s/2.5s 后移 1s，宽度仍 1.5s），每 tick 只放 ~1.5s 新料 |
 | 传导链 | airplay 子进程 `outBuf` 恒 0~8ms（供=耗=1x，缓冲攒不起来）⇒ `late` 以 ~22/秒（18%）单调累积 ⇒ 发送节拍抖动 ⇒ 设备 1.05s 播放缓冲被抽干 ⇒ 设备进追赶模式 |
 | 决定性证据 | 657 条重传请求中 **656/657 要的是"未来包"**（seq 超前当前播放位置，服务端尚未生成 ⇒ 物理补不回） |
 | 修复 | **投递侧 bulk backfill**：换代后 tick 内等新料 ≥6s，分片（每 ≥250ms 一片 + `setImmediate` 让出）一次性灌入桥会话，让 outBuf 攒起 ~6s 余量；消费端首填预算独立 300ms（`BRIDGE_PREFILL_WAIT_MS`）+ `hasInFlight` 门控 |
@@ -2019,7 +2032,7 @@ tar xzf - -C /app/backend`)→ restart**;先注入后 recreate 补丁会丢。
 ### 1. 关键数字（修正版）
 
 ```
-投递窗口     = 250ms bridgePushTick × [now+1.5s+ahead, now+2.5s+ahead]  ← 每 tick 只放 ~1s，速率恒 1x
+投递窗口     = 250ms bridgePushTick × [now+2.5s+ahead, now+4.0s+ahead]  ← 每 tick 只放 ~1.5s，速率恒 1x
 outBuf 现状  = 0~8ms（tick 里 queueMs）  ← 供=耗，缓冲永远攒不起来
 late 累积    ≈ 22/秒（约占发包 18%）    ← producer 阻塞（欠料）期间越过 sendAt 的包数
 设备播放缓冲 = leadUs=1050000 ≈ 1.05s   ← 被抽干即进追赶模式
@@ -2047,8 +2060,8 @@ late 累积    ≈ 22/秒（约占发包 18%）    ← producer 阻塞（欠料�
 发」，**与根因不矛盾**——1x 恰恰就是问题本身。pcap 只证"发了"，不证"发得够超前"。
 
 **E4 源码坐实**
-- `server.ts` `deliverBridgeWindow`：投递窗口 `[now+1.5s+ahead, now+2.5s+ahead]`，每 250ms
-  tick 只放 ~1s 料 ⇒ 投递速率结构性钳 1x；
+- `server.ts` `deliverBridgeWindow`：投递窗口 `[now+2.5s+ahead, now+4.0s+ahead]`（2026-11-02 起），每 250ms
+  tick 只放 ~1.5s 料 ⇒ 投递速率结构性钳 1x；
 - `raop.ts` `pullChunk`：无 jitter buffer，outBuf 即全部余量；
 - `raop.ts:1260` `late` 语义注释：producer 阻塞期间越过 sendAt 的包数——正是欠料指纹。
 

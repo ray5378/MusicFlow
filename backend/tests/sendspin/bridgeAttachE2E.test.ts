@@ -195,7 +195,7 @@ describe("B) 组泵 → 真桥 E2E(出口判据:组泵 PCM 逐字节到 MFAB AUD
       // §6.2 窗口化:pushFrame 只入 ring,投递由每组补投定时器(250ms)完成;
       // 此处帧起始 ts 取在投递窗口内,并显式驱动一次 tick(不等定时器,判据确定)。
       const ahead = BigInt(g.commonSendAheadUs()); // ring ts 为协议域(含 send_ahead)
-      const ts0 = nowUs() + ahead + 2_000_000n;
+      const ts0 = nowUs() + ahead + 3_000_000n;
       const got = await g.pushFrame(ts0, new Float32Array(960));
       g.bridgePushTick();
       expect(got).toBe(960); // BLK-01:无真实成员也照常产出

@@ -608,7 +608,7 @@ describe("playMedia 扇出与桥接降级", () => {
     expect(h.spinPlayCalls[0]!.extra.sockets[0]!.token).toBe("oldtok");
   });
 
-  it("B 方案冷启:成员变化(新增 a2)⇒ 拆旧建新,token 全新", async () => {
+  it("逐设备复用:新增 a2 ⇒ 老成员 a1 沿用旧 token(暖复用),只有 a2 冷建", async () => {
     setGroup(["sendspin:sp1", "airplay:a1", "airplay:a2"]);
     h.state.front = { clients: new Map([["sp1", { ready: true }]]), groups: new Map() };
     apOn("a1");
@@ -619,8 +619,13 @@ describe("playMedia 扇出与桥接降级", () => {
     const p = createGroupProtocolPlayer("g1");
     await p.playMedia(makeItem(), "http://base");
 
-    expect(h.bridgeStopCalls.map((c: any) => c.token)).toEqual(["oldtok"]); // 旧路由拆除
-    expect(h.prepareCalls.map((c: any) => c.token)).not.toContain("oldtok");
+    // 2026-11-03 改判据:集合差异只影响差异项 —— a1 不断线(否则每首/每次成员变化
+    // 都要重握手,240 实测换歌处 RTP 空洞 2220ms),a2 才走冷建新 token。
+    expect(h.bridgeStopCalls).toHaveLength(0);
+    const a1 = h.prepareCalls.find((c: any) => c.deviceId === "a1");
+    const a2 = h.prepareCalls.find((c: any) => c.deviceId === "a2");
+    expect(a1!.token).toBe("oldtok");
+    expect(a2!.token).not.toBe("oldtok");
   });
 });
 

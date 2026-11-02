@@ -1304,8 +1304,16 @@ export class GroupPump {
           //   接上一曲时间线尾 ⇒ 既不等 5s,也不吞开头。
           //   两道防线分工仍不可混:本分支 = 时间线锚点;切歌垫片
           //   (pendingTrackLeadUs,server.ts)= 桥侧投递整形。
+          // ★ 2026-11-02(投递下沿全局上调 2.5s 后的配套):桥组的锚点 lead 必须
+          //   ≥「下沿 + 一个补投周期」,否则新曲首帧 ts 落在下沿以下被直接跳过
+          //   (水位推过)= 每首歌开头被吞。暖档 2.5s 恰好等于下沿 ⇒ 显式取
+          //   floor + tick(2.75s),只对桥生效;直连 sendspin 路径不变。
           const anchorLead = hasBridges
-            ? Math.max(aheadUs, bridgeStartLeadUs([{ warm: BRIDGE_LEAD_TIERED && !reseed }]))
+            ? Math.max(
+                aheadUs,
+                bridgeStartLeadUs([{ warm: BRIDGE_LEAD_TIERED && !reseed }]),
+                BRIDGE_PUSH_FLOOR_US + BRIDGE_PUSH_TICK_MS * 1000,
+              )
             : prefillEnabled()
               ? Math.min(aheadUs, ANCHOR_SAFE_LEAD_US)
               : (reseed ? reseedLead : aheadUs);
@@ -1320,6 +1328,10 @@ export class GroupPump {
             // 「上一曲尾」与「下沿 + 一个补投周期」的较大者。
             const deliverFloorUs = nowUs() + BigInt(BRIDGE_PUSH_FLOOR_US + BRIDGE_PUSH_TICK_MS * 1000);
             contigUs = this.continuityFromUs > deliverFloorUs ? this.continuityFromUs : deliverFloorUs;
+            // ★ C(2026-11-03)空窗续静音:静音尾也是**已经投给桥**的时间线 ⇒ 新曲首帧
+            //   不得落在它之前,否则 ts ≤ 已投水位,被 deliverBridgeWindow 跳过 = 开头被吞。
+            const gapTailUs = this.group.currentBridgeGapFillTailUs?.() ?? 0n;
+            if (gapTailUs > contigUs) contigUs = gapTailUs;
           }
           const lead = BigInt(Math.max(anchorLead, FIRST_FRAME_LEAD_US));
           // ⚠️ 锚点必须**严格大于已发出的最后一个时间戳**(= 此刻的 cursorUs)。
@@ -1335,6 +1347,9 @@ export class GroupPump {
           this.group.timelineBaseUs = clamped;
           cursorUs = clamped;
           tsUs = cursorUs;
+          // ★ C(2026-11-03)首帧已锚定 ⇒ 空窗续静音收工:此后 tick 若再推进静音尾,
+          //   会把投递水位推过锚点 ⇒ 新曲开头被判「已投过」而静默跳过。
+          this.group.endBridgeAutoTrackGap?.("next-track");
           logSafe(
             this.server,
             "info",
@@ -1804,6 +1819,18 @@ export class GroupPump {
         //   桥的水位早已推过那段(静音已投过)⇒ 首帧被判「已投过」直接跳过 ——
         //   可闻就是「吞歌开头」。无排空时 contentTailUs === cursorUs,行为零变化。
         if (this.endedNaturally) this.lastContentEndUs = contentTailUs;
+        // ★ C(2026-11-03)换歌空窗续静音:自然播完且还有下一首时,从内容尾起由桥侧
+        //   每 tick 按 25ms 片续静音到窗口下沿,直到下一首首帧到达(`next-track` 收工)。
+        //   上游取源/解码空窗期 ring 不再断料 ⇒ RAOP 维持 1x;否则 producer 只能按
+        //   `waitDataMs`(1s)吐一块 8ms 静音,240 实测换歌处 RTP maxGap 4008ms。
+        //   · 手动切歌走 stop() 中断,走不到这里(continuityFromUs 也恒 null);
+        //   · 预取已就绪/在飞时下一首内容马上进 ring,续静音会与预取帧同 ts 重叠 ⇒ 不介入。
+        if (
+          this.endedNaturally && this.nextSongId !== ""
+          && !this.prefetch && !this.prefetchInFlight
+        ) {
+          this.group.noteBridgeAutoTrackGap?.(contentTailUs);
+        }
         recordSendspinDebug(
           linkDied ? "play.link_died" : contentEnded ? "play.finished" : "play.stopped",
           linkDied

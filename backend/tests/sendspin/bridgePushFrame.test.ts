@@ -140,8 +140,8 @@ describe("⑥ 投递窗口 = 组时间线(不含成员补偿)", () => {
     g.bridges.set("ap-2", b2 as any);
 
     const ahead = BigInt(g.commonSendAheadUs());
-    // 窗口 = [now+1.5s, now+2.5s] + ahead(shift 恒 0;+2s 不再把窗口后移)
-    const ts0 = nowUs() + ahead + 2_000_000n;
+    // 窗口 = [now+2.5s, now+4.0s] + ahead(shift 恒 0;+2s 不再把窗口后移)
+    const ts0 = nowUs() + ahead + 3_000_000n;
     await g.pushFrame(ts0, PCM());
     g.bridgePushTick();
     expect(b1.pushed).toHaveLength(1);
@@ -160,8 +160,8 @@ describe("⑥ 投递窗口 = 组时间线(不含成员补偿)", () => {
 
     g.notifyBridgeGeneration(1, "track"); // track 冷启(组值未配置)⇒ 动态冷 lead
     const ahead = BigInt(g.commonSendAheadUs());
-    // 打戳时 ts 已含垫片 Δ:ts0=now+1s ⇒ 落窗 ts0+Δ=now+2s ∈ [now+1.5,now+2.5]+ahead
-    const ts0 = nowUs() + ahead + 1_000_000n;
+    // 打戳时 ts 已含垫片 Δ:ts0=now+2s ⇒ 落窗 ts0+Δ=now+3s ∈ [now+2.5,now+4.0]+ahead
+    const ts0 = nowUs() + ahead + 2_000_000n;
     await g.pushFrame(ts0, PCM());
     g.bridgePushTick();
     expect(b.pushed.length).toBeGreaterThan(0);
@@ -177,7 +177,7 @@ describe("⑥ 投递窗口 = 组时间线(不含成员补偿)", () => {
 
     g.notifyBridgeGeneration(1, "seek"); // 暖边界 ⇒ 动态暖 lead
     const ahead = BigInt(g.commonSendAheadUs());
-    const ts0 = nowUs() + ahead + 2_000_000n;
+    const ts0 = nowUs() + ahead + 3_000_000n;
     await g.pushFrame(ts0, PCM());
     g.bridgePushTick();
     expect(b.pushed).toHaveLength(1);
@@ -192,8 +192,8 @@ describe("⑥ 投递窗口 = 组时间线(不含成员补偿)", () => {
     g.bridges.set("ap-3", b as any);
 
     const ahead = BigInt(g.commonSendAheadUs());
-    // 旧实现:窗口前移 0.8s ⇒ [now+0.7s,now+1.7s]+ahead ⇒ 本帧(2s)落窗外被推水位丢弃
-    const ts0 = nowUs() + ahead + 2_000_000n;
+    // 旧实现:窗口前移 0.8s ⇒ [now+1.7s,now+3.2s]+ahead ⇒ 本帧(3s)落窗外被推水位丢弃
+    const ts0 = nowUs() + ahead + 3_000_000n;
     await g.pushFrame(ts0, PCM());
     g.bridgePushTick();
     expect(b.pushed).toHaveLength(1);
@@ -210,8 +210,8 @@ describe("⑥ 投递窗口 = 组时间线(不含成员补偿)", () => {
       g.bridges.set("ap-1", b as any);
 
       const ahead = BigInt(g.commonSendAheadUs());
-      // 旧窗(+2s)= [now−0.5s, now+0.5s]+ahead ⇒ audible 2.3s 的帧落窗
-      const tsInside = nowUs() + ahead + 300_000n;
+      // 旧窗(+2s)= [now+0.5s, now+2.0s]+ahead ⇒ audible 1.2s 的帧落窗
+      const tsInside = nowUs() + ahead + 1_200_000n;
       await g.pushFrame(tsInside, PCM());
       g.bridgePushTick();
       expect(b.pushed).toHaveLength(1);
@@ -228,7 +228,7 @@ describe("① BLK-01:桥在场 ⇒ pcm:100 编码与真实成员解耦", () => {
     const b = bridgeStub("ap-1");
     const g = groupWith({ "pcm:100": enc }, [b]);
     const ahead = BigInt(g.commonSendAheadUs()); // 可听域换算量(= 设备 send_ahead)
-    const ts0 = nowUs() + ahead + 2_000_000n; // 原始域窗口 = [now+1.5s, now+2.5s] + ahead
+    const ts0 = nowUs() + ahead + 3_000_000n; // 原始域窗口 = [now+2.5s, now+4.0s] + ahead
 
     const got = await g.pushFrame(ts0, PCM());
     g.bridgePushTick(); // §6.2 窗口化:pushFrame 只入 ring,投递由补投 tick 完成
@@ -255,7 +255,7 @@ describe("① BLK-01:桥在场 ⇒ pcm:100 编码与真实成员解耦", () => {
     g.add(m);
 
     const ahead = BigInt(g.commonSendAheadUs()); // 可听域换算量(= 设备 send_ahead)
-    const ts0 = nowUs() + ahead + 2_000_000n; // 原始域窗口 = [now+1.5s, now+2.5s] + ahead
+    const ts0 = nowUs() + ahead + 3_000_000n; // 原始域窗口 = [now+2.5s, now+4.0s] + ahead
     const got = await g.pushFrame(ts0, PCM());
     g.bridgePushTick(); // §6.2 窗口化:投递由补投 tick 完成
 
@@ -287,7 +287,7 @@ describe("① BLK-01:桥在场 ⇒ pcm:100 编码与真实成员解耦", () => {
     (g as any).encoders.set("pcm:100", enc);
 
     const ahead = BigInt(g.commonSendAheadUs()); // 可听域换算量(= 设备 send_ahead)
-    const ts0 = nowUs() + ahead + 2_000_000n; // 原始域窗口 = [now+1.5s, now+2.5s] + ahead
+    const ts0 = nowUs() + ahead + 3_000_000n; // 原始域窗口 = [now+2.5s, now+4.0s] + ahead
     await g.pushFrame(ts0, PCM());
     g.bridgePushTick(); // §6.2 窗口化:投递由补投 tick 完成
 

@@ -555,20 +555,34 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
       // (RAOP 握手/设备缓冲零重来),新曲由 BOUNDARY(track) 驱动重锚(与 seek 同路径);
       // 句柄热复用见 bridgeAttach.syncGroupBridges。成员/协议变化 ⇒ 冷启(拆旧建新)。
       const prevRoute = activeBridgeRoutes.get(groupId);
-      const routeReusable = apOnline.length > 0 && !!prevRoute && prevRoute.length > 0
-        && apOnline.length === prevRoute.length
-        && apOnline.every((d) => prevRoute.some((r) => r.deviceId === d && r.protocol === selectAirPlayBridgeProtocol(d)));
-      if (!routeReusable) await teardownBridgeRoute();
+      // 逐设备复用(修 2026-11-03):此前按「在线集合必须与上一条路由**完全一致**」整条判 ——
+      // 只要组里有一台 AirPlay 离线/prepare 失败(D7:240 实测 GGMM ECONNREFUSED),
+      // prevRoute 就比 apOnline 少一条 ⇒ **每首歌**整组冷拆重握手 ⇒ 换歌处旧桥会话
+      // closed、新端口首包才出声(抓包实测 RTP 空洞 2220ms)。
+      // 改为逐设备:仍在线的旧 spec 沿用同 token ⇒ 子进程暖复用(RAOP 握手零重来,
+      // 见 bridgeSession.prepare 的同 token 分支);只有「已不在线 / 协议变了」的才停旧会话,
+      // 新出现的设备才走冷建。集合差异只影响差异项本身,不牵连其它成员。
+      const reuseSpecs = (prevRoute ?? []).filter(
+        (r) => apOnline.includes(r.deviceId) && r.protocol === selectAirPlayBridgeProtocol(r.deviceId),
+      );
+      const droppedSpecs = (prevRoute ?? []).filter((r) => !reuseSpecs.includes(r));
+      if (droppedSpecs.length > 0) {
+        log.info(`[group][bridge] ${groupId}: 逐设备复用 ${reuseSpecs.length} 台、停旧 ${droppedSpecs.length} 台`
+          + `(${droppedSpecs.map((r) => r.deviceId).join(",")})`);
+        await Promise.allSettled(droppedSpecs.map((r) => bridgeStopDevice(r.token, r.deviceId)));
+      }
       // 路由快照(§5.1,v4.9.3 方向 A):bridgeEnabled && ap>0 → "bridge" —— 纯 AirPlay
       // 组也强制走桥(组内对齐;spin 成员有无不再作为路由条件,prepare 失败仍按 MAJ-07
       // 逐设备回落 solo cast);
       // 否则(无 AP 成员 / 桥禁用)"legacy-cast"(flag=0 时与旧行为逐字节同路径)。
-      const bridgeRoute = apOnline.length > 0 ? await prepareBridgeRoute(apOnline, routeReusable ? prevRoute : undefined) : null;
+      const bridgeRoute = apOnline.length > 0 ? await prepareBridgeRoute(apOnline, reuseSpecs) : null;
+      // 全失败(整组退回 legacy)→ 旧会话必须回收,否则 owner=bridge 悬挂(D1 同款)。
+      if (!bridgeRoute && prevRoute) await teardownBridgeRoute();
       // D6/P1:用户手动 next/prev ⇒ 给**复用中的**桥路由打 sticky「手动」标记;
       // 子进程在下一个 track boundary 执行恰 1 次 FLUSH + ts 回拨。冷建路由没有
       // 旧轨道边界可消费,不打标记。
-      if (opts?.manual === true && routeReusable && prevRoute) {
-        await Promise.allSettled(prevRoute.map((r) => bridgeManualDevice(r.token)));
+      if (opts?.manual === true && reuseSpecs.length > 0) {
+        await Promise.allSettled(reuseSpecs.map((r) => bridgeManualDevice(r.token)));
       }
       const jobs: Array<Promise<{ mediaUri: string }>> = [];
       // v4.9.3 方向 A:纯 AirPlay 桥组(sp=0 且桥路由已备)也必须起组泵 —— 泵是桥的

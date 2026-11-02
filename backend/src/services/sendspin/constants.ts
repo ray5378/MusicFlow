@@ -75,17 +75,29 @@ export const LATE_JOIN_RING_MAX_US = 35_000_000;
 // ⇒ 同一帧两边同一墙钟出声。旧实现做 `ts' = ts − commonSendAheadUs` 会让桥整体
 // 早 sendAhead(实测 500ms),并把首个交付帧压到 `now+1.0s` —— 低于 RAOP 可达线
 // `L(1s)+SAFETY(50ms)`,导致每次切歌都自锚到 `now+2.5s`(1.5s 静默 + 1.48s 内容被裁)。
-/** 桥补投定时器周期(ms)。1s 宽的投递窗口下,250ms 一投余量充足且字节平滑。 */
+/** 桥补投定时器周期(ms)。1.5s 宽的投递窗口下,250ms 一投余量充足且字节平滑。 */
 export const BRIDGE_PUSH_TICK_MS = 250;
-/** 投递窗口上沿(µs,原 ts 域):只投 ts ≤ now+2.5s 的帧,桥队列水位有界,
- *  永远摸不到 8s 硬上限(reconnect 风暴根因)。 */
-// 注:字面量 "2_500_000" 被守卫 uniq 钉唯一,唯一出现点 = rates.ts 的
-// BRIDGE_WARM_START_LEAD_US(语义无关:那边是暖启动提前量,这边是投递窗口上沿,
-// 数值巧合同为 2.5s)。故此处用 2_500*1000 拼写规避重复字面量;改值只改本行。
-export const BRIDGE_PUSH_HORIZON_US = 2_500 * 1000;
-/** 投递窗口下沿(µs,原 ts 域):ts < now+1.5s 的帧不再投递 —— 桥(AirPlay
- *  发送侧)来不及为其建立稳定排程,宁可由可达性重锚接手也不喂「马上要响」的帧。 */
-export const BRIDGE_PUSH_FLOOR_US = 1_500_000;
+/** 投递窗口上沿(µs,原 ts 域):只投 ts ≤ now+4.0s 的帧,桥队列水位有界。
+ *
+ *  2026-11-02 全局上调(1.5s/2.5s ⇒ 2.5s/4.0s,窗口宽 1.5s 不变):老 LinkPlay
+ *  (HiVi H5MKII)实测有效设备缓冲只剩 ~200ms,2.5s 上沿下桥侧可听余量不足以吸收
+ *  投递抖动 ⇒ 每秒欠一块(一卡一卡)。窗口整体后移 1s,桥队列深度与队列硬上限无关。
+ *  ⚠️ 窗口宽度(horizon − floor)必须保持 ≈1.5s:拉宽会同步拉高桥队列水位。 */
+export const BRIDGE_PUSH_HORIZON_US = 4_000_000;
+/** 投递窗口下沿(µs,原 ts 域):ts < now+2.5s 的帧不再投递 —— 桥(AirPlay
+ *  发送侧)来不及为其建立稳定排程,宁可由可达性重锚接手也不喂「马上要响」的帧。
+ *
+ *  2026-11-02 全局上调 1.5s ⇒ 2.5s(同上一条):把「桥结构上永远拿不到」的近端
+ *  从 2.3s 推到 3.3s(floor + ahead 800ms),老设备才有足够排程余量。
+ *  ⚠️ 与下沿强耦合的两个落点必须同步(改值后重推):
+ *   ① rates.ts 的 `BRIDGE_END_DRAIN_MARGIN_MS`(= floor + ahead − ANCHOR_SAFE_LEAD);
+ *   ② streamEngine 的锚点 lead 必须 ≥ `floor + BRIDGE_PUSH_TICK_MS`(否则新曲首帧
+ *      直接落在下沿以下被跳过 = 吞歌开头);
+ *   ③ 自然接续锚点 `contigUs` 已按下沿 + 一个补投周期抬升(见 streamEngine)。
+ *  拼写说明:字面量 "2_500_000" 被守卫 uniq 钉唯一,唯一出现点 = rates.ts 的
+ *  BRIDGE_WARM_START_LEAD_US(语义无关:那边是暖启动提前量)。故此处用
+ *  `2_500 * 1000` 规避重复字面量;改值只改本行。 */
+export const BRIDGE_PUSH_FLOOR_US = 2_500 * 1000;
 
 /** 切歌垫片·冷(µs):「track」代次边界且桥路由冷启(句柄重建,RAOP 握手+设备缓冲,
  *  见 protocolPlayer.prepareBridgeRoute)时组时间线整体前移量,随内容推进消耗归零。

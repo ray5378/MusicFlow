@@ -32,6 +32,7 @@ import {
   AP2_WAIT_SLICE_MS,
   BRIDGE_MAX_HELD_AUDIO_US,
   BRIDGE_PCM_BYTES_PER_SEC,
+  BRIDGE_REBASE_MIN_AHEAD_US,
   BRIDGE_RESUME_REBASE_US,
   BRIDGE_WARM_START_LEAD_US,
   PROTOCOL_CAPS,
@@ -941,6 +942,8 @@ export class BridgeSession {
   // ---- Phase 5:生命周期(代次重锚 / 暂停 / stall / RAOP 重连) ----
   /** 推流被终态打断(boundary/stall):producer 立刻返回 null,旧 streamBridge 循环退出。 */
   private streamAborted = false;
+  /** 上一 tick 的内容前沿:用于判定「还有料可补」,冻结即跳过 pacing 重锚。 */
+  private lastFrontierUs = 0n;
   /** A(垫片窗静音续流):token 递增令在跑 filler 退出;promise 供新流首包前收尾。 */
   private gapFillerToken = 0;
   private gapFillerPromise: Promise<number> | null = null;
@@ -1461,8 +1464,8 @@ export class BridgeSession {
       bridgeSyncGroupTimelineEnabled() ? rate * 10 : undefined,
     );
     this.streamAborted = false;
+    this.lastFrontierUs = 0n;
     this.emitAnchorReport(plan, latencyFrames);
-    // ---- 双出口(Phase 6b · T03):同一个 plan.anchorUs,只是出口不同 ----
     // AP2 ⇒ runAp2Output(节拍 = A + i·spf/rate − L_eff,不加 RAOP_SAFETY_MS);
     // 否则落到下面的 RAOP streamBridge(语句一行不动)。
     if (this.ap2Session !== null) {
@@ -1831,6 +1834,39 @@ export class BridgeSession {
       const writtenFrames = (this.stats.chunksOut - this.chunksOutAtPlan) * CHUNK_LEN;
       const frontier = anchors.anchorUsShifted + BigInt(Math.round((writtenFrames / rate) * 1e6));
       deltaUs = Number(frontier - nowUs());
+      // ---- 2026-11-02 判据修复:内容前沿贴住墙钟 ⇒ 向前重锚 pacing ----
+      // 旧 rebase 只认「节拍滞后 > BRIDGE_RESUME_REBASE_US(2s)」;HiVi 实测恒定
+      // 落后 ~0.52s,2s 阈值永远触发不了 ⇒ 整首歌带欠账跑、每秒欠一块(一卡一卡)。
+      // 这里以「内容前沿距 now 的最小可听余量」为第二条判据:低于 1.5s 就前移
+      // pacing(= 该值 − deltaUs),主动停喂让设备缓冲排空,把余量垫回。
+      // 只动 sendAt 参考,RTP 映射/内容轴不变。落点 = 下限 + 100ms、触发线 = 下限 −
+      // 100ms ⇒ 前移后自带 200ms 回差,不会让「卡在阈值上」反复停喂;单次前移 ≤4s
+      // (极端陈旧锚点由下几个 tick 继续收,绝不为一次缺口停喂十几秒)。
+      // 门控(实测排空期 37 次 ×4s 空转):会话已停/正在排空时 deltaUs 深度为负
+      // 是「内容轴已走完」而非「贴住墙钟」,重锚既救不回内容,还会把残尾继续推后。
+      // 判据 = 内容前沿本 tick 仍在推进 + 链路活着仍出流;前沿冻结即视为无料可补。
+      const frontierAdvanced = frontier > this.lastFrontierUs;
+      this.lastFrontierUs = frontier;
+      if (
+        frontierAdvanced
+        && this.player !== null && this.aligner !== null && !this.pausedState
+        && !this.closed && !this.streamAborted && this.player.isStreaming
+        && deltaUs < BRIDGE_REBASE_MIN_AHEAD_US - 100_000
+      ) {
+        const shiftUs = Math.min(
+          BRIDGE_REBASE_MIN_AHEAD_US + 100_000 - deltaUs,
+          4_000_000,
+        );
+        this.player.requestPacingRebase(shiftUs);
+        log.warn(`[airplay-bridge] ${JSON.stringify({
+          ev: "front-rebase",
+          dev: this.deviceId,
+          gen: this.generation,
+          deltaUs,
+          shiftUs,
+          minAheadUs: BRIDGE_REBASE_MIN_AHEAD_US,
+        })}`);
+      }
       this.deltaSamples.push(deltaUs);
       if (this.deltaSamples.length > 25) this.deltaSamples.shift();
     }
