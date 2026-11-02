@@ -75,6 +75,32 @@ describe("改法2:空组回收必须清桥", () => {
     expect((srv.groups as Map<string, unknown>).has("ug:g1")).toBe(false);
     expect(conn.group).toBeNull();
   });
+
+  it("用户组仍有桥在播:控制端断开只安排限时回收,不立即拆桥(240 实测 17s 空窗根因)", () => {
+    const g: Record<string, unknown> = {
+      name: "ug:g2",
+      empty: true,
+      remove: vi.fn(),
+      close: vi.fn(() => 1),
+      current: { songId: "s1", durationMs: 1 },
+      bridges: new Map([["devA", {}]]),
+      armBridgeLonelyCleanup: vi.fn(),
+    };
+    const conn: Record<string, unknown> = { clientId: "c2", group: g };
+    const srv = Object.create(SendspinServer.prototype) as Record<string, any>;
+    srv.clients = new Map([["c2", conn]]);
+    srv.groups = new Map([["ug:g2", g]]);
+    srv.log = vi.fn();
+    (SendspinServer.prototype as unknown as { onConnectionClosed: (c: unknown) => void })
+      .onConnectionClosed.call(srv, conn);
+    // 桥是真实听者:不拆桥、不停泵、不关编码器、组仍在注册表。
+    expect(h.clearGroupBridges).not.toHaveBeenCalled();
+    expect(h.stopGroupPump).not.toHaveBeenCalled();
+    expect(g.close).not.toHaveBeenCalled();
+    expect((srv.groups as Map<string, unknown>).has("ug:g2")).toBe(true);
+    expect((g.armBridgeLonelyCleanup as ReturnType<typeof vi.fn>)).toHaveBeenCalled();
+    expect(conn.group).toBeNull();
+  });
 });
 
 describe("改法3:bridgeLeaveMember 泵侧未确认不拆 sock", () => {

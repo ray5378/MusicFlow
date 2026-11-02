@@ -793,11 +793,11 @@ console.log("===== G13 延迟补偿按成员(取值口按成员 id 查表,不再
   // 子进程暖 prepare + 暖挂载信号回灌 lead 选择。
   const gppCode = code(GROUP_PROTOCOL_PLAYER);
   check(
-    "桥路由暖复用:playMedia 复用判据把守拆桥(每首拆桥 = 恒冷启,切歌吞音根因)",
-    gppCode.includes("const routeReusable =")
-      && gppCode.includes("if (!routeReusable) await teardownBridgeRoute();")
-      && gppCode.includes("prepareBridgeRoute(apOnline, routeReusable ? prevRoute : undefined)"),
-    "playMedia 必须按 routeReusable 决定是否拆桥",
+    "桥路由暖复用:playMedia 逐设备复用(在线且协议一致才沿用旧 token)",
+    gppCode.includes("const reuseSpecs = (prevRoute ?? []).filter(")
+      && gppCode.includes("bridgeStopDevice(r.token, r.deviceId)")
+      && gppCode.includes("prepareBridgeRoute(apOnline, reuseSpecs)"),
+    "playMedia 必须逐设备复用;只停掉线/换协议那台(整组拆桥 = 每首冷启,切歌吞音根因)",
   );
   const pbrB = bodyByName(gppCode, atLineStart("prepareBridgeRoute"));
   check(
@@ -1169,10 +1169,13 @@ console.log("===== G19 切歌等待后端自适应(手动口已删+分档lead+�
   );
 
   // --- b) 纯桥 + 混合统一分档 lead;非桥分支原样保留 ---
-  const tieredExpr = 'Math.max(aheadUs, bridgeStartLeadUs([{ warm: BRIDGE_LEAD_TIERED && !reseed }]))';
+  // 4.11.3 起 bridges 分支的 lead 在分档之上再取 floor+1tick 下沿,故按「折成单行后
+  // 仍包含 Math.max(aheadUs, 分档 lead…)」判定,不钉下一参数的排版。
+  const seOne = se.replace(/\s+/g, "");
+  const tieredExpr = "Math.max(aheadUs,bridgeStartLeadUs([{warm:BRIDGE_LEAD_TIERED&&!reseed}]),";
   const hasBridgesGuard = se.includes("const hasBridges = this.group.hasBridges?.() === true;")
     && se.includes("const isPureBridge =");
-  const tieredOk = se.includes(tieredExpr) && hasBridgesGuard
+  const tieredOk = seOne.includes(tieredExpr) && hasBridgesGuard
     && se.includes("Math.min(aheadUs, ANCHOR_SAFE_LEAD_US)")
     && se.includes("reseed ? reseedLead : aheadUs");
   check(

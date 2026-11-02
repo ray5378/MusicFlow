@@ -94,6 +94,11 @@ const BRIDGE_DRAIN_SILENCE_SLICE_US = 25_000;
  *  内容在数秒内到达;超过说明队列尾/成员异常,再写只会白涨 ring 与投递水位。 */
 const BRIDGE_GAP_FILL_MAX_MS = 12_000;
 
+/** 控制端(WS)全部断开、但仍有桥成员在播时的最长保留时间(ms)。桥是真实听者,
+ *  不随控制端掉线立即拆;超过该时长仍无任何 WS 连接才终态回收(防「无听众还继续
+ *  解码整队歌」的内存/CPU 双泄漏)。 */
+const BRIDGE_LONELY_KEEP_MS = 120_000;
+
 /** 桥窗口诊断日志(bridge-window)节流间隔(µs)= 2s,与 bridgeSession 的 ev:"tick"
  *  同频,便于两侧对数。只影响日志行数,**不参与任何判据、不影响投递**。 */
 const BRIDGE_WINDOW_DIAG_THROTTLE_US = 2_000_000n;
@@ -438,21 +443,35 @@ export class SendspinServer {
       conn.group = null;
       g.remove(conn);
       if (g.empty) {
-        // 组空即停 pump(放掉整首 PCM)+ 关编码器(杀 ffmpeg),队列不动(重连恢复)。
-        // 不做:无听众还继续解完整队歌,是标准的内存/CPU 双泄漏。
-        stopGroupPump(g);
-        // 改法2(洞 B):终态回收必须补清桥 —— 组对象即将被丢弃,组上的活
-        // BridgeMember(handle.stop 是唯一退出入口)若不清,退避重连循环从此
-        // 不可触达(单侧孤儿)。与 BLK-02 不冲突:BLK-02 保护的是 playGroupCore
-        // 的 seek 重建热复用路径;空组回收是终态,语义等同 stopGroupCore
-        // (守卫 ⑩ 终态白名单两处之二)。
-        clearGroupBridges(g);
-        const n = g.close();
-        this.groups.delete(g.name);
-        if (n > 0) this.log("info", `group ${g.name} 空了,关 ${n} 个编码器`);
+        // 用户组 + 仍有桥在播:WS 断开只是「控制/直连端」掉了,桥(全屋音箱)才是
+        // 真正的听者。旧行为直接按空组终态拆桥 ⇒ 全屋静音,得等 tracker 15s
+        // stalled 才重投(240 实测 17s 空窗,2026-11-03)。有桥就继续推流,最多保留
+        // BRIDGE_LONELY_KEEP_MS;期间重连(add/onActivated)即撤销;超时仍无连接
+        // 再走终态回收(无听众的解码仍是内存/CPU 双泄漏)。
+        if (g.name.startsWith("ug:") && (g.bridges?.size ?? 0) > 0 && g.current) {
+          g.armBridgeLonelyCleanup(BRIDGE_LONELY_KEEP_MS, () => this.reclaimEmptyGroup(g));
+          this.log("info",
+            `group ${g.name} 控制端断开,仍有 ${g.bridges.size} 台桥在播 → 保持推流(≤${Math.round(BRIDGE_LONELY_KEEP_MS / 1000)}s)`);
+        } else {
+          this.reclaimEmptyGroup(g);
+        }
       }
     }
     this.onClosed?.(conn);
+  }
+
+  /** 空组终态回收:停 pump(放掉整首 PCM)+ 清桥 + 关编码器(杀 ffmpeg)+ 出注册表。
+   *  队列不动(重连可恢复)。组对象即将被丢弃,组上的活 BridgeMember(handle.stop 是
+   *  唯一退出入口)必须清,否则退避重连循环不可触达(单侧孤儿,守卫 ⑩ 终态白名单)。
+   *  与 BLK-02 不冲突:BLK-02 保护的是 playGroupCore 的 seek 重建热复用路径。 */
+  private reclaimEmptyGroup(g: SendspinGroup): void {
+    if (this.groups.get(g.name) !== g) return;   // 已被别的路径回收/同名重组
+    if (!g.empty) return;                        // 控制端已重连,不回收
+    stopGroupPump(g);
+    clearGroupBridges(g);
+    const n = g.close();
+    this.groups.delete(g.name);
+    if (n > 0) this.log("info", `group ${g.name} 空了,关 ${n} 个编码器`);
   }
 
   /** 用户组(`ug:<gid>`)的 Sendspin 延迟补偿(µs,**按成员**):**正数 = 该客户端更晚出声**。
@@ -744,6 +763,8 @@ export class SendspinGroup {
   // 投递点在 pushFrame 的 pcm:100 编码组循环体里(BLK-01 虚拟组保证组存在)。
   /** deviceId → 桥投递句柄(BridgeMember 满足该接口;测试可注入桩)。 */
   readonly bridges = new Map<string, SendspinBridgeHandle>();
+  /** 「控制端全断、仅剩桥在播」的终态回收定时器(见 armBridgeLonelyCleanup)。 */
+  private bridgeLonelyTimer: ReturnType<typeof setTimeout> | null = null;
   /** 当前生效的桥规格(bridgeAttach 同步时记录;seekCore 重建路径据此透传)。 */
   bridgeSpecs: BridgeSocketSpec[] = [];
   /** 每桥投递水位(原 ts 域):≤ 水位的帧已投递/已丢弃;缺失或 0n = 当前代次尚未投递。 */
@@ -1615,6 +1636,8 @@ export class SendspinGroup {
     this.volumeSeeded = true;
   }
   add(c: SendspinConnection): void {
+    // 控制端回来了(或成员重连入组):撤销「只剩桥在播」的终态回收。
+    this.cancelBridgeLonelyCleanup();
     this.members.add(c);
     // 入组即对齐(MA `PlayerGroupRole` 的组音量分配语义):**组音量是权威标度**,成员
     // 一进组就得跟上,否则同一份 PCM 下「老成员停在旧值、新成员停在设备默认 100」——
@@ -2406,7 +2429,28 @@ export class SendspinGroup {
    *  补投定时器属于**同一条跨曲时间线**,不能随切歌一起清 —— 清了就等于把旧曲
    *  尚未投出的尾巴和新曲的接续点一起丢掉。其余场景(seek / 真实停止 / 换组)保持
    *  既有语义逐字节不变。 */
+  /** 安排「控制端全断、仅剩桥在播」的空组回收;控制端重连(见 add)即撤销。 */
+  armBridgeLonelyCleanup(ms: number, cb: () => void): void {
+    this.cancelBridgeLonelyCleanup();
+    const t = setTimeout(() => {
+      this.bridgeLonelyTimer = null;
+      try { cb(); } catch { /* 回收失败不抛到定时器 */ }
+    }, ms);
+    this.bridgeLonelyTimer = t;
+    // 后台定时器不阻止进程退出(与其它心跳/巡检定时器同口径)。
+    (t as unknown as { unref?: () => void }).unref?.();
+  }
+
+  cancelBridgeLonelyCleanup(): void {
+    if (this.bridgeLonelyTimer) {
+      clearTimeout(this.bridgeLonelyTimer);
+      this.bridgeLonelyTimer = null;
+    }
+  }
+
   close(opts?: { keepBridgeDelivery?: boolean }): number {
+    // 组关闭是终态/重建入口:先撤销「只剩桥在播」的回收,避免定时器打到已废弃的组。
+    this.cancelBridgeLonelyCleanup();
     let n = 0;
     for (const e of this.encoders.values()) {
       try { e.close(); } catch { /* ignore */ }
