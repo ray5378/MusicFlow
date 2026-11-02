@@ -3,6 +3,7 @@
 import "../plugins/_env.js";
 import { describe, it, expect, beforeAll, beforeEach } from "vitest";
 import { Hono } from "hono";
+import { eq } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import { db, initDatabase, encryptPassword } from "../../src/db/index.js";
 import { users, playerGroups } from "../../src/db/schema.js";
@@ -138,7 +139,21 @@ describe("/v1/groups/:id/delays(按成员)", () => {
     const body = (await res.json()) as any;
     expect(body.memberDelays["airplay:hivi"]).toBe(5); // 成员表不受影响
     expect(body.trackLeadMs).toBeUndefined(); // v4.9.1 手动口已删,响应不再回显
-    expect(body.mixedAnchorLeadMs).toBe(0); // mixedAnchor 三件套不受影响
+  });
+
+  it("PUT body 带 mixedAnchorLeadMs(已移除的手动口,v4.11/P3) → 未知字段忽略:响应不含该字段", async () => {
+    const uid = seedAdmin();
+    const id = seedGroup(uid);
+    const headers = adminHeaders(uid);
+    const res = await putDelays(id, headers, { mixedAnchorLeadMs: 2500 });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as any;
+    expect(body.mixedAnchorLeadMs).toBeUndefined();
+    expect(body.mixedAnchorLeadStepMs).toBeUndefined();
+    expect(body.mixedAnchorLeadMaxMs).toBeUndefined();
+    // 库里那一列即使还在,也不该被这个请求写入(不再读写,避免误以为有覆盖值)
+    const row = db.select().from(playerGroups).where(eq(playerGroups.id, id)).get() as any;
+    expect(row.mixedAnchorLeadMs ?? 0).toBe(0);
   });
 
   it("组不存在 → 404(读写都是)", async () => {

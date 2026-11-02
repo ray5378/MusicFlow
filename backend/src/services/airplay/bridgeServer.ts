@@ -43,7 +43,8 @@ export interface BridgeServerOpts {
   checkIntervalMs?: number;
   /** CONFIG 握手超时(默认 5000ms):超时未发 CONFIG 断连。 */
   configTimeoutMs?: number;
-  /** 接收侧 PCM 积压上限(默认 8000ms,§4.4)。 */
+  /** 接收侧 PCM 积压上限(默认 16000ms,§4.4;2026-11-02 由 8s 抬到 16s —— 稳态积压
+   *  实测就贴着 8s,旧阈值导致 overflow→换代→再 overflow 循环)。 */
   overflowMs?: number;
 }
 

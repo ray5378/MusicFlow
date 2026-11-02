@@ -39,6 +39,8 @@ const eng = vi.hoisted(() => {
     // 停止路径会顺带取消预解码 —— 桩必须提供,否则起播直接抛 TypeError(不走失败回调)。
     hasPendingPrefetch: vi.fn(() => false),
     cancelNextTrackPrefetch: vi.fn(),
+    // P2/P3(2026-11-02):起播前问「能否接续上一曲」;桩默认不接续。
+    continuityReady: vi.fn(() => false),
   });
   return {
     pumps,

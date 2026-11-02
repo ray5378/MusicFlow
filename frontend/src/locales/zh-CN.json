@@ -1074,13 +1074,6 @@
     "delayTestStarted": "已开始：本组每 5 秒一次咔哒，听声对齐后点「停止测试」",
     "delayTestStopped": "已停止",
     "delayTestFailed": "测试延迟操作失败",
-    "mixedLeadEntry": "切歌等待",
-    "mixedLeadAuto": "自动",
-    "mixedLeadTitle": "切歌等待（混合组）",
-    "mixedLeadLabel": "等待",
-    "mixedLeadHint": "混合组切歌前全组统一等待的时长（给 AirPlay 成员留出就绪窗口，避免吞掉新歌开头）。0 = 自动（默认 5000ms）；调小可能吞歌开头；同协议组（无 AirPlay 成员）不受此值影响。保存后下一首切歌即生效",
-    "mixedLeadReset": "重置为 0（自动）",
-    "mixedLeadSaved": "已保存，下一首切歌生效",
     "delaySaved": "已保存",
     "delaySavedReconnect": "已保存，AirPlay 成员正在重连",
     "delaySaveFailed": "保存延迟补偿失败"

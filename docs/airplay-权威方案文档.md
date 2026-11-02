@@ -1102,7 +1102,7 @@ npx vitest run tests/airplay tests/dlna/controlTransportGuards.test.ts tests/ser
 |---|---|
 | 职责 | MFAB 帧服务器:**unix socket listener** + 首帧必须 CONFIG + 粘包解码 + AUDIO/BOUNDARY/HEARTBEAT 分发 + 2s 无帧判 stall |
 | 对外导出 | `class BridgeServer`(:99):`listen(socketPath)`(:131)/`close()`(:157)/`destroySessions()`(:182)/`stats()`(:126)<br>类型:`BridgeServerOpts`(:34)/`BridgeAudioEvent`(:50)/`BridgeSessionEvent`(:58)/`BridgeServerHandlers`(:63,`onAudio/onSession/onBoundary/onStall/onHeartbeat/onOverflow/log`)/`BridgeServerStats`(:75)<br>`runBridgeServerMain(env)`(:376,独立跑一个 listener,测试/落盘用) |
-| 关键常量 | `BRIDGE_STALL_NO_FRAME_MS=2_000`(`rates.ts`,:336 使用)/`BRIDGE_RECEIVE_OVERFLOW_MS=8_000`(:271-277 溢出回调)/检查周期 `checkIntervalMs ?? 500`(:151) |
+| 关键常量 | `BRIDGE_STALL_NO_FRAME_MS=2_000`(`rates.ts`,:336 使用)/`BRIDGE_RECEIVE_OVERFLOW_MS=16_000`(:271-277 溢出回调)/检查周期 `checkIntervalMs ?? 500`(:151) |
 | 状态归属 | 每个连接一个 `BridgeSession`(configOk/deviceId/token 校验态,见 :205-247) |
 | 上下游 | 上游:`bridgeSource.ts`(发送端 connect);下游:`bridgeSession.ts` 的 handlers |
 | 失败模式 | ①首帧不是 CONFIG / deviceId 或 token 不匹配 → `rejectSession`(:349),桥侧表现为反复重连;②粘包解析错位(magic/version/len 非法必须立即断连,:213-224);③2s 无帧(stall)→ 停推流等重连(不写静音) |
@@ -1124,10 +1124,10 @@ npx vitest run tests/airplay tests/dlna/controlTransportGuards.test.ts tests/ser
 |---|---|
 | 职责 | 桥接环**发送端**(跑在 sendspin 侧):unix socket 会合连接、发送队列、背压/硬上限、退避重连 |
 | 对外导出 | `computeBridgeBackoffMs(attempt: number, rand: () => number): number`(:35)/`class BridgeSource`(:100):`start`(:134)/`stop`(:142)/`enqueue(frame)`(:156)/`sendNow(bytes)`(:187)/`clearQueue()`(:198)/`stats()`(:204);私有 `drain`(:332)/`handleClosed`(:292)/`scheduleReconnect(forcedDelayMs?)`(:308)/`attach`(:265)<br>类型:`BridgeLinkState = "idle" \| "connecting" \| "live" \| "stalled"`(:23)/`BridgeSourceStats`(:61)/`BridgeSourceOpts`(:76)/`BridgeSocketLike`(:26) |
-| 关键常量 | `BRIDGE_ENOENT_PERMANENT_AFTER = 12`(:48,连续 12 次 ENOENT 判永久失败,路径不可能再出现)<br>来自 `rates.ts`:`BRIDGE_QUEUE_HIGH_WATER_BYTES=384KB`/`BRIDGE_QUEUE_HARD_CAP_BYTES=1536KB`/`BRIDGE_BACKOFF_BASE_MS=5_000`/`BRIDGE_BACKOFF_MAX_MS=30_000`/`BRIDGE_PCM_BYTES_PER_SEC=192_000`/`BRIDGE_QUEUE_HIGH_WATER_MS=2_000`/`BRIDGE_QUEUE_HARD_CAP_MS=8_000`<br>为什么 8s:一次窗口化投递只有 1s 内容,8s ≈ 8 个周期仍积压 ⇒ 只能是对端不读(socket 反压),`宁断不错位` |
+| 关键常量 | `BRIDGE_ENOENT_PERMANENT_AFTER = 12`(:48,连续 12 次 ENOENT 判永久失败,路径不可能再出现)<br>来自 `rates.ts`:`BRIDGE_QUEUE_HIGH_WATER_BYTES=384KB`/`BRIDGE_QUEUE_HARD_CAP_BYTES=1536KB`/`BRIDGE_BACKOFF_BASE_MS=5_000`/`BRIDGE_BACKOFF_MAX_MS=30_000`/`BRIDGE_PCM_BYTES_PER_SEC=192_000`/`BRIDGE_QUEUE_HIGH_WATER_MS=2_000`/`BRIDGE_QUEUE_HARD_CAP_MS=16_000`<br>为什么 16s（2026-11-02 由 8s 抬高）:240 真机 2h 实测,组泵按设备 `buffer_capacity × 0.6` 预填充后投递领先量 `bridge-window.tailVsHiUs` p50=7.57s / p99=max 11.96s,接收侧积压 `inQueueMs` p50=7.63s / p90=7.75 / max=7.98s —— 稳态就贴着旧 8s 红线,于是 `recv-overflow`(83 次,backlog 全在 8001–8025ms)→ 清 8s 积压 → `pad-insert` 8s 静音 → 会话换代,形成 overflow→换代→再 overflow 循环。抬到 16s 覆盖实测 p99 且留 4s 余量(代价内存 3MB/会话)。**曲末排空上限独立固定 8s**(`BRIDGE_END_DRAIN_SAFE_MAX_MS`),换歌等待不受影响 |
 | 状态归属 | 发送端内存:`queue/queuedBytes/maxQueueMs/backpressureActive/reconnects/state` |
 | 上下游 | 上游:`sendspin/bridgeMember.ts::pushAudio`(经 `enqueue`)、`sendBoundary`/`notifyGeneration`;下游:`bridgeServer.ts` listener |
-| 失败模式 | ①硬上限触发 → 断连重连(:163-171),日志 `bridge hardCap <ms>ms > <cap>ms,断连重连`;**排查要点:出现即说明对端 8s 没读**,常见于对端推流被 boundary/stall 中止或泵侧一次灌太多;②ENOENT 无限重连 = socket 路径已废而 stop 未走(:48) |
+| 失败模式 | ①硬上限触发 → 断连重连(:163-171),日志 `bridge hardCap <ms>ms > <cap>ms,断连重连`;**排查要点:出现即说明对端 16s 没读**,常见于对端推流被 boundary/stall 中止或泵侧一次灌太多;②ENOENT 无限重连 = socket 路径已废而 stop 未走(:48) |
 
 ## 9.8 `bridgeChannel.ts`（301 行）
 
@@ -1190,7 +1190,7 @@ npx vitest run tests/airplay tests/dlna/controlTransportGuards.test.ts tests/ser
 | 项 | 内容 |
 |---|---|
 | 职责 | 采样率 / 重采样 / 桥接全部**常量唯一源**(改值只能改这里) |
-| 对外导出 | `SENDSPIN_RATE=48000`(:6)/`AIRPLAY1_RATE=44100`(:9)/`AP2_RATES=[48000,44100]`(:12)/`RESAMPLE_L=147`(:19)/`RESAMPLE_M=160`(:21)/`RESAMPLE_GROUP_DELAY_OUT_SAMPLES=16`(:25)/`RESAMPLE_GROUP_DELAY_MS=0.3627`(:28)<br>`BRIDGE_COLD_START_LEAD_US=4_500_000`(:35)/`BRIDGE_WARM_START_LEAD_US=2_500_000`(:37)/`BRIDGE_MIN_BUFFER_US=1_000_000`(:39)/`ANCHOR_SAFE_LEAD_US=800_000`(:54)<br>`BRIDGE_QUEUE_HIGH_WATER_BYTES=384*1024`(:61)/`BRIDGE_QUEUE_HARD_CAP_BYTES=1536*1024`(:63)/`BRIDGE_BACKOFF_BASE_MS=5_000`(:65)/`BRIDGE_BACKOFF_MAX_MS=30_000`(:67)<br>`BRIDGE_PCM_BYTES_PER_SEC=192_000`(:75,48k×2ch×2B)/`BRIDGE_QUEUE_HIGH_WATER_MS=2_000`(:78)/`BRIDGE_QUEUE_HARD_CAP_MS=8_000`(:80)/`BRIDGE_RECEIVE_OVERFLOW_MS=8_000`(:82)/`BRIDGE_HEARTBEAT_INTERVAL_MS=1_000`(:84)/`BRIDGE_STALL_NO_FRAME_MS=2_000`(:86)<br>`RAOP_SAFETY_MS=50`(:89,RAOP 可达安全余量)/`BRIDGE_MAX_HELD_AUDIO_US=45_000_000`(:97)/`BRIDGE_RESUME_REBASE_US=2_000_000`(:100)<br>`PROTOCOL_CAPS: Record<BridgeProtocol, ProtocolCaps>`(:123) |
+| 对外导出 | `SENDSPIN_RATE=48000`(:6)/`AIRPLAY1_RATE=44100`(:9)/`AP2_RATES=[48000,44100]`(:12)/`RESAMPLE_L=147`(:19)/`RESAMPLE_M=160`(:21)/`RESAMPLE_GROUP_DELAY_OUT_SAMPLES=16`(:25)/`RESAMPLE_GROUP_DELAY_MS=0.3627`(:28)<br>`BRIDGE_COLD_START_LEAD_US=4_500_000`(:35)/`BRIDGE_WARM_START_LEAD_US=2_500_000`(:37)/`BRIDGE_MIN_BUFFER_US=1_000_000`(:39)/`ANCHOR_SAFE_LEAD_US=800_000`(:54)<br>`BRIDGE_QUEUE_HIGH_WATER_BYTES=384*1024`(:61)/`BRIDGE_QUEUE_HARD_CAP_BYTES=1536*1024`(:63)/`BRIDGE_BACKOFF_BASE_MS=5_000`(:65)/`BRIDGE_BACKOFF_MAX_MS=30_000`(:67)<br>`BRIDGE_PCM_BYTES_PER_SEC=192_000`(:80,48k×2ch×2B)/`BRIDGE_QUEUE_HIGH_WATER_MS=2_000`(:83)/`BRIDGE_QUEUE_HARD_CAP_MS=16_000`(:95)/`BRIDGE_RECEIVE_OVERFLOW_MS=16_000`(:101)/`BRIDGE_HEARTBEAT_INTERVAL_MS=1_000`(:103)/`BRIDGE_STALL_NO_FRAME_MS=2_000`(:105)/`BRIDGE_END_DRAIN_MARGIN_MS=1_500`(:134)/`BRIDGE_END_DRAIN_SAFE_MAX_MS=8_000`(:148,曲末排空独立上限,不随队列硬上限抬高)<br>`RAOP_SAFETY_MS=50`(:155,RAOP 可达安全余量)/`BRIDGE_MAX_HELD_AUDIO_US=45_000_000`(:188)/`BRIDGE_RESUME_REBASE_US=2_000_000`(:191)<br>`PROTOCOL_CAPS: Record<BridgeProtocol, ProtocolCaps>`(:123) |
 | 关键常量(为什么) | `ANCHOR_SAFE_LEAD_US=800ms` = 真机验证可用的**最浅**水位(再浅 esp32 就 underrun);`BRIDGE_MIN_BUFFER_US=1s` 是桥的最浅;`RAOP_SAFETY_MS=50`:桥首帧必须 ≥ `now + L/rate + 50ms` 才可能被 RAOP 排上 |
 | 状态归属 | 常量 |
 | 上下游 | 全链路 import;守卫 7.7 组③ 钉「唯一声明」 |
@@ -1565,7 +1565,7 @@ routes/api/groups.ts:129  PUT /v1/groups/:id/delays  {memberId, ms}
 | 桥锚点 | `[airplay-bridge] {"ev":"anchor",…}` | 看 `scheduledAnchorUs` / `commandedLeadUs` / `latencyFrames` / `reAnchored` |
 | 锚点不可达 | `anchor unreachable: … → re-anchor <µs>(丢弃更早内容)` | 桥自己等太久才立锚(首帧过旧) |
 | 桥稳态 | `[airplay-bridge] {"ev":"tick",…}` | 判据见 §10.6;A/V 权威字段 `deltaUs` |
-| 桥背压/硬上限 | `bridge backpressure <ms>ms > 2000ms` / `bridge hardCap <ms>ms > 8000ms,断连重连` | 后者 = 对端 8s 没读,必然重连 |
+| 桥背压/硬上限 | `bridge backpressure <ms>ms > 2000ms` / `bridge hardCap <ms>ms > 16000ms,断连重连` | 后者 = 对端 16s 没读,必然重连 |
 | 桥投递 | `bridge-backfill group=… frames=… durUs=…` / `bridge-sync group=… before=… after=…` | 播中加入 / 路由变化 |
 | 桥对齐降噪 | `[airplay-bridge] realigned …` | 无动作恒漂移已降 `debug`(WARN 只剩真动作) |
 | 组延迟补偿 | `[bridge] A/V 标定位移已更新 ms=<n>`(全局)/ PUT 响应 `rebuilt` | 按组改走 `/groups/:id/delays` |
@@ -2087,8 +2087,8 @@ late 累积    ≈ 22/秒（约占发包 18%）    ← producer 阻塞（欠料�
    （in-flight 门控防乱序双写）、结束置水位 + `bridge-bulk` 日志。
    **触发点必须在 tick 内等料 ≥6s 而非换代就地投**——换代瞬间新代 ring 必空，就地投只能投到 0 帧。
    存量料 1.5~6s 之间不硬投，pending 保留走原有逐窗投递（降级语义）。
-   断连红线：批量灌入 ≤6s 分片（Tx 侧 `BRIDGE_QUEUE_HARD_CAP_MS=8000`、Rx 侧
-   `BRIDGE_RECEIVE_OVERFLOW_MS=8s`），严格 ts 升序。
+   断连红线：批量灌入 ≤6s 分片（Tx 侧 `BRIDGE_QUEUE_HARD_CAP_MS=16000`、Rx 侧
+   `BRIDGE_RECEIVE_OVERFLOW_MS=16s`；2026-11-02 由 8s 抬高，曲末排空上限仍独立固定 8s），严格 ts 升序。
 2. **`airplay/bridgeSession.ts` 消费端改形**：首填预算从 `waitDataMs=1000` 拆出独立
    `BRIDGE_PREFILL_WAIT_MS=300`；**`hasInFlight` 门控**——首填等待只在已有在途数据时生效，
    空载会话落回原欠料逻辑（修空载首块被 300ms 拖慢 → pacing 迟到级联的真回归）。
@@ -2115,3 +2115,44 @@ late 累积    ≈ 22/秒（约占发包 18%）    ← producer 阻塞（欠料�
 桥子进程 / 空口 / 设备侧），挂监控读指纹，必要时深度取证（环形 pcap + 秒级对账）。
 若 `inQueueMs≈6000` 且 `late≈0` 仍失声 ⇒ 问题在空口或设备侧，转设备侧录音取证；
 若 `inQueueMs≈0` ⇒ bulk 未生效，回查换代/水位逻辑。
+
+---
+
+## v4.11.2 切歌等待自适应（2026-11-02 真机实测）
+
+> 本节为**最新口径**，与前文任何「混合组 5000ms / 1.75s / 手动切歌等待」表述冲突时以本节为准。
+
+### 结论
+
+1. **手动入口已移除**：组级 `mixed_anchor_lead_ms`（前端「切歌等待」弹窗、`PUT /delays` 的
+   `mixedAnchorLeadMs`、`delayCalib` 读写口）全部停用。DB 历史列保留（禁迁移代码）；
+   CI 守卫 G19 钉死「后端读写口 / API / 前端 / 旧全局常量」四类残留。
+2. **起播 lead 由后端自动决定**：沿用分档 `暖 2.5s / 冷 4.5s`（`BRIDGE_LEAD_TIERED`），
+   纯桥组与混合组同一口径；冷/暖由桥会话是否热复用判定，不再依赖组级用户值。
+3. **自然换歌走「接续」或「预取交接」**，两者都不发 BOUNDARY / 不 `RAOP FLUSH`：
+   - 无 S1 预取（混合组常态）：`continuity=1`，锚点 = 上一曲**内容尾**（含曲末续静音）；
+   - S1 预取就绪（纯桥组）：`handoff=预取起点`，锚点精确等于上一曲内容尾。
+4. **跨曲 ring 必须保留**：`close({keepBridgeDelivery:true})` 置一次性
+   `keepRingForNextPush`，`resetPushMeter()` 消费后跳过 `recentByGroup.clear()`；
+   seek / 真实停止 / 换组仍照旧清空（行为逐字节不变）。
+5. **S1 预取路径同样保留 ring**：非接续分支改为
+   `close({ keepBridgeDelivery: keepQueueForPrefetch })`，否则预取帧被清、边界后静默 ~3.8s。
+6. **内容尾 = `contentTailUs`**：曲末续静音写进 ring 后，`lastContentEndUs` 必须后移到静音尾，
+   否则下一曲首帧 ts 与静音区间重叠、被水位判「已投过」而跳过（= 吞歌开头）。
+
+### 真机验收（240 容器，三首 44s/69s/73s，各两次自然换歌）
+
+| 组合 | 路径 | 锚点 | 桥侧指标 |
+| --- | --- | --- | --- |
+| 纯桥 pb（S1 开） | handoff | +44.000s → +69.000s | `insertedFrames=83703` 恒定 / `skipped=0` |
+| 混合 mix | continuity=1 | +73.000s → +69.000s | `insertedFrames=85993` 恒定 / `skipped=0` |
+| 纯 Sendspin ss | 直连旧路径 | 不适用 | 无桥；行为与改前一致 |
+| 双桥 pb2（S1 开） | handoff ×2 | +73.000s → +69.000s | 两台均 `insertedFrames=72707` 恒定 / `skipped=0` |
+
+`insertedFrames` 定值全部来自开局首包前的一次 realign；换歌过程零新增。
+全程无 `pad-insert`、无 `realigned ... skip=`、无 `timeline-reset warm-reuse-poisoned`、无 `RAOP FLUSH`。
+
+### 回归
+
+- `vitest`：146 文件 / 1968 用例全过；
+- `node backend/scripts/check-group-invariants.mjs`：105 条断言全过（含 G19）。

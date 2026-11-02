@@ -391,11 +391,11 @@ describe("切歌垫片(D2=逐帧衰减)时间线 / bulk 判据 / 稳态窗口对
     expect(bridge.frames.length).toBeGreaterThanOrEqual(ITERS - STEADY_FROM);
   });
 
-  it("P10: bulk 上限受硬上限钳位(6s + 既有排队 ≈ 8s 不许顶格断连)", async () => {
+  it("P10: bulk 上限受硬上限钳位(16s 硬上限下 0/3s 排队仍灌满 6s,15s 排队才整包跳过)", async () => {
     setNowUsOverride(() => NOW);
     const BYTES_PER_SEC = 192_000; // 48k/s16le/2ch
 
-    // ① 健康路径:0 排队 ⇒ 8 − 0 − 1 = 7s > 6s ⇒ 上限仍是 6s(行为零变化)
+    // ① 健康路径:0 排队 ⇒ 16 − 0 − 1 = 15s > 6s ⇒ 上限仍是 6s(行为零变化)
     const a = makeGroup();
     a.g.notifyBridgeGeneration(2000006, "track");
     a.bridge.queuedBytes = 0;
@@ -403,18 +403,18 @@ describe("切歌垫片(D2=逐帧衰减)时间线 / bulk 判据 / 稳态窗口对
     await drainBulk(a.g);
     expect(BigInt(a.bridge.frames.length) * FRAME_US).toBe(BigInt(BRIDGE_BACKFILL_MAX_US));
 
-    // ② 已有 3s 排队 ⇒ 上限 = 8000 − 3000 − 1000 = 4s(而不是继续灌 6s 顶格)
+    // ② 已有 3s 排队 ⇒ 上限 = 16000 − 3000 − 1000 = 12s,仍被 6s 的 bulk 上限兜住
     const b2 = makeGroup();
     b2.g.notifyBridgeGeneration(2000006, "track");
     b2.bridge.queuedBytes = 3 * BYTES_PER_SEC;
     await pushContent(b2.g, 340, NOW + PURE_BRIDGE_LEAD_US);
     await drainBulk(b2.g);
-    expect(BigInt(b2.bridge.frames.length) * FRAME_US).toBe(4_000_000n);
+    expect(BigInt(b2.bridge.frames.length) * FRAME_US).toBe(BigInt(BRIDGE_BACKFILL_MAX_US));
 
-    // ③ 排队已顶格(8s)⇒ 预算 ≤ 0 ⇒ 整包跳过并留痕,绝不硬灌触发 socket.destroy
+    // ③ 排队 15s(距 16s 硬上限仅 1s 余量)⇒ 预算 ≤ 0 ⇒ 整包跳过并留痕,绝不硬灌触发 socket.destroy
     const c = makeGroup();
     c.g.notifyBridgeGeneration(2000006, "track");
-    c.bridge.queuedBytes = 8 * BYTES_PER_SEC;
+    c.bridge.queuedBytes = 15 * BYTES_PER_SEC;
     await pushContent(c.g, 340, NOW + PURE_BRIDGE_LEAD_US);
     await drainBulk(c.g);
     expect(c.bridge.frames.length).toBe(0);

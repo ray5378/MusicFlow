@@ -155,8 +155,8 @@ export interface EndDrainCap {
  *
  *  纯桥组(`hasBridges() && !hasDirectMembers()`)里,桥**结构上拿不到**「距此刻
  *  `BRIDGE_PUSH_FLOOR_US + ahead` 以内」的内容,而排空公式已先扣过 `ANCHOR_SAFE_LEAD_US`,
- *  故还需从排空需求里**减掉** `BRIDGE_END_DRAIN_MARGIN_MS`;再以桥队列硬上限
- *  `BRIDGE_END_DRAIN_SAFE_MAX_MS`(= `BRIDGE_QUEUE_HARD_CAP_MS`)兜顶,结果为
+ *  故还需从排空需求里**减掉** `BRIDGE_END_DRAIN_MARGIN_MS`;再以排空安全上限
+ *  `BRIDGE_END_DRAIN_SAFE_MAX_MS`(8000ms,**独立于队列硬上限**)兜顶,结果为
  *  `min(contentMs − MARGIN, SAFE_MAX)`,且不得为负。
  *  推导与真机判据(退出后 8.06s 断料 ⇒ 可承诺 8000ms)见 rates.ts 该常量注释。
  *

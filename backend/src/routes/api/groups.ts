@@ -18,10 +18,6 @@ import {
   getMemberDelays,
   invalidateGroupDelays,
   setMemberDelay,
-  getMixedAnchorLeadMs,
-  setMixedAnchorLeadMs,
-  MIXED_ANCHOR_LEAD_MAX_MS,
-  MIXED_ANCHOR_LEAD_STEP_MS,
 } from "../../services/group/delayCalib.js";
 import {
   bridgeJoinMember,
@@ -127,10 +123,6 @@ app.get("/v1/groups/:id/delays", permMiddleware(PERM.RENDERER_USE), (c) => {
   }
   return c.json({
     memberDelays: getMemberDelays(id),
-    // 混合组切歌等待(组级):0 = 自动。前端弹窗按 step/max 渲染。
-    mixedAnchorLeadMs: getMixedAnchorLeadMs(id),
-    mixedAnchorLeadStepMs: MIXED_ANCHOR_LEAD_STEP_MS,
-    mixedAnchorLeadMaxMs: MIXED_ANCHOR_LEAD_MAX_MS,
     minMs: GROUP_DELAY_MIN_MS,
     maxMs: GROUP_DELAY_MAX_MS,
     stepMs: GROUP_DELAY_STEP_MS,
@@ -149,9 +141,6 @@ app.put("/v1/groups/:id/delays", permMiddleware(PERM.RENDERER_USE), async (c) =>
   if (!gm.get(id)) {
     return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.group.notFound"), 404);
   }
-  // 可选:混合组切歌等待组值(前端弹窗)。0 = 自动;下一首切歌即生效(子进程重锚直查 db,
-  // 无需重建/重启)。该值只在下次重锚时读,不触发任何重建。
-  if (body.mixedAnchorLeadMs !== undefined) setMixedAnchorLeadMs(id, body.mixedAnchorLeadMs);
   // 单成员写入口:memberId 必须是本组成员(命名空间 id),越组写入一律拒绝。
   let rebuilt = 0;
   const memberId = typeof body.memberId === "string" ? body.memberId : "";
@@ -196,10 +185,6 @@ app.put("/v1/groups/:id/delays", permMiddleware(PERM.RENDERER_USE), async (c) =>
   }
   return c.json({
     memberDelays: getMemberDelays(id),
-    // 混合组切歌等待(组级):0 = 自动。前端弹窗按 step/max 渲染。
-    mixedAnchorLeadMs: getMixedAnchorLeadMs(id),
-    mixedAnchorLeadStepMs: MIXED_ANCHOR_LEAD_STEP_MS,
-    mixedAnchorLeadMaxMs: MIXED_ANCHOR_LEAD_MAX_MS,
     minMs: GROUP_DELAY_MIN_MS,
     maxMs: GROUP_DELAY_MAX_MS,
     stepMs: GROUP_DELAY_STEP_MS,

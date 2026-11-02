@@ -1129,70 +1129,110 @@ console.log("===== G18 跨进程判死回传 + 起播前完整性预检(第六�
 }
 
 // ===========================================================================
-// G19 混合组切歌等待按组可配(v4.8.6):固定 5s → 组级实时覆盖
-// 混合组锚点 lead(代价 = 切歌全组静默 ~5s)过去是全局常量,现在前端可逐组调。
-// 🔴 只许动混合组分支 —— 纯桥组深锚 / 非桥分支 / 垫片动态语义零改动(trackLeadMs 手动口已删 v4.9.1)。
-// 🔴 子进程实时性:streamEngine 跑在 fork 子进程,delayCalib cache 无失效广播,
-//    消费点必须绕过 cache 直查 db,否则「改了不生效」。
+// G19 切歌等待「后端自适应」(v4.11 / P3):前端手动口已删 + 纯桥/混合统一分档 lead + 接续锚点
+//
+// 历史:P3 之前混合组靠组级 `mixed_anchor_lead_ms`(默认 5s)换「不吞开头」,代价是
+// 每次切歌全组静默 5s —— 那就是前端「切歌等待」滑块的由来。P3 起:
+//   ① 起播/手切/seek:一律按 P1 分档 lead(暖 2.5s / 冷 4.5s)抬锚,均 ≥ 桥投递窗口下沿;
+//   ② 自然换歌:接上一曲内容尾(contigUs),既不静默等待也不吞开头。
+// 🔴 三条不许退化的铁律:
+//   - 手动口不许回来(后端读写口 / API / 前端 / 旧全局常量都要干净);
+//   - 纯桥与混合**同一口径**(不许再按组类型分叉出第二个 lead 常量);
+//   - 接续必须先于排空/边界(否则旧曲尾被 FLUSH 砍掉 = 反向吞开头)。
 // ===========================================================================
-console.log("===== G19 混合组切歌等待按组可配 =====");
+console.log("===== G19 切歌等待后端自适应(手动口已删+分档lead+接续) =====");
 {
   const se = code(SPIN_STREAM_ENGINE);
   const dc = code(DELAY_CALIB);
   const apiTxt = code(API_GROUPS);
   const dbIdx = code("backend/src/db/index.ts");
   const schemaTxt = code("backend/src/db/schema.ts");
-  // --- a) 消费点:混合组分支组值优先,回退全局常量(唯一表达式) ---
-  const mixedLines = se.split("\n").filter((l) => l.includes("mixedAnchorLeadUsOf("));
-  const mixedExpr = mixedLines.length === 1
-    && mixedLines[0].includes('Math.max(aheadUs, mixedAnchorLeadUsOf(this.group?.name ?? "") ?? BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US)');
+  const consts = code("backend/src/services/sendspin/constants.ts");
+  const srv = code(SPIN_SERVER);
+  const core = code(SPIN_CORE);
+  const fe = code(GROUPS_VUE);
+
+  // --- a) 手动「切歌等待」口彻底移除(后端读写口 + API + 前端 + 旧全局常量) ---
+  const noBackend = !dc.includes("mixedAnchorLeadUsOf")
+    && !dc.includes("getMixedAnchorLeadMs")
+    && !dc.includes("setMixedAnchorLeadMs")
+    && !dc.includes("MIXED_ANCHOR_LEAD");
+  const noApi = !apiTxt.includes("mixedAnchorLeadMs") && !apiTxt.includes("MIXED_ANCHOR_LEAD");
+  const noFe = !fe.includes("showMixedLead")
+    && !fe.includes("mixedLeadVals")
+    && !fe.includes("mixedAnchorLeadMs");
+  const noConst = !consts.includes("BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US");
   check(
-    "混合组分支 = 组值优先(mixedAnchorLeadUsOf)且回退全局常量,且为唯一表达式",
-    mixedExpr,
-    `命中 ${mixedLines.length} 处(应恰 1) ⇒ 缺回退 = 未配组直接失效;写死常量 = 改值不生效`,
+    "混合组手动切歌等待口已移除(delayCalib / API / 前端 / 旧全局常量)",
+    noBackend && noApi && noFe && noConst,
+    `backend=${noBackend} api=${noApi} fe=${noFe} const=${noConst} ⇒ 残留入口 = 用户又能把切歌等待调成固定静默,与自适应冲突`,
+  );
+
+  // --- b) 纯桥 + 混合统一分档 lead;非桥分支原样保留 ---
+  const tieredExpr = 'Math.max(aheadUs, bridgeStartLeadUs([{ warm: BRIDGE_LEAD_TIERED && !reseed }]))';
+  const hasBridgesGuard = se.includes("const hasBridges = this.group.hasBridges?.() === true;")
+    && se.includes("const isPureBridge =");
+  const tieredOk = se.includes(tieredExpr) && hasBridgesGuard
+    && se.includes("Math.min(aheadUs, ANCHOR_SAFE_LEAD_US)")
+    && se.includes("reseed ? reseedLead : aheadUs");
+  check(
+    "桥成员(纯桥/混合)统一走分档 lead,非桥/预填充分支原样保留",
+    tieredOk,
+    `分档=${tieredOk} ⇒ 分叉出第二套 lead = 纯桥与混合口径不一致;把分档混进非桥 = 直连 esp32 秒级跳变(硬同步阈值 5ms)`,
+  );
+
+  // --- c) 接续锚点:判定齐备 + 锚点优先 + 跳过排空 ---
+  const gates = se.includes("private continuityGates(")
+    && se.includes("private continuityWindowOk(")
+    && se.includes("continuityReady(songId?: string, seekMs?: number | null): boolean");
+  const anchor = se.includes("let contigUs: bigint | null = null;")
+    && se.includes("contigUs = this.continuityFromUs > deliverFloorUs ? this.continuityFromUs : deliverFloorUs")
+    && se.includes("const continuity =")
+    && se.includes("this.continuityGates(hasBridges, isPureBridge)");
+  const skipDrain = se.includes("const continuityDrainSkip = contentEnded && !this.prefetch && this.continuitySlotAvailable();")
+    && /contentEnded \&\& !this\.prefetch \&\& !continuityDrainSkip/.test(se);
+  check(
+    "接续判定齐备(纯桥/混合开关 + 窗口 + seek=0 不算 seek)",
+    gates,
+    `齐备=${gates} ⇒ 缺 seek 口径 = 自动换歌传 seekPositionMs=0 会被误判成 seek,接续永不触发`,
   );
   check(
-    "纯桥组深锚与非桥分支原样保留(只许动混合组分支)",
-    se.includes("bridgeStartLeadUs([{ warm: false }])")
-      && se.includes("Math.min(aheadUs, ANCHOR_SAFE_LEAD_US)")
-      && se.includes("reseed ? reseedLead : aheadUs"),
-    `深锚=${se.includes("bridgeStartLeadUs([{ warm: false }])")} 非桥=${se.includes("Math.min(aheadUs, ANCHOR_SAFE_LEAD_US)")} ⇒ 深锚进了混合组 = 直连 esp32 秒级跳变(硬同步阈值 5ms)`,
+    "接续锚点接上一曲内容尾(contigUs,不低于投递下沿),且优先于「墙钟+lead」",
+    anchor,
+    `命中=${anchor} ⇒ 不接内容尾 = 每次换歌都要重新等 lead(切歌慢);不钳投递下沿 = 首帧落窗外被丢`,
   );
-  // --- b) delayCalib:读写口 + 钳制 + 前端常量 ---
-  const dcOk = dc.includes("export function getMixedAnchorLeadMs(groupId: string | null | undefined): number")
-    && dc.includes("export function setMixedAnchorLeadMs(groupId: string, ms: unknown): number")
-    && dc.includes("export function clampMixedAnchorLeadMs(v: unknown): number")
-    && dc.includes("export const MIXED_ANCHOR_LEAD_MAX_MS = 30000")
-    && dc.includes("export const MIXED_ANCHOR_LEAD_STEP_MS = 100")
-    && dc.includes("Math.min(MIXED_ANCHOR_LEAD_MAX_MS, Math.max(0, Math.round(n)))");
   check(
-    "delayCalib 读写口 + 钳制(0~30000) + 前端常量齐备",
-    dcOk,
-    `齐备=${dcOk} ⇒ 缺钳制 = 负数/超大值直写库,切歌等待被拉成无意义静默`,
+    "接续时跳过曲末排空(排空只写 ring 不推进 cursor,留着旧曲尾才接得上)",
+    skipDrain,
+    `跳过=${skipDrain} ⇒ 照旧排空 = 旧曲尾被当静音塞满,新曲首帧挤到窗外(反向吞开头)`,
   );
-  // --- c) 子进程实时性:消费点绕过 cache 直查 db ---
-  const usofBody = bodyByHead(dc, /export function mixedAnchorLeadUsOf/);
-  const usofOk = !!usofBody
-    && usofBody.includes("playerGroups.mixedAnchorLeadMs")
-    && usofBody.includes(".get()")
-    && !usofBody.includes("getMixedAnchorLeadMs(")
-    && !usofBody.includes("cache.get(");
+
+  // --- d) 接续不发边界、不换代、不清 ring;预取路径保留旧曲尾 ---
+  const srvOk = srv.includes('continuity=1 keep=queue,epoch,watermarks')
+    && srv.includes("keepTail")
+    && srv.includes("BRIDGE_TRACK_KEEP_QUEUE_ENABLED")
+    && srv.includes("keepBridgeDelivery");
   check(
-    "mixedAnchorLeadUsOf 绕过 cache 直查 db(子进程 cache 无失效广播,走 cache = 改了不生效)",
-    usofOk,
-    `直查=${usofOk} ⇒ 用 getMixedAnchorLeadMs(cache) = 子进程读陈旧值,PUT 后下一首不生效`,
+    "接续边界不发 BOUNDARY/不换代/不清 ring;预取换歌保留旧曲尾并保留水位",
+    srvOk,
+    `齐备=${srvOk} ⇒ 发 stop = airplay 侧 FLUSH 旧曲尾;清 ring = 新曲首帧无时间基准`,
   );
-  // --- d) API 双向 ---
-  const apiOk = apiTxt.includes("mixedAnchorLeadMs: getMixedAnchorLeadMs(id)")
-    && apiTxt.includes("mixedAnchorLeadStepMs: MIXED_ANCHOR_LEAD_STEP_MS")
-    && apiTxt.includes("mixedAnchorLeadMaxMs: MIXED_ANCHOR_LEAD_MAX_MS")
-    && apiTxt.includes("if (body.mixedAnchorLeadMs !== undefined) setMixedAnchorLeadMs(id, body.mixedAnchorLeadMs);");
+  const coreOk = core.includes("const continuity = !interrupted && pump.continuityReady(item.songId, seekPositionMs);")
+    && core.includes("g.close({ keepBridgeDelivery: true })");
   check(
-    "GET/PUT /v1/groups/:id/delays 双向收发 mixedAnchorLeadMs + 前端渲染常量",
-    apiOk,
-    `双向=${apiOk} ⇒ 缺 GET = 前端无回显;缺 PUT = 弹窗保存空转`,
+    "起播路径按 continuityReady 选「保留桥投递」,且手动切歌(interrupted)不接续",
+    coreOk,
+    `齐备=${coreOk} ⇒ 手切也接续 = 用户拖进度却听旧曲尾;不保留 = 接续 ring 被 close 清空`,
   );
-  // --- e) 新装一致性钉(v4.9.2):CREATE TABLE 即最终形态,迁移代码禁复活 ---
+  const bm = code("backend/src/services/sendspin/bridgeMember.ts");
+  check(
+    "桥成员 track 换代不清发送队列(S2),免得旧曲尾丢在发送侧",
+    bm.includes('reason === "track" && BRIDGE_TRACK_KEEP_QUEUE_ENABLED'),
+    `命中=${bm.includes('reason === "track" && BRIDGE_TRACK_KEEP_QUEUE_ENABLED')}`,
+  );
+
+  // --- e) 新装一致性钉(v4.9.2):CREATE TABLE 即最终形态,迁移代码禁复活。
+  //     ⚠️ mixed_anchor_lead_ms 列**保留**但已不再读写(避免迁移);取消读写由 a) 钉住。
   const pgB = dbIdx.indexOf("CREATE TABLE IF NOT EXISTS player_groups");
   const pgE = pgB >= 0 ? dbIdx.indexOf("CREATE TABLE IF NOT EXISTS group_queues", pgB) : -1;
   const pgBod = pgB >= 0 && pgE > pgB ? dbIdx.slice(pgB, pgE) : "";
@@ -1200,23 +1240,9 @@ console.log("===== G19 混合组切歌等待按组可配 =====");
   const noMig = !dbIdx.includes("ALTER TABLE") && !dbIdx.includes("PRAGMA table_info");
   const schemaOk = schemaTxt.includes('mixedAnchorLeadMs: integer("mixed_anchor_lead_ms")');
   check(
-    "player_groups CREATE TABLE 含 member_delays_json+mixed_anchor_lead_ms(v4.9.2 新装=最终形态)+ schema 声明;全文件禁 ALTER TABLE/PRAGMA table_info(迁移代码不许回来)",
+    "player_groups CREATE TABLE 保留 member_delays_json+mixed_anchor_lead_ms(历史列,停用)+ schema 声明;全文件禁 ALTER TABLE/PRAGMA table_info(迁移代码不许回来)",
     dbOk && noMig && schemaOk,
     `create=${dbOk} noMigrate=${noMig} schema=${schemaOk} ⇒ CREATE 缺列 = 新装库与已迁移库不一致;迁移代码回归 = 双源漂移`,
-  );
-  // --- f) 前端弹窗:append-to-body 铁律 + input-number 步进严格 ---
-  const fe = read("frontend/src/views/Groups/index.vue");
-  const dlgStart = fe.indexOf('v-model="showMixedLead"');
-  const dlgEnd = dlgStart >= 0 ? fe.indexOf("</el-dialog>", dlgStart) : -1;
-  const dlg = dlgStart >= 0 && dlgEnd > dlgStart ? fe.slice(dlgStart, dlgEnd) : "";
-  const feOk = dlg.includes(':append-to-body="true"')
-    && dlg.includes("el-input-number")
-    && dlg.includes(':step-strictly="true"')
-    && fe.includes("mixedAnchorLeadMs");
-  check(
-    "前端弹窗 append-to-body=true + input-number 步进严格(照成员延迟弹窗范式)",
-    feOk,
-    `弹窗=${feOk} ⇒ 缺 append-to-body = 弹窗被卡片层叠遮挡(前端铁律)`,
   );
 }
 

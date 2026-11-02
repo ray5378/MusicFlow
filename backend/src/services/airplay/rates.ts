@@ -81,10 +81,24 @@ export const BRIDGE_PCM_BYTES_PER_SEC = 192_000;
 
 /** 发送端高水位:告警线(2s × 192000B/s ≈ 384KB)。 */
 export const BRIDGE_QUEUE_HIGH_WATER_MS = 2_000;
-/** 发送端硬上限:断连线(8s × 192000B/s ≈ 1.5MB;禁止丢最旧帧,直接断连重退避)。 */
-export const BRIDGE_QUEUE_HARD_CAP_MS = 8_000;
-/** airplay 接收侧 PCM 积压上限(§4.4:8s,同 48k 口径;超过断连报 overflow,让发送侧重连)。 */
-export const BRIDGE_RECEIVE_OVERFLOW_MS = 8_000;
+/** 发送端硬上限:断连线(16s × 192000B/s ≈ 3MB;禁止丢最旧帧,直接断连重退避)。
+ *
+ *  🔴 为什么是 16s(2026-11-02 240 真机 2h 日志):两侧水位必须**同阶**,而且必须
+ *  盖住「组泵设计领先量」——
+ *   - 组泵按设备 `buffer_capacity × 0.6` 预填充(实测 3395648B ⇒ ≈10.6s),再叠
+ *     投递窗口,实测 `bridge-window.tailVsHiUs` p50=7.57s、p99/max=**11.96/11.97s**;
+ *   - 接收侧积压实测 p50=7.63s、p90=7.75s、max=7.98s —— **稳态就贴着 8s 红线**,
+ *     任何抖动/换代批量都会越过 8000ms 触发 `recv-overflow`(2h 共 83 次,backlog
+ *     全部 8001~8025ms)。
+ *  ⇒ 8s 与设计领先量结构性矛盾;16s 给 p99(11.96s)留 4s 余量,又不至于让「对端
+ *  真的不读」的故障被拖到几分钟才暴露(内存代价 3MB/会话)。 */
+export const BRIDGE_QUEUE_HARD_CAP_MS = 16_000;
+/** airplay 接收侧 PCM 积压上限(§4.4:同 48k 口径;超过断连报 overflow,让发送侧重连)。
+ *
+ *  与 `BRIDGE_QUEUE_HARD_CAP_MS` 同值:接收侧必须容得下发送侧允许排队的量,否则
+ *  发送侧还在正常排队、接收侧先断连,必然形成「overflow → 换代 → 再 overflow」循环
+ *  (2h 日志:83 次 overflow → 85 次 session 断开 → 207 个 generation)。 */
+export const BRIDGE_RECEIVE_OVERFLOW_MS = 16_000;
 /** 心跳间隔(发送端;接收端 2s 无帧判 stalled,间隔须显著小于该值)。 */
 export const BRIDGE_HEARTBEAT_INTERVAL_MS = 1_000;
 /** 接收端 stall 判定:2s 未收到任何帧(§4.2)。 */
@@ -119,14 +133,19 @@ export const BRIDGE_STALL_NO_FRAME_MS = 2_000;
  *  消费点:`bridgeMath.capEndDrainMs`(只对**纯桥组**生效;混合组/纯直连组一律原值)。 */
 export const BRIDGE_END_DRAIN_MARGIN_MS = 1_500;
 
-/** 纯桥组排空量的**硬上限**(ms)= 桥队列硬上限(排空期间 pushLoop 已退出、桥队列只出不进,
- *  存量最多就是它)。
+/** 纯桥组排空量的**硬上限**(ms)= 8s,**不再跟随** `BRIDGE_QUEUE_HARD_CAP_MS`。
  *
- *  🔴 **不要再写成 `BRIDGE_QUEUE_HARD_CAP_MS − BRIDGE_END_DRAIN_MARGIN_MS`**:1500 的余量
+ *  2026-11-02:队列硬上限为消灭「稳态 8s 积压 ⇒ recv-overflow」升到 16s(见上一条),
+ *  但**排空上限必须留在 8s**,否则换歌等待会被无谓拉长一倍:
+ *   - 真机判据:曲末 pushLoop 退出瞬间,设备侧真实可播音频 ≈ **8.06s**(见上一条推导),
+ *     排空超过 8s 只是对着空队列白等;
+ *   - 抬到 16s ⇒ 每首歌结尾多等 ≈8s 才 advance,体验直接回退。
+ *  ⇒ 两个「上限」语义不同:队列上限 = 允许积压多久(容忍度),排空上限 = 值得等多久(体验)。
+ *
+ *  🔴 **不要写成 `BRIDGE_QUEUE_HARD_CAP_MS − BRIDGE_END_DRAIN_MARGIN_MS`**:1500 的余量
  *  已经在上一条里从「排空需求」中减掉了,这里再扣一次就是双重扣减 ⇒ 每首歌结尾被
- *  `player.flush()` 砍掉约 1.5 秒真实音频(推导与真机判据见 BRIDGE_END_DRAIN_MARGIN_MS)。
- *  保留本别名只是为了让「上限」这个概念有名字、并被测试钉住。 */
-export const BRIDGE_END_DRAIN_SAFE_MAX_MS = BRIDGE_QUEUE_HARD_CAP_MS;
+ *  `player.flush()` 砍掉约 1.5 秒真实音频(推导与真机判据见 BRIDGE_END_DRAIN_MARGIN_MS)。 */
+export const BRIDGE_END_DRAIN_SAFE_MAX_MS = 8_000;
 
 /** RAOP 发送节拍安全余量(吸收 25ms 泵抖动与 socket 调度)。
  *

@@ -44,6 +44,8 @@ const eng = vi.hoisted(() => {
     // S1(2026-11-01):起播前要问「有没有可采纳的预取」,停止路径会取消预解码。
     hasPendingPrefetch: vi.fn(() => false),
     cancelNextTrackPrefetch: vi.fn(),
+    // P2/P3(2026-11-02):起播前问「能否接续上一曲」;桩默认不接续。
+    continuityReady: vi.fn(() => false),
   });
   return {
     pumps,

@@ -2,6 +2,38 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.11.2] - 2026-11-02
+
+### Feature / 群组切歌等待自适应（P3，纯桥 + 混合统一）
+
+- **移除前端手动「切歌等待」入口**：组级 `mixed_anchor_lead_ms` 的读写口
+  (`delayCalib` / `PUT /groups/:id/delays` 的 `mixedAnchorLeadMs` / 群组卡片弹窗) 全部停用。
+  DB 历史列保留，禁迁移代码；CI 守卫 G19 钉死四类残留。
+- **起播 lead 后端自动分档**：暖 2.5s / 冷 4.5s，纯桥组与混合组同一口径，不再依赖用户值。
+- **自然换歌零边界**：无 S1 预取走 `continuity=1`（锚点=上一曲内容尾），S1 就绪走
+  `handoff`（锚点=预取起点=上一曲内容尾），两者都不发 BOUNDARY、不 `RAOP FLUSH`。
+- **跨曲 ring 保留（根因修复）**：`close({keepBridgeDelivery:true})` 置一次性
+  `keepRingForNextPush`，`resetPushMeter()` 消费后跳过 `recentByGroup.clear()`；
+  S1 预取路径同样 `keepQueueForPrefetch` 保留；`lastContentEndUs` 改取
+  `contentTailUs`（含曲末续静音），避免新曲首帧与静音区间重叠而被水位跳过。
+
+### 真机验收（240，三首 44s/69s/73s，各两次自然换歌）
+
+| 组合 | 路径 | 桥侧指标 |
+| --- | --- | --- |
+| 纯桥 pb（S1 开） | handoff，+44.000s / +69.000s | `insertedFrames=83703` 恒定、`skipped=0` |
+| 混合 mix | continuity=1，+73.000s / +69.000s | `insertedFrames=85993` 恒定、`skipped=0` |
+| 纯 Sendspin ss | 直连旧路径 | 无桥，行为与改前一致 |
+| 双桥 pb2（S1 开） | handoff ×2，+73.000s / +69.000s | 两台 `insertedFrames=72707` 恒定、`skipped=0` |
+
+换歌过程 `insertedFrames` / `skippedFrames` / `droppedFrames` 零新增，无 `pad-insert`、
+无 `warm-reuse-poisoned`、无 `RAOP FLUSH`。
+
+### 回归
+
+- `vitest`：146 文件 / 1968 用例全过；
+- `check-group-invariants.mjs`：105 条断言全过（含 G19）。
+
 ## [4.11.1] - 2026-11-01
 
 ### Fix / v4.11.0 的 CI 红（仅守卫与依赖锁定，无运行时代码变更）

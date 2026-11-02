@@ -25,6 +25,7 @@ import {
 } from "../airplay/bridgeChannel.js";
 import { BridgeSource, type BridgeLinkState, type BridgeSocketLike } from "../airplay/bridgeSource.js";
 import { BRIDGE_HEARTBEAT_INTERVAL_MS, SENDSPIN_RATE, type BridgeProtocol } from "../airplay/rates.js";
+import { BRIDGE_TRACK_KEEP_QUEUE_ENABLED } from "./constants.js";
 
 /** 泵空闲判定阈值:距上次 pushAudio 超过该时长视为「泵未在跑」(内容尾/过渡期)。
  *  播中桥投递最大间隔是 250ms 补投 tick,远低于该值;内容尾 teardown(rebase 等)
@@ -137,13 +138,16 @@ export class BridgeMember {
   }
 
   /** streamEngine 通知流代次(§4.3,Phase 3 接入):清旧代次队列并发 BOUNDARY。
-   *  同值幂等(重锚分支可能对同一 generation 多次触发)。 */
+   *  同值幂等(重锚分支可能对同一 generation 多次触发)。
+   *  ★ S2/P2(2026-11-02):`reason==="track"` 且保留队列开关开着时**不清**发送侧队列 ——
+   *  自然换歌的旧曲尾还在队列里(airplay 侧 onBoundary 同样保留 inQueue/不 FLUSH),
+   *  清了就等于把旧曲尾巴砍掉(真机 `track-keep-queue keptFrames=0`)。 */
   notifyGeneration(generation: number, reason: BridgeBoundaryReason): void {
     const gen = generation >>> 0;
     if (gen === this.gen) return;
     this.gen = gen;
     this.seq.reset(gen);
-    this.source.clearQueue();
+    if (!(reason === "track" && BRIDGE_TRACK_KEEP_QUEUE_ENABLED)) this.source.clearQueue();
     this.source.enqueue(encodeBoundary(gen, this.seq.take(), reason));
   }
 

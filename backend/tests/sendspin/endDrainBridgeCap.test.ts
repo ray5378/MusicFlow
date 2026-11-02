@@ -46,13 +46,15 @@ afterAll(() => {
 // ---------------------------------------------------------------------------
 
 describe("capEndDrainMs:曲末排空量的纯桥组投递上界(纯函数)", () => {
-  it("常量口径:余量 1500ms(从需求里减)、安全上限 = 队列硬上限 8000ms(不再双重扣减)", () => {
+  it("常量口径:余量 1500ms(从需求里减)、安全上限 8000ms(独立常量,不跟随队列硬上限)", () => {
     expect(BRIDGE_END_DRAIN_MARGIN_MS).toBe(1_500);
-    expect(BRIDGE_QUEUE_HARD_CAP_MS).toBe(8_000);
-    // 🔴 上限就是队列硬上限本身:1500 已从「需求」里减过,这里再减一次就会每首歌砍掉
-    //    约 1.5s 真实音频(推导见 rates.ts 的 BRIDGE_END_DRAIN_MARGIN_MS 注释)。
-    expect(BRIDGE_END_DRAIN_SAFE_MAX_MS).toBe(BRIDGE_QUEUE_HARD_CAP_MS);
+    // 队列硬上限 16s(2026-11-02:消灭稳态 8s 积压 ⇒ recv-overflow),见 rates.ts。
+    expect(BRIDGE_QUEUE_HARD_CAP_MS).toBe(16_000);
+    // 🔴 排空上限必须留在 8s 且**不跟随**队列硬上限:1500 已从「需求」里减过,这里再减
+    //    一次就会每首歌砍掉约 1.5s 真实音频;而抬到 16s 则每首歌结尾白等 ≈8s
+    //    (设备侧真实可播音频实测只有 ≈8.06s,推导见 rates.ts)。
     expect(BRIDGE_END_DRAIN_SAFE_MAX_MS).toBe(8_000);
+    expect(BRIDGE_END_DRAIN_SAFE_MAX_MS).toBeLessThan(BRIDGE_QUEUE_HARD_CAP_MS);
   });
 
   it("纯桥组 + 真机实测排空需求 9784ms ⇒ min(9784−1500, 8000) = 8000ms", () => {
@@ -60,7 +62,7 @@ describe("capEndDrainMs:曲末排空量的纯桥组投递上界(纯函数)", () 
     expect(r.contentMs).toBe(9784);
     expect(r.drainMs).toBe(8_000);
     expect(r.drainMs).toBe(
-      Math.min(9784 - BRIDGE_END_DRAIN_MARGIN_MS, BRIDGE_QUEUE_HARD_CAP_MS),
+      Math.min(9784 - BRIDGE_END_DRAIN_MARGIN_MS, BRIDGE_END_DRAIN_SAFE_MAX_MS),
     );
     expect(r.clamped).toBe(true);
   });
@@ -68,11 +70,11 @@ describe("capEndDrainMs:曲末排空量的纯桥组投递上界(纯函数)", () 
   it("纯桥组 + 需求 6000ms ⇒ 只扣不可达段 = 4500ms(队列上限未触发)", () => {
     const r = capEndDrainMs(6_000, true);
     expect(r.drainMs).toBe(4_500);
-    expect(r.drainMs).toBeLessThan(BRIDGE_QUEUE_HARD_CAP_MS);
+    expect(r.drainMs).toBeLessThan(BRIDGE_END_DRAIN_SAFE_MAX_MS);
     expect(r.clamped).toBe(true);
   });
 
-  it("纯桥组 + 需求 12000ms ⇒ 被队列硬上限兜住 = 8000ms", () => {
+  it("纯桥组 + 需求 12000ms ⇒ 被排空安全上限兜住 = 8000ms", () => {
     const r = capEndDrainMs(12_000, true);
     expect(r.drainMs).toBe(BRIDGE_END_DRAIN_SAFE_MAX_MS);
     expect(r.drainMs).toBe(8_000);
@@ -276,11 +278,11 @@ describe("pushLoop 曲末排空:纯桥组 ⇒ 按投递上界钳制(日志 + 真
     const m = DRAIN_CLAMP_RE.exec(clampRec!.msg)!;
     const origMs = Number(m[1]);
     const clampedMs = Number(m[2]);
-    expect(origMs).toBeGreaterThan(BRIDGE_QUEUE_HARD_CAP_MS); // 真的超了队列硬上限
+    expect(origMs).toBeGreaterThan(BRIDGE_END_DRAIN_SAFE_MAX_MS); // 真的超了排空安全上限
     expect(clampedMs).toBe(
-      Math.min(origMs - BRIDGE_END_DRAIN_MARGIN_MS, BRIDGE_QUEUE_HARD_CAP_MS),
+      Math.min(origMs - BRIDGE_END_DRAIN_MARGIN_MS, BRIDGE_END_DRAIN_SAFE_MAX_MS),
     );
-    expect(clampedMs).toBe(BRIDGE_QUEUE_HARD_CAP_MS); // = 8000
+    expect(clampedMs).toBe(BRIDGE_END_DRAIN_SAFE_MAX_MS); // = 8000
     expect(clampRec!.msg).toContain("sendspin 曲末排空:");
 
     // 钳制后实际等待 = clamped / speed(倍速折算),标准排空行报的也是钳制后的值
@@ -308,7 +310,7 @@ describe("pushLoop 曲末排空:纯桥组 ⇒ 按投递上界钳制(日志 + 真
     const m = DRAIN_CLAMP_RE.exec(clampRec!.msg)!;
     const origMs = Number(m[1]);
     const clampedMs = Number(m[2]);
-    expect(clampedMs).toBeLessThan(BRIDGE_QUEUE_HARD_CAP_MS); // 队列上限未触发
+    expect(clampedMs).toBeLessThan(BRIDGE_END_DRAIN_SAFE_MAX_MS); // 上限未触发
     expect(Math.abs(clampedMs - (origMs - BRIDGE_END_DRAIN_MARGIN_MS))).toBeLessThanOrEqual(1);
     expect(clampedMs).toBeGreaterThan(0);
     expect(stdWaitMs(out.stdLog, out.recs)).toBe(Math.round(clampedMs / speed));
@@ -324,8 +326,8 @@ describe("pushLoop 曲末排空:混合组 / 纯直连组行为零变化", () => 
     expect(out.frames).toHaveLength(out.totalFrames);
     expect(clampLogOf(out.recs), "混合组不得出现钳制日志").toBeUndefined();
     const waitMs = stdWaitMs(out.stdLog, out.recs);
-    // 原值口径:内容域排空需求 > 队列硬上限也照旧等待(证明没被钳制)
-    expect(waitMs * speed).toBeGreaterThan(BRIDGE_QUEUE_HARD_CAP_MS);
+    // 原值口径:内容域排空需求 > 排空安全上限也照旧等待(证明没被钳制)
+    expect(waitMs * speed).toBeGreaterThan(BRIDGE_END_DRAIN_SAFE_MAX_MS);
     expect(capEndDrainMs(waitMs * speed, false).drainMs).toBe(waitMs * speed);
   }, 40_000);
 
@@ -337,7 +339,7 @@ describe("pushLoop 曲末排空:混合组 / 纯直连组行为零变化", () => 
       expect(out.frames).toHaveLength(out.totalFrames);
       expect(clampLogOf(out.recs), "纯直连组不得出现钳制日志").toBeUndefined();
       const waitMs = stdWaitMs(out.stdLog, out.recs);
-      expect(waitMs * speed).toBeGreaterThan(BRIDGE_QUEUE_HARD_CAP_MS);
+      expect(waitMs * speed).toBeGreaterThan(BRIDGE_END_DRAIN_SAFE_MAX_MS);
     }
 
     // 有判据(false) 与 旧桩(无该属性) 的等待量必须一致(±120ms 计时抖动)

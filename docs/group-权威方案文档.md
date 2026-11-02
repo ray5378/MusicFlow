@@ -1175,3 +1175,44 @@ v4.10.1 在 MAJ-07 之前插入自动救回梯(细节以 airplay 权威文档 v4
 
 ### 3. S2(运维侧):优雅退出 TEARDOWN 已实抓验证(带 session id),240 compose 显式
 `stop_grace_period: 30s`。gracefulShutdown 链路自 v4.10.0 起确认工作,无需再改。
+
+---
+
+## v4.11.2 切歌等待自适应（2026-11-02 真机实测）
+
+> 本节为**最新口径**，与前文任何「混合组 5000ms / 1.75s / 手动切歌等待」表述冲突时以本节为准。
+
+### 结论
+
+1. **手动入口已移除**：组级 `mixed_anchor_lead_ms`（前端「切歌等待」弹窗、`PUT /delays` 的
+   `mixedAnchorLeadMs`、`delayCalib` 读写口）全部停用。DB 历史列保留（禁迁移代码）；
+   CI 守卫 G19 钉死「后端读写口 / API / 前端 / 旧全局常量」四类残留。
+2. **起播 lead 由后端自动决定**：沿用分档 `暖 2.5s / 冷 4.5s`（`BRIDGE_LEAD_TIERED`），
+   纯桥组与混合组同一口径；冷/暖由桥会话是否热复用判定，不再依赖组级用户值。
+3. **自然换歌走「接续」或「预取交接」**，两者都不发 BOUNDARY / 不 `RAOP FLUSH`：
+   - 无 S1 预取（混合组常态）：`continuity=1`，锚点 = 上一曲**内容尾**（含曲末续静音）；
+   - S1 预取就绪（纯桥组）：`handoff=预取起点`，锚点精确等于上一曲内容尾。
+4. **跨曲 ring 必须保留**：`close({keepBridgeDelivery:true})` 置一次性
+   `keepRingForNextPush`，`resetPushMeter()` 消费后跳过 `recentByGroup.clear()`；
+   seek / 真实停止 / 换组仍照旧清空（行为逐字节不变）。
+5. **S1 预取路径同样保留 ring**：非接续分支改为
+   `close({ keepBridgeDelivery: keepQueueForPrefetch })`，否则预取帧被清、边界后静默 ~3.8s。
+6. **内容尾 = `contentTailUs`**：曲末续静音写进 ring 后，`lastContentEndUs` 必须后移到静音尾，
+   否则下一曲首帧 ts 与静音区间重叠、被水位判「已投过」而跳过（= 吞歌开头）。
+
+### 真机验收（240 容器，三首 44s/69s/73s，各两次自然换歌）
+
+| 组合 | 路径 | 锚点 | 桥侧指标 |
+| --- | --- | --- | --- |
+| 纯桥 pb（S1 开） | handoff | +44.000s → +69.000s | `insertedFrames=83703` 恒定 / `skipped=0` |
+| 混合 mix | continuity=1 | +73.000s → +69.000s | `insertedFrames=85993` 恒定 / `skipped=0` |
+| 纯 Sendspin ss | 直连旧路径 | 不适用 | 无桥；行为与改前一致 |
+| 双桥 pb2（S1 开） | handoff ×2 | +73.000s → +69.000s | 两台均 `insertedFrames=72707` 恒定 / `skipped=0` |
+
+`insertedFrames` 定值全部来自开局首包前的一次 realign；换歌过程零新增。
+全程无 `pad-insert`、无 `realigned ... skip=`、无 `timeline-reset warm-reuse-poisoned`、无 `RAOP FLUSH`。
+
+### 回归
+
+- `vitest`：146 文件 / 1968 用例全过；
+- `node backend/scripts/check-group-invariants.mjs`：105 条断言全过（含 G19）。

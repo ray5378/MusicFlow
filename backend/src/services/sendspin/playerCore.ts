@@ -418,24 +418,52 @@ export function playGroupCore(
     log.info(`[Sendspin][handover] ${groupName} ← ${arm.fromGroup} 借流放弃(${r.reason}),走完整起播`);
   }
   const pump = pumpFor(srv, g, onUnplayable);
+  // ★ P2/P3(2026-11-02)接续判定必须在 stop() **之前**取:
+  //  - `interrupted` = 泵还在跑 ⇒ 这次起播是**手动 next/prev/seek** 打断,旧曲没播完,
+  //    天然不接续(与 D6 手动语义一致,无需把 manual 透传到泵);
+  //  - `pump.continuityReady` = 上一曲**自然播完**且时间线尾仍在窗口内、且没有
+  //    可采纳的 S1 预取(预取有自己的精确交接点)。
+  //  ⚠️ seek 判据必须与泵的 `armSeek` 完全同源:`0` 是「从头起播」(QueueController
+  //    每次 playMedia 都带 0),不是 seek —— 否则自动换歌会被误判成 seek 而不接续。
+  const interrupted = pump.active;
+  const continuity = !interrupted && pump.continuityReady(item.songId, seekPositionMs);
   pump.stop(); // 打断上一首,避免重叠推流
   if (seekPositionMs != null) pump.armSeek(seekPositionMs);
-  // 关旧编码器清残留分段(与 playCore 同因:无声事故)—— 两种路径都要。
-  g.close();
-  // ★ 切歌/seek 只 stream/clear 绝不 stream/end(MA keep_stream 语义,详见
-  //   playCore 同名段落注释)。用户组各成员逐一清缓冲,流上下文保留 → gapless。
-  // ★ S1:纯桥组 canKeepStream() 恒 false,有可采纳预取时改走 clearPlayback,
-  //   避免 BOUNDARY{stop} → RAOP FLUSH 清掉旧曲尾(同 playCore 段落说明)。
   const keepQueueForPrefetch = pump.hasPendingPrefetch(item.songId);
-  if (g.canKeepStream() || keepQueueForPrefetch) {
-    g.clearPlayback();
+  // ★ 接续时**什么边界消息都不能发**:
+  //  - `clearPlayback` 会 BOUNDARY{track}(airplay 侧虽保留队列仍会重锚);
+  //  - `finishPlayback` 会 BOUNDARY{stop} → RAOP FLUSH,截断旧曲尾。
+  //  同时 ring / 水位 / 补投定时器是**跨曲同一条时间线**,不能清(见 close 注释)。
+  //  其余路径行为与改前逐字节一致(切歌/seek 只 stream/clear 绝不 stream/end)。
+  if (continuity) {
+    g.close({ keepBridgeDelivery: true });
   } else {
-    // MA legacy 档:只发 `stream/end` 收尾旧流,**不报 stopped**(同 playCore)。
-    g.finishPlayback({ silentState: true });
+    // 关旧编码器清残留分段(与 playCore 同因:无声事故)—— 两种路径都要。
+    // ★ S1(2026-11-02 修正):有可采纳预取时 ring 里存着**新曲开头的预取帧**,
+    //   它与旧曲尚未投出的尾帧都属于同一条跨曲时间线 —— 必须 keep。旧实现这里
+    //   无差别 `close()` 清 ring(随后 pushLoop 起手的 resetPushMeter 又清一次),
+    //   预取帧被一并丢掉 ⇒ 边界后仍静默 3.8s(真机 pad-insert 实测),S1 白做。
+    g.close({ keepBridgeDelivery: keepQueueForPrefetch });
+    // ★ S1:纯桥组 canKeepStream() 恒 false,有可采纳预取时改走 clearPlayback,
+    //   避免 BOUNDARY{stop} → RAOP FLUSH 清掉旧曲尾(同 playCore 段落说明)。
+    if (g.canKeepStream() || keepQueueForPrefetch) {
+      g.clearPlayback();
+    } else {
+      // MA legacy 档:只发 `stream/end` 收尾旧流,**不报 stopped**(同 playCore)。
+      g.finishPlayback({ silentState: true });
+    }
   }
+  log.info(
+    `[Sendspin][continuity] group=${groupName} song=${item.songId} interrupted=${interrupted} ` +
+      `continuity=${continuity} keepPrefetch=${keepQueueForPrefetch}`,
+  );
   g.positionMs = seekPositionMs ?? 0;
   g.audibleStarted = false; // 起播即回可听前,poll 报 buffering 至首帧可听
   g.current = { songId: item.songId, title: item.title, artist: item.artist, album: item.album, coverArt: item.coverArt, mime: item.mime, durationMs: (item.duration ?? 0) * 1000 };
+  // ★ P2 接续:对**已是成员**的直连播放器不能再推 stream/start(那会重开会话/清缓冲,
+  //   把这条连续时间线上的旧曲尾一起弄丢);仍在推流的连接保持原样,只对本次真正
+  //   新加入的成员排队宣告。纯桥组没有直连成员,该分支天然不命中。
+  const alreadyMembers = new Set(g.members);
   for (const id of memberIds) {
     const conn = srv.clients.get(id);
     if (!conn) continue;
@@ -443,7 +471,7 @@ export function playGroupCore(
     g.add(conn); // 成员入组,推流才真正下发
     // 组状态先行、stream/start 延迟到首帧前兑现:与 playCore 单成员时序逐项一致。
     conn.sendGroupUpdate();
-    g.pendingAnnounces.push(conn);
+    if (!continuity || !alreadyMembers.has(conn)) g.pendingAnnounces.push(conn);
   }
   // 后台起播:解码→按组时间线推流。不阻塞调用方(pollState 反映进度)。
   void pump.play(item.songId, nextSongId).catch((e) => {

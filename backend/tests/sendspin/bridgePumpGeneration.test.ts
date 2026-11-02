@@ -7,9 +7,10 @@
 //   ② 重锚分支(firstFrame || timelineReseed !== consumedReseed)是桥代次钩子的
 //      **唯一落点**(BLK-02:不新增 bridgeTimelineReset,g.close() 不清桥):
 //      首帧 → BOUNDARY{track};reseed → BOUNDARY{rehost};3 次重锚代次严格单调推进。
-//   ③ 桥在场绕过 800ms 预填充钳制:锚点 lead ≥ bridgeStartLeadUs(cold)=4.5s,
-//      且 commonSendAheadUs **一字不动**(MAJ-01:桥 lead 绝不并进组公共提前量,
-//      否则真实 ESP32 恒定 +3.7s 偏移)。
+//   ③ 桥在场绕过 800ms 预填充钳制:track 边界首帧 lead ≥ bridgeStartLeadUs(warm)=2.5s
+//      (P1 分档 2026-11-02;seek/rehost 仍吃 cold 4.5s),且 commonSendAheadUs
+//      **一字不动**(MAJ-01:桥 lead 绝不并进组公共提前量,否则真实 ESP32 恒定
+//      +3.7s 偏移)。
 //
 // determinism:PcmWindow.slice() 挂起直到测试显式放行(与 lt1_streamEngineStreamingGaps
 // 同款夹具)—— 放一帧走一拍,重锚分支逐拍可观测,不碰真 ffmpeg / 网络 / 曲库。
@@ -75,7 +76,6 @@ vi.mock("../../src/services/sendspin/streamSource.js", () => {
 import { GroupPump } from "../../src/services/sendspin/streamEngine.js";
 import { nowUs } from "../../src/services/sendspin/clock.js";
 import { bridgeStartLeadUs } from "../../src/services/airplay/bridgeMath.js";
-import { BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US } from "../../src/services/sendspin/constants.js";
 
 const server = { log: () => {} } as any;
 
@@ -262,7 +262,7 @@ describe("② 重锚钩子:唯一落点(BLK-02)", () => {
 });
 
 describe("③ 桥在场绕过 800ms 钳制(MAJ-01)", () => {
-  it("hasBridges()=true → 首帧 lead ≥ bridgeStartLeadUs(cold)=4.5s,commonSendAheadUs 一字不动", async () => {
+  it("hasBridges()=true → track 首帧 lead ≥ bridgeStartLeadUs(warm)=2.5s,commonSendAheadUs 一字不动", async () => {
     H.rows = [{ id: "row-4", duration: 10 }];
     const csa = () => 800_000;
     const { g, genCalls } = makeGroup({ hasBridges: () => true, commonSendAheadUs: csa });
@@ -274,9 +274,10 @@ describe("③ 桥在场绕过 800ms 钳制(MAJ-01)", () => {
 
     expect(genCalls[0]).toEqual([1_000_003, "track"]);
     const leadUs = Number(g.timelineBaseUs - nowUs()); // 与锚点同源的单调钟
-    // 桥 cold lead = 4.5s:既压过 800ms 的 prefill 钳制,也压过 3s 的 reseed lead
-    expect(leadUs).toBeGreaterThanOrEqual(bridgeStartLeadUs([{ warm: false }]) - 1_000_000);
-    expect(leadUs).toBeGreaterThan(3_500_000);
+    // P1 分档(2026-11-02):track 走暖 lead 2.5s —— 仍远高于 800ms 的 prefill 钳制,
+    // 也高于 3s 的 reseed lead 之外的最小桥投递下沿(1.75s);冷 4.5s 只留给 seek/rehost。
+    expect(leadUs).toBeGreaterThanOrEqual(bridgeStartLeadUs([{ warm: true }]) - 1_000_000);
+    expect(leadUs).toBeGreaterThan(1_500_000);
     // MAJ-01 回归断言:组公共提前量没有被污染 —— 同一个函数、同一个返回值
     expect(g.commonSendAheadUs).toBe(csa);
     expect(g.commonSendAheadUs()).toBe(800_000);
@@ -286,7 +287,7 @@ describe("③ 桥在场绕过 800ms 钳制(MAJ-01)", () => {
 });
 
 describe("③b 深锚仅纯桥组(E3 判决,2026-10-26)", () => {
-  it("③c 混合组(桥+直连成员)→ lead 抬到桥投递下沿+补投周期(开头不丢),且非深锚", async () => {
+  it("③c 混合组(桥+直连成员)→ track 边界同样走暖 lead 2.5s(P3 统一口径),非深锚", async () => {
     H.rows = [{ id: "row-5m", duration: 10 }];
     const { g, genCalls } = makeGroup({ hasBridges: () => true });
     g.members.add({ id: "esp-1" }); // 直连成员在场 ⇒ 混合组
@@ -298,14 +299,17 @@ describe("③b 深锚仅纯桥组(E3 判决,2026-10-26)", () => {
 
     const leadUs = Number(g.timelineBaseUs - nowUs());
     // 必须覆盖接收端就绪窗口(混合组锚点 lead 5s,2026-10-27 真机定标);扣观测噪声 300ms
-    expect(leadUs).toBeGreaterThanOrEqual(BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US - 300_000);
-    // 仍是混合组语义(按 MIXED_LEAD 常量起,非 pure-bridge 深锚分支):上界留 1s 噪声
-    expect(leadUs).toBeLessThan(BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US + 1_000_000);
+    // P3(2026-11-02):混合组不再读组级 mixed_anchor_lead_ms(默认 5s),与纯桥组同一分档
+    // —— track 暖 2.5s,仍高于桥投递下沿 1.5s(不吞开头),但不再是固定 5s 静默。
+    expect(leadUs).toBeGreaterThanOrEqual(bridgeStartLeadUs([{ warm: true }]) - 1_000_000);
+    expect(leadUs).toBeLessThan(3_000_000); // 明确不再是 5s 固定等待
+    // P3:纯桥/混合分档一致(暖 2.5s),上界见上一条
+    expect(leadUs).toBeLessThan(3_000_000);
     releaseSlices(); // EOF 收尾
     await waitInactive(pump, 5000);
   }, 30_000);
 
-  it("纯桥组(hasDirectMembers()=false)挂桥 → 深锚保留:lead ≥ cold 4.5s", async () => {
+  it("纯桥组 track 边界 → 暖 lead 2.5s(P1 分档;不再恒冷 4.5s)", async () => {
     H.rows = [{ id: "row-5", duration: 10 }];
     const { g, genCalls } = makeGroup({ hasBridges: () => true, hasDirectMembers: () => false });
     const pump = new GroupPump(server, g);
@@ -315,8 +319,77 @@ describe("③b 深锚仅纯桥组(E3 判决,2026-10-26)", () => {
     await waitGen(genCalls, 1);
 
     const leadUs = Number(g.timelineBaseUs - nowUs());
-    expect(leadUs).toBeGreaterThan(3_500_000); // ≥4.5s(扣观测噪声),绝非 800ms
+    expect(leadUs).toBeGreaterThanOrEqual(bridgeStartLeadUs([{ warm: true }]) - 1_000_000); // ≥2.5s(扣观测噪声)
+    expect(leadUs).toBeLessThan(3_000_000); // 明确不再是 cold 4.5s
     releaseSlices(); // EOF 收尾
+    await waitInactive(pump, 5000);
+  }, 30_000);
+
+  it("纯桥组 seek/rehost 重锚 → 仍吃冷 lead 4.5s(P1 只放松 track)", async () => {
+    H.rows = [{ id: "row-5r", duration: 10 }];
+    const { g, genCalls } = makeGroup({ hasBridges: () => true, hasDirectMembers: () => false });
+    const pump = new GroupPump(server, g);
+    await pump.play("song-r");
+    await waitSlices(1);
+    releaseOne();
+    await waitGen(genCalls, 1);
+    (pump as any).timelineReseed += 1; // rehost 语义:只动 timelineReseed
+    releaseOne();
+    await waitGen(genCalls, 2);
+
+    expect(genCalls[1]![1]).toBe("rehost");
+    const leadUs = Number(g.timelineBaseUs - nowUs());
+    expect(leadUs).toBeGreaterThan(bridgeStartLeadUs([{ warm: false }]) - 1_000_000);
+    releaseSlices(); // EOF 收尾
+    await waitInactive(pump, 5000);
+  }, 30_000);
+
+  it("P2 接续锚点:纯净桥组自然播完后接上一曲时间线尾(不按墙钟重立)", async () => {
+    H.rows = [{ id: "row-p1", duration: 10 }, { id: "row-p2", duration: 10 }];
+    const { g, genCalls } = makeGroup({ hasBridges: () => true, hasDirectMembers: () => false });
+    const pump = new GroupPump(server, g);
+    await pump.play("song-p1");
+    await waitSlices(1);
+    releaseOne();
+    await waitGen(genCalls, 1);
+    // EOF 收尾:交付 <1s / 声明 10s,未过 80s 截断阈值 ⇒ 记为**自然播完**。
+    releaseSlices();
+    await waitInactive(pump, 5000);
+    const end = (pump as any).lastContentEndUs as bigint | null;
+    expect(end).not.toBeNull();
+
+    await pump.play("song-p2");
+    await waitSlices(1);
+    releaseOne();
+    await waitGen(genCalls, 2);
+    const base = g.timelineBaseUs;
+    // 接续生效 = 新锚点就是上一曲尾(旧行为会是 墙钟 + 2.5s,差一个墙钟间隔)。
+    expect((pump as any).continuityFromUs).toEqual(end);
+    expect(Math.abs(Number(base - (end as bigint)))).toBeLessThan(500_000);
+    releaseSlices();
+    await waitInactive(pump, 5000);
+  }, 30_000);
+
+  it("P2 反例:手动 stop 打断(非自然结束)→ 不接续,回暖 lead", async () => {
+    H.rows = [{ id: "row-m1", duration: 10 }, { id: "row-m2", duration: 10 }];
+    const { g, genCalls } = makeGroup({ hasBridges: () => true, hasDirectMembers: () => false });
+    const pump = new GroupPump(server, g);
+    await pump.play("song-m1");
+    await waitSlices(1);
+    releaseOne();
+    await waitGen(genCalls, 1);
+    pump.stop(); // 打断:pushLoop 走不到自然结束记账
+    await waitInactive(pump, 5000);
+    H.sliceWaits = []; // 旧循环挂起的取数已随世代作废
+
+    await pump.play("song-m2");
+    await waitSlices(1);
+    releaseOne();
+    await waitGen(genCalls, 2);
+    expect((pump as any).continuityFromUs).toBeNull();
+    const leadUs = Number(g.timelineBaseUs - nowUs());
+    expect(leadUs).toBeGreaterThanOrEqual(bridgeStartLeadUs([{ warm: true }]) - 1_000_000);
+    releaseSlices();
     await waitInactive(pump, 5000);
   }, 30_000);
 
@@ -333,7 +406,7 @@ describe("③b 深锚仅纯桥组(E3 判决,2026-10-26)", () => {
     // 2026-10-26 新契约:必须覆盖桥投递下沿(1.5s),否则组一开播就把桥来不及
     // 排程的前段内容推过去 ⇒ 真机「SENDSPIN 已出声、AirPlay 还没声、开头整段丢」。
     expect(leadUs).toBeGreaterThanOrEqual(1_500_000);
-    expect(leadUs).toBeLessThan(BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US + 1_000_000); // 定标:混合组 lead=5s
+    expect(leadUs).toBeLessThan(3_000_000); // 定标:混合组 lead=5s
     releaseSlices(); // EOF 收尾
     await waitInactive(pump, 5000);
   }, 30_000);
@@ -360,9 +433,9 @@ describe("③b 深锚仅纯桥组(E3 判决,2026-10-26)", () => {
     releaseSlices(); // EOF 收尾
     await waitInactive(pumpPlain, 5000);
 
-    // 2026-10-26 契约反转:桥在场时全组等桥(无桥组仍 800ms 截断)。固定差值 ≈
-    // 5s − 0.8s = 4.2s(2026-10-27 定标 MIXED_LEAD=5s);上下界留出观测噪声,排除 runaway。
-    expect(leadMixed - leadPlain).toBeGreaterThan(2_000_000);
-    expect(leadMixed - leadPlain).toBeLessThan(5_000_000);
+    // 2026-10-26 契约反转:桥在场时全组等桥(无桥组仍 800ms 截断)。
+    // P3(2026-11-02):混合组改用分档暖 lead ⇒ 差值 ≈ 2.5s − 0.8s = 1.7s
+    expect(leadMixed - leadPlain).toBeGreaterThan(900_000);
+    expect(leadMixed - leadPlain).toBeLessThan(3_000_000);
   }, 30_000);
 });

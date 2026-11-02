@@ -18,7 +18,18 @@
 // 通过 overridePumpSource 可注入测试音源(真实本地 WAV),默认走
 // ensurePlayableStream 解析真实网络曲源。
 
-import { BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US, PREFILL_BUFFER_MAX_MS, PREFILL_BUFFER_MIN_MS } from "./constants.js";
+import {
+  BRIDGE_CONTINUITY_ANCHOR_ENABLED,
+  BRIDGE_CONTINUITY_MAX_WAIT_US,
+  BRIDGE_CONTINUITY_MIXED_ENABLED,
+  BRIDGE_CONTINUITY_STALE_US,
+  BRIDGE_LEAD_TIERED,
+  BRIDGE_PUSH_FLOOR_US,
+  BRIDGE_PUSH_TICK_MS,
+  BRIDGE_TRACK_KEEP_QUEUE_ENABLED,
+  PREFILL_BUFFER_MAX_MS,
+  PREFILL_BUFFER_MIN_MS,
+} from "./constants.js";
 import { SAMPLE_RATE, CHANNELS } from "./encoding.js";
 import { nowUs } from "./clock.js";
 import { PcmWindow, WindowEvictedError, WINDOW_HIGH_SEC, type WindowSource } from "./streamSource.js";
@@ -28,7 +39,6 @@ import { bridgeStartLeadUs, capEndDrainMs } from "../airplay/bridgeMath.js";
 import { ANCHOR_SAFE_LEAD_US } from "../airplay/rates.js";
 import { createLogger } from "../../utils/logger.js";
 import { ap2TruncateMissingSec } from "../source/prefetchConfig.js";
-import { mixedAnchorLeadUsOf } from "../group/delayCalib.js";
 import { readBridgePrefetchConfig } from "./bridgePrefetchConfig.js";
 
 const log = createLogger("Sendspin");
@@ -551,6 +561,14 @@ export class GroupPump {
   // 上一首是否已"自然播完"(用于结束时置空 current 触发 auto-advance)。
   private endedNaturally = false;
 
+  // ---- P2(2026-11-02)接续锚点记账 ----
+  /** 上一曲**自然播完**那一刻的时间线尾(µs,本泵绝对域)。手动切歌/seek 由 stop()
+   *  打断,根本走不到记账户,故它天然只代表「同一时间线可以接着往下走」。
+   *  生命周期:**记完即用一次**(下一次 `play()` 起手快照进 continuityFromUs 后清空)。 */
+  private lastContentEndUs: bigint | null = null;
+  /** 本轮起播可接续的上一曲尾(play() 起手从 lastContentEndUs 快照,随后清空)。 */
+  private continuityFromUs: bigint | null = null;
+
   /** 判死后回传(子进程 → 主进程负缓存同步):由 `pumpFor(_, _, sink)` 装填。
    *  未装填 = 静默丢弃(单测 / 主进程内起播都不受影响)。
    *  回传失败绝不影响推流收尾(调用点整段 try/catch)。 */
@@ -618,6 +636,10 @@ export class GroupPump {
     // 新曲起播:预填充窗口重新打开(旧曲的 settle 状态不能带过来)。
     this.prefillSettled = false;
     this.prefillFilling = false;
+    // ★ P2 接续锚点:先快照上一曲自然播完的时间线尾,再清空 —— 一次起播只消费一次。
+    //   手动切歌/seek 重建走 stop() 中断,不会写 lastContentEndUs ⇒ 快照恒为 null。
+    this.continuityFromUs = this.lastContentEndUs;
+    this.lastContentEndUs = null;
     // debug 日志开关起播这一拍刷新(fire-and-forget,**不 await** —— play 的起播时序
     // 有用例钉死(busy/取源次数),多一个宏任务都会破坏;刷新在取音源的数秒窗口内
     // 必然完成,首个事件(play.start 除外)记录时开关已就绪)。
@@ -910,9 +932,62 @@ export class GroupPump {
   cancelNextTrackPrefetch(keepNextHint = false): void {
     if (!keepNextHint) this.nextSongId = "";
     this.handoffTsUs = null;
+    // P2:真实结束(stopGroupCore)与 seek 都经这里 ⇒ 接续锚点记账一并作废。
+    //   (自然换歌不走这里,故上一曲尾记账得以保留给下一曲。)
+    this.lastContentEndUs = null;
+    this.continuityFromUs = null;
     const pf = this.prefetch;
     this.prefetch = null;
     if (pf) this.closePrefetch(pf);
+  }
+
+  // ---- P2/P3(2026-11-02)接续判定 ----
+  //
+  // 「接续」= 自然换歌时新曲首帧锚在**上一曲自然播完的时间线尾**上,而不是
+  // 「墙钟 + lead」重新立一条时间轴。时间轴连续 ⇒ 桥侧不换代、不清队列、
+  // 不发 BOUNDARY、旧曲余料与新曲首帧无缝相接 ⇒ 既不等 lead 静默,也不吞开头。
+  // 下面四个方法是**同一口径的四次投影**,不要在别处再抄一份判断。
+
+  /** 结构门:开关 + S2 保留队列 + 桥组(纯桥,或混合组已开灰度)。 */
+  private continuityGates(hasBridges?: boolean, isPureBridge?: boolean): boolean {
+    if (!BRIDGE_CONTINUITY_ANCHOR_ENABLED || !BRIDGE_TRACK_KEEP_QUEUE_ENABLED) return false;
+    const hb = hasBridges ?? this.group.hasBridges?.() === true;
+    if (!hb) return false;
+    const pure = isPureBridge ?? this.group.hasDirectMembers?.() !== true;
+    return pure || BRIDGE_CONTINUITY_MIXED_ENABLED;
+  }
+
+  /** 时间窗门:接续点不得太旧(中断/卡了很久)也不得太远(游标领先 = 预填充深度)。
+   *  ⚠️ **未来**这一段不是静默 —— 它是上一曲尚未播完的尾巴,所以 MAX_WAIT 必须
+   *  覆盖预填充深度(纯桥组实测曲末游标领先墙钟 ~15s,旧值 3s 因此恒不触发)。 */
+  private continuityWindowOk(from: bigint | null): boolean {
+    if (from === null) return false;
+    const now = nowUs();
+    const ageUs = Number(now - from);
+    const waitUs = Number(from - now);
+    return ageUs <= BRIDGE_CONTINUITY_STALE_US && waitUs <= BRIDGE_CONTINUITY_MAX_WAIT_US;
+  }
+
+  /** 本曲是否值得**跳过曲末排空**:队列里有下一首,且下一轮起播会走接续。
+   *  排空会把数秒静音写进 ring,随后 playerCore 的 `g.close()` 又清掉 ring ——
+   *  接续点与新曲首帧都在这份 ring 里,排空/清理一旦发生,接续就无从谈起。 */
+  private continuitySlotAvailable(): boolean {
+    if (!this.continuityGates()) return false;
+    const next = this.nextSongId;
+    return !!next && next !== this.songId;
+  }
+
+  /** 主进程(playGroupCore)判定「这次起播能否接续上一曲」。
+   *  与泵内同一套结构门 + 时间窗;额外排除两种已有精确时间轴的路径:
+   *  seek(新时间轴,判据与 `armSeek` 完全一致 —— `0` 是「从头起播」不是 seek)与
+   *  S1 预取(handoffTsUs 已经指向预取起点)。
+   *  ⚠️ 必须与 pushLoop 里的 `continuity` 判定保持**同源**,两侧不一致会让边界
+   *  消息与时间线锚点各走各的(轻则多一条 BOUNDARY,重则 ring 顺序被未来帧打断)。 */
+  continuityReady(songId?: string, seekMs?: number | null): boolean {
+    if (seekMs != null && alignFrameMs(Math.max(0, Math.round(seekMs))) > 0) return false;
+    if (!this.continuityGates()) return false;
+    if (songId && this.hasPendingPrefetch(songId)) return false;
+    return this.continuityWindowOk(this.lastContentEndUs);
   }
 
   /** 曲末预解码下一首:墙钟剩余 ≤ 5s 且满足「纯桥组 / 开关开 / 未预取」时启动。
@@ -1139,15 +1214,29 @@ export class GroupPump {
           //   只对首帧有效(reseed 即 seek 时恒为 null,由 seek()/armSeek 清空)。
           const handoffUs = this.handoffTsUs;
           this.handoffTsUs = null;
+          // ★ 桥组判定(锚点 / 接续 / 边界语义共用;桩缺失 hasDirectMembers 按纯桥组,
+          //   与既有 ③ 用例口径一致)。
+          const hasBridges = this.group.hasBridges?.() === true;
+          const isPureBridge = hasBridges && this.group.hasDirectMembers?.() !== true;
+          // ★ P2 接续判定:这一拍**同时决定桥边界语义** —— 满足接续时新曲接在上一曲
+          //   自然播完的时间线尾上,桥侧不换代、不清队列、不发 BOUNDARY(见 server.ts
+          //   notifyBridgeGeneration 的 continuity 分支),旧曲余料与新曲首帧无缝相接。
+          const continuity =
+            !reseed &&
+            handoffUs === null &&
+            this.continuityGates(hasBridges, isPureBridge) &&
+            this.continuityWindowOk(this.continuityFromUs);
           // ★ 桥代次钩子(§4.3,唯一落点,BLK-02 不新增 bridgeTimelineReset):
           //   这里同时持有 myEpoch 与 this.group,一次覆盖 seek/track(epoch 变)与
           //   rehost(timelineReseed 变)。seek 时 epoch 跳 2、投递路径只见最终值,
           //   恰好只发一次 BOUNDARY;同代次重复触发由桥侧幂等。禁定时器轮询。
           //   S3:handoff 非空 = 预取就绪 ⇒ 该 track 边界不加垫片(见 server.ts)。
+          //   P2:continuity = 接续 ⇒ 不换代/不发 BOUNDARY/不清水位(见 server.ts)。
           this.group.notifyBridgeGeneration?.(
             this.epoch * 1_000_003 + this.timelineReseed,
             reseed ? "rehost" : "track",
             handoffUs !== null,
+            continuity,
           );
           // ★ 重锚这一拍同步刷新上报下界:泵移交(rehost)把下界改成目标落点,seek 把
           //   下界写成目标位置 —— 这里不取,移交后目标端的进度会从
@@ -1203,22 +1292,35 @@ export class GroupPump {
           //   整首开头丢」。抬到「下沿 + 一个补投周期」后首帧即落窗内 ⇒ 开头零丢失;
           //   代价 = 每首歌起播多等 ~1.25s(全组一致,组内同步与时间线语义不变,
           //   仍**不是** cold 深锚 4.5s —— 直连 esp32 不承受秒级跳变)。
-          const anchorLead = this.group.hasBridges?.() === true
-            ? this.group.hasDirectMembers?.() !== true
-              ? Math.max(aheadUs, bridgeStartLeadUs([{ warm: false }])) // 纯桥组:深锚
-              // 两道防线分工(勿混,不可互相替代):
-              //  - 切歌等待(本分支,混合组锚点 lead):重锚时窗口里**有货可取** —— 新代次
-              //    锚点抬高到接收端就绪窗口之上,代价 = 全组新歌晚几秒出声(静默的直接
-              //    来源);混合组专用、组级可配(mixed_anchor_lead_ms,前端弹窗)。
-              //  - 切歌垫片(pendingTrackLeadUs,server.ts):治 0xE0 就绪窗口 2~3s 内
-              //    「收到了也接不住」—— 桥投递时戳整体后移整形,影响**所有带桥的组**,
-              //    冷/暖动态自动挡(组值手动口已删 v4.9.1)。
-              // 混合组:组值优先(前端弹窗可配,子进程直查 db,下一首即生效),
-              //              未配(0/NULL/设备组)⇒ 回退全局默认(v4.7.6 真机定标 5s)。
-              : Math.max(aheadUs, mixedAnchorLeadUsOf(this.group?.name ?? "") ?? BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US)
+          // ★ P1(2026-11-02)分档:track 边界(暖,桥会话原地续用)只等 2.5s,
+          //   seek/rehost 才吃冷 4.5s。`MF_BRIDGE_LEAD_MODE=fixed` ⇒ warm 恒 false,
+          //   回到「任何边界都冷 4.5s」的旧行为。
+          // ★ P3(2026-11-02):**纯桥组与混合组统一口径**,不再有独立的
+          //   `mixed_anchor_lead_ms`。旧实现给混合组配 5s(前端弹窗逐组覆盖)换
+          //   「切歌后全组静默 5s」来避开接收端就绪窗口 —— 那 5s 就是切歌慢的直接
+          //   来源,也是前端「切歌延迟」手动入口的由来(已删)。
+          //   现在:起播/手切/seek 一律按分档 lead 抬锚(2.5s / 4.5s,均 ≥ 桥投递
+          //   窗口下沿 1.5s ⇒ 首帧必落窗内,不吞开头);**自然换歌**再由接续锚点
+          //   接上一曲时间线尾 ⇒ 既不等 5s,也不吞开头。
+          //   两道防线分工仍不可混:本分支 = 时间线锚点;切歌垫片
+          //   (pendingTrackLeadUs,server.ts)= 桥侧投递整形。
+          const anchorLead = hasBridges
+            ? Math.max(aheadUs, bridgeStartLeadUs([{ warm: BRIDGE_LEAD_TIERED && !reseed }]))
             : prefillEnabled()
               ? Math.min(aheadUs, ANCHOR_SAFE_LEAD_US)
               : (reseed ? reseedLead : aheadUs);
+          // ★ P2(2026-11-02)接续锚点:自然换歌不按「墙钟 + lead」重立,而是接在上一曲
+          //   自然播完的时间线尾之后 —— 时间轴连续 ⇒ 桥侧不换代/不清队列,旧曲余料与
+          //   新曲首帧无缝相接,可听静默只剩「解码真实空窗」。
+          //   判据全部收在 continuityGates / continuityWindowOk(与边界语义同一份),
+          //   此处只负责把接续点抬到桥投递可达线之上。
+          let contigUs: bigint | null = null;
+          if (continuity && this.continuityFromUs !== null) {
+            // 接续点不得落进桥投递窗口下沿以内(桥来不及排程 ⇒ 丢开头),故取
+            // 「上一曲尾」与「下沿 + 一个补投周期」的较大者。
+            const deliverFloorUs = nowUs() + BigInt(BRIDGE_PUSH_FLOOR_US + BRIDGE_PUSH_TICK_MS * 1000);
+            contigUs = this.continuityFromUs > deliverFloorUs ? this.continuityFromUs : deliverFloorUs;
+          }
           const lead = BigInt(Math.max(anchorLead, FIRST_FRAME_LEAD_US));
           // ⚠️ 锚点必须**严格大于已发出的最后一个时间戳**(= 此刻的 cursorUs)。
           // 时间线游标按 `round(produced/采样率)` 步进,与墙钟速率几乎相等但不完全相等:
@@ -1227,8 +1329,8 @@ export class GroupPump {
           // 设备端按时间戳排程,倒退是失序信号(虽远低于 hard-sync 阈值,但没理由让它发生)。
           // 取二者较大值即可:回跳只换内容,时间轴永不倒退;与真值的偏差仅数百 µs,
           // 相对 800ms 的 send_ahead 是噪声级,不影响 delta≈0 的锚点语义。
-          // ★ S1:预取交接时锚点 = 预取起点(见上方 handoffUs 注释);否则原公式。
-          const anchor = handoffUs ?? nowUs() + lead;
+          // ★ S1:预取交接时锚点 = 预取起点;P2:自然接续时锚点 = 接续点;否则原公式。
+          const anchor = handoffUs ?? contigUs ?? nowUs() + lead;
           const clamped = anchor > cursorUs ? anchor : cursorUs;
           this.group.timelineBaseUs = clamped;
           cursorUs = clamped;
@@ -1240,7 +1342,9 @@ export class GroupPump {
               ? `sendspin timeline RE-anchored after seek: pos=${this.group.positionMs}ms base=${cursorUs} lead=${lead}us (sendAhead=${aheadUs}us)` +
                 (clamped > anchor ? ` [clamped: wall=${anchor} ≤ cursor,已保单调]` : "")
               : `sendspin timeline anchored: base=${cursorUs} lead=${lead}us (sendAhead=${aheadUs}us)` +
-                ` handoff=${handoffUs ?? "-"} frameMs=${FRAME_MS} frameSamples=${frameSamples}`,
+                ` handoff=${handoffUs ?? "-"} contig=${contigUs ?? "-"} continuity=${continuity}` +
+                ` lastEnd=${this.continuityFromUs ?? "-"}` +
+                ` mode=${BRIDGE_LEAD_TIERED ? "tiered" : "fixed"} frameMs=${FRAME_MS} frameSamples=${frameSamples}`,
           );
         } else {
           tsUs = cursorUs;
@@ -1552,7 +1656,25 @@ export class GroupPump {
               `startTsUs=${this.prefetch.startTsUs}`,
           );
         }
-        if (contentEnded && !this.prefetch) {
+        // ★ P2(2026-11-02):**接续换歌必须跳过曲末排空**。排空会把数秒静音写进 ring,
+        //   随后 playerCore 的 `g.close()` 又清掉 ring —— 接续点(上一曲内容尾)与新曲
+        //   首帧都在这份 ring 里,清掉就没有「连续时间轴」可言。接续时旧曲尾仍按 250ms
+        //   补投窗口继续投给桥(旧曲自然播完),不需要再让服务端干等。
+        const continuityDrainSkip = contentEnded && !this.prefetch && this.continuitySlotAvailable();
+        if (continuityDrainSkip) {
+          logSafe(
+            this.server,
+            "info",
+            `sendspin 曲末排空跳过:接续下一首 continuity=1 next=${this.nextSongId} ` +
+              `endUs=${cursorUs} song=${this.songId}`,
+          );
+        }
+        // ★ P3(2026-11-02):曲末续静音也是**内容尾**的一部分 —— 它是真实写进 ring
+        //   并被投给桥的帧。接续锚点必须落在静音之后,否则下一曲首帧的 ts 与静音
+        //   区间重叠:桥先收到静音、水位推过 ⇒ 新曲开头被判「已投过」直接跳过
+        //   (可闻=开头被吞)。无排空时与 cursorUs 同值,行为零变化。
+        let contentTailUs = cursorUs;
+        if (contentEnded && !this.prefetch && !continuityDrainSkip) {
           // ⚠️ 除以 speed:设备侧的播出同样按倍率走(SENDSPIN_PUSH_SPEED 快进时,
           // 缓冲里的音频会以 speed 倍速播完),不折算会在快进用例里白等几十秒。
           const rawDrainMs =
@@ -1625,6 +1747,8 @@ export class GroupPump {
                 fillMs += stepMs;
               }
             }
+            // 真有续静音写进 ring ⇒ 内容尾后移(静音尾也属于桥时间线)。
+            if (fillMs > 0) contentTailUs = fillTsUs;
             // ★ 每首歌**恰好一行**(不是每步),且**三选一必须都留痕** —— 绝不允许静默:
             //   2026-11 真机教训:排空期 `fillChunks` 恒 0 而一行日志都没有,A/B 连续两次
             //   被误判成「公式错」,真因是 `pushBridgeOnlySilence` 内部 `bridges.size === 0`
@@ -1671,6 +1795,15 @@ export class GroupPump {
         // 曲末排空 / 过渡复位 / 调试事件都依赖它（改成 false 会让设备缓冲被砍、
         // 甚至让 poll 永远报 PLAYING —— 见下面过渡复位那段的判据）。
         this.endedNaturally = contentEnded && !truncated;
+        // ★ P2:只有**自然播完**才记时间线尾(供下一曲接续锚点)。手动切歌/中断经
+        //   stop() 打断,根本走不到这里 ⇒ 下一曲的 continuityFromUs 恒为 null,
+        //   「manual 不透传到泵」也就不会误接续(与 D6 的手动语义天然一致)。
+        // ★ P3(2026-11-02):必须取**内容尾**(含已写进 ring 的曲末续静音),不能再用
+        //   `cursorUs`。续静音占 `[contentEnd, contentEnd+fill]` 且随 ring 保留到下一
+        //   曲起播,若锚点仍落在静音**之前**,下一曲首帧的 ts 会与静音区间重叠:
+        //   桥的水位早已推过那段(静音已投过)⇒ 首帧被判「已投过」直接跳过 ——
+        //   可闻就是「吞歌开头」。无排空时 contentTailUs === cursorUs,行为零变化。
+        if (this.endedNaturally) this.lastContentEndUs = contentTailUs;
         recordSendspinDebug(
           linkDied ? "play.link_died" : contentEnded ? "play.finished" : "play.stopped",
           linkDied

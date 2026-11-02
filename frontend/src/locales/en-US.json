@@ -1074,13 +1074,6 @@
     "delayTestStarted": "Started: one click every 5 s in this group. Align by ear, then press Stop test",
     "delayTestStopped": "Stopped",
     "delayTestFailed": "Delay test failed",
-    "mixedLeadEntry": "Track switch wait",
-    "mixedLeadAuto": "Auto",
-    "mixedLeadTitle": "Track switch wait (mixed group)",
-    "mixedLeadLabel": "Wait",
-    "mixedLeadHint": "How long the whole group waits before a track switch in a mixed group (gives AirPlay members time to get ready so the start of the next track is not clipped). 0 = auto (default 5000 ms); lower values may clip the track start; single-protocol groups (no AirPlay member) are unaffected. Applies from the next track switch",
-    "mixedLeadReset": "Reset to 0 (auto)",
-    "mixedLeadSaved": "Saved — applies from the next track switch",
     "delaySaved": "Saved",
     "delaySavedReconnect": "Saved, AirPlay members reconnecting",
     "delaySaveFailed": "Failed to save delay offset"

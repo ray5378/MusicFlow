@@ -96,19 +96,51 @@ export const BRIDGE_TRACK_LEAD_COLD_US = Number(process.env.BRIDGE_TRACK_LEAD_CO
 /** 切歌垫片·暖(µs):「track」边界但路由暖复用(B 方案)/「seek/rehost」边界 —— 桥
  *  会话原地续用,仅需 BOUNDARY 重锚(清队列+新锚),量级小。env `BRIDGE_TRACK_LEAD_WARM_MS` 可调(0=关)。 */
 export const BRIDGE_TRACK_LEAD_WARM_US = Number(process.env.BRIDGE_TRACK_LEAD_WARM_MS ?? 800) * 1000;
-/** 混合组(桥 + 直连成员)的锚点 lead 下限(µs)= 桥下沿 + 一个补投周期。
- *  为什么必须有:混合组不能深锚(直连 esp32 硬同步阈值 5ms,见 streamEngine 注释),
- *  历史上回落到 prefill 的 min(sendAhead, 800ms)=500ms;而桥的投递窗口下沿是
- *  BRIDGE_PUSH_FLOOR_US(1.5s)⇒ 组一开播就把「桥来不及排程」的前 1s 内容推过去,
- *  桥只能从窗口下沿接 ⇒ 真机表现「SENDSPIN 已经出声、AirPlay 还没声,整首开头丢」。
- *  抬到 下沿 + 补投周期后,首帧本身即落在窗口内 ⇒ 开头零丢失。
- *  代价 = 每首歌起播多等 ~1.25s(全组一致,不破坏组内同步)。 */
-// 混合组锚点 lead:env BRIDGE_MIXED_GROUP_ANCHOR_LEAD_MS 可调(默认 5000)。
-// 2026-10-27 真机定标:track 边界桥会话重启(0xE0)后,接收端(HiVi)的就绪窗口实测
-// ≈2~3s —— lead 低于窗口时新歌开头落在窗口内被接收端跳过(切歌吞开头 100% 复现,
-// 1.75s 吞 1~2s / 3s 吞缩短 / 5s 不吞)。取 5s 覆盖窗口;代价 = 切歌全组静默 ≈5s,
-// 后续可用「解码前滚」(当前曲播放期预解码下一首)从根上消除。
-export const BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US = Number(process.env.BRIDGE_MIXED_GROUP_ANCHOR_LEAD_MS ?? 5000) * 1000;
+// ⚠️ 2026-11-02(P3):混合组**不再**有独立的锚点 lead 常量/组值。旧实现用
+//   `BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US`(默认 5s,前端弹窗可逐组覆盖)换「切歌后
+//   全组静默 5s」来避开接收端就绪窗口。现在纯桥/混合组统一走 P1 分档 lead
+//   (track 暖 2.5s / seek-rehost 冷 4.5s),自然换歌再由 P2 接续锚点接到上一曲
+//   时间线尾上 —— 既不等 5s 也不吞开头。前端手动「切歌延迟」入口随之移除。
+
+// ---- P1(2026-11-02)切歌 lead 分档 ----
+//
+// 旧行为:纯桥组**任何**重锚(track / seek / rehost)一律吃冷启动 4.5s。但 track 边界
+// (含自然换歌与手动 next)桥会话通常是原地续用的(0xE0 不重发),冷 4.5s 里绝大部分
+// 是纯静默等待。分档后:track → 暖 2.5s,seek/rehost 仍吃冷 4.5s。
+// 回退:`MF_BRIDGE_LEAD_MODE=fixed` ⇒ 与引入本改造前逐字节一致(恒冷)。
+export const BRIDGE_LEAD_TIERED =
+  (process.env.MF_BRIDGE_LEAD_MODE ?? "tiered").toLowerCase() !== "fixed";
+
+// ---- P2(2026-11-02)接续锚点(自然换歌不再「墙钟 + lead」重立,接上一曲时间线尾)----
+//
+// 判据(见 streamEngine 重锚分支):桥组 + 上一轮**自然播完** + 未 seek/rehost +
+// 未走预取交接 + S2 保留队列。手动切歌由 stop() 打断、不会写 lastContentEndUs ⇒
+// 天然不接续(与 D6 的 manual 语义一致,无需把 manual 透传到泵)。
+/** 纯桥组缺省 ON:`MF_BRIDGE_CONTINUITY_ANCHOR=0` 关闭。 */
+export const BRIDGE_CONTINUITY_ANCHOR_ENABLED =
+  (process.env.MF_BRIDGE_CONTINUITY_ANCHOR ?? "1") !== "0";
+/** 混合组缺省 ON(`MF_BRIDGE_CONTINUITY_MIXED=0` 单独回退)。
+ *  2026-11-02 起与纯桥组同口径:混合组不再靠手动 5s 静默等接收端,而由接续锚点
+ *  接上一曲时间线尾(直连成员的时间轴也是共享的,连续即无跳变)。 */
+export const BRIDGE_CONTINUITY_MIXED_ENABLED =
+  (process.env.MF_BRIDGE_CONTINUITY_MIXED ?? "1") !== "0";
+/** 接续上限(µs):上一曲尾距现在超过它 ⇒ 放弃接续。
+ *  ⚠️ 这个值要覆盖**预填充深度**(纯桥组实测曲末游标领先墙钟 ~15s):
+ *  接续点本身就落在未来,而未来那段正是上一曲尚未播完的尾巴 —— 等待不是静默,
+ *  是「旧曲继续播」。旧默认 3s 正是 P2 首轮灰度不触发的直接原因(实测 6.14s 被拒)。 */
+export const BRIDGE_CONTINUITY_MAX_WAIT_US =
+  Number(process.env.MF_BRIDGE_CONTINUITY_MAX_WAIT_MS ?? 35000) * 1000;
+/** 接续陈旧阈值(µs):结束距现在超过它(含自动切歌的 poll 5s + 解码)⇒ 视作中断。 */
+export const BRIDGE_CONTINUITY_STALE_US =
+  Number(process.env.MF_BRIDGE_CONTINUITY_STALE_MS ?? 15000) * 1000;
+/** S2 自然换歌保留桥队列(与 airplay/bridgeSession.ts 同一 env、同一缺省 ON)。
+ *  这里再读一份只为让**接续锚点**能同步回退:队列都清了,时间轴连续就无从谈起。 */
+export const BRIDGE_TRACK_KEEP_QUEUE_ENABLED = !(
+  process.env.MF_BRIDGE_TRACK_KEEP_QUEUE === "0" ||
+  process.env.MF_BRIDGE_TRACK_KEEP_QUEUE === "false" ||
+  process.env.MF_BRIDGE_TRACK_KEEP_QUEUE === "off"
+);
+
 /** 播中回填单桥总量上限(µs)。常态窗口宽仅 1s,远达不到;纯防御异常大帧。 */
 export const BRIDGE_BACKFILL_MAX_US = 6_000_000;
 
