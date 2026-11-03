@@ -152,11 +152,12 @@ app.put("/v1/groups/:id/delays", permMiddleware(PERM.RENDERER_USE), async (c) =>
     const before = getMemberDelays(id)[memberId] ?? 0;
     // 内存值先更新(落库在后):Sendspin 侧下一次 pushFrame 立刻按新值打戳 = 真·实时。
     const after = setMemberDelay(id, memberId, body.ms);
-    // AirPlay 侧的补偿 = 该设备相对组时间线的出声偏移。D9(2026-11-01)起走**必生效**路径:
-    // 先平移映射(立即一段 SYNC),随后**重建该成员 RTSP 会话**(TEARDOWN → 新 RECORD =
-    // 设备重新吃一次映射),代价 ~1~2s 静音 —— SYNC 无回执,实测 GGMM 只在 RECORD 时采纳,
-    // 只靠运行中平移无法保证出声时刻真的变。组时间线/其它成员的进度与内容不受影响。
-    // 兜底顺序:该成员会话重建 → 该组桥在跑但设备无会话 ⇒ 重建该组桥 →
+    // AirPlay 侧的补偿 = 该设备相对组时间线的出声偏移。方案1(2026-11-03):
+    // 运行中只平移该设备会话的 RTP↔NTP 映射(立即一段 SYNC),**绝不重建 RTSP 会话** ——
+    // TEARDOWN → 新 RECORD 会清空桥队列并按新会话语义重锚,实测单次制造 6.28~7.60s 静音
+    // (HiVi/MUZO 曾因此永久停止消费)。SYNC 单向无回执 ⇒ 设备若运行中不采纳,新值留待
+    // **下一次自然会话**建立时生效(宁可变声晚一点,也不再拿整条队列陪跑)。
+    // 兜底顺序:该成员会话(原地 retime)→ 该组桥在跑但设备无会话 ⇒ 重建该组桥 →
     // 登记缺失(容器重启后 resume-active 恢复的桥/历史泄漏)⇒ 逐成员幂等 join。
     if (memberId.startsWith("airplay:") && after !== before) {
       const devId = memberId.slice("airplay:".length);

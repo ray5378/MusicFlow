@@ -133,13 +133,13 @@ describe("env 开关与阈值", () => {
     expect(raopBridgeLivenessWatchdogEnabled()).toBe(true);
   });
 
-  it("LIVENESS_MS 缺省 15000(v4.10.1),下限 5000,env 可上调", () => {
-    // 15s 的依据(2026-10-30 240 pcap):HiVi 上行 NTP 4611 包 / 9 会话 / ≈4.1 小时,
-    // 会话内最大间隔仅 6.0s(>10s 样本 0)⇒ 15s = 自然上限 2.5 倍仍有余量;
-    // 旧缺省 45s 会把每次"接收端僵死"的失声拖到 45s 以上。
-    expect(raopBridgeLivenessMs()).toBe(15000);
+  it("LIVENESS_MS 缺省 30000(P1 2026-11-03),下限 5000,env 可上调", () => {
+    // 30s 的依据(见 bridgeSession.raopBridgeLivenessMs 注释):15s 是照 HiVi 标定的,
+    // 但同组 MUZO(.102)的健康节律含 16~17s 空档(240 实测 5 次),15s 必误杀;
+    // 且真死会话由**只读 OPTIONS 仲裁**判(P1),阈值只表示「开始怀疑」。
+    expect(raopBridgeLivenessMs()).toBe(30000);
     process.env.MF_BRIDGE_RAOP_LIVENESS_MS = "10";
-    expect(raopBridgeLivenessMs()).toBe(15000); // 低于下限回落缺省
+    expect(raopBridgeLivenessMs()).toBe(30000); // 低于下限回落缺省
     process.env.MF_BRIDGE_RAOP_LIVENESS_MS = "6000";
     expect(raopBridgeLivenessMs()).toBe(6000);
     process.env.MF_BRIDGE_RAOP_LIVENESS_MS = "60000";

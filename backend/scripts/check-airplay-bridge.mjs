@@ -812,7 +812,8 @@ console.log("===== ⑲ 进程退出(SIGTERM/SIGINT)必须先 TEARDOWN AirPlay �
 //      手动 next/prev 的回拨若没 TTL 守卫,会套到晚得多的新流上;
 //   D7 同组各成员各自规划锚点 ⇒ 同刻不同内容(分裂数秒);
 //   D8 边界处置按本地 reason 判 ⇒ 一台清队列一台保留(跨换歌粘住 2.95s);
-//   D9 只靠 SYNC 平移 ⇒ 接收端只在 RECORD 吃映射,出声时刻其实没变。
+//   D9 只靠 SYNC 平移 ⇒ 接收端只在 RECORD 吃映射,出声时刻其实没变;但 2026-11-03 实测
+//      「为必生效去重建会话」会把整条桥队列清空(6.28~7.60s 静音)⇒ 方案1 改回原地 retime。
 console.log("===== ⑳ D4~D9:组时间线唯一(D4/D5/D7/D8)+ 成员补偿必生效(D6/D9) =====");
 {
   const bs = code(BRIDGE_SESSION);
@@ -940,7 +941,7 @@ console.log("===== ⑳ D4~D9:组时间线唯一(D4/D5/D7/D8)+ 成员补偿必生
     "未找到暖复用污染复位分支",
   );
 
-  // ---- D9:改补偿必生效(重建该成员 RTSP 会话) ----
+  // ---- D9:改补偿落地(原地 retime,绝不重建 RTSP 会话) ----
   check(
     "D9: control.ts 提供 bridgeRebuildDelayDevice 并下发 bridgeRebuildDelay(而不是只 bridgeSetDelay)",
     /export\s+async\s+function\s+bridgeRebuildDelayDevice\(/.test(ctl) &&
@@ -948,15 +949,16 @@ console.log("===== ⑳ D4~D9:组时间线唯一(D4/D5/D7/D8)+ 成员补偿必生
     "未找到 bridgeRebuildDelayDevice → rpc(\"bridgeRebuildDelay\")",
   );
   check(
-    "D9: 子进程 bridgeRebuildDelay 落到 bridgeSessions.rebuildForShift(重建该成员会话)",
+    "D9: 子进程 bridgeRebuildDelay 落到 bridgeSessions.rebuildForShift(落点是原地 retime)",
     /case\s+"bridgeRebuildDelay"\s*:\s*\{[\s\S]{0,400}?this\.bridgeSessions\.rebuildForShift\(/.test(child),
     "childMain 未把 bridgeRebuildDelay 落到 rebuildForShift",
   );
   check(
-    "D9: 会话侧必生效路径 = applyAnchorShift + 立即 reconnectRaop,并记 rebuild-shift 事件",
-    /ev:\s*"rebuild-shift"/.test(bs) && /await\s+this\.reconnectRaop\(\)\s*;/.test(bs) &&
-      /if\s*\(\s*!this\.applyAnchorShift\(\s*shiftUs\s*\)\s*\)\s*return\s+false\s*;/.test(bs),
-    "缺 rebuild-shift 事件 / reconnectRaop / applyAnchorShift 前置",
+    "D9/方案1: 运行中改补偿只 applyAnchorShift(原地 retime),绝不 TEARDOWN 重建会话",
+    /if\s*\(\s*!this\.applyAnchorShift\(\s*shiftUs\s*\)\s*\)\s*return\s+false\s*;/.test(bs) &&
+      /ev:\s*"set-delay-inplace"/.test(bs) &&
+      !/ev:\s*"rebuild-shift"/.test(bs),
+    "rebuildForShift 又回到重建会话(rebuild-shift),或丢了 applyAnchorShift / set-delay-inplace",
   );
   check(
     "D9: AP2 出口无 RTP 时间线 ⇒ rebuildForShift 只更新 opts 并返回 false(交由路由重建兜底)",
@@ -964,11 +966,11 @@ console.log("===== ⑳ D4~D9:组时间线唯一(D4/D5/D7/D8)+ 成员补偿必生
     "AP2 分支未返回 false(调用方会误以为已生效)",
   );
   check(
-    "D9: PUT /groups/:id/delays 的三段兜底顺序 = 重建成员会话 → 重建组桥 → 逐成员 join",
+    "D9: PUT /groups/:id/delays 的三段兜底顺序 = 成员原地 retime → 重建组桥 → 逐成员 join",
     /bridgeRebuildDelayDevice\(\s*devId\s*,\s*after\s*\*\s*1000\s*\)/.test(route) &&
       /else\s+if\s*\(\s*isBridgeRouteActive\(\s*id\s*\)\s*\)\s*\{[\s\S]{0,200}?rebuilt\s*=\s*await\s+rebuildBridgeRoutes\(\s*id\s*\)/.test(route) &&
       /await\s+bridgeJoinMember\(\s*id\s*,/.test(route),
-    "路由未按 成员会话重建 → 组桥重建 → 成员 join 的兜底顺序",
+    "路由未按 成员原地 retime → 组桥重建 → 成员 join 的兜底顺序",
   );
 }
 

@@ -9,13 +9,19 @@
 //      实例销毁 ⇒ "10 分钟内 ≥2 次"永远攒不满。240 实证 2026-10-29 10:03–10:48 连炸
 //      10 次、间隔精确 300s,熔断一次都没生效 ⇒ 状态上提为**设备级**。
 //
+// P1(2026-11-03 变更):15s 是照 HiVi(会话内最大 6.0s)标定的,但同组 MUZO(.102)的
+//   健康节律含 16.14~17.57s 空档 ⇒ 15s 落在健康包络内,必然误杀;MA/libraop 根本没有
+//   这条判据。缺省抬到 30s,且"开始怀疑"后还要过**只读** OPTIONS 仲裁才判死。
+//
 // 钉死:
-//   ① raopBridgeLivenessMs 缺省 15000、env 可覆盖、下限 5000;
-//   ② livenessWatchdogShouldFire 在 16s/15s 处放行、6s 处拦下;paused/非 streaming 恒拦;
+//   ① raopBridgeLivenessMs 缺省 30000、env 可覆盖、下限 5000;
+//   ② livenessWatchdogShouldFire 在 16s/15s(显式阈值)处放行、6s 处拦下;
+//      缺省 30s 下 17.57s(MUZO 实测最大健康空档)必须拦下;paused/非 streaming 恒拦;
 //      设备本会话零 timing 心跳 ⇒ 恒不触发(v4.11.0 豁免,GGMM 实证);
 //   ③ noteLivenessFire 跨"会话重建"累计(不依赖任何 session 实例);
 //   ④ 窗口内第 2 次起退避 30s、≥3 次退避 120s;
-//   ⑤ 连续 3 次重连都没救回心跳 ⇒ 停用 30min;任何一次救回来就立刻归零。
+//   ⑤ 连续 3 次重连都没救回心跳 ⇒ 停用 30min;任何一次救回来就立刻归零;
+//   ⑥ optionsProbeSaysAlive:OPTIONS 有状态码(含 4xx)= 活着,只有无响应/5xx 才判死。
 import "../plugins/_env.js";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -28,6 +34,7 @@ import {
   raopBridgeLivenessWatchdogEnabled,
   resetLivenessBreaker,
 } from "../../src/services/airplay/bridgeSession.js";
+import { optionsProbeSaysAlive } from "../../src/services/airplay/raop.js";
 
 const ENV_KEY = "MF_BRIDGE_RAOP_LIVENESS_MS";
 
@@ -60,20 +67,20 @@ afterEach(() => {
 });
 
 describe("raopBridgeLivenessMs:阈值", () => {
-  it("缺省 15000ms(不是旧的 45000)", () => {
-    expect(raopBridgeLivenessMs()).toBe(15000);
+  it("缺省 30000ms(15s 会误杀 MUZO 的 16~17s 健康空档)", () => {
+    expect(raopBridgeLivenessMs()).toBe(30000);
   });
 
-  it("env 可覆盖到 15000 以上", () => {
-    process.env[ENV_KEY] = "20000";
-    expect(raopBridgeLivenessMs()).toBe(20000);
+  it("env 可覆盖到 30000 以上", () => {
+    process.env[ENV_KEY] = "45000";
+    expect(raopBridgeLivenessMs()).toBe(45000);
   });
 
   it("env 低于下限 5000 视为误配,回落缺省", () => {
     process.env[ENV_KEY] = "3000";
-    expect(raopBridgeLivenessMs()).toBe(15000);
+    expect(raopBridgeLivenessMs()).toBe(30000);
     process.env[ENV_KEY] = "abc";
-    expect(raopBridgeLivenessMs()).toBe(15000);
+    expect(raopBridgeLivenessMs()).toBe(30000);
   });
 
   it("看门狗总开关缺省 ON,0/false 关闭", () => {
@@ -84,8 +91,8 @@ describe("raopBridgeLivenessMs:阈值", () => {
 });
 
 describe("livenessWatchdogShouldFire:判据边界", () => {
-  it("心跳静默 16s > 15s 阈值 ⇒ 触发", () => {
-    expect(livenessWatchdogShouldFire(baseOpts({ quietMs: 16000 }))).toBe(true);
+  it("心跳静默 16s > 15s(显式阈值)⇒ 放行(此时只是「开始怀疑」,还要过 OPTIONS 仲裁)", () => {
+    expect(livenessWatchdogShouldFire(baseOpts({ quietMs: 16000, thresholdMs: 15000 }))).toBe(true);
   });
 
   it("心跳静默 6s(实测健康期最大间隔)⇒ 绝不触发", () => {
@@ -93,7 +100,13 @@ describe("livenessWatchdogShouldFire:判据边界", () => {
   });
 
   it("静默 15s 恰好等于阈值 ⇒ 不触发(严格大于)", () => {
-    expect(livenessWatchdogShouldFire(baseOpts({ quietMs: 15000 }))).toBe(false);
+    expect(livenessWatchdogShouldFire(baseOpts({ quietMs: 15000, thresholdMs: 15000 }))).toBe(false);
+  });
+
+  it("★ 缺省 30s 下 17.57s(MUZO 实测最大健康空档)必须拦下", () => {
+    expect(livenessWatchdogShouldFire(baseOpts({ quietMs: 17_570 }))).toBe(false);
+    expect(livenessWatchdogShouldFire(baseOpts({ quietMs: 29_999 }))).toBe(false);
+    expect(livenessWatchdogShouldFire(baseOpts({ quietMs: 30_001 }))).toBe(true);
   });
 
   it("★ 设备本会话从未发过 timing(GGMM/240A64FED051 实证)⇒ 判据不适用,静默再久也不触发", () => {
@@ -185,5 +198,23 @@ describe("noteLivenessFire:设备级熔断状态机", () => {
     resetLivenessBreaker("dev-m");
     expect(livenessBreakerState("dev-m").fireAt.length).toBe(0);
     expect(noteLivenessFire("dev-m", 3000, true).firesInWindow).toBe(1);
+  });
+});
+
+describe("optionsProbeSaysAlive:P1 仲裁判据", () => {
+  it("OPTIONS 200 ⇒ 活着,绝不 TEARDOWN", () => {
+    expect(optionsProbeSaysAlive({ reachable: true, status: 200 })).toBe(true);
+  });
+
+  it("OPTIONS 454(Session Not Found,无 session 的正常应答)⇒ 仍判活着", () => {
+    expect(optionsProbeSaysAlive({ reachable: true, status: 454 })).toBe(true);
+  });
+
+  it("TCP/RTSP 无响应 ⇒ 判死(唯一允许重连的情形)", () => {
+    expect(optionsProbeSaysAlive({ reachable: false, status: null })).toBe(false);
+  });
+
+  it("设备自己回 5xx ⇒ 判死(服务端已报错,重握手才有救)", () => {
+    expect(optionsProbeSaysAlive({ reachable: true, status: 500 })).toBe(false);
   });
 });

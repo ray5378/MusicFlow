@@ -399,25 +399,19 @@ export interface RaopProbeResult {
   detail: string;
 }
 
-/** S1/S3:独立 RAOP 探测连接 —— 新 RTSP socket 上 OPTIONS + TEARDOWN(**无
- *  session 也发**,设备回 454 无害),把僵死半开会话在重握手前请掉。
- *  绝不复用 RaopPlayer:不建 UDP 通道、不做加密协商、不留状态 —— 纯一次性连接。
- *  OPTIONS 不答(TCP 活但 RTSP 层哑)按不可达处理:重试握手也只会空耗 12s 预算。 */
-export async function raopTeardownProbe(host: string, port: number, timeoutMs = 6_000): Promise<RaopProbeResult> {
-  const fail = (detail: string): RaopProbeResult => ({ reachable: false, optionsStatus: null, teardownStatus: null, detail });
-  let sock: net.Socket;
-  try {
-    sock = await new Promise<net.Socket>((resolve, reject) => {
-      const s = net.createConnection({ host, port }, () => resolve(s));
-      s.once("error", (e) => reject(e));
-      setTimeout(() => reject(new Error("RTSP connect timeout")), timeoutMs).unref();
-    });
-  } catch (e) {
-    return fail(`TCP connect: ${(e as Error)?.message || e}`);
-  }
-  // 单请求往返:解析首个 \r\n\r\n 前的状态行(RTSP 响应可能带 interleaved 二进制,
-  // 只认 `RTSP/1.0 <code>`)。超时/出错/对端直断都按 null 回(不抛,探测永不抛)。
-  const roundtrip = (req: string): Promise<number | null> => new Promise((resolve) => {
+/** 打开一条一次性 RTSP 探测连接(不建 UDP、不做加密协商、不留会话状态)。 */
+async function openProbeSocket(host: string, port: number, timeoutMs: number): Promise<net.Socket> {
+  return await new Promise<net.Socket>((resolve, reject) => {
+    const s = net.createConnection({ host, port }, () => resolve(s));
+    s.once("error", (e) => reject(e));
+    setTimeout(() => reject(new Error("RTSP connect timeout")), timeoutMs).unref();
+  });
+}
+
+/** 单请求往返:解析首个 \r\n\r\n 前的状态行(RTSP 响应可能带 interleaved 二进制,
+ *  只认 `RTSP/1.0 <code>`)。超时/出错/对端直断都按 null 回(不抛,探测永不抛)。 */
+function probeRoundtrip(sock: net.Socket, req: string, timeoutMs: number): Promise<number | null> {
+  return new Promise((resolve) => {
     let buf = "";
     let settled = false;
     const done = (v: number | null): void => {
@@ -440,14 +434,63 @@ export async function raopTeardownProbe(host: string, port: number, timeoutMs = 
     setTimeout(() => done(null), timeoutMs).unref();
     sock.write(req, "latin1");
   });
-  const url = `rtsp://${host}:${port}/`;
-  // 头与 sendRtsp 同契约:请求行必须带 RTSP/1.0 版本段(漏了设备回 400)。
-  const mk = (method: string, cseq: number): string =>
-    `${method} ${url} RTSP/1.0\r\nCSeq: ${cseq}\r\nUser-Agent: iTunes/7.6.2 (Windows; N;)\r\n\r\n`;
+}
+
+/** 探测请求行:头与 sendRtsp 同契约 —— 请求行必须带 RTSP/1.0 版本段(漏了设备回 400)。 */
+function probeRequest(method: string, url: string, cseq: number): string {
+  return `${method} ${url} RTSP/1.0\r\nCSeq: ${cseq}\r\nUser-Agent: iTunes/7.6.2 (Windows; N;)\r\n\r\n`;
+}
+
+/** P1(2026-11-03):**只读**健康探测 —— 单发 OPTIONS,**绝不 TEARDOWN**。
+ *
+ *  只用于"会话到底死没死"的仲裁:有状态码应答(200/4xx 皆可)= RTSP 通道活着。
+ *  ⚠️ 绝不可复用 `raopTeardownProbe`:它会盲发 TEARDOWN,实测能把合法在线会话真杀掉
+ *  (tests/airplay/raopProbe.test.ts「S3 防误杀」一节)。 */
+export async function raopOptionsProbe(
+  host: string,
+  port: number,
+  timeoutMs = 3_000,
+): Promise<{ reachable: boolean; status: number | null; detail: string }> {
+  let sock: net.Socket;
   try {
-    const optionsStatus = await roundtrip(mk("OPTIONS", 1));
+    sock = await openProbeSocket(host, port, timeoutMs);
+  } catch (e) {
+    return { reachable: false, status: null, detail: `TCP connect: ${(e as Error)?.message || e}` };
+  }
+  try {
+    const status = await probeRoundtrip(sock, probeRequest("OPTIONS", `rtsp://${host}:${port}/`, 1), timeoutMs);
+    return status === null
+      ? { reachable: false, status: null, detail: "OPTIONS 无响应(TCP 活但 RTSP 层哑)" }
+      : { reachable: true, status, detail: "ok" };
+  } finally {
+    try { sock.destroy(); } catch { /* ignore */ }
+  }
+}
+
+/** 探测判定(纯函数):OPTIONS 拿到状态码即"通道活着" ⇒ **绝不**做破坏性重连。
+ *  只有 TCP/RTSP 无响应,或 5xx(服务端自己报错)才算会话已不可救。 */
+export function optionsProbeSaysAlive(r: { reachable: boolean; status: number | null }): boolean {
+  return r.reachable && r.status !== null && r.status < 500;
+}
+
+/** S1/S3:独立 RAOP 探测连接 —— 新 RTSP socket 上 OPTIONS + TEARDOWN(**无
+ *  session 也发**,设备回 454 无害),把僵死半开会话在重握手前请掉。
+ *  绝不复用 RaopPlayer:不建 UDP 通道、不做加密协商、不留状态 —— 纯一次性连接。
+ *  OPTIONS 不答(TCP 活但 RTSP 层哑)按不可达处理:重试握手也只会空耗 12s 预算。
+ *  ⚠️ 只用于**已判定要重连**的清理路径;健康仲裁请用 `raopOptionsProbe`。 */
+export async function raopTeardownProbe(host: string, port: number, timeoutMs = 6_000): Promise<RaopProbeResult> {
+  const fail = (detail: string): RaopProbeResult => ({ reachable: false, optionsStatus: null, teardownStatus: null, detail });
+  let sock: net.Socket;
+  try {
+    sock = await openProbeSocket(host, port, timeoutMs);
+  } catch (e) {
+    return fail(`TCP connect: ${(e as Error)?.message || e}`);
+  }
+  const url = `rtsp://${host}:${port}/`;
+  try {
+    const optionsStatus = await probeRoundtrip(sock, probeRequest("OPTIONS", url, 1), timeoutMs);
     if (optionsStatus === null) return fail("OPTIONS 无响应(TCP 活但 RTSP 层哑)");
-    const teardownStatus = await roundtrip(mk("TEARDOWN", 2));
+    const teardownStatus = await probeRoundtrip(sock, probeRequest("TEARDOWN", url, 2), timeoutMs);
     return {
       reachable: true,
       optionsStatus,

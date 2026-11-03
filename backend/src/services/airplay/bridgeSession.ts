@@ -45,7 +45,15 @@ import { computeBridgeBackoffMs } from "./bridgeSource.js";
 import { PolyphaseResampler, floatToPcmS16, pcmS16ToFloat } from "./resampler.js";
 import { audibleAtUs, computeBridgeAnchors, driftCorrection, groupDelayUs, type BridgeAnchors } from "./bridgeMath.js";
 import { nowUs } from "../../utils/hostClock.js";
-import { RaopPlayer, CHUNK_LEN, raopBridgeConnectPrimeEnabled, type BridgeStreamEndReason, type RaopSession } from "./raop.js";
+import {
+  RaopPlayer,
+  CHUNK_LEN,
+  optionsProbeSaysAlive,
+  raopBridgeConnectPrimeEnabled,
+  raopOptionsProbe,
+  type BridgeStreamEndReason,
+  type RaopSession,
+} from "./raop.js";
 import { getAirPlayVolumeState, DEFAULT_AIRPLAY_VOLUME } from "./deviceState.js";
 import { degreesToDb } from "./decoder.js";
 import { AP2_SEND_ERROR_LIMIT, Ap2StreamSession, type Ap2StreamOptions, type Ap2StreamState } from "./ap2/ap2Stream.js";
@@ -391,18 +399,27 @@ export function raopBridgeLivenessWatchdogEnabled(): boolean {
   return !(v === "0" || v === "false");
 }
 
-/** 看门狗阈值 ms(MF_BRIDGE_RAOP_LIVENESS_MS,缺省 15000,下限 5000)。 */
+/** 看门狗阈值 ms(MF_BRIDGE_RAOP_LIVENESS_MS,缺省 30000,下限 5000)。 */
 export function raopBridgeLivenessMs(): number {
   const v = Number(process.env.MF_BRIDGE_RAOP_LIVENESS_MS);
-  // 判据 = timing 心跳。缺省 **15s** 而不是 v4.10.0 的 45s(2026-10-30 实测改)：
-  //   240 全量 pcap 里 HiVi 上行 NTP 共 4611 包 / 9 个会话 / ≈4.1 小时播放,
-  //   **会话内最大间隔只有 6.0 秒**(直方图 0.5-5s:4583、5-10s:3、>10s:0),
-  //   即健康期铁定 20 次/分钟、绝不抖到 10s 以上 ⇒ 15s = 自然上限的 2.5 倍仍有富余。
-  //   而 45s 会把每次"接收端僵死"的失声拉长到 45s 以上:实测一次事件的纯断音是
-  //   14s,其中 45s 全耗在"等判据",用户听感就是"失声一分钟"。
+  // 判据 = timing 心跳静默。缺省 **30s**(2026-11-03 由 15s 改,取证见下)：
+  //   ① 15s 是照 **HiVi**(09 会话、会话内最大间隔 6.0s)标定的,但同一群里**MUZO
+  //      (.102)** 的健康节律是"每 3s 一次 + 偶发 16~17s 空档"(240 实测:671 个间隔中
+  //      593 个=3s,空档 16.14/16.52/17.06/17.37/17.57s)⇒ 15s 落在健康行为包络内,
+  //      必然误杀。同一台 HiVi 在 MA 下不卡,正是因为 MA/libraop **没有**这条判据。
+  //   ② 真正的死会话不再靠时间猜:先做**只读** OPTIONS 仲裁(arbitrateLiveness),
+  //      有应答就绝不 TEARDOWN;30s 只是"开始怀疑"的门槛,不再等于"判死"。
+  //   ③ 单次误杀的实际代价 = 整条桥队列(实测 6.28~7.60s 静音 + 内容丢弃),
+  //      所以宁可晚 15s 怀疑,也不能把 16s 的健康空档当死。
   // env 下限放到 5s(排障用);低于 5s 视为误配,回落缺省。
-  return Number.isFinite(v) && v >= 5000 ? v : 15000;
+  return Number.isFinite(v) && v >= 5000 ? v : 30000;
 }
+
+/** P1 仲裁探测节流:与 MA 的 RTSP OPTIONS 保活同频(25s);失败后 5s 重试,
+ *  连续 2 次不可达才判死(单次可能是瞬断,重连代价 = 一整个队列的静音)。 */
+const LIVENESS_PROBE_INTERVAL_MS = 25_000;
+const LIVENESS_PROBE_RETRY_MS = 5_000;
+const LIVENESS_PROBE_TIMEOUT_MS = 3_000;
 
 /** 熔断(纯函数):10 分钟内因心跳缺失重连 ≥2 次 ⇒ 判据可疑,停用 30 分钟。
  *  任何自动恢复都必须有失败退避 —— v4.9.8 的反面教材就是没有退避,一次误判变连环重连。 */
@@ -955,6 +972,12 @@ export class BridgeSession {
   private timingCountAtFire = 0;
   /** 「本代次已打过『设备从不发 timing,看门狗豁免』日志」的代次号(防 2s tick 刷屏)。 */
   private livenessNoTimingLoggedGen = "";
+  /** P1(2026-11-03):看门狗仲裁 —— 静默只触发一次**只读** OPTIONS 探测,探测在飞时防重入。 */
+  private livenessProbeInFlight = false;
+  private livenessProbeAtMs = 0;
+  private livenessProbeFailures = 0;
+  /** 「本代次已打过『探测有应答 ⇒ 判良性』日志」的代次号(探测每 25s 一次,不刷屏)。 */
+  private livenessProbeOkGen = "";
   /** C-4 结构性兜底:connected 且有 player 却一直 aligner=null(无消费者)的起始时刻。 */
   private noConsumerSince = 0;
   /** v4.9.7:RAOP 会话重建期间的互斥门 —— 期间禁止 maybeBeginStream 起流,
@@ -1727,6 +1750,75 @@ export class BridgeSession {
     this.statsTimer.unref?.();
   }
 
+  /** P1(2026-11-03)看门狗仲裁:静默只能"开始怀疑",不能直接判死。
+   *
+   *  判据 `quiet > threshold` 只说明设备没发 NTP 请求。MUZO 的健康节律本身就含
+   *  16~17s 空档(240 实测 671 个间隔里 593 个=3s,空档 16.14~17.57s),而 MA/libraop
+   *  全程没有这条判据(只有 RTSP/控制面报错才重连)⇒ 同一台设备在 MA 下不卡。
+   *
+   *  仲裁 = 一次**只读** OPTIONS(绝不复用会盲发 TEARDOWN 的 raopTeardownProbe):
+   *  有状态码应答 ⇒ 会话活着,绝不 TEARDOWN;连续 2 次 TCP/RTSP 无响应才走原重连。
+   *  为什么要 2 次:单次可能是瞬断,而误判代价 = 整条桥队列(实测 6.28~7.60s 静音)。
+   */
+  private async arbitrateLiveness(quietMs: number, thresholdMs: number): Promise<void> {
+    if (this.closed || this.livenessReconnectInFlight || this.livenessProbeInFlight) return;
+    if (this.raopReconnectTimer !== null) return;
+    const now = Date.now();
+    const minGap = this.livenessProbeFailures > 0 ? LIVENESS_PROBE_RETRY_MS : LIVENESS_PROBE_INTERVAL_MS;
+    if (now - this.livenessProbeAtMs < minGap) return;
+    this.livenessProbeAtMs = now;
+    this.livenessProbeInFlight = true;
+    let verdict: { reachable: boolean; status: number | null; detail: string };
+    try {
+      verdict = await raopOptionsProbe(this.opts.host ?? "", this.opts.port ?? 5000, LIVENESS_PROBE_TIMEOUT_MS);
+    } catch (e) {
+      verdict = { reachable: false, status: null, detail: `probe threw: ${(e as Error)?.message || e}` };
+    } finally {
+      this.livenessProbeInFlight = false;
+    }
+    // 探测在飞的 3s 里状态可能已变(重连已排上/已暂停/已关闭)⇒ 以最新状态为准,不重复动手
+    if (this.closed || this.livenessReconnectInFlight || this.raopReconnectTimer !== null) return;
+    if (!this.connected || this.player === null || this.aligner === null || this.pausedState) return;
+    if (optionsProbeSaysAlive(verdict)) {
+      this.livenessProbeFailures = 0;
+      if (this.livenessProbeOkGen !== String(this.generation)) {
+        this.livenessProbeOkGen = String(this.generation);
+        log.info(`[airplay-bridge] liveness watchdog 仲裁: device=${this.deviceId} gen=${this.generation} timing 心跳静默 ${(quietMs / 1000).toFixed(1)}s(≥ ${(thresholdMs / 1000).toFixed(0)}s),但 RTSP OPTIONS 应答 ${verdict.status} ⇒ 会话健康,不 TEARDOWN`);
+      }
+      return;
+    }
+    this.livenessProbeFailures += 1;
+    log.warn(`[airplay-bridge] liveness watchdog 仲裁失败: device=${this.deviceId} gen=${this.generation} 静默 ${(quietMs / 1000).toFixed(1)}s,RTSP OPTIONS ${verdict.detail}(连续 ${this.livenessProbeFailures} 次不可达)`);
+    if (this.livenessProbeFailures < 2) return;
+    this.livenessProbeFailures = 0;
+    // 判「上一次重连到底救没救回来」= **同一个 player** 的 timingCount 有没有涨过。
+    // ⚠️ 绝不能用 lastTimingAt 比较:它是字段初值=构造时刻,新 player 恰在 fire 之后
+    // 构造 ⇒ 条件恒真 ⇒ failedRun 永远归零 ⇒ 30min 止损变成死代码(复核 C-1)。
+    const heartbeatSinceLastFire = this.player !== null && this.player.timingCount > this.timingCountAtFire;
+    if (this.player !== null) this.timingCountAtFire = this.player.timingCount;
+    const fired = noteLivenessFire(this.deviceId, Date.now(), heartbeatSinceLastFire);
+    if (fired.disabled) {
+      log.warn(`[airplay-bridge] liveness watchdog 熔断: device=${this.deviceId} 连续 3 次重连都没换回心跳 ⇒ 停用 30min(判据或设备侧已不可救,止损避免连环重连)`);
+      return;
+    }
+    this.livenessReconnectInFlight = true;
+    log.warn(`[airplay-bridge] liveness watchdog: device=${this.deviceId} gen=${this.generation} timing 心跳已停 ${(quietMs / 1000).toFixed(1)}s ≥ ${(thresholdMs / 1000).toFixed(0)}s 且 RTSP 探测连续 2 次不可达 ⇒ 判会话已死,先 TEARDOWN 旧会话再完整重握手(10min 内第 ${fired.firesInWindow} 次,连续未救回 ${fired.failedRun} 次)`);
+    void this.reconnectRaop()
+      .catch(() => { /* 重连失败已由 scheduleRaopReconnect 接管退避 */ })
+      .finally(() => {
+        this.livenessReconnectInFlight = false;
+        // ★ v4.10.1 复核 C-2:重连完成必须同时重置 **quiet 基线**。
+        //   新 player 在 `connect()` **之前**构造,而 connect 预算是 12s
+        //  (raop.ts AIRPLAY_CONNECT_BUDGET_MS)⇒ 一次慢重连做完时 lastTimingAt 已经
+        //   "12s 旧",短阈值下再过一个 2s tick 就会立刻二次判定 ⇒ TEARDOWN 刚建好的会话。
+        //   这里只给"宽限窗",不代表设备活过来 —— 活体判据看 timingCount。
+        if (this.player) {
+          this.player.lastDeviceSignalAt = Date.now();
+          this.player.lastTimingAt = Date.now();
+        }
+      });
+  }
+
   /** §10.5 stats tick:每设备一行 JSON(ev:"tick"),clock 恒 local-rtp-ntp(同源 host 单调钟)。 */
   private emitStatsTick(): void {
     if (this.closed) return;
@@ -1773,33 +1865,10 @@ export class BridgeSession {
         hasTimingHeartbeat: livenessHasHeartbeat,
       })
     ) {
-      // 判「上一次重连到底救没救回来」= **同一个 player** 的 timingCount 有没有涨过。
-      // ⚠️ 绝不能用 lastTimingAt 比较:它是字段初值=构造时刻,新 player 恰在 fire 之后
-      // 构造 ⇒ 条件恒真 ⇒ failedRun 永远归零 ⇒ 30min 止损变成死代码(复核 C-1)。
-      const heartbeatSinceLastFire = this.player !== null && this.player.timingCount > this.timingCountAtFire;
-      if (this.player !== null) this.timingCountAtFire = this.player.timingCount;
-      const fired = noteLivenessFire(this.deviceId, Date.now(), heartbeatSinceLastFire);
-      if (fired.disabled) {
-        log.warn(`[airplay-bridge] liveness watchdog 熔断: device=${this.deviceId} 连续 3 次重连都没换回心跳 ⇒ 停用 30min(判据或设备侧已不可救,止损避免连环重连)`);
-        return;
-      }
-      this.livenessReconnectInFlight = true;
-      log.warn(`[airplay-bridge] liveness watchdog: device=${this.deviceId} gen=${this.generation} timing 心跳已停 ${(livenessQuietMs / 1000).toFixed(1)}s ≥ ${(livenessThresholdMs / 1000).toFixed(0)}s ⇒ 判会话未被接管/接收端僵死,先 TEARDOWN 旧会话再完整重握手(10min 内第 ${fired.firesInWindow} 次,连续未救回 ${fired.failedRun} 次)`);
-      void this.reconnectRaop()
-        .catch(() => { /* 重连失败已由 scheduleRaopReconnect 接管退避 */ })
-        .finally(() => {
-          this.livenessReconnectInFlight = false;
-          // ★ v4.10.1 复核 C-2:重连完成必须同时重置 **quiet 基线**。
-          //   新 player 在 `connect()` **之前**构造,而 connect 预算是 12s
-          //  (raop.ts AIRPLAY_CONNECT_BUDGET_MS)⇒ 一次慢重连做完时 lastTimingAt 已经
-          //   "12s 旧",15s 阈值下再过一个 2s tick 就会立刻二次判定 ⇒ TEARDOWN 刚建好的
-          //   会话。45s 阈值时 12s 远小于阈值所以从不暴露,降到 15s 才成为真风险。
-          //   这里只给"宽限窗",不代表设备活过来 —— 活体判据看 timingCount。
-          if (this.player) {
-            this.player.lastDeviceSignalAt = Date.now();
-            this.player.lastTimingAt = Date.now();
-          }
-        });
+      // ★ P1(2026-11-03):静默 ≠ 会话死。设备只是"没发 NTP 请求",RTSP 通道可能完全健康
+      //   (MA/libraop 从不用静默判死,只有 RTSP/控制面报错才重连)。先做一次**只读**
+      //   OPTIONS 仲裁:有状态码应答就判良性、绝不 TEARDOWN;连续 2 次无响应才重连。
+      void this.arbitrateLiveness(livenessQuietMs, livenessThresholdMs);
     }
     // C-4(复核)结构性兜底:看门狗要求 `streaming = aligner !== null`,而本次事故的
     // 状态恰恰是 **aligner 恒 null**(240 实证 04:21:37–04:21:44 无一个 anchor)⇒ 看门狗
@@ -2182,16 +2251,19 @@ export class BridgeSession {
     return true;
   }
 
-  /** D9(2026-11-01):改补偿的**必生效**兜底 —— 重建本设备侧 RTSP 会话
-   *  (TEARDOWN → 新 ANNOUNCE/SETUP/RECORD),让设备**重新吃一次** RTP↔NTP 映射。
+  /** D9(2026-11-01)/方案1(2026-11-03):改补偿的落地 —— **只平移运行中的映射,绝不重建 RTSP 会话**。
    *
-   *  为什么必须有这条:SYNC 是单向的、无回执,且实测 GGMM 这类接收端只在 RECORD
-   *  时吃映射、运行中改 SYNC 不一定采纳 ⇒ 仅 `retimeByUs`(D6)无法保证出声时刻真的变。
-   *  内容轴不受影响(可听时间 = 内容 ts;锚点仍走 D7/D8 的组规则),代价 = 重建窗口
-   *  (~1~2s)静音 —— 这是用户明确接受的兜底代价。
+   *  历史(D9):为保证设备"必吃"新映射,这里曾 TEARDOWN → 新 ANNOUNCE/SETUP/RECORD。
+   *  实测代价不可接受(2026-11-03 240 真机):重建会清空桥队列并对新会话重新锚定,
+   *  单次换来 6.28~7.60s 静音;而且它把「拖一次延迟滑杆」变成一次设备级重连,是
+   *  HiVi(MUZO)被搞成永久无声的触发链之一。
    *
-   *  @returns true = 已接受(流在跑时已完成重建;未起流/AP2 时值已进 opts,
-   *  下一次起流或主进程路由重建自然生效);false = 会话已关闭。 */
+   *  现在:运行中只调 `retimeByUs`(平移 startNtp + 立即一段 SYNC),会话/队列/锚点全部不动。
+   *  SYNC 单向无回执 ⇒ 若设备运行中不采纳,新值不丢(opts 已更新),在**下一次自然的**
+   *  会话建立(RECORD)或代次重锚时生效 —— 宁可变声晚一点,也不再拿整条队列陪跑。
+   *
+   *  @returns true = 已接受(opts 已更新,运行中已原地 retime);false = 会话已关闭或 AP2 出口
+   *  (无 RTP 时间线,主进程按路由重建兜底)。 */
   async rebuildForShift(shiftUs: number, reason = "delay-change"): Promise<boolean> {
     if (this.closed) return false;
     // AP2 无 RTP 时间线:opts 已更新,只能靠主进程重建桥路由(调用方兜底)。
@@ -2200,25 +2272,12 @@ export class BridgeSession {
       return false;
     }
     if (!this.applyAnchorShift(shiftUs)) return false;
-    // 流未在跑(起流判定前/已中止)⇒ 新值已进 opts,起流时天然生效,不必拆会话。
-    if (!this.player || this.aligner === null || this.streamAborted) {
-      log.info(`[airplay-bridge] ${JSON.stringify({
-        ev: "rebuild-deferred", dev: this.deviceId, gen: this.generation,
-        shiftUs, reason,
-      })}`);
-      return true;
-    }
     log.info(`[airplay-bridge] ${JSON.stringify({
-      ev: "rebuild-shift", dev: this.deviceId, gen: this.generation,
+      ev: "set-delay-inplace", dev: this.deviceId, gen: this.generation,
       shiftUs, reason,
+      // 原地 retime 是否真的落到了在跑的流(未起流/已中止 ⇒ false,新值留待下次锚定)
+      applied: this.player !== null && this.aligner !== null && !this.streamAborted,
     })}`);
-    // 立刻重建(不走退避):清掉可能挂着的重连定时器,复用现成的
-    // 「TEARDOWN 旧会话 → 新 RECORD → 等新帧重锚」流程。
-    if (this.raopReconnectTimer) {
-      clearTimeout(this.raopReconnectTimer);
-      this.raopReconnectTimer = null;
-    }
-    await this.reconnectRaop();
     return true;
   }
 

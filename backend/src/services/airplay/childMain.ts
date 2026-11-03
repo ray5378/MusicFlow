@@ -165,9 +165,10 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
         return this.bridgeSessions.setAnchorShift(String(p?.deviceId ?? ""), Number(p?.shiftUs ?? 0));
       }
       case "bridgeRebuildDelay": {
-        // D9(2026-11-01):改补偿的**必生效**兜底 —— 重建该成员 RTSP 会话
-        // (TEARDOWN → 新 ANNOUNCE/SETUP/RECORD = 设备重新吃一次映射),代价 ~1~2s 静音。
-        // 返回 false = 该设备当前没有桥会话(主进程按路由重建/成员 join 兜底)。
+        // D9/方案1(2026-11-03):改补偿落地 —— 运行中只在原位平移映射(retimeByUs),
+        // **绝不 TEARDOWN 重建会话**(重建会清空桥队列,实测制造 6.28~7.60s 静音)。
+        // 设备若运行中不采纳 SYNC,新值留待下一次自然会话(RECORD)建立时生效。
+        // 返回 false = 该设备当前没有桥会话/AP2(主进程按路由重建/成员 join 兜底)。
         return await this.bridgeSessions.rebuildForShift(
           String(p?.deviceId ?? ""),
           Number(p?.shiftUs ?? 0),
