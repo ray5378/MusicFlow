@@ -1218,16 +1218,21 @@ export class RaopPlayer {
       const pkt = this.audioBacklog.get(idx);
       if (!pkt) continue;
       this.lossResentPackets++;
-      const resend = Buffer.from(pkt);
+      // 重传答复 = 4 字节前缀(80 D6 00 01)+ **完整原始音频包**(含 12 字节 RTP 头,
+      // seq/ts/ssrc 原样保留)。旧实现把原包前 4 字节改写成新头、长度不变,
+      // 既丢掉了原 header 也没 +4 ⇒ 设备收到畸形重传包、反复重请求同一 seq,
+      // 缓冲抽干后停止消费(240 实证 2026-11-03 10:10:50 seq=59642 连请 4 次)。
+      const resend = Buffer.alloc(pkt.length + 4);
       resend[0] = 0x80;
-      resend[1] = 0x56 | 0x80;
-      resend[2] = 0;
-      resend[3] = 1;
+      resend[1] = 0xd6;
+      resend[2] = 0x00;
+      resend[3] = 0x01;
+      pkt.copy(resend, 4);
       if (this.ctrlSocket && controlPort) {
         this.ctrlSocket.send(resend, 0, resend.length, controlPort, this.opts.host);
       }
     }
-    this.lossMissPackets += Math.max(0, this.lossRequestedPackets - this.lossResentPackets - this.lossMissPackets);
+    this.lossMissPackets += Math.max(0, n - (this.lossResentPackets - resentBefore));
     // [OBS-LOSS] 窗口 miss:本次请求里 backlog 查不到的包数。
     // ⚠️ 这个字段此前只被重置和打印、从未被累加 ⇒ 日志里 `miss=` 恒为 0,
     // 是**假象**,会让「补发到底成没成」完全不可观测(排查 HiVi 曲中失声期间

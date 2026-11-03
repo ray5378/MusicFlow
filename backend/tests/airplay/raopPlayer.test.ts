@@ -404,7 +404,7 @@ describe("onLoss:接收端丢包重传", () => {
     expect(r[3]).toBe(1);
   });
 
-  it("重发包体与原始音频包一致(只改头部)", () => {
+  it("重传答复 = 4 字节前缀 + 完整原始音频包(头与体原样)", () => {
     const { p, anyP, audio, ctrl } = makePlayer();
     anyP.seq = 0;
     p.sendChunk(pcmChunk());
@@ -412,8 +412,10 @@ describe("onLoss:接收端丢包重传", () => {
     ctrl.sent.length = 0;
     anyP.onLoss(1, 1, 7001);
     const r = ctrl.sent[0].buf;
-    expect(r.length).toBe(original.length);
-    expect(r.subarray(4).equals(original.subarray(4))).toBe(true);
+    expect(r.length).toBe(original.length + 4);
+    expect(r.subarray(4).equals(original)).toBe(true);
+    // 原包的 RTP 头(seq/ts/ssrc)必须原样保留,不能被重传前缀覆盖
+    expect(r.readUInt16BE(6)).toBe(original.readUInt16BE(2));
   });
 
   it("backlog 里没有的 seq → 不重发(已被淘汰或从未发过)", () => {

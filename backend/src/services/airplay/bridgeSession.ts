@@ -420,6 +420,11 @@ export function raopBridgeLivenessMs(): number {
 const LIVENESS_PROBE_INTERVAL_MS = 25_000;
 const LIVENESS_PROBE_RETRY_MS = 5_000;
 const LIVENESS_PROBE_TIMEOUT_MS = 3_000;
+/** 僵尸强制重建下限(ms):OPTIONS 有应答最多只能"推迟"重建,不能永久否决。
+ *  240 实证(2026-11-03 10:10:52):HiVi 停发 timing 心跳(20 次/分钟→0)且永不恢复,
+ *  但 RTSP OPTIONS 一直 200 ⇒ 旧仲裁把会话永久钉在"活着但不消费"(服务端 tick 全绿)。
+ *  健康 MUZO 实测最大空档 17.6s,60s = 3.4×包络,不会误杀。 */
+const LIVENESS_ZOMBIE_MIN_MS = 60_000;
 
 /** 熔断(纯函数):10 分钟内因心跳缺失重连 ≥2 次 ⇒ 判据可疑,停用 30 分钟。
  *  任何自动恢复都必须有失败退避 —— v4.9.8 的反面教材就是没有退避,一次误判变连环重连。 */
@@ -1757,7 +1762,8 @@ export class BridgeSession {
    *  全程没有这条判据(只有 RTSP/控制面报错才重连)⇒ 同一台设备在 MA 下不卡。
    *
    *  仲裁 = 一次**只读** OPTIONS(绝不复用会盲发 TEARDOWN 的 raopTeardownProbe):
-   *  有状态码应答 ⇒ 会话活着,绝不 TEARDOWN;连续 2 次 TCP/RTSP 无响应才走原重连。
+   *  有状态码应答 ⇒ 会话活着,**短期**内不 TEARDOWN;连续 2 次 TCP/RTSP 无响应才走原重连。
+   *  但"活着"≠"在消费":静默 ≥ max(2×阈值, 60s)时即使 OPTIONS 应答也强制重建(P1.1)。
    *  为什么要 2 次:单次可能是瞬断,而误判代价 = 整条桥队列(实测 6.28~7.60s 静音)。
    */
   private async arbitrateLiveness(quietMs: number, thresholdMs: number): Promise<void> {
@@ -1781,16 +1787,24 @@ export class BridgeSession {
     if (!this.connected || this.player === null || this.aligner === null || this.pausedState) return;
     if (optionsProbeSaysAlive(verdict)) {
       this.livenessProbeFailures = 0;
-      if (this.livenessProbeOkGen !== String(this.generation)) {
-        this.livenessProbeOkGen = String(this.generation);
-        log.info(`[airplay-bridge] liveness watchdog 仲裁: device=${this.deviceId} gen=${this.generation} timing 心跳静默 ${(quietMs / 1000).toFixed(1)}s(≥ ${(thresholdMs / 1000).toFixed(0)}s),但 RTSP OPTIONS 应答 ${verdict.status} ⇒ 会话健康,不 TEARDOWN`);
+      // P1.1(2026-11-03):OPTIONS 应答只证明**控制面**活着,不能证明设备在消费。
+      // 240 实证:HiVi 停发 timing 心跳后 OPTIONS 一直 200 ⇒ 旧仲裁把会话永久钉死。
+      // 硬上限:静默 ≥ max(2×阈值, 60s) ⇒ 判「活着但不消费」僵尸,强制重建会话。
+      const zombieLimitMs = Math.max(thresholdMs * 2, LIVENESS_ZOMBIE_MIN_MS);
+      if (quietMs < zombieLimitMs) {
+        if (this.livenessProbeOkGen !== String(this.generation)) {
+          this.livenessProbeOkGen = String(this.generation);
+          log.info(`[airplay-bridge] liveness watchdog 仲裁: device=${this.deviceId} gen=${this.generation} timing 心跳静默 ${(quietMs / 1000).toFixed(1)}s(≥ ${(thresholdMs / 1000).toFixed(0)}s),但 RTSP OPTIONS 应答 ${verdict.status} ⇒ 会话健康,不 TEARDOWN`);
+        }
+        return;
       }
-      return;
+      log.warn(`[airplay-bridge] liveness watchdog 僵尸判定: device=${this.deviceId} gen=${this.generation} timing 静默 ${(quietMs / 1000).toFixed(1)}s ≥ ${(zombieLimitMs / 1000).toFixed(0)}s(OPTIONS ${verdict.status} 仍应答)⇒ 活着但不消费,强制重建会话`);
+    } else {
+      this.livenessProbeFailures += 1;
+      log.warn(`[airplay-bridge] liveness watchdog 仲裁失败: device=${this.deviceId} gen=${this.generation} 静默 ${(quietMs / 1000).toFixed(1)}s,RTSP OPTIONS ${verdict.detail}(连续 ${this.livenessProbeFailures} 次不可达)`);
+      if (this.livenessProbeFailures < 2) return;
+      this.livenessProbeFailures = 0;
     }
-    this.livenessProbeFailures += 1;
-    log.warn(`[airplay-bridge] liveness watchdog 仲裁失败: device=${this.deviceId} gen=${this.generation} 静默 ${(quietMs / 1000).toFixed(1)}s,RTSP OPTIONS ${verdict.detail}(连续 ${this.livenessProbeFailures} 次不可达)`);
-    if (this.livenessProbeFailures < 2) return;
-    this.livenessProbeFailures = 0;
     // 判「上一次重连到底救没救回来」= **同一个 player** 的 timingCount 有没有涨过。
     // ⚠️ 绝不能用 lastTimingAt 比较:它是字段初值=构造时刻,新 player 恰在 fire 之后
     // 构造 ⇒ 条件恒真 ⇒ failedRun 永远归零 ⇒ 30min 止损变成死代码(复核 C-1)。
