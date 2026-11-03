@@ -426,6 +426,14 @@ const LIVENESS_PROBE_TIMEOUT_MS = 3_000;
  *  健康 MUZO 实测最大空档 17.6s,60s = 3.4×包络,不会误杀。 */
 const LIVENESS_ZOMBIE_MIN_MS = 60_000;
 
+/** 零心跳强制重建窗口(ms):会话起流后仍 **一次 timing 请求都没收到** ⇒ 设备接收端
+ *  没切到本会话,必须 TEARDOWN + 重握手才能唤醒。240 实证(2026-11-03 10:29–11:28):
+ *  MUZO(.102:4515)收到 122 包/秒 RTP、RTSP RECORD/OPTIONS 全 200,但 60 分钟零 timing、
+ *  零重传请求、零出声 —— 旧实现把「从未收到 timing」整段豁免(判据不适用),于是永久静音。
+ *  健康 MUZO/HiVi 固件实测恒 20 次/分钟(R7「正常播放停发 timing」已推翻),
+ *  45s ≈ 两侧包络,不会误杀。 */
+const NEVER_TIMING_REBUILD_MS = 45_000;
+
 /** 熔断(纯函数):10 分钟内因心跳缺失重连 ≥2 次 ⇒ 判据可疑,停用 30 分钟。
  *  任何自动恢复都必须有失败退避 —— v4.9.8 的反面教材就是没有退避,一次误判变连环重连。 */
 export function livenessBreakerActive(fireAtMs: number[], nowMs: number): boolean {
@@ -977,6 +985,8 @@ export class BridgeSession {
   private timingCountAtFire = 0;
   /** 「本代次已打过『设备从不发 timing,看门狗豁免』日志」的代次号(防 2s tick 刷屏)。 */
   private livenessNoTimingLoggedGen = "";
+  /** 本次起流(aligner 建立)时刻;零心跳重建用它判「起了多久还没一次 timing」。 */
+  private streamStartedAtMs = 0;
   /** P1(2026-11-03):看门狗仲裁 —— 静默只触发一次**只读** OPTIONS 探测,探测在飞时防重入。 */
   private livenessProbeInFlight = false;
   private livenessProbeAtMs = 0;
@@ -1493,6 +1503,7 @@ export class BridgeSession {
     );
     this.streamAborted = false;
     this.lastFrontierUs = 0n;
+    this.streamStartedAtMs = Date.now();
     this.emitAnchorReport(plan, latencyFrames);
     // AP2 ⇒ runAp2Output(节拍 = A + i·spf/rate − L_eff,不加 RAOP_SAFETY_MS);
     // 否则落到下面的 RAOP streamBridge(语句一行不动)。
@@ -1849,19 +1860,48 @@ export class BridgeSession {
     const livenessThresholdMs = raopBridgeLivenessMs();
     const livenessQuietMs = this.player !== null ? Date.now() - this.player.lastTimingAt : 0;
     const livenessBreaker = livenessBreakerState(this.deviceId);
-    // 无心跳设备豁免(判据见 livenessWatchdogShouldFire 的 hasTimingHeartbeat):设备
-    // 结构上从不发 timing 时,quiet 恒超阈值 —— 必须整段跳过,否则每次 TEARDOWN 都把
-    // 组时间线推后 6~7s(重锚 skip),健康流被切成一跳一跳的哑音。
+    // 无心跳设备**不能永久豁免**(P1.2,2026-11-03 MUZO 无声):livenessWatchdogShouldFire
+    // 要求 hasTimingHeartbeat,而「本会话一次 timing 都没收到」正是设备接收端没切到
+    // 本会话的指纹(RECORD/OPTIONS 照样 200、RTP 照样 122 包/秒)。旧实现整段跳过并打
+    // 「判据不适用」⇒ 设备永久静音、无任何自愈。这里独立补一条零心跳重建:
+    // 起流 ≥45s 仍 0 次 timing ⇒ TEARDOWN + 完整重握手;走同一熔断记账(连续 3 次
+    // 救不回 ⇒ 停 30min,说明设备侧已不可救,需人工断电)。
     const livenessHasHeartbeat = this.player !== null && this.player.timingCount > 0;
+    const streamAgeMs = this.streamStartedAtMs > 0 ? Date.now() - this.streamStartedAtMs : 0;
     if (
       !livenessHasHeartbeat &&
+      this.ap2Session === null &&
+      this.connected &&
+      this.player !== null &&
       this.aligner !== null &&
-      livenessQuietMs > livenessThresholdMs &&
-      this.livenessNoTimingLoggedGen !== String(this.generation)
+      !this.pausedState &&
+      !this.raopReconnectInFlight &&
+      this.raopReconnectTimer === null &&
+      streamAgeMs >= NEVER_TIMING_REBUILD_MS &&
+      Date.now() >= livenessBreaker.cooldownUntil
     ) {
-      this.livenessNoTimingLoggedGen = String(this.generation);
-      log.info(`[airplay-bridge] liveness watchdog 豁免: device=${this.deviceId} gen=${this.generation} 本会话从未收到 timing 请求(${Math.round(livenessQuietMs / 1000)}s 静默)⇒ 判据不适用,不触发 TEARDOWN`);
+      const fired = noteLivenessFire(this.deviceId, Date.now(), false);
+      if (fired.disabled) {
+        if (this.livenessNoTimingLoggedGen !== String(this.generation)) {
+          this.livenessNoTimingLoggedGen = String(this.generation);
+          log.warn(`[airplay-bridge] 零心跳重建熔断: device=${this.deviceId} gen=${this.generation} 连续 ${fired.failedRun} 次重连仍 0 次 timing ⇒ 停用 30min(设备接收端已不可救,需人工断电重启)`);
+        }
+      } else {
+        this.livenessReconnectInFlight = true;
+        this.streamStartedAtMs = 0;
+        log.warn(`[airplay-bridge] 零心跳重建: device=${this.deviceId} gen=${this.generation} 起流 ${Math.round(streamAgeMs / 1000)}s 仍 0 次 timing 请求(健康固件恒 20 次/分钟)⇒ 设备接收端未接管本会话,先 TEARDOWN 旧会话再完整重握手(10min 内第 ${fired.firesInWindow} 次)`);
+        void this.reconnectRaop()
+          .catch(() => { /* 重连失败已由 scheduleRaopReconnect 接管退避 */ })
+          .finally(() => {
+            this.livenessReconnectInFlight = false;
+            if (this.player) {
+              this.player.lastDeviceSignalAt = Date.now();
+              this.player.lastTimingAt = Date.now();
+            }
+          });
+      }
     }
+
     if (
       Date.now() >= livenessBreaker.cooldownUntil &&
       livenessWatchdogShouldFire({
