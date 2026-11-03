@@ -88,6 +88,54 @@ export function resolveAudioBacklogMaxPackets(): number {
   return allowed.find((v) => v >= raw) ?? maxTier;
 }
 
+// ---------------------------------------------------------------------------
+// 4.11.10 空口加固:重传请求去重 / 限速 / 过期判据
+//
+// 240 实测(2026-11-04 00:16:05–00:16:37):共享 AP 空口突发丢包时,设备在 20s 内
+// 发出 ~1550 次 0x55 请求(平时 1–26 次/10s,约 500 倍)。旧实现「来一条请求就整段
+// 立即逐包补发」⇒ 答复包又走同一条拥塞空口,把单次丢包放大成 20–30s 的连锁风暴。
+//
+// MA/libraop 的对应机制做在**接收端**([raop_streamer.c] `RESEND_TO=150ms` 去重 +
+// 连续缺口合并);我们的接收端是设备固件改不了,故搬到发送端替设备做:
+//   - 去重:同一 seq 在 `RAOP_LOSS_DEDUP_MS` 内不重复补发(风暴里大量重复请求同一段);
+//   - 限速:每设备 token bucket(`RAOP_LOSS_RATE_PPS` 包/s),把空口带宽留给恢复;
+//   - 过期:请求 seq 落后已发位置超过 `RAOP_LOSS_STALE_PACKETS` 时判设备已放弃该段,
+//     不再补发(对应 libraop 的 `too many missing frames` 前跳)。
+// 默认 400 包/s ≈ 3.2s 音频/s,高于 125 包/s 的正常消费率,不会饿死合法补发。
+// ---------------------------------------------------------------------------
+
+/** 同一 seq 的重传去重窗口(ms;对齐 libraop 接收端 RESEND_TO=150)。 */
+export const RAOP_LOSS_DEDUP_MS = 150;
+/** 每设备重传答复速率上限(包/s)。0/非法 ⇒ 用默认值。 */
+export const RAOP_LOSS_RATE_PPS = 400;
+/** 请求 seq 落后已发位置超过该包数即视为过期(375 包 ≈ 3s 音频)。
+ *  ⚠️ 必须明显大于一次真实空口突发(实测 240 包 ≈ 1.9s)与设备缓冲深度
+ *  (raopHoldFrames 默认 2s ≈ 250 包),否则会把「还能抢救的爆发」误判成过期,
+ *  反而复现 4.10.6 修掉的曲中失声。 */
+export const RAOP_LOSS_STALE_PACKETS = 375;
+
+export function resolveLossDedupMs(): number {
+  // ⚠️ Number("") === 0:未设置时必须先判空,否则默认窗口会被静默改成 0(去重失效)。
+  const raw = process.env.MF_BRIDGE_RAOP_LOSS_DEDUP_MS?.trim();
+  if (raw === undefined || raw === "") return RAOP_LOSS_DEDUP_MS;
+  const v = Number(raw);
+  return Number.isFinite(v) && v >= 0 ? v : RAOP_LOSS_DEDUP_MS;
+}
+
+export function resolveLossRatePps(): number {
+  const raw = process.env.MF_BRIDGE_RAOP_LOSS_RATE_PPS?.trim();
+  if (raw === undefined || raw === "") return RAOP_LOSS_RATE_PPS;
+  const v = Number(raw);
+  return Number.isFinite(v) && v > 0 ? v : RAOP_LOSS_RATE_PPS;
+}
+
+export function resolveLossStalePackets(): number {
+  const raw = process.env.MF_BRIDGE_RAOP_LOSS_STALE_PACKETS?.trim();
+  if (raw === undefined || raw === "") return RAOP_LOSS_STALE_PACKETS;
+  const v = Number(raw);
+  return Number.isFinite(v) && v > 0 ? v : RAOP_LOSS_STALE_PACKETS;
+}
+
 /** 按方法 + 握手剩余预算选超时:清理请求永远短;握手请求受总预算约束。 */
 export function rtspTimeoutFor(method: string, remainingHandshakeMs: number | null): number {
   if (method === "TEARDOWN" || method === "FLUSH") return RTSP_CLEANUP_TIMEOUT_MS;
@@ -107,6 +155,21 @@ export interface RaopRealtimeStats {
   elapsedMs: number;
   /** 接收端请求重传(RTP loss)的次数。 */
   lossRequests: number;
+  /** 设备请求补发的包总数(0x55 里 n 的累加)。 */
+  lossRequestedPackets: number;
+  /** 实际补发出去的包数。 */
+  lossResentPackets: number;
+  /** 补不到 / 请求未来包 / 过期放弃 的包数(沿用旧口径:都属"这次请求没补上";
+   *  去重与限速是「主动推迟」,设备会再请,单列不摊进 miss)。 */
+  lossMissPackets: number;
+  /** 设备请求"服务端尚未产生"的包的累计数。 */
+  lossFuturePackets: number;
+  /** 因「同一 seq 在去重窗口内已补过」而跳过的包数。 */
+  lossDedupPackets: number;
+  /** 因「重传速率预算耗尽」而跳过的包数(设备会再请,预算恢复后补)。 */
+  lossThrottledPackets: number;
+  /** 因「请求包已落后设备可消费窗口太久」而主动放弃的包数。 */
+  lossStalePackets: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -584,6 +647,22 @@ export class RaopPlayer {
   private lossFuturePackets = 0;
   /** [OBS-LOSS] 本 200ms 聚合窗口内的"未来包请求"数。 */
   private lossWinFuture = 0;
+
+  // ---- 4.11.10 空口加固(见顶部 RAOP_LOSS_* 注释;构造时读一次 env,运行期不变) ----
+  private readonly lossDedupMs = resolveLossDedupMs();
+  private readonly lossRatePps = resolveLossRatePps();
+  private readonly lossStaleWindowPackets = resolveLossStalePackets();
+  /** seq → 最近一次实际补发的墙钟 ms(去重窗口判据;超过 MAP_PRUNE 阈值时清理旧项)。 */
+  private lossResentAtMs = new Map<number, number>();
+  private lossBudgetTokens = 0;
+  private lossBudgetAtMs = 0;
+  /** 因去重窗口 / 限速预算 / 过期判据而跳过的包数(累计 + 本窗口)。 */
+  private lossDedupPackets = 0;
+  private lossThrottledPackets = 0;
+  private lossStalePackets = 0;
+  private lossWinDedup = 0;
+  private lossWinThrottled = 0;
+  private lossWinStale = 0;
   /** [OBS-LOSS] backlog 当前最小 key(Map 插入序首键);-1 = 空缓冲。
    *
    *  ⚠️ 不能对 16 位 seq 用 `Math.min/max` 求区间:seq 回绕(65535 → 0)之后
@@ -670,6 +749,13 @@ export class RaopPlayer {
       maxGapMs: s.maxGapMs,
       elapsedMs: Math.max(0, Date.now() - s.startMs),
       lossRequests: this.lossRequests,
+      lossRequestedPackets: this.lossRequestedPackets,
+      lossResentPackets: this.lossResentPackets,
+      lossMissPackets: this.lossMissPackets,
+      lossFuturePackets: this.lossFuturePackets,
+      lossDedupPackets: this.lossDedupPackets,
+      lossThrottledPackets: this.lossThrottledPackets,
+      lossStalePackets: this.lossStalePackets,
     };
   }
 
@@ -1100,6 +1186,18 @@ export class RaopPlayer {
   get lossFutureCount(): number {
     return this.lossFuturePackets;
   }
+  /** [OBS-LOSS] 因去重窗口跳过的累计包数(加固生效量的直接证据)。 */
+  get lossDedupCount(): number {
+    return this.lossDedupPackets;
+  }
+  /** [OBS-LOSS] 因重传速率预算耗尽跳过的累计包数。 */
+  get lossThrottledCount(): number {
+    return this.lossThrottledPackets;
+  }
+  /** [OBS-LOSS] 因落后可消费窗口太久而放弃的累计包数。 */
+  get lossStaleCount(): number {
+    return this.lossStalePackets;
+  }
   /** [OBS-LOSS] backlog 当前最小 key(回绕安全);空缓冲返回 -1。 */
   get backlogHead(): number {
     return this.backlogHeadKey;
@@ -1218,17 +1316,52 @@ export class RaopPlayer {
   private onLoss(seqno: number, n: number, controlPort: number): void {
     this.lossRequests++;
     this.lossRequestedPackets += Math.max(1, n);
-    const resentBefore = this.lossResentPackets;
+    // 4.11.10 限速预算:按经过时间回填 token(cap = 1s 的量),首次调用自动满额。
+    const nowMs = Date.now();
+    const dtMs = nowMs - this.lossBudgetAtMs;
+    this.lossBudgetAtMs = nowMs;
+    this.lossBudgetTokens = Math.min(this.lossRatePps, this.lossBudgetTokens + (dtMs * this.lossRatePps) / 1000);
+
     let futureThis = 0;
+    let missThis = 0;
+    let dedupThis = 0;
+    let throttledThis = 0;
+    let staleThis = 0;
     for (let i = 0; i < n; i++) {
       const idx = (seqno + i) & 0xffff;
       // [OBS-LOSS] 回绕安全的"晚于"比较(RFC 1982 序列号算术):
       // 0 < (idx - this.seq) mod 2^16 < 2^15 ⇒ idx 严格晚于服务端已发到的位置,
       // 即设备要的是还没产生的包;== 0 表示正好是要最后一个已发包(可补发)。
       const ahead = (idx - this.seq) & 0xffff;
-      if (ahead !== 0 && ahead < 0x8000) futureThis++;
+      if (ahead !== 0 && ahead < 0x8000) {
+        futureThis++;
+        continue;
+      }
+      // 4.11.10 过期判据:落后已发位置超过 stale 窗 ⇒ 设备已放弃该段(对应 libraop
+      // 的 `too many missing frames` 前跳),继续补发只是给拥塞空口添堵。
+      const behind = (this.seq - idx) & 0xffff;
+      if (behind > this.lossStaleWindowPackets) {
+        staleThis++;
+        continue;
+      }
+      // 4.11.10 去重:同一 seq 在窗口内已补过 ⇒ 本轮风暴多半是重复请求,不再答复。
+      const lastResent = this.lossResentAtMs.get(idx);
+      if (lastResent !== undefined && nowMs - lastResent < this.lossDedupMs) {
+        dedupThis++;
+        continue;
+      }
       const pkt = this.audioBacklog.get(idx);
-      if (!pkt) continue;
+      if (!pkt) {
+        missThis++;
+        continue;
+      }
+      // 4.11.10 限速:预算耗尽就跳过。不写 lossResentAtMs,设备再次请求时会重试。
+      if (this.lossBudgetTokens < 1) {
+        throttledThis++;
+        continue;
+      }
+      this.lossBudgetTokens -= 1;
+      this.lossResentAtMs.set(idx, nowMs);
       this.lossResentPackets++;
       // 重传答复 = 4 字节前缀(80 D6 00 01)+ **完整原始音频包**(含 12 字节 RTP 头,
       // seq/ts/ssrc 原样保留)。旧实现把原包前 4 字节改写成新头、长度不变,
@@ -1244,24 +1377,41 @@ export class RaopPlayer {
         this.ctrlSocket.send(resend, 0, resend.length, controlPort, this.opts.host);
       }
     }
-    this.lossMissPackets += Math.max(0, n - (this.lossResentPackets - resentBefore));
-    // [OBS-LOSS] 窗口 miss:本次请求里 backlog 查不到的包数。
+    // 去重表只在异常增长时清理(正常会话最多 2048 个 key,不值得每请求遍历)。
+    if (this.lossResentAtMs.size > 4096) {
+      for (const [k, t] of this.lossResentAtMs) {
+        if (nowMs - t >= this.lossDedupMs) this.lossResentAtMs.delete(k);
+      }
+    }
+    // miss 沿用旧口径:backlog 查不到 + 未来包 + 过期放弃 都算"这次没补上";
+    // 去重/限速是主动推迟(设备会再请),不摊进 miss,否则风暴窗口会把两者混为一谈。
+    const unsatisfied = missThis + futureThis + staleThis;
+    this.lossMissPackets += unsatisfied;
+    this.lossDedupPackets += dedupThis;
+    this.lossThrottledPackets += throttledThis;
+    this.lossStalePackets += staleThis;
+    this.lossFuturePackets += futureThis;
+    // [OBS-LOSS] 窗口 miss:同 miss 口径(见上)。
     // ⚠️ 这个字段此前只被重置和打印、从未被累加 ⇒ 日志里 `miss=` 恒为 0,
     // 是**假象**,会让「补发到底成没成」完全不可观测(排查 HiVi 曲中失声期间
-    // 一度据此误判"重传全部命中")。这里按「请求数 - 本轮实际补发数」补齐。
-    this.lossWinMiss += Math.max(0, n - (this.lossResentPackets - resentBefore));
+    // 一度据此误判"重传全部命中")。4.11.10 起按实际分类累加。
+    this.lossWinMiss += unsatisfied;
+    this.lossWinDedup += dedupThis;
+    this.lossWinThrottled += throttledThis;
+    this.lossWinStale += staleThis;
     this.lossWinFuture += futureThis;
-    this.lossFuturePackets += futureThis;
     // [OBS-LOSS] 窗口聚合:200ms 一行,避免一次爆发 657 条请求刷屏
-    const nowMs = Date.now();
     if (nowMs - this.lossWinStartMs > 200) {
       if (this.lossWinCount > 0) {
-        log.warn(`[raop-loss] dev=${this.opts.deviceId ?? "-"} req=${this.lossWinCount} seq0=${this.lossWinSeq0} seq1=${seqno} miss=${this.lossWinMiss} future=${this.lossWinFuture} backlog=${this.audioBacklog.size} cap=${this.backlogMaxPackets} head=${this.backlogHeadKey} tail=${this.backlogTailKey} cur=${this.seq} total=${this.lossRequests} totalMiss=${this.lossMissPackets}`);
+        log.warn(`[raop-loss] dev=${this.opts.deviceId ?? "-"} req=${this.lossWinCount} seq0=${this.lossWinSeq0} seq1=${seqno} miss=${this.lossWinMiss} future=${this.lossWinFuture} dedup=${this.lossWinDedup} thr=${this.lossWinThrottled} stale=${this.lossWinStale} budget=${Math.floor(this.lossBudgetTokens)} backlog=${this.audioBacklog.size} cap=${this.backlogMaxPackets} head=${this.backlogHeadKey} tail=${this.backlogTailKey} cur=${this.seq} total=${this.lossRequests} totalMiss=${this.lossMissPackets}`);
       }
       this.lossWinStartMs = nowMs;
       this.lossWinCount = 0;
       this.lossWinMiss = 0;
       this.lossWinFuture = 0;
+      this.lossWinDedup = 0;
+      this.lossWinThrottled = 0;
+      this.lossWinStale = 0;
       this.lossWinSeq0 = seqno;
     }
     this.lossWinCount++;

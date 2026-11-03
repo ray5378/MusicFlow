@@ -2,6 +2,28 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.11.10] - 2026-11-04
+
+### Fix / 共享 AP 空口突发:重传风暴就地压制(参考 MA/libraop)
+
+- **故障**:240 实测 00:16:05–00:16:37,两台设备 20s 内发出 ~1550 次 0x55 重传请求
+  (平时 1–26 次/10s,约 500 倍);服务端时间线/队列/锚点全程健康(`miss=0`、
+  `nonlive=0`、`inQueue 1.7–1.8s`),但设备售后卡顿失声,`ping` 显示空口 RTT 106ms–1.25s。
+- **根因**:旧 `onLoss`「来一条请求就整段立即逐包补发」,答复包又走同一条拥塞空口,
+  把单次丢包放大成 20–30s 的连锁风暴。
+- **修复**(MA/libraop 的对应机制在接收端 `RESEND_TO=150ms` + 缺口合并;我们的接收端
+  是设备固件改不了,故搬到发送端替设备做):
+  - **去重**:同一 seq 在 `MF_BRIDGE_RAOP_LOSS_DEDUP_MS`(默认 150ms)内不重复补发;
+  - **限速**:每设备 token bucket `MF_BRIDGE_RAOP_LOSS_RATE_PPS`(默认 400 包/s ≈ 3.2s
+    音频/s,高于 125 包/s 正常消费率),把空口带宽留给恢复;
+  - **过期**:请求 seq 落后已发位置 > `MF_BRIDGE_RAOP_LOSS_STALE_PACKETS`(默认 187 包
+    ≈1.5s)判设备已放弃该段,不再补发(对应 libraop `too many missing frames` 前跳)。
+- **可观测**:`[raop-loss]` 聚合行新增 `dedup=/thr=/stale=/budget=`;tick 新增
+  `lossReq/lossResent/lossMiss/lossFuture/lossDedup/lossThr/lossStale` 累计量;
+  并修正 `miss` 此前从未累加(恒为 0)的观测假象。
+- **验收(240)**:风暴窗口内 `dedup+thr` 增量应占请求包数大头、`lossResent` 增速被压到
+  ≤400 包/s,设备缓冲不再被抽干;稳态 `dedup/thr/stale` 应为 0(不误伤正常重传)。
+
 ## [4.11.9] - 2026-11-03
 
 ### Fix / 换曲边界「追赶风暴」(1→2→3)

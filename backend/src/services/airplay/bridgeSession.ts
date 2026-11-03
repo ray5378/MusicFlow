@@ -2063,6 +2063,15 @@ export class BridgeSession {
       inQueueMs: this.backlogMs(),
       maxQueueMs: this.maxQueueMs,
       late: this.player?.bridgeLateCount ?? 0,
+      // 4.11.10 空口加固观测:重传请求总量 / 实补 / 补不到 / 未来包,
+      // 以及三条加固判据各自拦下的包数(风暴是否被就地压住,看这几个增量即可)。
+      lossReq: this.player?.lossRequestedCount ?? 0,
+      lossResent: this.player?.lossResentCount ?? 0,
+      lossMiss: this.player?.lossMissCount ?? 0,
+      lossFuture: this.player?.lossFutureCount ?? 0,
+      lossDedup: this.player?.lossDedupCount ?? 0,
+      lossThr: this.player?.lossThrottledCount ?? 0,
+      lossStale: this.player?.lossStaleCount ?? 0,
       // D 组观测(2026-10-30):距设备上一次 timing 心跳的毫秒数 —— 看门狗判据的唯一
       // 输入,必须能被事后复核(null = 尚无 player)。健康期应恒 < 6000。
       timingAgeMs: this.player !== null ? Date.now() - this.player.lastTimingAt : null,

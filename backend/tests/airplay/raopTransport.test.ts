@@ -428,6 +428,78 @@ describe("stream():实时节拍推流", () => {
 });
 
 // ===========================================================================
+// 2026-11-04 4.11.10 空口加固:重传请求去重 / 限速 / 过期判据。
+//
+// 240 实测风暴窗口(00:16:05–00:16:37):设备 20s 内发 ~1550 次 0x55,旧实现每条
+// 都整段立即补发 ⇒ 答复包又堵塞同一条空口。这里钉死三条判据的分类与计数,
+// 防止后续改动把「重复请求照样全量答复」悄悄退回去。
+describe("onLoss:4.11.10 空口加固(去重 / 限速 / 过期)", () => {
+  const isResend = (s: { buf: Buffer }) => s.buf[1] === 0xd6;
+
+  /** 建一个已连接、backlog 里灌了 n 个包的 player;返回各观测句柄。 */
+  async function primed(n: number) {
+    const { anyP } = await connected();
+    anyP.serverAudioPort = 7000;
+    anyP.serverControlPort = 7001;
+    anyP.audioBacklog.clear();
+    for (let i = 0; i < n; i++) anyP.sendChunk(Buffer.alloc(CHUNK_LEN * 4));
+    const ctrl = H.dgramSockets[1];
+    const count = () => ctrl.sent.filter(isResend).length;
+    return { anyP, ctrl, count };
+  }
+
+  it("同一 seq 段在去重窗口内重复请求 → 只补发一次,其余计入 dedup", async () => {
+    const { anyP, count } = await primed(8);
+    const firstSeq = (anyP.seq - 7) & 0xffff;
+    const before = count();
+    anyP.onLoss(firstSeq, 8, 7001);
+    expect(count() - before).toBe(8); // 首次请求:8 个全部补发
+    anyP.onLoss(firstSeq, 8, 7001); // 立刻重复同一段(风暴典型形态)
+    expect(count() - before).toBe(8); // 去重窗口内不得再答复
+    expect(anyP.lossDedupCount).toBe(8);
+    expect(anyP.lossRequestedCount).toBe(16);
+  });
+
+  it("速率预算耗尽 → 超出部分计入 throttled(不写去重表,后续请求可重试)", async () => {
+    process.env.MF_BRIDGE_RAOP_LOSS_RATE_PPS = "4";
+    try {
+      const { anyP, count } = await primed(8);
+      const firstSeq = (anyP.seq - 7) & 0xffff;
+      const before = count();
+      anyP.onLoss(firstSeq, 8, 7001);
+      expect(count() - before).toBe(4); // 预算 4 包/s
+      expect(anyP.lossThrottledCount).toBe(4);
+      expect(anyP.lossResentCount).toBe(4);
+    } finally {
+      delete process.env.MF_BRIDGE_RAOP_LOSS_RATE_PPS;
+    }
+  });
+
+  it("请求落后已发位置超过 stale 窗 → 主动放弃(不补发、不占预算)", async () => {
+    const { anyP, count } = await primed(8);
+    const before = count();
+    anyP.onLoss((anyP.seq - 500) & 0xffff, 4, 7001);
+    expect(count()).toBe(before);
+    expect(anyP.lossStaleCount).toBe(4);
+    expect(anyP.lossMissCount).toBe(4); // 沿用旧 miss 口径:过期也算"这次没补上"
+  });
+
+  it("请求未来包 / backlog 查不到的包 → future 与 miss 各自独立累加", async () => {
+    const { anyP, count } = await primed(8);
+    const before = count();
+    anyP.onLoss((anyP.seq + 64) & 0xffff, 2, 7001);
+    expect(count()).toBe(before);
+    expect(anyP.lossFutureCount).toBe(2);
+    expect(anyP.lossMissCount).toBe(2); // future ⊂ miss(旧口径)
+    // 窗口内(stale 判据之前)但 backlog 里没有 ⇒ 同样计入 miss
+    anyP.audioBacklog.clear();
+    anyP.onLoss((anyP.seq - 3) & 0xffff, 1, 7001);
+    expect(anyP.lossMissCount).toBe(3);
+    expect(count()).toBe(before);
+  });
+});
+
+// ===========================================================================
 // 2026-10-22 fork 模式真机:`seek` 报 `airplay rpc 超时: cast (25000ms)`。
 // 根因之一:sendRtsp 在等响应期间连接被关闭时**只 clearTimeout、不 reject**,
 // Promise 永不 settle ⇒ 子进程的 stop()/cast() 永久挂起。这里钉死「必须 reject」。
