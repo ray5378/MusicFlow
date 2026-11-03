@@ -1,6 +1,6 @@
 {
   "name": "musicflow-backend",
-  "version": "4.11.5",
+  "version": "4.11.8",
   "private": true,
   "license": "MIT",
   "type": "module",

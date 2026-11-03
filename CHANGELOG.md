@@ -2,6 +2,46 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.11.8] - 2026-11-03
+
+### Fix / 零心跳设备强制重建(MUZO 永久静音)
+
+- **故障**:MUZO `00226C073ECC`(192.168.10.102:4515)收 122 包/秒 RTP、RECORD/OPTIONS 均 200、
+  组位置正常推进,但 **58 分钟零 timing、零 0x55 重传请求、零出声**;DLNA 侧
+  `TransportState=STOPPED`、音量 54、未静音。
+- **根因**:看门狗要求 `timingCount > 0`,旧实现把「本会话从未收到 timing」整段豁免
+  (判据不适用)⇒ 设备挂死会话上时永不重建,永久静音且无自愈。
+- **修复**:起流 ≥45s 仍 0 次 timing ⇒ 按僵尸重建(TEARDOWN + 完整重握手);复用熔断记账
+  (连续 3 次救不回停 30min 并 WARN 需人工断电)。健康固件实测恒 20 次/分钟,不误杀。
+- **验收(240)**:两台 timing 20–22 次/分钟、`timingAgeMs` 0–3s 复位;MUZO 29 次 0x55 全部
+  `miss=0/totalMiss=0`;`silenceChunks=0`、无重连。
+
+## [4.11.7] - 2026-11-03
+
+### Fix / RAOP 重传答复格式错误(设备停止消费的真根因)
+
+- **故障**:HiVi 播十余分钟后 `timingAgeMs` 2828→242850 单调上涨,日志同一 seq 被反复
+  重请求(`miss=0` 却补不上),最终停止消费。
+- **根因**:`onLoss` 用 `Buffer.from(pkt)` 改写前 4 字节、长度不变 ⇒ 原始 RTP 头被写坏,
+  设备拒收 ⇒ 接收缓冲抽干 ⇒ 停播。
+- **修复**:重传答复 = `80 D6 00 01` + **完整原包**(总长 = 原包 + 4);`lossMissPackets`
+  按重发前后差值累计。
+- **配套**:看门狗 60s 僵尸硬上限 —— OPTIONS 200 不再永久否决重建。
+- **验收**:25% 丢包注入 30s,12 次 0x55 全 `miss=0/future=0/totalMiss=0`,无同一 seq 重请求;
+  僵尸路径 83.9s 触发强制重建并恢复消费;9 分钟观察 173 次 timing、仅 2 次 loss。
+
+## [4.11.6] - 2026-11-03
+
+### Fix / 回退 P2 carry+reseat,补偿改原地 retime(方案1)
+
+- 删除跨会话内容游标续接(`carryContent` / `planContentOffsetFrames` / `contentAnchorUs` /
+  `reSeated` / `catchUpUs`),`BridgeTimelineAligner` 恢复 `pos = 0`;重连恢复「全新时间线」
+  语义(清队列 / 新 aligner / 新 anchor,RTP 时间戳不跳变)。
+- 运行中改补偿只 `applyAnchorShift` 原地 retime(日志 `set-delay-inplace applied:true`),
+  不再 TEARDOWN+RECORD。
+- **验收(240)**:delay 10→40ms 只出现 `set-delay` + `set-delay-inplace`,无 TEARDOWN/RECORD;
+  HiVi `timingAgeMs` 持续复位。
+
 ## [4.11.5] - 2026-11-03
 
 ### Fix / 断连期两台桥一次性裁 300ms（曲内 `send_ahead` 回退 800ms 根因）

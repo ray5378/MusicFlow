@@ -2169,3 +2169,71 @@ late 累积    ≈ 22/秒（约占发包 18%）    ← producer 阻塞（欠料�
 
 - `vitest`：146 文件 / 1968 用例全过；
 - `node backend/scripts/check-group-invariants.mjs`：105 条断言全过（含 G19）。
+
+---
+
+## v4.11.6–v4.11.8 增补(方案1 回退 + 重传答复 + 零心跳重建,2026-11-03)
+
+> 本节为**最新口径**。与 v4.11.2 及更早关于「重连 carry/reseat」「无 timing 设备豁免」「运行中改补偿要重建」的表述冲突时,一律以本节为准。
+
+### 1. 方案1:回退 P2 的 carry+reseat,补偿改原地 retime(v4.11.6)
+
+- **删除跨会话内容游标续接**:`carryContent` / `planContentOffsetFrames` / `contentAnchorUs` /
+  `reSeated` / `idx0` / `catchUpUs` 与 `reconnect-carry`、`reconnect-reseat` 日志全部移除;
+  `RaopBridgeAnchor.catchUpUs` 删除,`BridgeTimelineAligner` 恢复 `pos = 0`。
+- **重连恢复 4.11.5 语义(全新时间线)**:`reconnectRaop` 无条件清队列 / 新 aligner / 新 anchor,
+  RTP 时间戳不跳变;`BRIDGE_RESUME_REBASE_US` 判据恢复原位。
+- **运行中改补偿只原地 retime**:`rebuildForShift` 只 `applyAnchorShift`,不再 TEARDOWN+RECORD;
+  日志 `set-delay-inplace applied:true`。`groups.ts` / `childMain.ts` 注释同步更正。
+- **真机验收(240)**:delay 10→40ms 只出现 `set-delay` + `set-delay-inplace`,
+  **无 TEARDOWN/RECORD**;HiVi `timingAgeMs` 持续复位(在消费)。
+
+### 2. 重传答复格式错误(4.11.7,设备停止消费的真根因)
+
+- **故障现场(2026-11-03 09:55–10:14,240 HiVi)**:播放十余分钟后 `timingAgeMs` 从 2828
+  单调涨到 242850(+1000ms/s,停止消费);日志 `[raop-loss] req=1 seq0=59642 seq1=59642`
+  同一 seq 被反复重请求,`miss=0` 却始终补不上;同时看门狗打「OPTIONS 应答 200 ⇒ 会话健康,
+  不 TEARDOWN」把会话永久钉死。
+- **根因**:`onLoss` 用 `Buffer.from(pkt)` 复制后改写前 4 字节,**长度不变** ⇒ 原始 RTP 头
+  (12 字节)被写坏;设备拿到不可解析的包,反复重请求 ⇒ 接收缓冲抽干 ⇒ 停播。
+- **修复**:答复 = **4 字节前缀 `80 D6 00 01` + 完整原始包(含 12 字节 RTP 头)**,
+  总长 = 原包 + 4(`Buffer.alloc(pkt.length + 4)` + `pkt.copy(resend, 4)`);
+  `lossMissPackets` 改用「重发前后差值」累计,杜绝观测层恒零假象。
+- **配套(v4.11.7)**:看门狗僵尸硬上限 —— 静默 ≥ `max(2×阈值, 60s)` 时即使 OPTIONS 仍答 200
+  也强制 TEARDOWN + 重握手(OPTIONS 200 不再永久否决重建)。
+- **真机验收(240)**:
+  - 25% 音频丢包注入 30s:设备 12 次 0x55 请求全部 `miss=0/future=0/totalMiss=0`,
+    **无同一 seq 重请求**;`timingAgeMs` 3002→1973→997 持续复位;
+  - 僵尸路径(封旧 timing 端口 ~100s):83.9s 触发「僵尸判定…强制重建」+ TEARDOWN+RECORD,
+    新会话端口 59500、设备恢复消费;
+  - 9 分钟被动观察:270 ticks、173 次 timing reply、仅 2 次 `raop-loss`,`timingAgeMs` 持续复位。
+
+### 3. 零心跳设备强制重建(4.11.8,MUZO 永久静音的根因)
+
+- **故障现场(2026-11-03 10:29–11:28,240 MUZO `00226C073ECC`,192.168.10.102:4515)**:
+  RTP 以 122 包/秒持续发到 `39798`(tcpdump 12s 计 2941 行,双向去重后 ~1470),
+  RTSP RECORD/OPTIONS 全 200、组播放位置正常推进 —— 但设备侧
+  **58 分钟零 timing、零 0x55 重传请求、零出声**;DLNA 侧 `TransportState=STOPPED`、
+  `Volume=54`、`Mute=0`(排除静音/零音量)。
+- **根因(程序缺陷)**:`livenessWatchdogShouldFire` 要求 `timingCount > 0`;旧实现把
+  「本会话从未收到 timing」整段判为「判据不适用」直接豁免 ⇒ 设备挂在死会话上时
+  看门狗永不触发,**永久静音且无任何自愈**。
+- **修复**:起流(aligner 建立)≥ **45s** 仍 0 次 timing ⇒ 判「设备接收端未接管本会话」,
+  先 TEARDOWN 旧会话再完整重握手;复用同一熔断记账(连续 3 次重连仍零心跳 ⇒ 停用 30min
+  并 WARN「设备接收端已不可救,需人工断电重启」)。健康 MUZO/HiVi 固件实测恒 20 次/分钟,
+  45s 窗口不会误杀(R7「MUZO 正常播放会停发 timing」旧结论据此正式作废)。
+- **真机验收(240,4.11.8 部署后)**:
+  - 两台设备 timing 20–22 次/分钟,`timingAgeMs` 在 0–3s 周期内持续复位;
+  - MUZO 前 12 分钟 29 次 0x55 全部 `miss=0/future=0/totalMiss=0` 补齐,后 6 分钟 0 次;
+  - `silenceChunks` 全程 0、无 TEARDOWN/重连、组位置正常推进。
+- **运维事实**:容器重建会在设备侧残留半开 RAOP 会话;boot clear-probe(TEARDOWN=200)能清,
+  但「设备接收端是否切到新会话」**只能靠 timing 心跳判定 —— 零心跳即判死**,不能再豁免。
+
+### 4. 判据更新(覆盖前文)
+
+| 判据 | 阈值 | 动作 |
+| --- | --- | --- |
+| timing 静默(曾有过心跳) | ≥30s | 只读 OPTIONS 探测;仍 200 且 ≥60s ⇒ 僵尸强制重建 |
+| timing 从未出现 | 起流 ≥45s | 零心跳强制重建(v4.11.8 新增,不再豁免) |
+| 同一 seq 被反复 0x55 | 任意 | 先查重传答复格式是否为 `80 D6 00 01` + 完整原包 |
+| 收包正常但无出声 | — | 服务端指标不能证明出声,以设备 timing 心跳/听感为准 |
