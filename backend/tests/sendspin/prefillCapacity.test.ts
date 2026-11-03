@@ -142,3 +142,68 @@ describe("pushMeter 生命周期", () => {
     expect(g.capacityLimitedPrefillMs()).toBeLessThan(before);
   });
 });
+
+// ==================== 4.11.5 曲内可听轴冻结 / 纯桥期预填充 ====================
+//
+// 真机根因(2026-11-03,240  miesz 组 iptables DROP Sendspin 控制端 60s):
+//   断连 44s 处两台桥**同时** `realigned -300ms (drop 13230 帧)`。
+//   链条:控制端被摘牌 → members 清空 → computeCommonSendAhead([]) 回退
+//   DEFAULT_MIN_BUFFER_MS(800ms),而曲内锚点原为 500ms ⇒ ahead 突增 300ms ⇒
+//   投递戳 ts' = ts − ahead 全部提前 300ms ⇒ 对齐器一次裁 13230 帧
+//   (= 300.0ms @44.1k)。桥内压着 ~7.5s 队列,故 7.7s 后才到播放头。
+// 伴随:deviceCapacityBytes() 归零 ⇒ 容量钳制/字节闸同时失效 ⇒ 预填充目标
+//   10.6s → 30s,`contentFrontierVsNowUs` 一次性 +4.38s(诊断失真,无听感影响)。
+
+describe("4.11.5 曲内 send_ahead 冻结", () => {
+  /** 已上报 client/state 的成员桩(否则 sendAheadInputOf 走缺省 800ms)。 */
+  function stated(clientId: string, minBufferMs: number): any {
+    return { clientId, codec: "flac", bufferCapacityBytes: 1_600_000, stateReported: true, minBufferMs };
+  }
+
+  it("控制端摘牌后不回落 800ms;resetPushMeter(换歌)才重锚", () => {
+    const c = stated("c1", 500);
+    const g = new SendspinGroup("g-freeze", { log() {} } as any);
+    g.add(c);
+    expect(g.commonSendAheadUs()).toBe(500_000);
+    // 摘牌 = 成员集合清空(真机 ESP32 控制端 60s 被 DROP 的等价形态)
+    g.remove(c);
+    expect(g.members.size).toBe(0);
+    // ★ 曲内冻结:不再回落 DEFAULT_MIN_BUFFER_MS(800ms) ⇒ 不会一次性裁 300ms
+    expect(g.commonSendAheadUs()).toBe(500_000);
+    // 换歌/重建流:按当前成员重锚(此时无成员 ⇒ 回到协议缺省 800ms)
+    g.resetPushMeter();
+    expect(g.commonSendAheadUs()).toBe(800_000);
+  });
+
+  it("成员中途加入也不改曲内可听轴(只增不减语义由冻结保证)", () => {
+    const c1 = stated("c1", 500);
+    const g = new SendspinGroup("g-freeze2", { log() {} } as any);
+    g.add(c1);
+    expect(g.commonSendAheadUs()).toBe(500_000);
+    // 曲中再入一个要 900ms 的成员:冻结值不变(换歌时才重算)
+    g.add(stated("c2", 900));
+    expect(g.commonSendAheadUs()).toBe(500_000);
+    g.resetPushMeter();
+    expect(g.commonSendAheadUs()).toBe(900_000);
+  });
+});
+
+describe("4.11.5 纯桥期沿用上次容量钳制", () => {
+  it("直连成员全离线:沿用上次钳制,不回退 30s(避免 +4.38s 突发预填充)", () => {
+    const m = member("flac", 1_600_000);
+    const g = groupWith([m]);
+    const clamped = g.capacityLimitedPrefillMs();
+    expect(clamped).toBeLessThan(PREFILL_BUFFER_MAX_MS);
+    expect(clamped).toBeGreaterThan(0);
+    g.remove(m);
+    expect(g.members.size).toBe(0);
+    expect(g.deviceCapacityBytes()).toBe(0);
+    // ★ 关键:不回退 PREFILL_BUFFER_MAX_MS(30s)
+    expect(g.capacityLimitedPrefillMs()).toBe(clamped);
+  });
+
+  it("从未取得容量钳制(纯桥自始)仍回退 30s,保持旧行为", () => {
+    const g = groupWith([]);
+    expect(g.capacityLimitedPrefillMs()).toBe(PREFILL_BUFFER_MAX_MS);
+  });
+});

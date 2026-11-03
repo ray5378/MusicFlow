@@ -1774,7 +1774,11 @@ export class SendspinGroup {
    *  必须用同一个量(MA `push_stream.py:1313`),否则 `delta=(ts-send_ahead)-now`
    *  不为 0,设备会立刻判「已过期」→ underrun。 */
   commonSendAheadUs(): number {
-    return computeCommonSendAhead([...this.members].map((m) => sendAheadInputOf(m)));
+    if (this.frozenSendAheadUs > 0) return this.frozenSendAheadUs;
+    const live = computeCommonSendAhead([...this.members].map((m) => sendAheadInputOf(m)));
+    // 纯桥组起播(无直连成员)不冻结;首个成员出现即冻结,曲中增删不再改可听轴。
+    if (this.members.size > 0 && live > 0) this.frozenSendAheadUs = live;
+    return live;
   }
 
   // ---- 缓冲档位 × 设备容量匹配(见 PREFILL_BUFFER_MAX_MS 注释与
@@ -1790,6 +1794,23 @@ export class SendspinGroup {
   private deliveredByGroup = new Map<string, number>();
   /** 上包络(单调不减):成员/编码组增删(含播中加入)时时间线永不倒退、不停滞。 */
   private deliveredPeak = 0;
+
+  /** 曲目内**冻结的公共 send_ahead**(µs)。
+   *
+   *  投递戳按 `ts' = ts − commonSendAheadUs()` 映射到可听轴。若该值在曲中随成员
+   *  增删实时重算:控制端被摘牌 ⇒ `members` 清空 ⇒ `computeCommonSendAhead([])` 回退
+   *  `DEFAULT_MIN_BUFFER_MS`(800ms),而原成员报的是 500ms ⇒ 整条可听轴瞬间回溯
+   *  300ms ⇒ 桥按对齐器裁掉等长内容(240 实测 13,230 帧 = 300.0ms,2026-11-03;
+   *  因桥内还压着 7.5s 内容,7.7s 后才暴露)。
+   *  故本曲内保持首锚值,仅 `resetPushMeter()`(换歌/重建流)重取。 */
+  private frozenSendAheadUs = 0;
+
+  /** 设备容量钳制的预填充时长(最近一次直连成员在场时的值)。
+   *
+   *  直连成员全部离线(纯桥窗口)时 `deviceCapacityBytes()` = 0,旧行为回退
+   *  `PREFILL_BUFFER_MAX_MS`(30s)且字节闸失效 ⇒ `wantFill` 一次性突发把内容前沿
+   *  顶前 4.4s(240 实测 10.57→14.94s,2026-11-03)。纯桥期沿用上次容量值即可。 */
+  private lastCapacityPrefillMs = 0;
 
   /** **尚未播到**的音频缓存(late-join 回填用),键 = 编码组(`codec:gain`)。
    *
@@ -1816,6 +1837,8 @@ export class SendspinGroup {
     this.pushedSamples = 0;
     this.deliveredByGroup.clear();
     this.deliveredPeak = 0;
+    // ★ 4.11.5:换歌/重建流时重取可听轴基准(曲中增删成员不再改,见 frozenSendAheadUs)。
+    this.frozenSendAheadUs = computeCommonSendAhead([...this.members].map((m) => sendAheadInputOf(m)));
     // ★ P3(2026-11-02):接续/预取交接保留 ring —— 否则这里会把 close() 刚保留的
     //   旧曲尾(以及 S1 预取帧)清空,桥侧在边界后 3~10s 拿不到内容 ⇒ 补静音/跳段
     //   (真机实测 pad-insert 3235ms、skip 10607ms)。其余场景仍照旧清空:
@@ -2014,10 +2037,16 @@ export class SendspinGroup {
    *  要更深的水位请调大设备侧 `buffer_size`。 */
   capacityLimitedPrefillMs(): number {
     const cap = this.deviceCapacityBytes();
-    if (cap <= 0) return PREFILL_BUFFER_MAX_MS;
+    if (cap <= 0) {
+      // 纯桥期(直连成员全离线)沿用上次容量钳制,避免回退 30s 触发 4.4s 突发预填充。
+      if (this.members.size === 0 && this.lastCapacityPrefillMs > 0) return this.lastCapacityPrefillMs;
+      return PREFILL_BUFFER_MAX_MS;
+    }
     const usable = cap * DEVICE_BUFFER_HEADROOM_RATIO;
     const byBytes = (usable / Math.max(1, this.encodedBytesPerSec())) * 1000;
-    return Math.max(PREFILL_BUFFER_MIN_MS, Math.min(PREFILL_BUFFER_MAX_MS, Math.floor(byBytes)));
+    const ms = Math.max(PREFILL_BUFFER_MIN_MS, Math.min(PREFILL_BUFFER_MAX_MS, Math.floor(byBytes)));
+    this.lastCapacityPrefillMs = ms;
+    return ms;
   }
 
   /** 设备环形缓冲的**压缩字节预算**(扣除余量)。0 = 设备未宣告容量(不做字节闸)。

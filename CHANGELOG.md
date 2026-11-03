@@ -2,6 +2,53 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.11.5] - 2026-11-03
+
+### Fix / 断连期两台桥一次性裁 300ms（曲内 `send_ahead` 回退 800ms 根因）
+
+4.11.4 真机验收唯一残留：iptables DROP Sendspin 控制端 60s，断连 44s 处两台桥**同步**
+`realigned -300ms (drop 13230 帧)`。
+
+根因链（数值自洽）：
+
+1. 桥投递戳映射 `ts' = ts − send_ahead`，`send_ahead = commonSendAheadUs()`；
+2. 控制端被摘牌 ⇒ `members` 清空 ⇒ `computeCommonSendAhead([])` 返回
+   `DEFAULT_MIN_BUFFER_MS = 800ms`，而本曲锚点原为 **500ms** ⇒ `ahead` 突增 300ms
+   ⇒ 后续投递帧整体提前 300ms；
+3. 对齐器 `diff ≤ −441 帧` 时一次裁掉全部差值 ⇒ **13,230 帧 = 300.0ms @44.1k**，
+   随后 12 个 25ms 块消化 `pendingDrops`；
+4. 桥内压着 ≈7.5s 内容队列，故偏移帧排空后才到播放头（可听轴回溯晚 7.7s 暴露）。
+5. 伴随现象（无听感影响、仅诊断失真）：`deviceCapacityBytes()` 归零 ⇒ 容量钳制回退
+   30s、字节闸失效 ⇒ 预填充目标 10.6s→15s，`contentFrontierVsNowUs` 一次性 +4.38s。
+
+修复：
+
+- **曲内冻结 ahead**：新增 `frozenSendAheadUs`。首个直连成员出现即冻结（
+  `commonSendAheadUs()`），曲中成员增删不再改可听轴；`resetPushMeter()`（换歌/重建流）
+  才按当前成员重取。纯桥组起播无成员时不冻结。
+- **纯桥期沿用容量钳制**：新增 `lastCapacityPrefillMs`。`deviceCapacityBytes()=0` 且组内
+  无直连成员时沿用上次钳制值，不再回退 `PREFILL_BUFFER_MAX_MS`(30s)；从未取得钳制值
+  时保持旧行为（向后兼容）。
+- **回归单测**：`tests/sendspin/prefillCapacity.test.ts` 新增 4 例（摘牌后不回落 800ms
+  且 `resetPushMeter` 才重锚 / 中途加入不改曲内可听轴 / 直连全离线沿用钳制 / 纯桥自始
+  仍回退 30s）。
+
+### 真机验收（240，4.11.5）
+
+- **注入方式**：同 4.11.4，`iptables` 双向 DROP `192.168.10.246` 60s
+  （2026-11-03 12:52:12–12:53:12 CST），`eno1-ovs` 抓 `udp host .102/.30/.246`，126s。
+- **裁切消失**：DROP 窗口内 `realigned: device=…` **动作日志 0 条**；两台桥 `realigned`
+  计数器 .102=268、.30=266 全程不变（对照 4.11.4：两台各 +1 且 drop 13,230 帧）。
+- **诊断前沿稳定**：`contentFrontierVsNowUs` 10.558–10.585s（168 采样，极差 25.8ms），
+  **不再**由 10.57s 跳到 14.94s。
+- **无空洞**：MUZO 15,783 包 / HiVi 15,783 包，均 125.3pps，maxGap 39/26ms，
+  `>100ms` 空洞 0，RTP 序号断点 0。
+- **恢复续播**：撤规则后约 1s 成员自动回组，12:54:16 `timeline anchored … sendAhead=500000us
+  … continuity=true lastEnd=base` ⇒ 零间隙续播（冻结值未被成员回归改写）。
+- **旁证（非本修复引入，4.11.4 同样存在）**：12:51:30 MUZO RAOP 重连触发 now 锚
+  （E2 默认 ON）⇒ 对齐器补 6281.3ms 静音；属既有 RAOP 重连行为，与断连裁切无关，
+  后续单独收敛。
+
 ## [4.11.4] - 2026-11-03
 
 ### Fix / 混合组控制端掉线不再拖停 AirPlay 桥（全屋 17s 静音根因）
