@@ -141,7 +141,7 @@ describe("bridgeServer:帧分发与背压事件(§4.2/§4.4)", () => {
     client.destroy();
   });
 
-  it("onAudio 返回 backlog > overflowMs(注入 8s)→ overflow 断连", async () => {
+  it("onAudio 返回 backlog > overflowMs(注入 8s)→ onOverflow 上报,连接保留(裁旧保新)", async () => {
     let overflowMs = 0;
     const server = new BridgeServer(
       { deviceId: "dev-1", token: "tok-1", protocol: "raop", overflowMs: 8_000 },
@@ -154,13 +154,15 @@ describe("bridgeServer:帧分发与背压事件(§4.2/§4.4)", () => {
     client.write(encodeConfig(CFG));
     await until(() => server.stats().sessionsAccepted === 1, "accepted");
     client.write(encodeAudio(1, 1, 0n, Buffer.alloc(64)));
-    await until(() => client.destroyed, "overflow destroy");
-    expect(overflowMs).toBe(9000);
+    await until(() => overflowMs === 9000, "overflow report");
+    // 2026-11-03:overflow 不再 socket.destroy()(断连会诱发 rehost 放大抖动)
+    expect(client.destroyed).toBe(false);
     expect(server.stats().overflows).toBe(1);
     expect(server.stats().sessionsAccepted).toBe(1); // 统计不被覆盖
+    client.destroy();
   });
 
-  it("默认 overflowMs = BRIDGE_RECEIVE_OVERFLOW_MS(16s):8.5s 积压不断连,16.5s 才断连", async () => {
+  it("默认 overflowMs = BRIDGE_RECEIVE_OVERFLOW_MS(16s):8.5s 积压不报,16.5s 上报但连接保留", async () => {
     // 240 真机 2h:稳态接收积压 p50=7.63s / max=7.98s,旧 8s 阈值 ⇒ 83 次 overflow,
     // 每次丢 8s 音频、pad-insert 8s 静音、session 换代。16s 口径必须让 8.5s 存活。
     expect(BRIDGE_RECEIVE_OVERFLOW_MS).toBe(16_000);
@@ -185,9 +187,11 @@ describe("bridgeServer:帧分发与背压事件(§4.2/§4.4)", () => {
 
     backlog = 16_500;
     client.write(encodeAudio(2, 2, 352n, Buffer.alloc(64)));
-    await until(() => client.destroyed, "overflow destroy");
-    expect(overflowMs).toBe(16_500);
+    await until(() => overflowMs === 16_500, "overflow report");
+    // 2026-11-03:上报后连接保留,由实现方裁旧保新
+    expect(client.destroyed).toBe(false);
     expect(server.stats().overflows).toBe(1);
+    client.destroy();
   });
 
   it("2s 无帧判 stalled(注入短阈值)", async () => {

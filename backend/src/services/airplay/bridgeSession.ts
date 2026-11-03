@@ -140,6 +140,25 @@ const BRIDGE_LOW_WATER_WAIT_MS = 40;
  *  窗口;细化到 1ms 以降低残留抖动(该定时器只在欠料/补货等待期间才会转)。 */
 const BRIDGE_PULL_POLL_MS = 1;
 
+/** 新代次首帧「大缺口」阈值(µs):换曲/重锚时上游泵短暂断供,时间戳却继续前进,旧行为把
+ *  这段缺口物化成静音塞进 outBuf(240 实测 1704ms / 1768.5ms)⇒ 内容前沿被垫高、与节拍轴
+ *  错位,叠加 raop 的 lag rebase 后演成「追发风暴」(12:34 `late` +100/s、16s 积压 overflow)。
+ *  新代次首帧缺口 > 该阈值 ⇒ 走 skip(前移 RTP 时间线,不物化静音):听感同样是静音,
+ *  但不污染内容前沿/节拍轴,也不再产生秒级突发缓冲。 */
+const BRIDGE_NEWGEN_GAP_SKIP_US = 500_000;
+
+/** front-rebase 冷却期(ms):换曲/重锚残波里 tick 每 2s 一次、把 pacing shift 顶到 4s 上限
+ *  (12:33/20:33 实证 ×7)。同一次偏差只允许补偿一次,给恢复留出观察窗。 */
+const BRIDGE_FRONT_REBASE_COOLDOWN_MS = 5_000;
+
+/** front-rebase 允许的上游积压上限(ms):一旦接收侧已积压,deltaUs 变小是「欠料」而非
+ *  「贴住墙钟」,此时停喂只会把积压推向 overflow。稳态 inQueue ≈1.5–1.75s,阈值取 3s。 */
+const BRIDGE_FRONT_REBASE_MAX_BACKLOG_MS = 3_000;
+
+/** 接收侧 overflow 保留上限(ms):裁旧保新时把 inQueue 压回该深度(与接收端 L 同量级),
+ *  余下的时间线缺口交给 aligner 的 skip 路径自然吸收。 */
+const BRIDGE_OVERFLOW_KEEP_MS = 2_000;
+
 /** Fix-1: 桥会话建立(RECORD 完成)后主动推一次初始音量。此前桥会话只在音量
  *  **变更**事件时才有 SET_PARAMETER(cast 路径 control.applyVolumeDb 不覆盖桥),
  *  起播/重连会话从不推,接收端落默认初始音量(shairport-sync -18dB ⇒ loopback
@@ -286,6 +305,23 @@ export class BridgeTimelineAligner {
   /** 实际追加 n 帧重采样输出(insert 静音已在 onFrame 内计,勿重复调)。 */
   produced(n: number): void {
     if (n > 0) this.pos += n;
+  }
+
+  /** 到目标时间线的帧差(target − pos;正 = 内容落后/有洞)。只读,不改状态。 */
+  gapFramesTo(tsUs: bigint): number {
+    const target = Math.round((Number(tsUs - this.anchorUs) * this.rate) / 1e6);
+    return target - this.pos;
+  }
+
+  /** 新代次首帧大缺口:内容位置直接跳到 target(不物化静音,语义 = skip)。
+   *  返回实际跳过的帧数(≤0 = 无需跳);调用方负责经 bridgeSkipFrames 同步 RTP 时间线。 */
+  skipGapTo(tsUs: bigint): number {
+    const gap = this.gapFramesTo(tsUs);
+    if (gap <= 0) return 0;
+    this.pos += gap;
+    this.lastDrift = Math.round((gap / this.rate) * 1e6);
+    this.realignCount++;
+    return gap;
   }
 
   /** producer 欠料静音补块占 n 帧(占据内容时间线,保持对齐连续)。 */
@@ -955,6 +991,8 @@ export class BridgeSession {
   /** E3:锚点落定时刻的 chunksOut 快照(tick deltaUs 用增量)。 */
   private chunksOutAtPlan = 0;
   private generation = 0;
+  /** 已进入 resampleIn 的最后一帧代次(0 = 旧无代次路径未计入)。用于识别「新代次首帧」。 */
+  private lastResampledGen = 0;
   /** D6/P1:主进程 `bridgeManual` RPC 置的 sticky「用户手动 next/prev」标记(时间戳;0=无)。 */
   private manualPendingAt = 0;
   /** D6/P1:手动操作在泵侧先发 `stop` 再发 `track`(playFrom = stop→play)。
@@ -1357,17 +1395,21 @@ export class BridgeSession {
   /** 链路 stall(2s 无任何帧,含心跳):sendspin 子进程死亡/链路断。
    *  §5.2「sendspin 子进程崩溃 ⇒ airplay 侧无残留播放」:立刻停推流(不写静音),
    *  保留 listener 等重连;BridgeMember 重连成功会发 BOUNDARY{rehost} ⇒ 走 onBoundary 重锚。 */
-  /** §4.4 接收侧积压超上限(服务端已决定销毁该 session):把积压一并丢弃。
+  /** §4.4 接收侧积压超上限(发送侧仍在消费,**不再断连**)。
    *
-   *  为什么必须丢(2026-10-30 240 实证):积压之所以能长到 8s,是因为**没有消费者**
-   *  (看门狗重连窗口内 aligner=null)。这些 PCM 对时间线早已过期 —— 留着只会在发送侧
-   *  重连(&rehost)后被当成正常内容消费,表现为 `ev=stale staleFrames=385200`
-   *  (≈8.7s 内容一次性废弃)且旧会话 Socket 生命周期被拉长。丢弃是显式的、有界的。 */
+   *  2026-11-03 改为「裁旧保新」:旧实现清空 inQueue/outBuf 后服务端还 destroy socket ⇒
+   *  换代 rehost(240 实测 12:33:36 / 20:33:35:16s 积压 → 断链 → 新流重锚 → 再积压)。
+   *  积压本质只是「生产者比发送侧快」,丢最旧的一段即可追上;保留当前内容与 outBuf,
+   *  余下的时间线缺口由 aligner 的 skip 路径自然吸收(不物化静音)。
+   */
   private onReceiveOverflow(ms: number): void {
-    const dropped = this.inBytes;
-    this.inQueue = [];
-    this.inBytes = 0;
-    this.outBuf = Buffer.alloc(0);
+    const keepBytes = Math.round((BRIDGE_OVERFLOW_KEEP_MS / 1000) * BRIDGE_PCM_BYTES_PER_SEC);
+    let dropped = 0;
+    while (this.inBytes > keepBytes && this.inQueue.length > 0) {
+      const head = this.inQueue.shift()!;
+      this.inBytes -= head.buf.length;
+      dropped += head.buf.length;
+    }
     log.warn(`[airplay-bridge] ${JSON.stringify({
       ev: "recv-overflow",
       dev: this.deviceId,
@@ -1375,6 +1417,7 @@ export class BridgeSession {
       backlogMs: Math.round(ms),
       droppedBytes: dropped,
       droppedMs: Math.round((dropped / BRIDGE_PCM_BYTES_PER_SEC) * 1000),
+      keptMs: this.backlogMs(),
     })}`);
   }
 
@@ -1968,19 +2011,29 @@ export class BridgeSession {
       // 门控(实测排空期 37 次 ×4s 空转):会话已停/正在排空时 deltaUs 深度为负
       // 是「内容轴已走完」而非「贴住墙钟」,重锚既救不回内容,还会把残尾继续推后。
       // 判据 = 内容前沿本 tick 仍在推进 + 链路活着仍出流;前沿冻结即视为无料可补。
+      // 2026-11-03 补三道闸(12:33/20:33 换曲风暴实证)——
+      //   a) deltaUs > 0:前沿已落到墙钟之后(= 真欠料),再停喂只会更深负、救不回来;
+      //   b) 上游积压 ≤3s:有积压说明 delta 变小是「欠料」而非「贴住墙钟」,
+      //      停喂会把积压推向 overflow(实测 15.5s → 16s 断连 rehost);
+      //   c) 冷却 5s:与 raop 的 pause/lag rebase 互斥(同一偏差只补一次),
+      //      否则每 2s 一次把 shift 顶到 4s 上限(实测 ×7)。
       const frontierAdvanced = frontier > this.lastFrontierUs;
       this.lastFrontierUs = frontier;
+      const player = this.player;
       if (
         frontierAdvanced
-        && this.player !== null && this.aligner !== null && !this.pausedState
-        && !this.closed && !this.streamAborted && this.player.isStreaming
+        && player !== null && this.aligner !== null && !this.pausedState
+        && !this.closed && !this.streamAborted && player.isStreaming
+        && deltaUs > 0
+        && this.backlogMs() <= BRIDGE_FRONT_REBASE_MAX_BACKLOG_MS
+        && player.msSinceLastPacingRebase >= BRIDGE_FRONT_REBASE_COOLDOWN_MS
         && deltaUs < BRIDGE_REBASE_MIN_AHEAD_US - 100_000
       ) {
         const shiftUs = Math.min(
           BRIDGE_REBASE_MIN_AHEAD_US + 100_000 - deltaUs,
           4_000_000,
         );
-        this.player.requestPacingRebase(shiftUs);
+        player.requestPacingRebase(shiftUs);
         log.warn(`[airplay-bridge] ${JSON.stringify({
           ev: "front-rebase",
           dev: this.deviceId,
@@ -1988,6 +2041,7 @@ export class BridgeSession {
           deltaUs,
           shiftUs,
           minAheadUs: BRIDGE_REBASE_MIN_AHEAD_US,
+          backlogMs: this.backlogMs(),
         })}`);
       }
       this.deltaSamples.push(deltaUs);
@@ -2148,10 +2202,30 @@ export class BridgeSession {
           this.stats.droppedFrames += off;
         }
       }
-      const act = aligner.onFrame(entry.tsUs);
+      // ① 换曲/重锚的新代次首帧:大缺口走 skip(不物化静音),见 BRIDGE_NEWGEN_GAP_SKIP_US。
+      //   缺口 > 阈值时内容位置直接跳到新时间线、RTP 时间线同步前移;听感仍是静音,
+      //   但不再把秒级静音塞进 outBuf(那会把内容前沿垫高、与节拍轴错位 ⇒ 追发风暴)。
+      const genChanged = entry.generation !== 0 && entry.generation !== this.lastResampledGen;
+      if (entry.generation !== 0) this.lastResampledGen = entry.generation;
+      let act: BridgeAlignAction;
+      const newGenGap = genChanged ? aligner.gapFramesTo(entry.tsUs) : 0;
+      if (newGenGap > 0 && (newGenGap / rate) * 1e6 > BRIDGE_NEWGEN_GAP_SKIP_US) {
+        const frames = aligner.skipGapTo(entry.tsUs);
+        act = { insertFrames: 0, dropFrames: 0, skipFrames: frames, realigned: frames > 0, diff: frames };
+        log.warn(`[airplay-bridge] ${JSON.stringify({
+          ev: "newgen-skip",
+          dev: this.deviceId,
+          gen: this.generation,
+          frames,
+          ms: Math.round((frames / rate) * 1000),
+        })}`);
+      } else {
+        act = aligner.onFrame(entry.tsUs);
+      }
       if (act.insertFrames > 0) {
-        // 内容落后(有洞)⇒ 补静音(占据真实时间线)。D8:组同步模式不设上限(长缺口也补,
+        // 内容落后(有洞)⇒ 补静音(占据真实时间线)。D8:稳态对齐不设上限(长缺口也补,
         // 绝不跳段 —— 跳段会把本成员 RTP 内容轴前移,永久错位)。
+        // 唯一例外 = 新代次首帧的大缺口:按 ① 先走 skip(见上),不会落到这里。
         this.appendOut(Buffer.alloc(act.insertFrames * 4));
         this.stats.insertedFrames += act.insertFrames;
         if (act.insertFrames > rate * 2) {

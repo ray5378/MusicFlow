@@ -68,6 +68,21 @@ describe("BridgeTimelineAligner:drop 不得三角累计(45s 无声根因)", () =
   });
 });
 
+describe("BridgeTimelineAligner:新代次首帧大缺口走 skip(不物化静音)", () => {
+  it("gap 1.7685s → skipGapTo 前移 pos 且返回 77989 帧;gap ≤ 0 返回 0", () => {
+    const A = 4_000_000_000n;
+    const a = new BridgeTimelineAligner(A, RATE);
+    const gapUs = 1_768_500n;
+    expect(a.contentPos).toBe(0);
+    expect(a.gapFramesTo(A + gapUs)).toBe(Math.round((Number(gapUs) * RATE) / 1e6));
+    const frames = a.skipGapTo(A + gapUs);
+    // 20:33/12:33 实测该缺口被物化成 insert=77989 静音帧;这里改为等量 skip(不物化)。
+    expect(frames).toBe(Math.round((Number(gapUs) * RATE) / 1e6)); // 1.7685s × 44100 = 77991
+    expect(a.contentPos).toBe(frames);
+    expect(a.skipGapTo(A - 1_000_000n)).toBe(0); // 已超前/缺口为负:不动
+  });
+});
+
 describe("planBridgeAnchor:窗口 FLOOR 打戳可达(切歌不再自锚 +2.5s)", () => {
   const now = 3_000_000_000n;
   const L = 44100; // RAOP 协商延迟 1s(真机 latencyFrames=44100)

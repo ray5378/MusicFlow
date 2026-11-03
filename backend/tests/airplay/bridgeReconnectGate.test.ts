@@ -154,16 +154,24 @@ describe("v4.10.1 重连后补起流判定 + overflow 清积压", () => {
     expect(Date.now() - any.noConsumerSince).toBeLessThan(1000);
   });
 
-  it("★ 接收侧 overflow 必须丢弃无消费者的积压 PCM(in/out 一并清)", async () => {
+  it("★ 接收侧 overflow 只裁最旧积压(保留近 2s 新内容与 outBuf,不断连)", async () => {
     const s = mkSession();
     await s.start();
     const any = s as any;
-    any.inQueue = [Buffer.alloc(64), Buffer.alloc(64)];
-    any.inBytes = 128;
+    // 5 × 100000B ≈ 5.2s(48k s16le 立体声);超上限后应裁到 ≤ 2s(384000B)
+    any.inQueue = Array.from({ length: 5 }, (_, i) => ({
+      buf: Buffer.alloc(100_000, i),
+      tsUs: 0n,
+      generation: 0,
+    }));
+    any.inBytes = 500_000;
     any.outBuf = Buffer.alloc(256);
-    any.onReceiveOverflow(8025);
-    expect(any.inBytes).toBe(0);
-    expect(any.inQueue.length).toBe(0);
-    expect(any.outBuf.length).toBe(0);
+    any.onReceiveOverflow(16_031);
+    expect(any.inBytes).toBeLessThanOrEqual(384_000);
+    expect(any.inQueue.length).toBeLessThan(5);
+    // 保新:留下的应是队尾(旧条目已出队)
+    expect(any.inQueue[any.inQueue.length - 1].buf[0]).toBe(4);
+    // outBuf 是已产出内容,不受裁旧影响
+    expect(any.outBuf.length).toBe(256);
   });
 });

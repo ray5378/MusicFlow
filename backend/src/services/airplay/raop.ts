@@ -624,6 +624,9 @@ export class RaopPlayer {
    *   ② `BridgeSession` stats tick 的内容前沿判据(deltaUs < +1.5s,见 rates.ts)。
    *  每次 `streamBridge` 起始归零(新流 = 新锚点,旧偏移无意义)。 */
   private bridgePacingShiftUs = 0n;
+  /** 最近一次 pacing 重锚(任一推动者:raop 节拍判据 / tick 前沿判据)的时刻(ms;0=无)。
+   *  供 BridgeSession 做互斥门:同一偏差只允许补偿一次,防两条通道叠加把 shift 顶到上限。 */
+  private bridgePacingRebaseAtMs = 0;
 
   // runtime state for the app layer
   positionSec = 0;
@@ -675,6 +678,14 @@ export class RaopPlayer {
     return this.bridgeLatePackets;
   }
 
+  /** 距最近一次 pacing 重锚的毫秒数(从未发生过 = Number.MAX_SAFE_INTEGER)。
+   *  互斥门用:raop 节拍判据与 tick 前沿判据都推同一个 shift,必须串行化。 */
+  get msSinceLastPacingRebase(): number {
+    return this.bridgePacingRebaseAtMs === 0
+      ? Number.MAX_SAFE_INTEGER
+      : Date.now() - this.bridgePacingRebaseAtMs;
+  }
+
   /** 请求把桥接发送节奏参考前移 `us`(µs,只影响 sendAt,不动 RTP 映射树)。
    *  由 `BridgeSession` stats tick 在「内容前沿 deltaUs < BRIDGE_REBASE_MIN_AHEAD_US」
    *  时调用:内容已经贴着墙钟播 ⇒ 主动停喂 `us`,让设备缓冲先排空、前沿重新垫高。
@@ -682,6 +693,7 @@ export class RaopPlayer {
   requestPacingRebase(us: number): void {
     if (!Number.isFinite(us) || us <= 0) return;
     this.bridgePacingShiftUs += BigInt(Math.round(us));
+    this.bridgePacingRebaseAtMs = Date.now();
   }
 
   /** RECORD 协商的接收端缓冲深度(帧)—— 锚点公式 L 的唯一来源(§3.3:L = latencyFrames/rate
@@ -1443,6 +1455,7 @@ export class RaopPlayer {
     }
     this.bridgeLatePackets = 0;
     this.bridgePacingShiftUs = 0n;
+    this.bridgePacingRebaseAtMs = 0;
     const rate = this.opts.sampleRate;
     let idx = 0; // 已发包数(内容样本 [idx·352, (idx+1)·352) 的序号)
     let endedBy: BridgeStreamEndReason = "stopped";
@@ -1490,6 +1503,7 @@ export class RaopPlayer {
           // 暂停恢复/长饥饿:整体时间线落后墙钟 → pacing 前移,恢复首包立即发,
           // 后续包按新节拍(不重取料,已取到的本包照发 —— 不得造成内容缺口)。
           this.bridgePacingShiftUs += BigInt(lagUs);
+          this.bridgePacingRebaseAtMs = Date.now();
           lagRunSinceUs = null;
           log.info(`bridge pacing rebase: +${lagUs}µs (pause/starvation recovery, RTP 映射不动) idx=${idx}`);
         } else if (lagUs > BRIDGE_REBASE_LAG_US) {
@@ -1500,6 +1514,7 @@ export class RaopPlayer {
           if (lagRunSinceUs === null) lagRunSinceUs = now - BigInt(lagUs);
           if (now - lagRunSinceUs >= BigInt(BRIDGE_REBASE_PERSIST_MS) * 1000n) {
             this.bridgePacingShiftUs += BigInt(lagUs);
+            this.bridgePacingRebaseAtMs = Date.now();
             log.warn(`bridge pacing rebase(lag): +${lagUs}µs (持续 ≥${BRIDGE_REBASE_PERSIST_MS}ms > ${BRIDGE_REBASE_LAG_US}µs, RTP 映射不动) idx=${idx}`);
             lagRunSinceUs = null;
           } else {

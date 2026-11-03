@@ -2,8 +2,8 @@
  *
  *  每连接(每设备每流一个 socket):
  *  - 首帧必须 CONFIG,校验 deviceId/sessionToken,不匹配立即断连;
- *  - AUDIO → handlers.onAudio(实现方返回当前 PCM backlog ms;> 8s 触发
- *    overflow 断连,让发送侧重连 —— §4.4,48k 口径 MIN-05);
+ *  - AUDIO → handlers.onAudio(实现方返回当前 PCM backlog ms;> 上限触发
+ *    onOverflow 由实现方裁旧保新,**不断连** —— §4.4,48k 口径 MIN-05);
  *  - BOUNDARY / HEARTBEAT → 对应回调;2s 未收到任何帧 → onStall(Phase 2 只判定
  *    与上报,复杂恢复从简);
  *  - 非法帧流(解码器抛错)立即断连,不错位续读。
@@ -44,7 +44,8 @@ export interface BridgeServerOpts {
   /** CONFIG 握手超时(默认 5000ms):超时未发 CONFIG 断连。 */
   configTimeoutMs?: number;
   /** 接收侧 PCM 积压上限(默认 16000ms,§4.4;2026-11-02 由 8s 抬到 16s —— 稳态积压
-   *  实测就贴着 8s,旧阈值导致 overflow→换代→再 overflow 循环)。 */
+   *  实测就贴着 8s,旧阈值导致 overflow→换代→再 overflow 循环)。超限后由实现方
+   *  「裁旧保新」,连接保留。 */
   overflowMs?: number;
 }
 
@@ -62,7 +63,7 @@ export interface BridgeSessionEvent {
 }
 
 export interface BridgeServerHandlers {
-  /** 返回当前 PCM backlog(ms);> overflowMs 时服务器断连该会话。 */
+  /** 返回当前 PCM backlog(ms);> overflowMs 时触发 onOverflow(实现方裁旧保新)。 */
   onAudio?: (audio: BridgeAudioEvent) => number | void;
   onBoundary?: (generation: number, reason: string) => void;
   /** paused = HEARTBEAT flags bit1(§5.4 组泵暂停指示;Phase 5)。 */
@@ -272,11 +273,13 @@ export class BridgeServer {
       case FRAME_TYPE.AUDIO: {
         const backlog = this.dispatchAudio(frame);
         if (typeof backlog === "number" && backlog > (this.opts.overflowMs ?? BRIDGE_RECEIVE_OVERFLOW_MS)) {
-          // §4.4:接收侧 PCM 积压超 8s → 断连报 overflow,让发送侧重连。
+          // §4.4:接收侧 PCM 积压超上限 → 交给实现方「裁旧保新」,**不断连**。
+          // 2026-11-03(240 实证):旧行为 socket.destroy() ⇒ 换代 rehost ⇒ 新流重锚 +
+          // 另一轮积压,反而把一次换曲抖动放大成 16s 断连;积压本质是「发得慢」,
+          // 丢最旧的一段即可追上,断链没有收益。
           this.stats_.overflows++;
-          this.log(`overflow: backlog=${Math.round(backlog)}ms`);
+          this.log(`overflow: backlog=${Math.round(backlog)}ms (trim oldest, keep session)`);
           this.handlers.onOverflow?.(backlog);
-          session.socket.destroy();
         }
         return;
       }

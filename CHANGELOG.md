@@ -2,6 +2,20 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.11.9] - 2026-11-03
+
+### Fix / 换曲边界「追赶风暴」(1→2→3)
+
+- **① 换曲/重锚首帧不再物化秒级静音**:新代次首帧缺口 >500ms 走 skip(前移 RTP 时间线),
+  不再把 1.7s/1.77s 静音塞进 outBuf(240 实测该插入把内容前沿垫高、与节拍轴错位)。
+- **② front-rebase 与 pacing rebase 互斥**:tick 前沿判据补三道闸 —— `deltaUs > 0`、
+  上游积压 ≤3s、5s 冷却(与 raop 的 pause/lag rebase 同一 shift,同一偏差只补一次)。
+  修前每 2s 一次把 shift 顶到 4s 上限(实测 ×7,同步发生 `pacing rebase(lag)` 每 1.25s 一次)。
+- **③ 接收侧 overflow 不再断连**:服务端不再 `socket.destroy()`,实现方「裁旧保新」
+  把 inQueue 压回 2s,保留下游消费内容与 outBuf;内容轴缺口由 aligner skip 吸收。
+- **验收(240)**:跨曲边界不得再出现 `realigned insert=77989`、`front-rebase×N`、
+  `recv-overflow`、rehost;`late` 回落到稳态抖动水平。
+
 ## [4.11.8] - 2026-11-03
 
 ### Fix / 零心跳设备强制重建(MUZO 永久静音)
