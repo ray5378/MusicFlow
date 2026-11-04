@@ -1394,6 +1394,11 @@ export class QueueController extends EventEmitter {
       // 跳过改了游标 → 立即同步(客户端 / Web / HA 的界面要跟上)。
       this.persist(deviceId);
       this.emit("queue_changed", deviceId, this.snapshot(deviceId));
+      // 跳曲后补预取:预取链通常还指着刚被判死的曲目,被跳到的新当前曲没有暖缓存,
+      // 现场取源会把换歌空窗拉到十几秒(2026-11-04 240 实测 16.8s → 桥断音 5.8s)。
+      // fire-and-forget,不阻塞起播;失败由预取模块记负缓存。
+      void prefetchSong(item.songId).catch(() => { /* 预取失败不挡起播 */ });
+      this.schedulePrefetch(deviceId);
     }
 
     // 只带 songId 的 item(HA/脚本下发)补全元数据,否则 castToDevice 的

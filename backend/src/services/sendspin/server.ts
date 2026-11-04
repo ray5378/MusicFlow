@@ -91,8 +91,13 @@ export interface SendspinBridgeHandle {
 const BRIDGE_DRAIN_SILENCE_SLICE_US = 25_000;
 
 /** 自动换歌空窗续静音的最长保持时间(ms)。超时即收工并留一行日志:正常情况下一首
- *  内容在数秒内到达;超过说明队列尾/成员异常,再写只会白涨 ring 与投递水位。 */
-const BRIDGE_GAP_FILL_MAX_MS = 12_000;
+ *  内容在数秒内到达;超过说明队列尾/成员异常,再写只会白涨 ring 与投递水位。
+ *
+ *  4.11.15:12s → 20s。240 实测「跳过无音源曲 + 离线成员阻塞 + 无预取」最坏空窗
+ *  16.8s:12s 到点收工后设备 7s 缓冲播完即出现 5.8s 真静音(silenceChunks=4)。
+ *  提到 20s 覆盖该最坏值;正常路径仍由 `[pump][play] 音源就绪` 触发的
+ *  endBridgeAutoTrackGap("content") 提前收工,不额外写静音。 */
+const BRIDGE_GAP_FILL_MAX_MS = 20_000;
 
 /** 控制端(WS)全部断开、但仍有桥成员在播时的最长保留时间(ms)。桥是真实听者,
  *  不随控制端掉线立即拆;超过该时长仍无任何 WS 连接才终态回收(防「无听众还继续

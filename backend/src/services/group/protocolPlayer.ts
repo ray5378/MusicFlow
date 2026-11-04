@@ -38,6 +38,29 @@ export function getBridgeUnavailableReason(deviceId: string): { at: number; reas
 /** 生成新的桥会话 token(§5.5 owner token;与 playMedia 路径同一格式)。 */
 const newBridgeToken = (): string => randomBytes(12).toString("hex");
 
+/** 单台桥准备的硬顶(ms):冷建 / 暖复用。
+ *  离线设备的 `bridgePrepare` 内会先让位同 host DLNA(STOP SOAP)再走 RTSP,
+ *  任一步都可能等到网络超时;实测一台离线设备独占约 9s,把整组取源拖后。
+ *  正常设备冷建 <1s、暖复用 <300ms,这里只是异常兜底,不参与正常时序。 */
+const BRIDGE_PREPARE_COLD_CAP_MS = 2_500;
+const BRIDGE_PREPARE_WARM_CAP_MS = 5_000;
+/** 负缓存 TTL:一次失败后 30s 内不再对该设备发起握手探测(每首歌只付一次代价)。 */
+const BRIDGE_PREPARE_NEGATIVE_TTL_MS = 30_000;
+/** 设备类失败后的 TEARDOWN 探测上限(原默认 6s,离线设备会白等到超时)。 */
+const BRIDGE_PREPARE_PROBE_CAP_MS = 1_500;
+
+/** Promise 硬顶:超时 reject(调用方按失败处理)。定时器 unref,不阻止进程退出。 */
+function capPromise<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`bridge-prepare-timeout(${label}, ${ms}ms)`)), ms);
+    timer.unref?.();
+    p.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); },
+    );
+  });
+}
+
 /** 该组当前是否走桥接路由(§5.2 流内成员变化的路由判定依据)。 */
 export function isBridgeRouteActive(groupId: string): boolean {
   return (activeBridgeRoutes.get(groupId)?.length ?? 0) > 0;
@@ -433,6 +456,11 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
     await Promise.allSettled(route.map((r) => bridgeStopDevice(r.token, r.deviceId)));
   }
 
+  /** 桥准备失败的负缓存(key=deviceId):离线/不可达设备在 TTL 内不再重复握手探测。
+   *  起因(2026-11-04 240 实测):组内一台离线 AP 设备,每首歌起播前都串行等它
+   *  让位 DLNA + 握手重试,累计约 9s,把泵的取源整体拖后 → 桥缓冲耗尽断音 5.8s。 */
+  const bridgeProbeNegative = new Map<string, { until: number; reason: string }>();
+
   /** 准备桥路由:逐设备生成 token → bridgePrepare(§4.1 顺序 ①)。
    *  单设备失败(MAJ-07)→ 记入 fallback,该设备本流回落 solo cast;
    *  全部失败 → 返回 null(整组退回 legacy 路由,与 flag=0 同行为)。
@@ -455,6 +483,16 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
       // 协议先选(B 方案:暖复用判据含协议一致 ⇒ token 沿用与否取决于协议)。
       const protocol = selectAirPlayBridgeProtocol(d);
       const prevSpec = reuse?.find((r) => r.deviceId === d && r.protocol === protocol);
+      // 负缓存命中(且无暖会话可复用):上一首歌已确认这台不可达,30s 内直接判失败,
+      // 不再为它付握手/探测的网络超时代价 —— 这是「离线成员拖住整组起播」的根治点。
+      const neg = bridgeProbeNegative.get(d);
+      if (!prevSpec && neg && neg.until > Date.now()) {
+        const reason = `bridge-skip(负缓存): ${neg.reason}`;
+        bridgeUnavailable.set(d, { at: Date.now(), reason });
+        log.info(`[bridge-prepare] skip device=${d} 负缓存命中(剩余 ${Math.round((neg.until - Date.now()) / 1000)}s): ${neg.reason}`);
+        failed.push(d);
+        continue;
+      }
       // 同设备同协议沿用旧 token ⇒ 子进程暖复用会话(RAOP 握手零重来);否则新 token(冷启语义)。
       const token = prevSpec ? prevSpec.token : randomBytes(12).toString("hex");
       const attempt = (): Promise<{ listening: true; socketPath: string }> => {
@@ -464,17 +502,25 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
         // 快路径,DLNA 早已让位(本组上一首即在播)。
         return bridgePrepareDevice(d, token, protocol, groupId, { initialVolume: groupInitialVolume, settleDlna: !prevSpec });
       };
+      const capMs = prevSpec ? BRIDGE_PREPARE_WARM_CAP_MS : BRIDGE_PREPARE_COLD_CAP_MS;
       try {
-        await attempt();
+        await capPromise(attempt(), capMs, `device=${d}`);
         sockets.push({ deviceId: d, socketPath: bridgeSocketPath(d, token), token, protocol });
+        bridgeProbeNegative.delete(d);
       } catch (e) {
         const reason = (e as Error)?.message || String(e);
+        // 硬顶超时不取消底层握手:迟到成功的会话不在路由表里,必须主动收掉,
+        // 否则子进程会留一条没人消费的桥会话(泄漏 socket / 抢设备音频通道)。
+        if (reason.startsWith("bridge-prepare-timeout")) {
+          void bridgeStopDevice(token, d).catch(() => {});
+        }
         // S1:仅握手阶段设备类失败值得重试(AP2 凭据缺失等语义错误重试必复现)。
         if (isBridgeHandshakeDeviceError(reason)) {
           const recovered = await retryBridgePrepareWithProbe({
             reason,
-            probe: () => raopProbeDevice(d),
-            attempt,
+            // 探测本身也压到 1.5s:默认 6s 对离线设备纯属白等。
+            probe: () => raopProbeDevice(d, BRIDGE_PREPARE_PROBE_CAP_MS),
+            attempt: () => capPromise(attempt(), BRIDGE_PREPARE_COLD_CAP_MS, `retry device=${d}`),
             onRetry: (n, probe) => log.info(`[bridge-prepare] retry#${n} device=${d} probe=${probe.reachable ? "ok" : "unreachable"}(options=${probe.optionsStatus ?? "-"} teardown=${probe.teardownStatus ?? "-"}) reason=${reason}`),
             onGiveUp: (n, probe) => log.warn(`[bridge-prepare] retry#${n} device=${d} probe 不可达(${probe.detail}) → 放弃重试,本流回落 solo cast`),
             onFail: (n, err) => log.warn(`[bridge-prepare] retry#${n} 仍失败 device=${d}: ${(err as Error)?.message || err}`),
@@ -482,11 +528,14 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
           });
           if (recovered) {
             sockets.push({ deviceId: d, socketPath: bridgeSocketPath(d, token), token, protocol });
+            bridgeProbeNegative.delete(d);
             continue;
           }
         }
         // D7：重试后仍失败 ⇒ 仅该台本次不播放并留可读原因；不再回落 solo cast。
         bridgeUnavailable.set(d, { at: Date.now(), reason });
+        // 失败进负缓存:后续 30s 内的起播不再为这台付网络超时(成功/暖复用会清掉)。
+        bridgeProbeNegative.set(d, { until: Date.now() + BRIDGE_PREPARE_NEGATIVE_TTL_MS, reason });
         log.warn(`[group][bridge] ${groupId}: bridgePrepare 失败 device=${d} → 本曲该设备不播放(D7): ${reason}`);
         failed.push(d);
       }

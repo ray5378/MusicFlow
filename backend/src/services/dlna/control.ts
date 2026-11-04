@@ -1568,6 +1568,22 @@ export function getLastReportedPlaybackSec(deviceId: string, maxAgeMs = 10_000):
 const lastTransportState = new Map<string, { state: string; at: number }>();
 const TRANSPORT_STATE_CACHE_MS = 15_000;
 
+/** 单个状态 SOAP 的硬上限(ms)。HA 轮询预算 1s,而离线设备每个 SOAP 都要等到
+ *  网络超时;三个调用串行实测 9.4~18.2s。并发 + 1.2s 硬顶后最坏 ~1.2s。 */
+const STATUS_SOAP_CAP_MS = 1_200;
+
+/** SOAP 状态查询硬顶:超时按失败处理(沿用 lastTransportState / 默认值)。 */
+function cappedStatusSoap<T>(p: Promise<T>, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`status-soap-timeout(${label}, ${STATUS_SOAP_CAP_MS}ms)`)), STATUS_SOAP_CAP_MS);
+    timer.unref?.();
+    p.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); },
+    );
+  });
+}
+
 // Query current transport state + position + volume via SOAP.
 // Returns a default STOPPED status when the device is not in cache (e.g.
 // right after a server restart, before background discovery repopulates it)
@@ -1576,57 +1592,76 @@ const TRANSPORT_STATE_CACHE_MS = 15_000;
 export async function getDeviceStatus(deviceId: string): Promise<DeviceStatus> {
   const device = getDevice(deviceId);
   const sampledAt = Date.now();
-  if (!device?.avTransportUrl) return { state: "STOPPED", position: 0, duration: 0, volume: 0, muted: false, media: getCurrentMedia(deviceId), updatedAt: sampledAt };
+  // 闭包(并发任务)里 TS 不再保留 device 的可选链收窄,先取本地常量。
+  const avTransportUrl = device?.avTransportUrl;
+  const renderingControlUrl = device?.renderingControlUrl;
+  if (!avTransportUrl) return { state: "STOPPED", position: 0, duration: 0, volume: 0, muted: false, media: getCurrentMedia(deviceId), updatedAt: sampledAt };
   const state: DeviceStatus = { state: "STOPPED", position: 0, duration: 0, volume: 0, muted: false, media: getCurrentMedia(deviceId), updatedAt: sampledAt };
 
-  // GetTransportInfo — state.
-  try {
-    const xml = await soapCall(device.avTransportUrl, AV_TRANSPORT, "GetTransportInfo", { InstanceID: "0" });
-    const sm = xml.match(/<CurrentTransportState>([^<]*)<\/CurrentTransportState>/i);
-    if (sm) {
-      state.state = sm[1].trim();
-      lastTransportState.set(deviceId, { state: state.state, at: sampledAt });
-    }
-    markOk(deviceId);
-  } catch (e: any) {
-    markFailed(deviceId, "GetTransportInfo", e);
-    // 抖动 ≠ 已停止:沿用最近一次成功读数(详见 lastTransportState 注释)。
-    const cached = lastTransportState.get(deviceId);
-    if (cached && sampledAt - cached.at <= TRANSPORT_STATE_CACHE_MS) {
-      state.state = cached.state;
-      log.warn(`[dlna] ${deviceId}: GetTransportInfo 失败,沿用 ${cached.state}(${Math.round((sampledAt - cached.at) / 1000)}s 前的读数)`);
-    }
-  }
-
-  // GetPositionInfo — position + duration + TrackURI(供 poll 路径 track_changed 检测)。
-  try {
-    const xml = await soapCall(device.avTransportUrl, AV_TRANSPORT, "GetPositionInfo", { InstanceID: "0" });
-    const relTime = xml.match(/<RelTime>([^<]*)<\/RelTime>/i)?.[1].trim();
-    const trackDur = xml.match(/<TrackDuration>([^<]*)<\/TrackDuration>/i)?.[1].trim();
-    const trackUri = xml.match(/<TrackURI>([^<]*)<\/TrackURI>/i)?.[1].trim();
-    if (relTime && relTime !== "NOT_IMPLEMENTED") state.position = parseHms(relTime);
-    if (trackDur && trackDur !== "NOT_IMPLEMENTED") state.duration = parseHms(trackDur);
-    if (trackUri && trackUri !== "") state.trackUri = trackUri;
-  } catch {}
-
-  // GetVolume — RenderingControl.
-  if (device.renderingControlUrl) {
+  // 三个查询互不依赖 → 并发 + 各自 1.2s 硬顶。串行时一台离线设备会把每次
+  // HA 轮询拖到 9.4~18.2s(2026-11-04 240 实测,/status 预算 1s)。
+  const transportTask = (async () => {
+    // GetTransportInfo — state.
     try {
-      const xml = await soapCall(device.renderingControlUrl, RENDERING_CONTROL, "GetVolume", { InstanceID: "0", Channel: "Master" });
-      const vm = xml.match(/<CurrentVolume>([^<]*)<\/CurrentVolume>/i);
-      if (vm) state.volume = parseInt(vm[1].trim(), 10) || 0;
-    } catch {}
-    // GetMute —— 单独一次调用。部分设备实现了 GetVolume 却没实现 GetMute,
-    // 所以独立 try,失败只当作"未静音",不影响音量读数。
-    try {
-      const xml = await soapCall(device.renderingControlUrl, RENDERING_CONTROL, "GetMute", { InstanceID: "0", Channel: "Master" });
-      const mm = xml.match(/<CurrentMute>([^<]*)<\/CurrentMute>/i);
-      if (mm) {
-        const v = mm[1].trim().toLowerCase();
-        state.muted = v === "1" || v === "true" || v === "yes";
+      const xml = await cappedStatusSoap(soapCall(avTransportUrl, AV_TRANSPORT, "GetTransportInfo", { InstanceID: "0" }), "GetTransportInfo");
+      const sm = xml.match(/<CurrentTransportState>([^<]*)<\/CurrentTransportState>/i);
+      if (sm) {
+        state.state = sm[1].trim();
+        lastTransportState.set(deviceId, { state: state.state, at: sampledAt });
       }
+      markOk(deviceId);
+    } catch (e: any) {
+      markFailed(deviceId, "GetTransportInfo", e);
+      // 抖动 ≠ 已停止:沿用最近一次成功读数(详见 lastTransportState 注释)。
+      const cached = lastTransportState.get(deviceId);
+      if (cached && sampledAt - cached.at <= TRANSPORT_STATE_CACHE_MS) {
+        state.state = cached.state;
+        log.warn(`[dlna] ${deviceId}: GetTransportInfo 失败,沿用 ${cached.state}(${Math.round((sampledAt - cached.at) / 1000)}s 前的读数)`);
+      }
+    }
+  })();
+
+  const positionTask = (async () => {
+    // GetPositionInfo — position + duration + TrackURI(供 poll 路径 track_changed 检测)。
+    try {
+      const xml = await cappedStatusSoap(soapCall(avTransportUrl, AV_TRANSPORT, "GetPositionInfo", { InstanceID: "0" }), "GetPositionInfo");
+      const relTime = xml.match(/<RelTime>([^<]*)<\/RelTime>/i)?.[1].trim();
+      const trackDur = xml.match(/<TrackDuration>([^<]*)<\/TrackDuration>/i)?.[1].trim();
+      const trackUri = xml.match(/<TrackURI>([^<]*)<\/TrackURI>/i)?.[1].trim();
+      if (relTime && relTime !== "NOT_IMPLEMENTED") state.position = parseHms(relTime);
+      if (trackDur && trackDur !== "NOT_IMPLEMENTED") state.duration = parseHms(trackDur);
+      if (trackUri && trackUri !== "") state.trackUri = trackUri;
     } catch {}
-  }
+  })();
+
+  const volumeTask = renderingControlUrl
+    ? (async () => {
+        // GetVolume — RenderingControl。
+        await Promise.allSettled([
+          (async () => {
+            try {
+              const xml = await cappedStatusSoap(soapCall(renderingControlUrl, RENDERING_CONTROL, "GetVolume", { InstanceID: "0", Channel: "Master" }), "GetVolume");
+              const vm = xml.match(/<CurrentVolume>([^<]*)<\/CurrentVolume>/i);
+              if (vm) state.volume = parseInt(vm[1].trim(), 10) || 0;
+            } catch {}
+          })(),
+          // GetMute —— 单独一次调用。部分设备实现了 GetVolume 却没实现 GetMute,
+          // 所以独立 try,失败只当作"未静音",不影响音量读数。
+          (async () => {
+            try {
+              const xml = await cappedStatusSoap(soapCall(renderingControlUrl, RENDERING_CONTROL, "GetMute", { InstanceID: "0", Channel: "Master" }), "GetMute");
+              const mm = xml.match(/<CurrentMute>([^<]*)<\/CurrentMute>/i);
+              if (mm) {
+                const v = mm[1].trim().toLowerCase();
+                state.muted = v === "1" || v === "true" || v === "yes";
+              }
+            } catch {}
+          })(),
+        ]);
+      })()
+    : Promise.resolve();
+
+  await Promise.all([transportTask, positionTask, volumeTask]);
 
   // ---- 换歌检测:用 currentMedia.songId 兜底重置位置基线 ----
   // 比 TrackURI 更可靠——部分设备 GetPositionInfo 不回传 TrackURI,导致下面的

@@ -223,6 +223,18 @@ describe("v4.9.3 方向 A:纯 AirPlay 组强制走桥", () => {
     expect(getBridgeUnavailableReason("ap1")?.reason).toMatch(/prepare failed/);
   });
 
+  it("失败设备进 30s 负缓存:下一首歌不再为它发起 bridgePrepare(离线成员不拖住起播)", async () => {
+    setGroup(["airplay:ap1"]);
+    apOn("ap1");
+    h.prepareFail.add("ap1");
+    const p = createGroupProtocolPlayer("g1");
+    await expect(p.playMedia(makeItem(), "http://b")).rejects.toThrow(/全部成员 cast 失败/);
+    h.prepareCalls.length = 0; // 只统计第二首
+    await expect(p.playMedia(makeItem("s2"), "http://b")).rejects.toThrow(/全部成员 cast 失败/);
+    expect(h.prepareCalls).toHaveLength(0); // ★ 负缓存命中:零网络握手
+    expect(getBridgeUnavailableReason("ap1")?.reason).toMatch(/负缓存/);
+  });
+
   it("暖复用:同集合同协议二连播沿用 token、不拆桥(routeReusable 判据改 ap 集合)", async () => {
     setGroup(["airplay:ap1"]);
     apOn("ap1");

@@ -522,7 +522,7 @@ describe("自动换歌空窗:桥侧续静音", () => {
     expect(ringOf(g)).toHaveLength(0);
   });
 
-  it("超过 12s 仍未接上 ⇒ 收工(reason=timeout),不再白涨 ring", () => {
+  it("超过 20s 仍未接上 ⇒ 收工(reason=timeout),不再白涨 ring", () => {
     const srv = makeSrv();
     const g = srv.group("g-gap-timeout") as SendspinGroup;
     try {
@@ -530,7 +530,7 @@ describe("自动换歌空窗:桥侧续静音", () => {
       const now = 9_000_000n;
       g.noteBridgeAutoTrackGap(now - 1_000_000n);
       const before = ringOf(g).length;
-      (g as any).bridgeGapFillSinceMs = Date.now() - 13_000;
+      (g as any).bridgeGapFillSinceMs = Date.now() - 21_000;
 
       (g as any).fillBridgeAutoTrackGap(now);
 
