@@ -1640,10 +1640,15 @@ export class QueueController extends EventEmitter {
         ? Math.floor(Math.random() * items.length)
         : 0;
     // 起播落位同样刷新可听采样(与 transport seek 同口径),避免首曲曲末外推用旧值。
+    // 只在**带进度起播**(startPositionMs>0)时注入:从 0 起播时不写 pos=0 的假采样 ——
+    // 那会让「曲目提前结束」(短曲/截断音源)在 advance 时按整首时长外推,凭空把显示
+    // 按住几分钟;同时清掉上一首遗留采样,避免跨曲误用。
     {
       const item = idx >= 0 ? items[idx] : undefined;
       const dur = item ? this.knownDuration(item) : 0;
-      if (dur > 0) this.lastPlaying.set(playerId, { pos: Math.max(0, (startPositionMs ?? 0) / 1000), dur, at: Date.now() });
+      const startSec = Math.max(0, (startPositionMs ?? 0) / 1000);
+      if (dur > 0 && startSec > 0) this.lastPlaying.set(playerId, { pos: startSec, dur, at: Date.now() });
+      else this.lastPlaying.delete(playerId);
     }
     this.setQueue(playerId, items, idx, baseUrl, contentContext);
     if (!this.advancing.has(playerId)) {
@@ -1662,11 +1667,9 @@ export class QueueController extends EventEmitter {
   async jumpTo(playerId: string, index: number, baseUrl: string): Promise<void> {
     playerId = stripPlayerPrefix(playerId);
     this.clearDisplayHold(playerId);
-    {
-      const item = index >= 0 ? this.queues.get(playerId)?.items[index] : undefined;
-      const dur = item ? this.knownDuration(item) : 0;
-      if (dur > 0) this.lastPlaying.set(playerId, { pos: 0, dur, at: Date.now() });
-    }
+    // 跳播总是从 0 起播:删掉旧采样即可(理由同 playFrom 的 startPositionMs=0 分支),
+    // 不能在 0 位置写假采样。
+    this.lastPlaying.delete(playerId);
     const q = this.queues.get(playerId);
     if (!q) return;
     if (!Number.isInteger(index) || index < 0 || index >= q.items.length) return;
