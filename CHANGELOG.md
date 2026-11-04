@@ -16,13 +16,19 @@
   - **去重**:同一 seq 在 `MF_BRIDGE_RAOP_LOSS_DEDUP_MS`(默认 150ms)内不重复补发;
   - **限速**:每设备 token bucket `MF_BRIDGE_RAOP_LOSS_RATE_PPS`(默认 400 包/s ≈ 3.2s
     音频/s,高于 125 包/s 正常消费率),把空口带宽留给恢复;
-  - **过期**:请求 seq 落后已发位置 > `MF_BRIDGE_RAOP_LOSS_STALE_PACKETS`(默认 187 包
-    ≈1.5s)判设备已放弃该段,不再补发(对应 libraop `too many missing frames` 前跳)。
+  - **过期**:请求 seq 落后已发位置 > `MF_BRIDGE_RAOP_LOSS_STALE_PACKETS`(默认 375 包
+    ≈3s)判设备已放弃该段,不再补发(对应 libraop `too many missing frames` 前跳);
+    阈值必须 ≥ 实测一次连续 240 包突发(≈1.92s)与 2s hold,否则会把可补段误判为过期。
 - **可观测**:`[raop-loss]` 聚合行新增 `dedup=/thr=/stale=/budget=`;tick 新增
   `lossReq/lossResent/lossMiss/lossFuture/lossDedup/lossThr/lossStale` 累计量;
   并修正 `miss` 此前从未累加(恒为 0)的观测假象。
-- **验收(240)**:风暴窗口内 `dedup+thr` 增量应占请求包数大头、`lossResent` 增速被压到
-  ≤400 包/s,设备缓冲不再被抽干;稳态 `dedup/thr/stale` 应为 0(不误伤正常重传)。
+- **验收(240,2026-11-04)**:61 分钟真实播放(HiVi `A0C0` + MUZO `3ECC` 同时出声)——
+  `silenceChunks/skippedFrames/insertedFrames` 全 0、`nonlive=0`;期间重传 9 次
+  (HiVi 2 / MUZO 7),**全部补发成功 `lossMiss=0`**;稳态 `dedup/thr/stale=0`(未误伤正常重传)。
+  全量 `tests/airplay` 842 用例通过(新增 dedup/throttle/stale/future 4 个单测)。
+  注:01:35–07:35 的 6 小时空载采样(期间无任何播放)不作为验收依据;
+  该窗口 04:00 三路同时丢包经 dmesg 确认为**路由器定时重启**导致的有线掉链,
+  与空口及本修复无关。
 
 ## [4.11.9] - 2026-11-03
 
