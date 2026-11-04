@@ -1710,9 +1710,13 @@ export class QueueController extends EventEmitter {
   /**
    * flow 会话走到第 `index` 首：静默把队列位置推过去。
    *
+   * 调用时机是**可听位置跨过曲目边界**（出流路由用播放端真实进度/编码器内容
+   * 时间轴换算），不是「开始编码下一首」那一刻 —— 后者会提前一个交叉淡入窗口
+   * 广播快照，Web/HA 卡片就会在上一首还没放完时显示下一首。
+   *
    * 为什么"静默"：设备拉的是同一条流，重投 `SetAVTransportURI` 会打断正在播的流
    * （听感就是每次切歌都断一次）。所以这里只改 `currentIndex` 并广播快照，
-   * 让 Web / HA / ICY 元数据跟上真实播放位置。
+   * 让 Web / HA / 客户端跟上真实播放位置（ICY 元数据不经过这里，仍在生成边界）。
    * 越界（播放途中队列被用户改短）直接忽略，避免把位置推到不存在的曲目上。
    */
   flowAdvance(playerId: string, index: number): void {

@@ -1537,6 +1537,25 @@ const positionEstimateSong = new Map<string, string | undefined>();
 const mediaDuration = new Map<string, number>();
 
 /**
+ * 每台设备**原生上报**的播放位置（秒）与采样时刻：只认 `GetPositionInfo` 的 RelTime，
+ * 不参与下面的单调外推/封顶。flow 连续流把它当"可听时钟"的原料 —— 流是一条不间断的
+ * 内容时间轴，设备报出的位置就是**已经从流起点播出的秒数**，正好与 flow 的
+ * `itemStartSec`（同样以流起点为 0）对齐。
+ *
+ * 设备恒回 `RelTime=0`（MUZO/HiVi 播实时转码流）时不会登记 ⇒ 调用方退回
+ * 「编码器已出流位置」，保持旧行为，不回归。
+ */
+const lastReportedPosition = new Map<string, { sec: number; at: number }>();
+
+/** 取设备最近一次**真实上报**的播放位置；超过 maxAgeMs 未刷新、或设备不报位置时返回 null。 */
+export function getLastReportedPlaybackSec(deviceId: string, maxAgeMs = 10_000): { sec: number; at: number } | null {
+  const e = lastReportedPosition.get(deviceId);
+  if (!e) return null;
+  if (Date.now() - e.at > maxAgeMs) return null;
+  return e;
+}
+
+/**
  * 每台设备最后一次**成功**读到的 transport state。
  *
  * GetTransportInfo 失败时 `state.state` 会留在初值 `"STOPPED"`,而
@@ -1624,6 +1643,10 @@ export async function getDeviceStatus(deviceId: string): Promise<DeviceStatus> {
   // debug 用:记住 SOAP 原始读数(下面的外推/封顶会改写 state.position)。
   const rawPos = state.position;
   const rawDur = state.duration;
+  // flow 可听时钟原料：只登记设备**真的报过**的正位置（0 表示"不报"，见 lastReportedPosition）。
+  if (state.state === "PLAYING" && rawPos > 0) {
+    lastReportedPosition.set(deviceId, { sec: rawPos, at: sampledAt });
+  }
   // 切歌(TrackURI 变化)则重置基线,避免用上一首的进度外推。
   const cachedBaseline = positionEstimates.get(deviceId);
   if (cachedBaseline && state.trackUri && cachedBaseline.trackUri && cachedBaseline.trackUri !== state.trackUri) {

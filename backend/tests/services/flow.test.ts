@@ -24,8 +24,10 @@ import { spawnSync } from "node:child_process";
 import { resolveFfmpeg } from "../../src/services/transcode.js";
 import {
   FLOW_DEFAULT_SAMPLE_RATE,
+  createAudibleClock,
   flowDecodeArgs,
   flowEncodeArgs,
+  pickItemIndexAtSec,
   startFlowSession,
   type FlowItem,
 } from "../../src/services/audio/flow.js";
@@ -123,6 +125,67 @@ describe("P3-4 命令组装：af 一次算定、限制器只在编码段", () =>
   });
 });
 
+describe("可听时钟：itemStartSec 边界 + 选曲", () => {
+  it("pickItemIndexAtSec：边界之前一拍仍属于上一首，等于边界才切换", () => {
+    const bounds = [0, 7, 17];
+    expect(pickItemIndexAtSec(bounds, 0)).toBe(0);
+    expect(pickItemIndexAtSec(bounds, 6.999)).toBe(0);
+    expect(pickItemIndexAtSec(bounds, 7)).toBe(1);
+    expect(pickItemIndexAtSec(bounds, 16.5)).toBe(1);
+    expect(pickItemIndexAtSec(bounds, 17)).toBe(2);
+    expect(pickItemIndexAtSec(bounds, 999)).toBe(2);
+    expect(pickItemIndexAtSec([], 10)).toBe(0);
+  });
+
+  it("跳过的曲目没有边界：稀疏数组不会把 UI 推到没播的那首", () => {
+    // index 1 解析失败被跳过 ⇒ 只有 0 和 2 有边界。
+    const sparse: number[] = [];
+    sparse[0] = 0;
+    sparse[2] = 5;
+    expect(pickItemIndexAtSec(sparse, 4.9)).toBe(0);
+    expect(pickItemIndexAtSec(sparse, 5)).toBe(2);
+  });
+});
+
+describe("可听时钟积分器：设备进度 → 流内容秒（抗陈旧/抗归零）", () => {
+  const T0 = 1_000_000;
+
+  it("正常增量推进；领先已出流位置的陈旧读数整帧丢弃", () => {
+    let emitted = 0;
+    const clock = createAudibleClock(T0, () => emitted);
+    emitted = 12;
+    clock.sample(10, T0 + 1000);
+    expect(clock.sec()).toBeCloseTo(10, 5);
+    emitted = 22;
+    clock.sample(20, T0 + 2000);
+    expect(clock.sec()).toBeCloseTo(20, 5);
+    emitted = 30;
+    clock.sample(50, T0 + 3000); // 上一会话的陈旧值：领先已出流 20s → 丢弃
+    expect(clock.sec()).toBeCloseTo(20, 5);
+  });
+
+  it("设备换歌把 RelTime 归零：可听位置不倒退，后续按新增量继续", () => {
+    let emitted = 25;
+    const clock = createAudibleClock(T0, () => emitted);
+    clock.sample(10, T0 + 1000);
+    clock.sample(20, T0 + 2000);
+    expect(clock.sec()).toBeCloseTo(20, 5);
+    clock.sample(0, T0 + 3000); // 归零 → 保留 20
+    expect(clock.sec()).toBeCloseTo(20, 5);
+    emitted = 30;
+    clock.sample(5, T0 + 4000); // 新增量 5 → 25
+    expect(clock.sec()).toBeCloseTo(25, 5);
+  });
+
+  it("会话启动前的采样与「从未采样」→ null（调用方回退已出流位置）", () => {
+    let emitted = 10;
+    const clock = createAudibleClock(T0, () => emitted);
+    expect(clock.sec()).toBeNull();
+    clock.sample(3, T0 - 1); // 早于本会话启动 → 丢弃
+    expect(clock.sec()).toBeNull();
+  });
+});
+
 describe("P3-1 flow 会话：两路解码并存 + 交叉淡入", () => {
   it("两曲 10s、过渡 3s：总长 ≈ 10+10−3 = 17s，crossfades=1，decoders=2（预取真并存）", async () => {
     // 两曲都必须够长：MA 的「窗口 ≤ 下一曲总时长的一半」规则下，5s 的下一曲配 3s 窗口
@@ -149,6 +212,11 @@ describe("P3-1 flow 会话：两路解码并存 + 交叉淡入", () => {
     expect(st.emittedFrames / RATE).toBeCloseTo(17, 0);
     expect(statsTrace).toEqual([0, 1]);
     expect(session.currentIndex()).toBe(1);
+    // 可听边界：第 2 首在混合块**播完**（10s）才成为唯一在播的曲目；淡入期间仍算第 1 首。
+    expect(session.itemStartSec()[0]).toBe(0);
+    expect(session.itemStartSec()[1]).toBeCloseTo(10, 1);
+    // 编码器已出流位置 = 整条流的长度（与播放端进度无关的兜底时钟）。
+    expect(session.streamSec()).toBeCloseTo(17, 0);
   }, 30000);
 
   it("下一曲太短：窗口被「一半」夹到 < 3s → 直接不做过渡（照 MA streams/audio.py:4140-4146）", async () => {
@@ -169,6 +237,8 @@ describe("P3-1 flow 会话：两路解码并存 + 交叉淡入", () => {
     expect(outputSeconds(out)).toBeCloseTo(10, 0); // 两曲首尾相接，完整播出
     expect(st.emittedFrames / RATE).toBeCloseTo(10, 0);
     expect(st.skipped).toBe(0);
+    // 没混合 ⇒ 第 2 首的可听起点就是上一首播完的 5s，而不是"开始解码"的那一刻。
+    expect(session.itemStartSec()[1]).toBeCloseTo(5, 1);
   }, 30000);
 
   it("关掉交叉淡入 = 直通拼接（仍走管道）：总长 ≈ 10s、crossfades=0", async () => {
@@ -182,6 +252,7 @@ describe("P3-1 flow 会话：两路解码并存 + 交叉淡入", () => {
     await session.done;
     expect(outputSeconds(out)).toBeCloseTo(10, 0);
     expect(session.stats().crossfades).toBe(0);
+    expect(session.itemStartSec()).toEqual([0, 5]);
   });
 
   it("曲尾静音不计入过渡窗口（P3-3）：尾部 3s 静音 → 不成过渡，静音被丢掉", async () => {

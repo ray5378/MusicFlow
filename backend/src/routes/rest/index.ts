@@ -22,7 +22,7 @@ import { readCoverFile } from "../../services/coverCache.js";
 import { loadAndRenderCover, getCoverPressure, buildCoverPressureHeaders } from "../../services/coverImage.js";
 import { dailyRecommendTag } from "../../services/pluginAccess.js";
 import { refreshPlaylistCounts } from "../../services/plugin/shared.js";
-import { resolveCastToken, resolveCastSession, resolveRawStreamToken, loopbackBase, loopbackRawStreamUrl } from "../../services/dlna/control.js";
+import { resolveCastToken, resolveCastSession, resolveRawStreamToken, loopbackBase, loopbackRawStreamUrl, getLastReportedPlaybackSec } from "../../services/dlna/control.js";
 import { isBlockedCoverProxyUrl } from "../../utils/ssrf.js";
 import { findFallbackStream, resolveRemoteStreamUrl, markUnplayable } from "../../services/source/online/streamFallback.js";
 import { resolvePreferredSong } from "../../services/source/preferredSource.js";
@@ -1956,17 +1956,17 @@ async function serveFlowQueue(
   // 落 16bit(与 batch49 之前的 flow 行为一致,`flowEncodeArgs` 原先就写死 16);
   // 只有显式设了 24 才升到 24。
   const flowTargetBits = resolveTargetBits(flowRateKey) === 24 ? 24 : 16;
-  const { startFlowSession } = await import("../../services/audio/flow.js");
+  const { startFlowSession, pickItemIndexAtSec, createAudibleClock } = await import("../../services/audio/flow.js");
   const session = await startFlowSession(items, {
     codec: opts.codec,
     sampleRate: flowSampleRate,
     targetBits: flowTargetBits,
     crossfade: true,
     fade: opts.fade,
-    onItemStart: (i, item) => {
+    onItemStart: (_i, item) => {
+      // ICY 传输流里的曲目边界必须与**音频写入**同步（流内消费者会自动准时），
+      // 所以元数据仍留在这里；队列/UI 的 currentIndex 不能跟它 —— 见下面的可听时钟。
       metadata = icyMetadataBlock(item.title, item.artist);
-      // 静默推进队列位置 + 广播快照（见 QueueController.flowAdvance 注释）。
-      try { qm.flowAdvance(opts.deviceId, startIndex + i); } catch { /* 队列已被改，忽略 */ }
     },
     onItemEnd: (_i, item, stderr, ok) => {
       // P0-4 在 flow 模式下的唯一落点：每首歌有自己的解码 stderr，可逐首上报边播边测。
@@ -1988,6 +1988,28 @@ async function serveFlowQueue(
     qm.setFlowOwned(opts.deviceId, false);
     return new Response(null, { status: 499 });
   }
+  // ---------- 可听时钟推进队列（替换原先 onItemStart 里的 flowAdvance）----------
+  // 病根：onItemStart 在「下一首开始编码」时就触发，而此刻它的音频还没写进流
+  // （交叉淡入窗口 = 上一首尾巴，默认 8s），再叠加播放端解码/输出延迟 1~2.5s，
+  // Web/HA/客户端看到的就是提前 5~10s 的"正在播放下一首"。
+  // 现在 flow 在**上一首最后一个样本播出**时记录 itemStartSec；这里的定时器按播放端
+  // 真实进度选 index（DLNA RelTime = 连续流已播出的内容秒数），跨过边界才推进。
+  // 没有播放端进度（设备不报 RelTime / HTTP 直连）时退回「编码器已出流位置」，
+  // 与旧行为一致（不回归）。
+  const flowStartedAt = Date.now();
+  const audibleClock = createAudibleClock(flowStartedAt, () => session.streamSec());
+  const advanceByAudibleClock = () => {
+    try {
+      const reported = getLastReportedPlaybackSec(opts.deviceId);
+      if (reported) audibleClock.sample(reported.sec, reported.at);
+      // 设备不报进度/尚未采到 ⇒ 回退「编码器已出流位置」（与旧行为一致）。
+      const sec = audibleClock.sec() ?? session.streamSec();
+      const idx = pickItemIndexAtSec(session.itemStartSec(), sec);
+      qm.flowAdvance(opts.deviceId, startIndex + Math.min(idx, items.length - 1));
+    } catch { /* 队列已被改 / 会话已收敛，忽略 */ }
+  };
+  const audibleClockTimer = setInterval(advanceByAudibleClock, 200);
+  audibleClockTimer.unref();
   signal.addEventListener("abort", onAbort, { once: true });
   // 同一台设备的新会话接管:旧会话先中止(释放它占的 flow 槽),再挂新钩子。
   const prevAbort = activeFlowAborts.get(opts.deviceId);
@@ -1997,6 +2019,7 @@ async function serveFlowQueue(
   activeFlowAborts.set(opts.deviceId, onAbort);
   // 会话结束（自然放完 / 中止）→ 摘掉 flow 所有权，否则该设备的切歌决策被永久吞掉。
   void session.done.then(() => {
+    clearInterval(audibleClockTimer);
     signal.removeEventListener("abort", onAbort);
     qm.setFlowOwned(opts.deviceId, false);
     if (activeFlowAborts.get(opts.deviceId) === onAbort) activeFlowAborts.delete(opts.deviceId);

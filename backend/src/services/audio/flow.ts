@@ -147,6 +147,76 @@ export interface FlowSession {
   /** 当前正在播的曲目下标（0 基；供 ICY / 队列推进读取）。 */
   currentIndex: () => number;
   stats: () => FlowStats;
+  /**
+   * 每首在**流内容时间轴**上「成为唯一正在播放的曲目」的秒数（index 对齐 items，
+   * 单调递增）。
+   *
+   * index 0 恒为 0；index>0 取交叉淡入块的**结束** —— 从这一秒起上一首的最后一个
+   * 样本已经播出，输出里只剩本曲。淡入期间（本曲已在淡入、上一首还在淡出）仍算上一首，
+   * 这样队列/UI 只在「上一首真正播完」时切换，不会被预取/提前解码带早。
+   */
+  itemStartSec: () => number[];
+  /** 已写入编码器的流内容秒数（没有播放端进度时的回退时钟）。 */
+  streamSec: () => number;
+}
+
+/**
+ * 可听时钟选曲：给定每首的流内容起点（秒；单调递增，允许因「源解析失败跳过」而稀疏），
+ * 返回当前可听位置 `sec` 落在哪一首（0 基下标）。
+ *
+ * 规则是 `start <= sec` 才算进入该首 —— **跨过边界的前一拍仍返回上一首**，
+ * 这样队列/UI 的切换时刻与「上一首最后一个样本被播出」对齐，而不是与"开始解码"对齐。
+ */
+export function pickItemIndexAtSec(itemStartSec: number[], sec: number): number {
+  let idx = 0;
+  for (let i = 0; i < itemStartSec.length; i++) {
+    const start = itemStartSec[i];
+    if (typeof start !== "number") continue; // 跳过的曲没有边界
+    if (start <= sec) idx = i;
+    else break;
+  }
+  return idx;
+}
+
+/** 播放端上报的「流内容可听秒」积分器（见 `createAudibleClock`）。 */
+export interface AudibleClock {
+  /** 喂一帧设备上报的播放位置（秒）与采样时刻（ms）。非法/陈旧/领先的采样会被忽略。 */
+  sample(sec: number, at: number): void;
+  /** 已积分出的可听内容秒；从未收到合法设备读数时返回 null（调用方回退已出流位置）。 */
+  sec(): number | null;
+}
+
+/**
+ * 把设备上报的**原生播放进度**积分成「流内容时间轴的已播出秒数」。
+ *
+ * 为什么不直接用 `上报位置`：部分 DLNA 固件把一条连续流当成"逐曲 RelTime"，
+ * 换歌时把位置归零。直接采用会让 UI 卡回前几首。这里只用**增量**推进：
+ *   - 正常（本拍 ≥ 上拍）：可听位置 += 增量；
+ *   - 归零/回退（本拍 < 上拍）：保留已积分值，下一拍起继续用新增量；
+ *   - 领先已出流内容（上一会话的陈旧采样）：整帧丢弃；
+ *   - 早于本会话启动：丢弃。
+ * 结果永不倒退、永不超过编码器已出流位置。
+ */
+export function createAudibleClock(startedAt: number, emittedSec: () => number): AudibleClock {
+  let lastRaw: number | null = null;
+  let audible = 0;
+  return {
+    sample(sec: number, at: number) {
+      if (!Number.isFinite(sec) || !Number.isFinite(at)) return;
+      if (at < startedAt) return;
+      const emitted = emittedSec();
+      if (sec > emitted + 5) return; // 上一会话的陈旧值 / 时间轴对不上
+      if (lastRaw === null) {
+        // 首拍：设备从头开始时 raw 很小；取它与已出流位置的较小者起步。
+        audible = Math.max(audible, Math.min(sec, emitted));
+      } else if (sec >= lastRaw) {
+        audible = Math.min(audible + (sec - lastRaw), emitted);
+      }
+      // sec < lastRaw：设备换歌归零 —— 保留 audible，后续按新增量继续。
+      lastRaw = sec;
+    },
+    sec: () => (lastRaw === null ? null : audible),
+  };
 }
 
 /** 内部：一路解码器。 */
@@ -297,6 +367,8 @@ export async function startFlowSession(items: FlowItem[], opts: FlowOptions = {}
   const fadeBytes = fadeSamplesCfg * F32_BYTES_PER_SAMPLE;
 
   const stats: FlowStats = { emittedFrames: 0, crossfades: 0, skipped: 0, decoders: 0 };
+  /** 每首的流内容时间轴起点（秒）。只有**写进输出**才更新，预取/提前解码不影响它。 */
+  const itemStartSec: number[] = [];
   const live = new Set<Decoder>();
   let aborted = false;
   let currentIndex = 0;
@@ -505,6 +577,15 @@ export async function startFlowSession(items: FlowItem[], opts: FlowOptions = {}
         continue;
       }
       currentIndex = index;
+      // 可听时间轴：第 0 首从 0 秒起；后续首在「上一首最后一个样本播出」的那一刻标记。
+      // 预取/提前解码发生在写输出之前，但**不**改这条时间轴 —— 队列/UI 只认它。
+      let startMarked = index === 0;
+      if (index === 0) itemStartSec[0] = 0;
+      const markStart = () => {
+        if (startMarked) return;
+        itemStartSec[index] = stats.emittedFrames / sampleRate;
+        startMarked = true;
+      };
       opts.onItemStart?.(index, item);
       // 起播时就把**下一首**放进后台解析：整首歌的时间足够完成 WebDAV 探测/换链，
       // 过渡点只等分母（不再在曲尾才开始解析 → 接缝停顿甚至断流）。
@@ -579,6 +660,13 @@ export async function startFlowSession(items: FlowItem[], opts: FlowOptions = {}
           stats.emittedFrames += mixFrames;
           stats.crossfades++;
           await writeOut(asBuffer(mixed));
+          // 混合块写完之后，上一首的最后一个样本已经播出 ⇒ 从这一秒起输出里只剩本曲。
+          // 队列/UI 在这一秒才切歌：淡入期间仍显示上一首（符合"上一首真正播完才切"）。
+          markStart();
+        } else {
+          // 窗口被否决（下一首太短 / 曲尾静音吃光）：上一首尾段已全部播出，
+          // 下一首的首个样本从这里开始 —— 同样是可听边界。
+          markStart();
         }
         // 3) 首段里超出混合窗口的部分照常播出
         headConsumed = mixFrames * frameBytes;
@@ -587,7 +675,12 @@ export async function startFlowSession(items: FlowItem[], opts: FlowOptions = {}
         // 4) 曲尾静音到此**丢弃**：剥离的意义就是不让它进过渡窗口，也不单独播出
         //    （否则"淡出完还在放静音"）。剩下的本曲由下面直通泵处理。
       } else if (carry.length > 0) {
+        // 关闭淡入（fadeBytes=0）：上一首尾段原样播出，播完的这一秒就是下一首起点。
         await emit(carry);
+        markStart();
+      } else {
+        // 没有 carry（上一首空流/被跳过）：本曲从当前输出位置直接开始。
+        markStart();
       }
       carry = Buffer.alloc(0);
 
@@ -638,5 +731,13 @@ export async function startFlowSession(items: FlowItem[], opts: FlowOptions = {}
     if (encErr) log.warn("flow 编码器 stderr", { tail: encErr.slice(-300) });
   });
 
-  return { stream: enc.stdout, abort, done, currentIndex: () => currentIndex, stats: () => stats };
+  return {
+    stream: enc.stdout,
+    abort,
+    done,
+    currentIndex: () => currentIndex,
+    stats: () => stats,
+    itemStartSec: () => itemStartSec.slice(),
+    streamSec: () => stats.emittedFrames / sampleRate,
+  };
 }
