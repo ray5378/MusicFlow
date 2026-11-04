@@ -195,7 +195,7 @@ describe("retryBridgePrepareWithProbe(S1 重试梯)", () => {
     expect(ok).toBe(true);
     expect(attempts).toBe(2);
     expect(probes).toBe(2);
-    expect(sleeps).toEqual([5_000, 15_000]);
+    expect(sleeps).toEqual([1_500, 5_000]);
     expect(retried).toEqual([1, 2]);
   });
 
@@ -223,8 +223,8 @@ describe("retryBridgePrepareWithProbe(S1 重试梯)", () => {
     expect(probes).toBe(0);
   });
 
-  it("默认退避梯 = [5000, 15000](值被钉,防无意改参)", () => {
-    expect([...BRIDGE_PREPARE_RETRY_BACKOFF_MS]).toEqual([5_000, 15_000]);
+  it("默认退避梯 = [1500, 5000](probe 可达即僵死会话已清,首档不再白等 5s)", () => {
+    expect([...BRIDGE_PREPARE_RETRY_BACKOFF_MS]).toEqual([1_500, 5_000]);
   });
 });
 

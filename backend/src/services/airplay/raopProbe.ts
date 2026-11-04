@@ -31,8 +31,11 @@ export interface RaopProbeResult {
   detail: string;
 }
 
-/** S1 退避梯:两档,单位 ms。导出供测试钉值。 */
-export const BRIDGE_PREPARE_RETRY_BACKOFF_MS = [5_000, 15_000] as const;
+/** S1 退避梯:两档,单位 ms。导出供测试钉值。
+ *  2026-11-04:probe 可达说明 TEARDOWN 已把僵死会话清掉(240 实测 options=200/teardown=200),
+ *  首档 5s 纯属保守等待 —— 容器重启后两台桥各等 5s(串行)使 resume 拖到 11.9s。
+ *  首档降到 1.5s,第二档 5s 兜底;probe 不可达仍立即放弃,不白等。 */
+export const BRIDGE_PREPARE_RETRY_BACKOFF_MS = [1_500, 5_000] as const;
 
 /** 握手阶段「设备类」失败判据:ECONNRESET(半开会话最典型)/拒连/超时/RTSP 步骤被掐。
  *  有意排除语义性错误(AP2 凭据缺失 `ap2-` 前缀、设备不存在)——那些重试必复现。 */

@@ -466,7 +466,7 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
    *  全部失败 → 返回 null(整组退回 legacy 路由,与 flag=0 同行为)。
    *  返回:成功规格数组 + 需回落 solo cast 的设备列表。
    *  S1(v4.10.x):握手阶段设备类失败(ECONNRESET 等,容器重建后 MUZO 固件保留
-   *  半开会话的典型症状)先走「TEARDOWN 探测 + 5s/15s 退避重试」救回,救不回才
+   *  半开会话的典型症状)先走「TEARDOWN 探测 + 1.5s/5s 退避重试」救回,救不回才
    *  回落 solo cast —— 现场验证过 stop→10s→play 一次成功,把该人工步骤自动化。 */
   async function prepareBridgeRoute(
     apOnline: string[],
@@ -479,7 +479,12 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
     const groupInitialVolume = getGroupManager().getVolume(groupId);
     const sockets: BridgeSocketSpec[] = [];
     const failed: string[] = [];
-    for (const d of apOnline) {
+    // ★ 2026-11-04 P1:逐设备**并发**准备。串行时容器重启后两台设备各自命中
+    //   「ECONNRESET → TEARDOWN 探测 → 退避 → 重试成功」,退避时间叠加 ⇒
+    //   resume 补建桥路由 11.9s,请求到出声约 17s。设备之间不共享会话/settle,
+    //   并发安全;总耗时从 sum 降为 max。
+    type PrepareOne = { deviceId: string; spec?: BridgeSocketSpec };
+    const prepared = await Promise.all(apOnline.map(async (d): Promise<PrepareOne> => {
       // 协议先选(B 方案:暖复用判据含协议一致 ⇒ token 沿用与否取决于协议)。
       const protocol = selectAirPlayBridgeProtocol(d);
       const prevSpec = reuse?.find((r) => r.deviceId === d && r.protocol === protocol);
@@ -490,8 +495,7 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
         const reason = `bridge-skip(负缓存): ${neg.reason}`;
         bridgeUnavailable.set(d, { at: Date.now(), reason });
         log.info(`[bridge-prepare] skip device=${d} 负缓存命中(剩余 ${Math.round((neg.until - Date.now()) / 1000)}s): ${neg.reason}`);
-        failed.push(d);
-        continue;
+        return { deviceId: d };
       }
       // 同设备同协议沿用旧 token ⇒ 子进程暖复用会话(RAOP 握手零重来);否则新 token(冷启语义)。
       const token = prevSpec ? prevSpec.token : randomBytes(12).toString("hex");
@@ -505,8 +509,8 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
       const capMs = prevSpec ? BRIDGE_PREPARE_WARM_CAP_MS : BRIDGE_PREPARE_COLD_CAP_MS;
       try {
         await capPromise(attempt(), capMs, `device=${d}`);
-        sockets.push({ deviceId: d, socketPath: bridgeSocketPath(d, token), token, protocol });
         bridgeProbeNegative.delete(d);
+        return { deviceId: d, spec: { deviceId: d, socketPath: bridgeSocketPath(d, token), token, protocol } };
       } catch (e) {
         const reason = (e as Error)?.message || String(e);
         // 硬顶超时不取消底层握手:迟到成功的会话不在路由表里,必须主动收掉,
@@ -527,9 +531,8 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
             onRecovered: (n) => log.info(`[bridge-prepare] retry#${n} 成功 device=${d},桥会话已建立`),
           });
           if (recovered) {
-            sockets.push({ deviceId: d, socketPath: bridgeSocketPath(d, token), token, protocol });
             bridgeProbeNegative.delete(d);
-            continue;
+            return { deviceId: d, spec: { deviceId: d, socketPath: bridgeSocketPath(d, token), token, protocol } };
           }
         }
         // D7：重试后仍失败 ⇒ 仅该台本次不播放并留可读原因；不再回落 solo cast。
@@ -537,8 +540,12 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
         // 失败进负缓存:后续 30s 内的起播不再为这台付网络超时(成功/暖复用会清掉)。
         bridgeProbeNegative.set(d, { until: Date.now() + BRIDGE_PREPARE_NEGATIVE_TTL_MS, reason });
         log.warn(`[group][bridge] ${groupId}: bridgePrepare 失败 device=${d} → 本曲该设备不播放(D7): ${reason}`);
-        failed.push(d);
+        return { deviceId: d };
       }
+    }));
+    for (const r of prepared) {
+      if (r.spec) sockets.push(r.spec);
+      else failed.push(r.deviceId);
     }
     for (const s of sockets) bridgeUnavailable.delete(s.deviceId);
     if (sockets.length === 0) return null;
