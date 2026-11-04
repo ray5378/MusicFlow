@@ -92,13 +92,18 @@ export interface ProtocolPlayer {
    *  可选第 5 参 `opts.nextSongId`(2026-11-01 S1):队列**下一首**的 songId(不知道/不适用
    *  ⇒ 不传)。sendspin 泵据此在曲末 ≤5s 用**独立解码器**预取下一首 PCM,按**沿用当前
    *  组时间线**的连续 ts 写入 pcm:100 ring,让切歌边界不再断粮(见 streamEngine 预取段)。
-   *  只传 id 不传整项:泵侧只用它取源,元数据(subtitle/封面)由真正的起播再写。 */
+   *  只传 id 不传整项:泵侧只用它取源,元数据(subtitle/封面)由真正的起播再写。
+   *  可选第 5 参 `opts.resolvedRowId`(2026-11-04):`judgePlayable` 在主进程已裁决出的
+   *  可播源行 id。sendspin 泵(fork 子进程)据此直接复用该行、跳过整段播放优选 ——
+   *  子进程的 `playableCache` 是**进程内 Map**,主进程的裁决结果在那边看不见,不传
+   *  就等于每首换歌被两个进程各探测一次(240 实测多付 3.5s,桥边界空窗 2.8~3.1s)。
+   *  只在 `songId` 一致时有效;其它协议实现忽略该字段。 */
   playMedia(
     item: QueueItem,
     baseUrl: string,
     startMs?: number,
     bridge?: { sockets: Array<{ deviceId: string; socketPath: string; token: string; protocol: string }> },
-    opts?: { manual?: boolean; nextSongId?: string },
+    opts?: { manual?: boolean; nextSongId?: string; resolvedRowId?: string },
   ): Promise<{ mediaUri: string }>;
   stop(): Promise<void>;
   pause(): Promise<void>;

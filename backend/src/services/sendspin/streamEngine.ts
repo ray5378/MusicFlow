@@ -627,8 +627,10 @@ export class GroupPump {
   }
 
   /** 播放一个音频缓冲:按组时间线切帧推送,推进 positionMs。
-   *  `nextSongId`(S1 2026-11-01):队列下一首(只传 id),供曲末预解码;空 = 不预取。 */
-  async play(songId: string, nextSongId?: string): Promise<void> {
+   *  `nextSongId`(S1 2026-11-01):队列下一首(只传 id),供曲末预解码;空 = 不预取。
+   *  `seedRowId`(2026-11-04 P2):主进程 `judgePlayable` 已裁决出的可播源行,供**跨进程**
+   *  首次起播直接复用(子进程的 playableCache 不跨 fork,不传就得多探一次)。 */
+  async play(songId: string, nextSongId?: string, seedRowId?: string): Promise<void> {
     // seek 重建(同曲)沿用本曲的下一首提示;其余情况(切歌/新起播)按调用方为准。
     const keepNext = nextSongId === undefined && this.keepNextOnRebuild && songId === this.songId;
     this.keepNextOnRebuild = false;
@@ -688,10 +690,12 @@ export class GroupPump {
     // 随后看门狗误判、子进程被杀。240 实锤:seek 重建后新 pushLoop 永远没起来,
     // 旧循环已按世代退出,组静默至死。首播不加(大文件全量解码可能合法地慢)。
     // 30s 熔断 → 抛错 → onPlayFailed 走跳过/换源愈合,绝不停在"半截 rebuild"。
-    // ★ 源行复用(仅**同曲**):把上一轮生效的源行交给解析器,跳过整段播放优选。
+    // ★ 源行复用:同曲重建优先用泵自己的记账(它一定是**本曲实际生效**的那行);
+    //   新曲起播则用主进程透传的 `seedRowId`(judgePlayable 刚裁决的行)。
+    //   两者都命中 `reuse-active`,跳过整段播放优选;取流失败的回退见下方 srcPromise。
     //   用户口径 ——「网络源/webdav 源跳转进度时应该自动复用正在播放的地址,
-    //   不应该回退到查找播放源这一步」。切歌 / 无记账 → undefined,走完整裁决。
-    const reuseRowId = songId === this.srcRowSongId ? this.srcRowId ?? undefined : undefined;
+    //   不应该回退到查找播放源这一步」。都没有 → undefined,走完整裁决。
+    const reuseRowId = songId === this.srcRowSongId ? this.srcRowId ?? undefined : seedRowId;
     const NEED_FUSE = startMsForSource > 0;
     const SOURCE_TIMEOUT_MS = 30_000;
     let srcResult: Awaited<ReturnType<typeof source>>;

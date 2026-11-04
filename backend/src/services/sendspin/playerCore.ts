@@ -266,6 +266,9 @@ export function playCore(
   /** S1(2026-11-01):队列下一首 songId(仅提示;泵在曲末 ≤5s 预解码下一首 PCM 写 ring)。
    *  undefined = 不预取(单曲循环 / 队列末尾 / 老调用方),行为与引入前逐字节一致。 */
   nextSongId?: string,
+  /** 2026-11-04 P2:主进程 `judgePlayable` 已裁决出的源行(仅**本次新曲**复用;
+   *  同曲 seek 重建仍以泵自己的记账优先)。undefined = 走完整解析(旧行为)。 */
+  preferRowId?: string,
 ): void {
   clearPauseState(srv, clientId);
   if (!srv) return; // 无 server 时无推流可言(原 playMedia 在 !srv 时 throw,由调用方处理)
@@ -339,7 +342,7 @@ export function playCore(
     g.pendingAnnounces.push(conn);
   }
   // 后台起播:解码→按组时间线推流。不阻塞调用方(pollState 反映进度)。
-  void pump.play(item.songId, nextSongId).catch((e) => {
+  void pump.play(item.songId, nextSongId, preferRowId).catch((e) => {
     // 无可播源等:置空 current,交 QueueController 走跳过/换源。
     // MA 对齐:失败即跳歌属过渡 —— 只发 stream/end 收尾(若 start 已发),**不报
     // stopped**(报 stopped 会让固件镜像 IDLE 并锁死下一首的 stream/start)。
@@ -400,6 +403,8 @@ export function playGroupCore(
   onUnplayable?: SongUnplayableSink,
   /** S1(2026-11-01):队列下一首 songId(语义同 playCore;用户组同样需要预取)。 */
   nextSongId?: string,
+  /** 2026-11-04 P2:语义同 playCore(主进程裁决行透传给泵,跨进程零探测复用)。 */
+  preferRowId?: string,
 ): void {
   clearPauseState(srv, groupName);
   if (!srv) return;
@@ -474,7 +479,7 @@ export function playGroupCore(
     if (!continuity || !alreadyMembers.has(conn)) g.pendingAnnounces.push(conn);
   }
   // 后台起播:解码→按组时间线推流。不阻塞调用方(pollState 反映进度)。
-  void pump.play(item.songId, nextSongId).catch((e) => {
+  void pump.play(item.songId, nextSongId, preferRowId).catch((e) => {
     // MA 对齐:同 playCore —— 失败即跳歌属过渡,只发 stream/end,**不报 stopped**。
     g.current = null;
     g.frozenDurationMs = 0;

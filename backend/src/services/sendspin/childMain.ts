@@ -127,7 +127,9 @@ export class SendspinChildController extends ChildRpcHost<SendspinChildToParent,
           // ★ 判死跨进程回传:子进程这份负缓存主进程读不到,必须让主进程自己再记一次
           //   (主进程收到 songUnplayable 后写 markUnplayable)。与 playFailed 共用 emit 出口。
           this.emit({ t: "songUnplayable", clientId, songId, reason });
-        }, typeof p.nextSongId === "string" && p.nextSongId ? p.nextSongId : undefined);
+        }, typeof p.nextSongId === "string" && p.nextSongId ? p.nextSongId : undefined,
+        // 2026-11-04 P2:主进程已裁决的源行,泵侧直接复用(零探测)。
+        typeof p.preferRowId === "string" && p.preferRowId ? p.preferRowId : undefined);
         this.requestSnapshot(true); // current 元数据变化立即可见(前端歌词/封面跟随)
         return null; // pump 异步起播,不等待解码
       }
@@ -186,7 +188,9 @@ export class SendspinChildController extends ChildRpcHost<SendspinChildToParent,
         }, p.seekPositionMs as number | undefined, bridgeSockets, (songId, reason) => {
           // ★ 同上:用户组起播的判死同样要回传主进程。
           this.emit({ t: "songUnplayable", clientId: String(p.group), songId, reason });
-        }, typeof p.nextSongId === "string" && p.nextSongId ? p.nextSongId : undefined);
+        }, typeof p.nextSongId === "string" && p.nextSongId ? p.nextSongId : undefined,
+        // 2026-11-04 P2:同上,组起播也复用主进程裁决行。
+        typeof p.preferRowId === "string" && p.preferRowId ? p.preferRowId : undefined);
         this.requestSnapshot(true);
         return null;
       }

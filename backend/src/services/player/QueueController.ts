@@ -141,6 +141,10 @@ interface PlayerControllerLike {
   onPositionAdvance?: (playerId: string, posSec: number, durSec: number) => void;
 }
 
+/** judgePlayable 裁决出的「可播源行」提示有效期(ms)。短 TTL:只服务本次起播,
+ *  超时/换曲即弃用 —— 复用它是为了省一次探测,不是为了保证可播(旧行仍可能被下架)。 */
+const RESOLVED_ROW_HINT_TTL_MS = 15_000;
+
 /** 跨曲连续「卡死→切歌」上限:超过即停队列。
  *  取值 3:一首失败可能是源抖动;三首连续失败说明这一队里当前区域整体不可播
  *  (240 真机:整段网络源歌曲),继续往下走只会拖垮事件循环,不会恢复播放。 */
@@ -199,6 +203,15 @@ export class QueueController extends EventEmitter {
   private lastPlaying = new Map<string, { pos: number; dur: number; at: number }>();
   /** 可听显示延迟持有(key=裸 id)。见 DisplayHold 注释。 */
   private displayHold = new Map<string, DisplayHold>();
+  /** judgePlayable 刚裁决出的可播源行(key=裸 id):起播时透传给 player,
+   *  让 sendspin fork 子进程直接命中该行(零探测)。
+   *
+   *  为什么需要:主进程 `judgePlayable → resolvePlayableRow` 会走一次播放优选,
+   *  子进程 `streamEngine.defaultSource` 又走一次 —— `playableCache` 是**进程内 Map**,
+   *  不跨 fork 共享。240 实测每首换歌因此多付 3.5s,内容就绪 10.1s,桥边界垫 2.8~3.1s
+   *  静音并把显示持有顶到 15.5s(采样 #7 P2)。本表只存 songId 匹配的短 TTL 提示,
+   *  起播消费后立即删除,绝不影响「不把不知道当成死的」判定语义。 */
+  private resolvedRowHints = new Map<string, { songId: string; rowId: string; at: number }>();
   /** 探测到「链路/子进程不可用」的 player(key=裸 id):记下当时的播放位置。
    *  期间**不接受任何决策**(不切歌、不计数、不重投),等恢复后一次性续播。
    *
@@ -1129,7 +1142,7 @@ export class QueueController extends EventEmitter {
    *
    * **绝不把「不知道」当成「死的」** —— 这是 2026-09-11 拆除永久拉黑时定下的边界。
    */
-  private async judgePlayable(item: QueueItem): Promise<"skip" | "play"> {
+  private async judgePlayable(item: QueueItem, deviceId?: string): Promise<"skip" | "play"> {
     // 1) 缓存判定(预探测的成果)→ 零成本。热路径上多数歌在这里就返回了。
     //    正缓存(1 小时 TTL)不盲信:扫描时活、播时死是常态(直链下架),在线直链
     //    做一次短超时复核 —— 与预探测扫描共用 recheckOnlineDirect(同一把尺子)。
@@ -1143,7 +1156,12 @@ export class QueueController extends EventEmitter {
       const { recheckOnlineDirect, evictStreamFallbackCache, ensurePlayableStream } =
         await import("../source/online/streamFallback.js");
       const rc = await recheckOnlineDirect(songRow, 2500);
-      if (rc !== "gone") return "play";
+      if (rc !== "gone") {
+        if (deviceId && songRow?.id) {
+          this.resolvedRowHints.set(deviceId, { songId: item.songId, rowId: songRow.id, at: Date.now() });
+        }
+        return "play";
+      }
       // 直链明确已死:逐出正缓存,找兄弟/远程替代;无替代 → skip。
       // 这是知识(404 照妖镜),不是"未知" —— 不违"不把不知道当成死的"边界。
       evictStreamFallbackCache(item.songId);
@@ -1175,7 +1193,12 @@ export class QueueController extends EventEmitter {
       return "skip";
     }
     const r = await resolvePlayableRow(item.songId);
-    if (r.row) return "play";
+    if (r.row) {
+      if (deviceId && r.row.id) {
+        this.resolvedRowHints.set(deviceId, { songId: item.songId, rowId: r.row.id, at: Date.now() });
+      }
+      return "play";
+    }
     if (r.definitive) {
       log.info(`[QueueController][judge] ${item.songId}: 确定无源(${r.reason}),跳过`);
       return "skip";
@@ -1343,7 +1366,7 @@ export class QueueController extends EventEmitter {
       // 这里就是 advancing 永久占用的入口(2026-10-21 240:HiVi 卡在《亲爱的你啊》)。
       // 超时按「未知」处理 = 照常试播,与既有「不把不知道当成死的」语义一致。
       const verdict = await withTimeout(
-        this.judgePlayable(item),
+        this.judgePlayable(item, deviceId),
         10_000,
         `${deviceId} judgePlayable(${item.songId})`,
         () => "play" as const,
@@ -1450,8 +1473,20 @@ export class QueueController extends EventEmitter {
       const nextSongId = nextIdx >= 0 && nextIdx !== q.currentIndex
         ? q.items[nextIdx]?.songId
         : undefined;
-      const castOpts = (manual || nextSongId)
-        ? { ...(manual ? { manual: true } : {}), ...(nextSongId ? { nextSongId } : {}) }
+      // ★ 裁决行透传(2026-11-04 P2):judgePlayable 刚定位到的可播源行交给 player,
+      //   sendspin 泵(fork 子进程)直接复用 —— 否则子进程会把同一首再完整探测一次。
+      //   只认 songId 一致且 TTL 内的提示;取用即删(避免旧行串到下一首)。
+      const hint = this.resolvedRowHints.get(deviceId);
+      if (hint) this.resolvedRowHints.delete(deviceId);
+      const resolvedRowId = hint && hint.songId === fullItem.songId && Date.now() - hint.at <= RESOLVED_ROW_HINT_TTL_MS
+        ? hint.rowId
+        : undefined;
+      const castOpts = (manual || nextSongId || resolvedRowId)
+        ? {
+            ...(manual ? { manual: true } : {}),
+            ...(nextSongId ? { nextSongId } : {}),
+            ...(resolvedRowId ? { resolvedRowId } : {}),
+          }
         : undefined;
       const { mediaUri } = (await withTimeout(
         player.playMedia(fullItem, baseUrl, castStartMs, undefined, castOpts),

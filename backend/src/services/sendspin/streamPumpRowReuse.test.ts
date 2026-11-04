@@ -146,4 +146,46 @@ describe("GroupPump 源行复用", () => {
     expect(calls[1].preferRowId).toBeUndefined();
     pump.stop();
   }, 20_000);
+
+  it("跨进程首播(seedRowId):切歌首播复用主进程裁决行,且不串到后续曲目", async () => {
+    // 2026-11-04 P2 回归守卫:主进程 judgePlayable 已裁决出可播源行,经 play(opts)
+    // 透传到这里;子进程若不复用就会把同一首再完整探测一次(240 实测多付 3.5s)。
+    overridePumpSource(async (songId, startMs = 0, opts) => {
+      calls.push({ songId, startMs, preferRowId: opts?.preferRowId });
+      return { ...silence(), sourceRowId: `row-${songId}` };
+    });
+    const { server } = stubServer();
+    const pump = new GroupPump(server, stubGroup());
+
+    await pump.play("song-A");                       // 首播:无提示 → 完整裁决
+    expect(calls[0].preferRowId).toBeUndefined();
+
+    pump.stop();
+    await pump.play("song-B", undefined, "row-B-judged"); // 切歌首播:应复用裁决行
+    expect(calls[1].songId).toBe("song-B");
+    expect(calls[1].preferRowId).toBe("row-B-judged");    // ★ 核心断言
+
+    pump.stop();
+    await pump.play("song-C");                       // 下一首无提示:绝不复用上一首
+    expect(calls[2].preferRowId).toBeUndefined();
+    pump.stop();
+  }, 20_000);
+
+  it("seedRowId 失效:回退完整解析一次,不因复用失败停摆", async () => {
+    let seedFailsLeft = 1;
+    overridePumpSource(async (songId, startMs = 0, opts) => {
+      calls.push({ songId, startMs, preferRowId: opts?.preferRowId });
+      if (opts?.preferRowId && seedFailsLeft-- > 0) throw new Error("裁决行已失效");
+      return { ...silence(), sourceRowId: `row-${songId}` };
+    });
+    const { server, logs } = stubServer();
+    const pump = new GroupPump(server, stubGroup());
+
+    await pump.play("song-X", undefined, "row-X-judged");
+    expect(pump.active).toBe(true);
+    expect(logs.some((m) => m.includes("复用源行取流失败,回退完整解析"))).toBe(true);
+    // 回退那次必须不带复用(否则原地重试同一个失效行)。
+    expect(calls.map((c) => c.preferRowId)).toEqual(["row-X-judged", undefined]);
+    pump.stop();
+  }, 20_000);
 });

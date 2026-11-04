@@ -768,6 +768,10 @@ export async function sendspinGroupPlay(
   bridge?: { sockets: BridgeSocketSpec[] },
   /** S1(2026-11-01):队列下一首 songId(仅提示,泵侧曲末预解码用;无则不下发)。 */
   nextSongId?: string,
+  /** 2026-11-04 P2:主进程 `judgePlayable` 已裁决出的可播源行 id(无则不传)。
+   *  泵侧直接复用该行(零探测)—— 子进程 `playableCache` 是进程内 Map,不复用就等于
+   *  同一首被主/子两个进程各完整探测一次(240 实测多付 3.5s)。 */
+  preferRowId?: string,
 ): Promise<void> {
   if (isForkMode()) {
     if (!sendspinSupervisor.isRunning()) throw new Error("sendspin 服务未运行");
@@ -778,6 +782,7 @@ export async function sendspinGroupPlay(
       seekPositionMs: startMs,
       ...(bridge && bridge.sockets.length > 0 ? { bridge } : {}),
       ...(nextSongId ? { nextSongId } : {}),
+      ...(preferRowId ? { preferRowId } : {}),
     });
     return;
   }
@@ -787,7 +792,7 @@ export async function sendspinGroupPlay(
   // in-proc 同样透传 bridge —— 不得静默丢弃(旧注释指向不存在的 group/airplayBridge.ts,已删)。
   playGroupCore(srv, groupName, memberIds, item as any, (cid, songId, message) => {
     log.warn(`sendspin group play ${songId} failed(group=${cid}): ${message}`);
-  }, startMs, bridge?.sockets, undefined, nextSongId);
+  }, startMs, bridge?.sockets, undefined, nextSongId, preferRowId);
 }
 
 /** 用户组停止(成员保留,下次起播复用)。 */
