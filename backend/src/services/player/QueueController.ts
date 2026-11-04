@@ -391,6 +391,14 @@ export class QueueController extends EventEmitter {
     if (!player) throw new Error(`未注册的播放器: ${playerId}`);
     // 用户主动传输操作 = 新的意图,立即放开「可听显示延迟」(音量不影响显示)。
     if (op !== "volume") this.clearDisplayHold(playerId);
+    // seek 会瞬间改写「这一首还剩多久」:立刻刷新可听采样,否则曲末 advance 可能拿
+    // 上一次轮询的旧位置外推,把「剩余」误算成整首(显示被长期按住)。
+    if (op === "seek" && typeof arg === "number") {
+      const q = this.queues.get(playerId);
+      const item = q && q.currentIndex >= 0 ? q.items[q.currentIndex] : undefined;
+      const dur = item ? this.knownDuration(item) : 0;
+      if (dur > 0) this.lastPlaying.set(playerId, { pos: Math.max(0, arg), dur, at: Date.now() });
+    }
     // debug:传输命令入口留痕。拖动进度条时这里是"一次拖动实际发了几个 seek"的第一手证据
     // (前端有 250ms 防抖,但连拖/多点仍可能并发下发;tid 相同即为同一个请求链)。
     const t0 = Date.now();
@@ -1631,6 +1639,12 @@ export class QueueController extends EventEmitter {
       : mode === "shuffle" && items.length > 1
         ? Math.floor(Math.random() * items.length)
         : 0;
+    // 起播落位同样刷新可听采样(与 transport seek 同口径),避免首曲曲末外推用旧值。
+    {
+      const item = idx >= 0 ? items[idx] : undefined;
+      const dur = item ? this.knownDuration(item) : 0;
+      if (dur > 0) this.lastPlaying.set(playerId, { pos: Math.max(0, (startPositionMs ?? 0) / 1000), dur, at: Date.now() });
+    }
     this.setQueue(playerId, items, idx, baseUrl, contentContext);
     if (!this.advancing.has(playerId)) {
       this.advancing.add(playerId);
@@ -1648,6 +1662,11 @@ export class QueueController extends EventEmitter {
   async jumpTo(playerId: string, index: number, baseUrl: string): Promise<void> {
     playerId = stripPlayerPrefix(playerId);
     this.clearDisplayHold(playerId);
+    {
+      const item = index >= 0 ? this.queues.get(playerId)?.items[index] : undefined;
+      const dur = item ? this.knownDuration(item) : 0;
+      if (dur > 0) this.lastPlaying.set(playerId, { pos: 0, dur, at: Date.now() });
+    }
     const q = this.queues.get(playerId);
     if (!q) return;
     if (!Number.isInteger(index) || index < 0 || index >= q.items.length) return;
