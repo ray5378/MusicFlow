@@ -194,7 +194,7 @@ app.get("/v1/peers/:peerId/queue", (c) => {
   if (!snap) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   // dlna peer:补 currentMedia(原 QueueSnapshot 字段,新 snapshot 改用 ended)。
   const parsed = parsePeerId(peerId);
-  const currentMedia = parsed
+  let currentMedia = parsed
     ? parsed.kind === "dlna"
       ? getCurrentMedia(parsed.id)
       : parsed.kind === "airplay"
@@ -203,6 +203,11 @@ app.get("/v1/peers/:peerId/queue", (c) => {
           ? getSendspinFront()?.currentMedia(parsed.id)
           : undefined
     : undefined;
+  // 可听显示延迟:上一首还可听时,队列视图的 currentMedia 也必须是旧曲(4.11.12)。
+  if (parsed) {
+    const hold = getQueueController()?.displayHoldState?.(parsed.id);
+    if (hold) currentMedia = hold.media;
+  }
   const items = Array.isArray(snap.items) ? snap.items : [];
   const total = items.length;
   const offset = Math.max(0, parseInt(c.req.query("offset") || "0", 10) || 0);
@@ -1067,6 +1072,13 @@ app.get("/v1/peers/:peerId/status", async (c) => {
         // 事件驱动下 position 是 GENA 推送时的采样,updatedAt(EventState)比 SOAP 轮询时刻更贴近。
         if (fresh && evtAt !== null && evtAt > 0) status.updatedAt = evtAt;
       }
+      // 可听显示延迟:上一首还可听时,status 仍返回旧曲与可听进度(4.11.12)。
+      const hold = getQueueController()?.displayHoldState?.(deviceId);
+      if (hold) {
+        status.media = hold.media;
+        status.position = hold.position;
+        status.duration = hold.duration;
+      }
       return c.json(status);
     } catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
@@ -1087,6 +1099,13 @@ app.get("/v1/peers/:peerId/status", async (c) => {
       // 而客户端只认 PLAYING / PAUSED_PLAYBACK / STOPPED(peer.dart)。
       if (status.state === "PAUSED") status.state = "PAUSED_PLAYBACK";
       else if (status.state === "IDLE") status.state = "STOPPED";
+      // 可听显示延迟(混合组/桥组:泵内容推完就 advance,设备还有缓冲)—— 显示按住旧曲(4.11.12)。
+      const hold = getQueueController()?.displayHoldState?.(parsed.id);
+      if (hold) {
+        (status as any).media = hold.media;
+        status.position = hold.position;
+        status.duration = hold.duration;
+      }
       return c.json(status);
     } catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
@@ -1097,6 +1116,9 @@ app.get("/v1/peers/:peerId/status", async (c) => {
     const st: any = { ...getAirPlayPeerStatus(parsed.id) };
     if (st.state === "PAUSED") st.state = "PAUSED_PLAYBACK";
     else if (st.state === "IDLE") st.state = "STOPPED";
+    // 可听显示延迟(桥路径:新旧曲交叉窗口)—— 显示按住旧曲(4.11.12)。
+    const hold = getQueueController()?.displayHoldState?.(parsed.id);
+    if (hold) { st.media = hold.media; st.position = hold.position; st.duration = hold.duration; }
     return c.json(st);
   }
   // sendspin:进程内播放器的实时状态(Position/Duration 由推流引擎驱动)。
@@ -1109,18 +1131,20 @@ app.get("/v1/peers/:peerId/status", async (c) => {
       // 离线(组缺席 / 服务未跑)回退持久库值 —— 已离线端也看得到上次音量,
       // 无行则 100/false(与「首次上线缺省 100」一致)。取值口径与 peer 列表回显同源。
       const vol = getSendspinDeviceVolume(parsed.id);
+      // 可听显示延迟:上一首还可听时,媒体/进度保持旧曲(4.11.12)。
+      const hold = getQueueController()?.displayHoldState?.(parsed.id);
       return c.json({
         state: st.playbackState === PlaybackState.PLAYING ? "PLAYING"
           : st.playbackState === PlaybackState.PAUSED ? "PAUSED_PLAYBACK"
           : st.playbackState === PlaybackState.BUFFERING ? "BUFFERING"
           : "STOPPED",
-        position: st.position,
-        duration: st.duration,
+        position: hold ? hold.position : st.position,
+        duration: hold ? hold.duration : st.duration,
         updatedAt: st.updatedAt,
         volume: vol.volume,
         muted: vol.muted,
         // 当前曲:各端靠 media.songId 变化刷新歌词/封面,缺了切歌后还挂第一首。
-        media: srv?.currentMedia(parsed.id),
+        media: hold ? hold.media : srv?.currentMedia(parsed.id),
       });
     } catch (e: any) { return c.json(apiInternalError(e), 500); }
   }

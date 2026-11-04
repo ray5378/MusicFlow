@@ -319,6 +319,13 @@ app.get("/v1/dlna/devices/:deviceId/status", async (c) => {
       if (typeof evt.volume === "number") status.volume = evt.volume;
       if (typeof evt.muted === "boolean") status.muted = evt.muted;
     }
+    // 可听显示延迟:上一首还可听时,status 必须仍是旧曲 + 可听时间轴的进度(4.11.12)。
+    const hold = getQueueController()?.displayHoldState?.(deviceId);
+    if (hold) {
+      status.media = hold.media;
+      status.position = hold.position;
+      status.duration = hold.duration;
+    }
     return c.json(status);
   } catch (e: any) { return c.json(apiInternalError(e), 500); }
 });
@@ -331,7 +338,9 @@ app.get("/v1/dlna/devices/:deviceId/status", async (c) => {
 app.get("/v1/dlna/devices/:deviceId/queue", (c) => {
   const deviceId = c.req.param("deviceId")!;
   // 新 QueueSnapshot 不再带 currentMedia(改为 ended);路由层补回以保持前端/HA 响应形状兼容。
-  return c.json({ ...getQueueManager().snapshot(deviceId), currentMedia: getCurrentMedia(deviceId) });
+  // 可听显示延迟期间保持旧曲(4.11.12)。
+  const hold = getQueueController()?.displayHoldState?.(deviceId);
+  return c.json({ ...getQueueManager().snapshot(deviceId), currentMedia: hold ? hold.media : getCurrentMedia(deviceId) });
 });
 
 // Replace the queue and start playing from `startIndex` (default 0).

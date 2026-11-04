@@ -99,6 +99,32 @@ interface QueueData {
   shuffleLen?: number;
 }
 
+/** 「可听显示延迟」持有(4.11.12)。
+ *
+ *  泵路径(混合组 / AirPlay 桥 / sendspin)在**内容推完**时就判 advance 并切
+ *  currentIndex,而设备侧还有一段缓冲没播(240 实测约 9.8s)。若立刻广播新
+ *  currentIndex/currentMedia,Web / HA / 客户端会在上一首还能听见的时候就显示
+ *  下一首的封面歌名。这里把**显示**按住到旧曲真正播完:
+ *   - `until`   = 旧曲可听结束时刻(由最后一次 PLAYING 位置外推);
+ *   - `releaseAt` = 硬顶(until + 5s),设备迟迟不进入新曲时也要放开;
+ *   - snapshot / status 出口在持有期间返回旧曲(index/media)与推算位置。
+ *  用户主动操作(play/pause/stop/seek/next/prev/清队列)一律立即清除。 */
+interface DisplayHold {
+  index: number;
+  item: QueueItem;
+  /** 旧曲时长(秒)。 */
+  duration: number;
+  /** 旧曲可听结束的绝对时刻(ms)。 */
+  until: number;
+  /** 硬顶释放时刻(ms)。 */
+  releaseAt: number;
+  /** 设持有时设备上报的位置(秒):新曲 position 从 0 重新走 ⇒ `< 该值` 即已换曲。 */
+  posAtSet: number;
+  /** 设持有时洗牌位置,快照回显与之对齐。 */
+  shufflePos: number;
+  timer: ReturnType<typeof setTimeout> | null;
+}
+
 interface PlayerControllerLike {
   beginOptimistic(playerId: string, mediaUri: string): void;
   /** cast 命令**送达后**起 5s「等设备确认 PLAYING」计时(乐观窗口阶段 2,见 PlayerController)。
@@ -168,6 +194,11 @@ export class QueueController extends EventEmitter {
    *     而不是从头播(= 用户眼里的"归零");
    *  ② frozen 判定后重投的落点。 */
   private lastPos = new Map<string, number>();
+  /** 最后一次**PLAYING**采样(位置/时长/时刻),供 advance 时外推旧曲还能听多久。
+   *  与 lastPos 分开:lastPos 只记位置(链路恢复/冻结用),这里还要时长与时间戳。 */
+  private lastPlaying = new Map<string, { pos: number; dur: number; at: number }>();
+  /** 可听显示延迟持有(key=裸 id)。见 DisplayHold 注释。 */
+  private displayHold = new Map<string, DisplayHold>();
   /** 探测到「链路/子进程不可用」的 player(key=裸 id):记下当时的播放位置。
    *  期间**不接受任何决策**(不切歌、不计数、不重投),等恢复后一次性续播。
    *
@@ -296,6 +327,8 @@ export class QueueController extends EventEmitter {
       this.castFailStreak.delete(k);
       this.linkLost.delete(k);
       this.lastPos.delete(k);
+      this.lastPlaying.delete(k);
+      this.displayHold.delete(k);
       this.clearSleepTimer(k);
     }
   }
@@ -356,6 +389,8 @@ export class QueueController extends EventEmitter {
     playerId = stripPlayerPrefix(playerId);
     const player = this.players.get(playerId);
     if (!player) throw new Error(`未注册的播放器: ${playerId}`);
+    // 用户主动传输操作 = 新的意图,立即放开「可听显示延迟」(音量不影响显示)。
+    if (op !== "volume") this.clearDisplayHold(playerId);
     // debug:传输命令入口留痕。拖动进度条时这里是"一次拖动实际发了几个 seek"的第一手证据
     // (前端有 250ms 防抖,但连拖/多点仍可能并发下发;tid 相同即为同一个请求链)。
     const t0 = Date.now();
@@ -454,6 +489,15 @@ export class QueueController extends EventEmitter {
         // 取用(它自己负责清)。先删就会把"离开时的播放位置"丢掉,续播只能从头播。
         const wasLost = this.linkLost.has(deviceId);
         if (typeof state.position === "number" && state.position > 0) this.lastPos.set(deviceId, state.position);
+        // 可听显示延迟:设备已进入新曲(position 重新从小值走)或到硬顶 → 放开显示。
+        this.maybeReleaseDisplayHold(deviceId, state);
+        if (state.playbackState === PlaybackState.PLAYING) {
+          this.lastPlaying.set(deviceId, {
+            pos: typeof state.position === "number" ? state.position : 0,
+            dur: typeof state.duration === "number" ? state.duration : 0,
+            at: Date.now(),
+          });
+        }
         // F2:标记「曲末前 20s」→ 下一轮轮询切 1s 缩短换歌等待。dur<=0(未知时长)
         // 或 position<=0(还没开始走)则不判曲末,保持 5s。
         const nearItem = q.items[q.currentIndex];
@@ -652,6 +696,35 @@ export class QueueController extends EventEmitter {
         if (nextIdx === -1) {
           if (!this.shouldSuppressGroupEnd(id)) this.markEnded(id);
           return;
+        }
+        // 可听显示延迟(A 方案,4.11.12):泵路径在「内容推完」就 advance,而设备还有
+        // 缓冲没播。用最后一次 PLAYING 采样外推旧曲还可听多久;>1s 才按旧曲显示,
+        // 纯原生路径(真播完才 advance)remain≈0 ⇒ 不设持有,行为不变。
+        if (decision === "advance" && nextIdx !== q.currentIndex) {
+          const holdIndex = q.currentIndex;
+          const holdItem = holdIndex >= 0 ? q.items[holdIndex] : undefined;
+          if (holdItem) {
+            const sample = this.lastPlaying.get(id);
+            const holdDur = this.knownDuration(holdItem) || sample?.dur || 0;
+            let holdPosAtSet = 0;
+            let holdRemain = 0;
+            if (holdDur > 0 && sample) {
+              holdPosAtSet = Math.min(holdDur, sample.pos + (Date.now() - sample.at) / 1000);
+              holdRemain = holdDur - holdPosAtSet;
+            }
+            if (holdRemain > 1) {
+              // pickNext 已在洗牌模式下推进过 shufflePos;显示旧曲时回退一格(重建绕回时
+              // 拿不准,客户端以 currentIndex 为准,shufflePos 仅作镜像)。
+              const holdShufflePos = q.playMode === "shuffle"
+                ? Math.max(-1, (q.shufflePos ?? 0) - 1)
+                : (q.shufflePos ?? -1);
+              this.setDisplayHold(id, holdIndex, holdItem, holdDur, holdRemain, holdPosAtSet, holdShufflePos);
+            } else {
+              this.clearDisplayHold(id, true);
+            }
+          }
+        } else {
+          this.clearDisplayHold(id, true);
         }
         q.currentIndex = nextIdx;
         q.ended = false;
@@ -1484,6 +1557,8 @@ export class QueueController extends EventEmitter {
    *  播放触发的后台自动匹配据此跳过补齐。 */
   setQueue(playerId: string, items: QueueItem[], startIndex: number, baseUrl: string, contentContext?: string): void {
     playerId = stripPlayerPrefix(playerId);
+    // 整队替换 = 用户新意图,放开旧的显示延迟。
+    this.clearDisplayHold(playerId);
     // 整队替换 → 旧队列上的 flow 会话作废（它的曲目列表已经不是这条队列了）。
     this.flowOwned.delete(playerId);
     // 整队替换 → 上一轮队列攒的连续 cast 失败计数一起作废(新队列是一次全新的尝试)。
@@ -1546,6 +1621,7 @@ export class QueueController extends EventEmitter {
     startPositionMs?: number,
   ): Promise<number> {
     playerId = stripPlayerPrefix(playerId);
+    this.clearDisplayHold(playerId);
     const mode = this.queues.get(playerId)?.playMode ?? "shuffle";
     // 整列表播放 = 未给起点 / startIndex<=0（默认从第 1 首开始）。指定居中某首(>0)则尊重。
     const listStart = !(typeof startIndex === "number" && Number.isInteger(startIndex) && startIndex > 0);
@@ -1571,6 +1647,7 @@ export class QueueController extends EventEmitter {
    *  与 playFrom 的区别:playFrom 是**整队替换**并定位到起点,本方法只移动游标。 */
   async jumpTo(playerId: string, index: number, baseUrl: string): Promise<void> {
     playerId = stripPlayerPrefix(playerId);
+    this.clearDisplayHold(playerId);
     const q = this.queues.get(playerId);
     if (!q) return;
     if (!Number.isInteger(index) || index < 0 || index >= q.items.length) return;
@@ -1609,6 +1686,7 @@ export class QueueController extends EventEmitter {
 
   async next(playerId: string, baseUrl: string): Promise<void> {
     playerId = stripPlayerPrefix(playerId);
+    this.clearDisplayHold(playerId);
     const q = this.queues.get(playerId); if (!q) return;
     const idx = this.pickNext(q, false);
     if (idx === -1) { this.markEnded(playerId); return; }
@@ -1620,6 +1698,7 @@ export class QueueController extends EventEmitter {
 
   async prev(playerId: string, baseUrl: string): Promise<void> {
     playerId = stripPlayerPrefix(playerId);
+    this.clearDisplayHold(playerId);
     const q = this.queues.get(playerId); if (!q) return;
     if (this.advancing.has(playerId)) return;
     this.advancing.add(playerId);
@@ -1647,6 +1726,7 @@ export class QueueController extends EventEmitter {
    *  让固件输入仲裁把通路顶回 DLNA(RTSP 活着、timing 照答,但音频不渲染,240 实证)。 */
   clear(playerId: string, opts?: { skipDeviceStop?: boolean }): void {
     playerId = stripPlayerPrefix(playerId);
+    this.clearDisplayHold(playerId);
     this.flowOwned.delete(playerId); // 队列清空 → 进行中的 flow 会话作废
     const q = this.queues.get(playerId); if (!q) return;
     // 清空队列同时停止实际播放(dlna=stopDevice,group=扇出各成员)。
@@ -1678,17 +1758,107 @@ export class QueueController extends EventEmitter {
   snapshot(playerId: string): QueueSnapshot {
     playerId = stripPlayerPrefix(playerId);
     const q = this.queues.get(playerId);
+    // 可听显示延迟持有期间:队列内部已经切到下一首(用于预取/预探测),但**对外显示**
+    // 必须还是旧曲 —— 直到旧曲真正播完才放开(见 DisplayHold 注释)。
+    const hold = this.displayHold.get(playerId);
     return {
       items: q?.items || [],
-      currentIndex: q?.currentIndex ?? -1,
+      currentIndex: hold ? hold.index : (q?.currentIndex ?? -1),
       playMode: q?.playMode || "shuffle",
       isActive: q?.isActive || false,
       ended: q?.ended || false,
       // 权威洗牌序列随快照下发,客户端只做镜像(见 QueueSnapshot 文档)。
       shuffleOrder: q?.shuffleOrder || [],
-      shufflePos: q?.shufflePos ?? -1,
+      shufflePos: hold ? hold.shufflePos : (q?.shufflePos ?? -1),
       // 预探测状态位(仅 Web 端消费;HA 卡片不读该字段 → 天然不显示)。
       preProbe: getPreProbeScheduler().status(playerId),
+    };
+  }
+
+  // ==================== 可听显示延迟（4.11.12 A 方案） ====================
+
+  /** 设持有:显示按住旧曲,直到 `until`(可听结束)或硬顶 `releaseAt`。 */
+  private setDisplayHold(
+    id: string,
+    index: number,
+    item: QueueItem,
+    duration: number,
+    remainSec: number,
+    posAtSet: number,
+    shufflePos: number,
+  ): void {
+    this.clearDisplayHold(id, true); // 先摘旧持有(不发事件)
+    const now = Date.now();
+    const until = now + Math.max(0, remainSec) * 1000;
+    const hold: DisplayHold = {
+      index,
+      item,
+      duration,
+      until,
+      releaseAt: until + 5000,
+      posAtSet,
+      shufflePos,
+      timer: null,
+    };
+    hold.timer = setTimeout(() => {
+      if (this.displayHold.get(id) === hold) this.clearDisplayHold(id, false, "hard-timeout");
+    }, Math.max(0, hold.releaseAt - now) + 1);
+    hold.timer.unref?.();
+    this.displayHold.set(id, hold);
+    log.info(
+      `[QueueController][display-hold] ${id}: 旧曲 idx=${index} song=${item.songId} 还可听 ${remainSec.toFixed(1)}s(显示延迟到 +${Math.round(until - now)}ms,硬顶 +${Math.round(hold.releaseAt - now)}ms)`,
+    );
+  }
+
+  /** 解析「设备是否已进入新曲」,满足即放开显示并广播新快照。
+   *  判据:新曲 position 从 0 重新走 ⇒ `position > 0 && position < posAtSet`(旧曲位置已接近曲末)。
+   *  硬顶兜底放在 setDisplayHold 的定时器里。 */
+  private maybeReleaseDisplayHold(deviceId: string, state: any): void {
+    const hold = this.displayHold.get(deviceId);
+    if (!hold) return;
+    const pos = state?.position;
+    if (typeof pos === "number" && pos > 0 && pos < hold.posAtSet) {
+      this.clearDisplayHold(deviceId, false, `设备已进入新曲(pos=${pos.toFixed(1)})`);
+    }
+  }
+
+  /** 清除持有。silent=true 用于「设新持有前先摘旧」「非 advance 分支」—— 不广播,
+   *  避免多打一拍快照;真正放开时广播 queue_changed 并让客户端重拉状态。 */
+  private clearDisplayHold(id: string, silent = false, reason = "released"): void {
+    const hold = this.displayHold.get(id);
+    if (!hold) return;
+    this.displayHold.delete(id);
+    if (hold.timer) clearTimeout(hold.timer);
+    if (silent) return;
+    log.info(`[QueueController][display-hold] ${id}: 放开显示(${reason}) → idx=${this.queues.get(id)?.currentIndex ?? -1}`);
+    this.emit("queue_changed", id, this.snapshot(id));
+    // 状态类出口(WS state / peers status)由客户端重拉;DLNA 设备用 player_refresh
+    // 触发一次主动刷新。动态 import 防 QueueController ↔ eventing 的加载环。
+    void import("../dlna/eventing.js")
+      .then(({ getEventManager }) => getEventManager().emit("player_refresh", id, { reason: "display_hold_released" }))
+      .catch(() => { /* 刷新通道不可用:客户端轮询兜底 */ });
+  }
+
+  /** 对外**状态出口**用的覆盖:持有期间返回旧曲媒体 + 按可听时间轴外推的位置/时长。
+   *  无持有返回 undefined(= 各出口保持原有取值)。 */
+  displayHoldState(playerId: string):
+    | { media: { songId: string; title: string; artist?: string; album?: string; coverArt?: string }; position: number; duration: number }
+    | undefined {
+    const id = stripPlayerPrefix(playerId);
+    const hold = this.displayHold.get(id);
+    if (!hold) return undefined;
+    const remain = Math.max(0, hold.until - Date.now()) / 1000;
+    const position = Math.max(0, Math.min(hold.duration, hold.duration - remain));
+    return {
+      media: {
+        songId: hold.item.songId,
+        title: hold.item.title || "未知",
+        artist: hold.item.artist,
+        album: hold.item.album,
+        coverArt: hold.item.coverArt,
+      },
+      position,
+      duration: hold.duration,
     };
   }
 
@@ -1762,6 +1932,7 @@ export class QueueController extends EventEmitter {
    *  故一并触发预探测窗口重算。 */
   removeAt(playerId: string, index: number, baseUrl: string): void {
     playerId = stripPlayerPrefix(playerId);
+    this.clearDisplayHold(playerId);
     const q = this.queues.get(playerId); if (!q) return;
     if (index < 0 || index >= q.items.length) return;
     q.items.splice(index, 1);
@@ -1823,6 +1994,7 @@ export class QueueController extends EventEmitter {
    *  resetTracker 清掉 prev 状态,避免冻结前后的残留迁移在下次播放时再触发 advance。 */
   stopPlayback(playerId: string): void {
     playerId = stripPlayerPrefix(playerId);
+    this.clearDisplayHold(playerId);
     this.flowOwned.delete(playerId); // 用户停止 → 会话由出流侧 abort
     const q = this.queues.get(playerId);
     this.ctrls.get(playerId)?.resetTracker(this.players.get(playerId)?.playerId ?? playerId);
@@ -1836,6 +2008,7 @@ export class QueueController extends EventEmitter {
    *  仅在队列"被按停"(有当前曲且未播完)时恢复;自然播完的队列不复活。 */
   resumePlayback(playerId: string): void {
     playerId = stripPlayerPrefix(playerId);
+    this.clearDisplayHold(playerId);
     const q = this.queues.get(playerId); if (!q) return;
     if (q.isActive || q.ended) return;
     if (q.currentIndex < 0 || q.items.length === 0) return;

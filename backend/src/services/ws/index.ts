@@ -41,6 +41,7 @@ import {
   getCurrentMedia,
 } from "../dlna/control.js";
 import { getPeerManager } from "../peer.js";
+import { getQueueController } from "../player/index.js";
 import { getGroupManager } from "../group/index.js";
 import { authenticateWsToken, WsUser } from "./auth.js";
 import { sanitizeClientId, maskLocalPeerId, buildLocalPeerId, clientIdOfLocalPeer, userIdOfLocalPeer } from "../../utils/peerId.js";
@@ -169,6 +170,13 @@ async function sendSnapshot(ws: WebSocket): Promise<void> {
     if (user && !user.isAdmin && !canUseRenderer(user.id, false, `dlna:${d.id}`)) continue;
     try {
       const status = await getDeviceStatus(d.id);
+      // 可听显示延迟:新连接的快照也不能提前显示下一首(4.11.12)。
+      const hold = getQueueController()?.displayHoldState?.(d.id);
+      if (hold) {
+        status.media = hold.media;
+        status.position = hold.position;
+        status.duration = hold.duration;
+      }
       devices[d.id] = { ...status, name: d.name, available: d.available };
     } catch {
       devices[d.id] = { name: d.name, available: false };
@@ -221,17 +229,23 @@ function subscribeAndForward(ws: WebSocket): () => void {
     || canUseRenderer(user.id, false, `sendspin:${deviceId}`);
   const onState = (deviceId: string, st: any) => {
     if (!canSeeDevice(deviceId)) return;
-    const media = getCurrentMedia(deviceId);
+    // 可听显示延迟(4.11.12):上一首还可听时,WS 推送的媒体/进度也必须是旧曲,
+    // 否则 Web/HA 会在上一首没播完时先显示下一首封面歌名。
+    const hold = getQueueController()?.displayHoldState?.(deviceId);
+    const media = hold ? hold.media : getCurrentMedia(deviceId);
+    const state = hold ? { ...st, position: hold.position, duration: hold.duration } : st;
     // debug:推给前端的最终状态 —— 进度条「拖动后跳回」是前端渲染 vs 服务端权威值
     // 的分歧,而服务端权威值就是以这一行为准(前端进度条按 pos/dur 渲染)。
     // 拖动瞬间若看到 pos 从目标值掉回旧值,说明回退发生在服务端外推/上报侧,
     // 而不是前端 UI 层;反之则前端没接受这个值。
-    log.debug(`[ws][state] ${deviceId} state=${st?.state ?? "-"} pos=${Math.round(st?.position ?? 0)} dur=${Math.round(st?.duration ?? 0)} track=${media?.title ?? "-"}`);
-    send(ws, { type: "player_state_changed", device_id: deviceId, state: { ...st, media } });
+    log.debug(`[ws][state] ${deviceId} state=${state?.state ?? "-"} pos=${Math.round(state?.position ?? 0)} dur=${Math.round(state?.duration ?? 0)} track=${media?.title ?? "-"}${hold ? " hold=1" : ""}`);
+    send(ws, { type: "player_state_changed", device_id: deviceId, state: { ...state, media } });
   };
   const onMedia = (deviceId: string, media: any) => {
     if (!canSeeDevice(deviceId)) return;
-    send(ws, { type: "media_changed", device_id: deviceId, media });
+    // 与 onState 同口径:可听显示延迟期间,媒体变更事件也必须按旧曲下发(4.11.12)。
+    const hold = getQueueController()?.displayHoldState?.(deviceId);
+    send(ws, { type: "media_changed", device_id: deviceId, media: hold ? hold.media : media });
   };
   const onPlayerRefresh = (deviceId: string, info: any) => {
     if (!canSeeDevice(deviceId)) return;

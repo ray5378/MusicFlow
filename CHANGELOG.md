@@ -2,6 +2,28 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.11.12] - 2026-11-04
+
+### Fix / 切歌显示：泵路径按「可听剩余时长」延迟队列/UI 的当前曲（覆盖混合组、AirPlay 桥、sendspin、DLNA）
+
+- **现象**:4.11.11 修好了 DLNA 连续流,但**混合组/桥组**仍会在上一首还可听时提前显示下一首
+  (240 实测:02:48:08 队列已 advance,下一首首次 `pos>0` 在 02:48:19,约 11s 差)。
+- **根因**:sendspin 泵在**内容推完**就判自然结束并切队列,而设备侧还有约 9.8s 缓冲未播;
+  `QueueController` 立刻改 `currentIndex` 并广播,WS/peers/HA 状态跟着显示下一首。
+- **修复**(A 方案:音频保持无缝,只延迟「显示」):
+  - `QueueController` 新增**可听显示延迟持有**(per-device):advance 前用最后一次 PLAYING
+    采样外推旧曲剩余可听时长,剩余 >1s 才持有;持有期间 `snapshot()` 仍返回旧索引,
+    `displayHoldState()` 返回旧曲媒体与按可听时间轴外推的 position/duration;
+  - 释放条件:设备进入新曲(`position` 重新从小值走)或硬顶 `剩余+5s` 到点;
+    用户 active play/pause/stop/seek/next/prev/清队列/删曲一律立即清除;
+  - 状态出口统一套用持有:WS `player_state_changed`/`media_changed`/首连快照、
+    `GET /v1/peers/:id/status`(dlna/airplay/group/sendspin)、`GET /v1/peers/:id/queue`、
+    `GET /v1/dlna/devices/:id/status|queue`;
+  - 纯原生路径(DLNA SOAP / AirPlay RAOP)在真播完才 advance,剩余≈0 ⇒ **不设持有**,
+    行为不变;DLNA 连续流仍由 4.11.11 的可听时钟推进。
+- **单测**:`tests/player/queueDisplayHold.test.ts`(泵路径持有、原生 remain≈0 不延迟、
+  新曲位置释放、用户操作清除、硬顶兜底)。
+
 ## [4.11.11] - 2026-11-04
 
 ### Fix / 连续流切歌：队列/UI 改由「可听时钟」推进，不再跟着解码预取提前显示
