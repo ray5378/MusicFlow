@@ -1216,3 +1216,24 @@ v4.10.1 在 MAJ-07 之前插入自动救回梯(细节以 airplay 权威文档 v4
 
 - `vitest`：146 文件 / 1968 用例全过；
 - `node backend/scripts/check-group-invariants.mjs`：105 条断言全过（含 G19）。
+
+---
+
+## v4.11.16 增补(桥路由逐设备并发准备 + 首档退避 1.5s,2026-11-04)
+
+> 与正文 §2.2 第 3 步、v4.10.1 §1「S1 救回梯」冲突处以本节为准:判据、TEARDOWN 探测、
+> 负缓存、`soloFallback` 收集、MAJ-07 回落**全部不变**,只改**并行度**与**首档退避**。
+
+| 项 | 改前 | 改后 | 位置 |
+|---|---|---|---|
+| `prepareBridgeRoute` 并行度 | 逐台 `for-await`,总耗时 = Σ | 逐设备 `Promise.all`,总耗时 = max | `group/protocolPlayer.ts:289-309` |
+| S1 首档退避 | 5s | 1.5s(probe 可达即旧会话已清;第二档仍 5s 兜底) | `airplay/raopProbe.ts` |
+| 负缓存 / 单设备硬顶 / `soloFallback` / MAJ-07 | — | 语义不变 | 同上 |
+
+- **现场(240,2026-11-04 20:04)**:容器重建后首次 resume,两台桥各 `read ECONNRESET`
+  → probe 可达(`options=200/teardown=200`)→ 退避 5s → 重试成功;串行叠加 ⇒
+  补建路由 11939ms、`POST /play` 11993ms、请求到出声约 17s。
+- **实测**:重启后首次 resume `POST /play` **2441ms**(-79.6%);单台 `ECONNRESET`
+  由 `retry#1` 自愈,不拖累另一台(`bridge-prepare` 负缓存未误伤在线设备)。
+- **回归**:退避梯钉值测试同步更新;`tests/airplay/raopProbe.test.ts` + `tests/group`
+  15 文件 247 例全过。

@@ -2,6 +2,25 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.11.16] - 2026-11-04
+
+### Fix / 换歌取源跨进程复用 + 桥路由逐设备并发准备(240 巡检两项遗留)
+
+- **换歌裁决行跨进程复用**:`judgePlayable` 裁决出的可播源行按裸 songId 写入
+  短 TTL 提示(`resolvedRowHints`,15s 且 songId 一致才认),起播时经
+  `ProtocolPlayer opts.resolvedRowId` 下发给 sendspin 泵(fork 子进程),
+  `GroupPump.play` 以 `seedRowId` 直接命中 `resolvePlayableRow` 的 `reuse-active`。
+  主/子进程原先对同一首各探测一次,240 实测多付 3.5s:内容就绪 10.1s、桥边界垫
+  2.8~3.1s 静音并顶穿 15.5s 显示持有(采样 #7 P2)。复用失败仍回退完整解析一次,
+  「不把不知道当成死的」判定语义不变。新增跨曲 seedRowId 复用与失效回退两条守卫
+  (`sendspin/streamPumpRowReuse.test.ts`)。
+- **桥路由逐设备并发准备 + S1 首档退避 1.5s**:容器重建后首次 resume,两台 AirPlay
+  桥各命中 `read ECONNRESET` → TEARDOWN 探测可达 → 退避 5s → 重试成功;旧实现逐台
+  串行,两台退避叠加 ⇒ 补建桥路由 11939ms、`POST /play` 11993ms、请求到出声约 17s。
+  现在 `prepareBridgeRoute` 逐设备 `Promise.all`(总耗时 sum→max),S1 首档退避
+  5s→1.5s(probe 可达即僵死会话已清,第二档 5s 兜底);负缓存/硬顶/失败设备收集
+  与 MAJ-07 回落语义不变。240 实测重启后首次 resume `POST /play` **11993ms → 2441ms**。
+
 ## [4.11.15] - 2026-11-04
 
 ### Fix / 换歌断音根治:离线成员不再阻塞起播 + 跳曲补预取 + 续静音覆盖空窗 + 状态查询去阻塞

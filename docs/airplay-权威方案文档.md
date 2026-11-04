@@ -2266,3 +2266,31 @@ late 累积    ≈ 22/秒（约占发包 18%）    ← producer 阻塞（欠料�
 | timing 从未出现 | 起流 ≥45s | 零心跳强制重建(v4.11.8 新增,不再豁免) |
 | 同一 seq 被反复 0x55 | 任意 | 先查重传答复格式是否为 `80 D6 00 01` + 完整原包 |
 | 收包正常但无出声 | — | 服务端指标不能证明出声,以设备 timing 心跳/听感为准 |
+
+---
+
+## v4.11.16 增补(容器重建后首次 resume 12s→2.4s + 首换歌一次性垫音,2026-11-04)
+
+### 1. 补建桥路由:逐台串行 → 逐设备并发,首档退避 5s→1.5s
+
+- **现场(240,20:04)**:容器重建后首次 resume,两台桥各命中 `read ECONNRESET`;
+  S1 探测确认可达(`options=200/teardown=200`)后按梯退避 5s、重试成功。
+  旧 `prepareBridgeRoute` 逐台 `for-await` 串行 ⇒ 两台退避叠加:补建路由 11939ms、
+  `POST /play` 11993ms、请求到出声约 17s。
+- **改法**:逐设备 `Promise.all`(总耗时 sum→max);S1 首档退避 1.5s(第二档仍 5s);
+  负缓存、单设备硬顶、`soloFallback` 收集、MAJ-07 回落语义不变。
+- **实测**:重启后首次 resume `POST /play` **11993ms → 2441ms**(-79.6%),
+  单台 `ECONNRESET` 由 `retry#1` 自愈,不拖累另一台。
+
+### 2. 已知边界:重启/暖复用 poisoned 后首次换歌一次 ~1.5–2.2s 垫音
+
+- **现象**:每代次**第一次**换歌出现 `newgen-skip 96323 frames(2184.2ms)` →
+  `re-anchor/pad-insert`;其后多次换歌零复现(4.11.14/4.11.15/4.11.16 巡检均同型)。
+- **根因**:`bridgeSession.ts:2344 resetTimeline()` 复位内容轴(首帧/对齐器/锚点)
+  并 `player.flush()`,但 `raop.ts:584 lastSentTs` 与 `flush()`(`raop.ts:1795`)均
+  不复位它;下一曲规划锚点时命中 `raop.ts:1595-1603` 分支 —— 新起点早于旧
+  `lastSentTs`,按 `minNext = lastSentTs + CHUNK_LEN` **强制前跳**并补差值静音。
+- **修复方向(未在 4.11.16 落地)**:①`resetTimeline` 同步清 `lastSentTs`(最小改动);
+  ②或让代次首曲锚点走「等待/裁头」而非硬垫(需验证不吞曲头)。
+- **判据**:仅代次首曲出现、1.5–2.2s、`hard-timeout=0`、其后 `gap-fill filledMs=0`
+  ⇒ 边界一次性,不必按 P1 处理。

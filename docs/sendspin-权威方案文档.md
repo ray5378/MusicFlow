@@ -1759,3 +1759,17 @@ socket 按需追加)后,原「单行 `grep -F` 整串」断言恒不命中 ⇒ �
 
 - `vitest`：146 文件 / 1968 用例全过；
 - `node backend/scripts/check-group-invariants.mjs`：105 条断言全过（含 G19）。
+
+---
+
+## v4.11.16 增补(裁决行跨进程复用:ProtocolPlayer.resolvedRowId,2026-11-04)
+
+- 起播链路新增**可选第 5 参** `opts.resolvedRowId`(主进程 `judgePlayable` 已裁决的可播源行):
+  `QueueController.playCurrent` → `ProtocolPlayer.playMedia` → `sendspinGroupPlay(...)` →
+  `GroupPump.play(songId, nextSongId, seedRowId)` → `resolvePlayableRow` 直接 `reuse-active`。
+- hint 规则:按裸 songId 记录、TTL 15s、songId 必须一致;不满足即忽略并走完整解析,
+  「不把不知道当成死的」判定语义不变。
+- 效果(240):子进程零探测 1–3ms(原多付 3.5s),`bridge-gap-fill filledMs=0`;
+  守卫 `sendspin/streamPumpRowReuse.test.ts`(跨曲复用 / 失效回退)。
+- 位置:`player/QueueController.ts:214,1161,1198,1479-1488`、`player/types.ts:96-106`、
+  `sendspin/protocolPlayer.ts:93-109,343`、`sendspin/streamEngine.ts:631-698`。
