@@ -1667,12 +1667,12 @@ export class QueueController extends EventEmitter {
   async jumpTo(playerId: string, index: number, baseUrl: string): Promise<void> {
     playerId = stripPlayerPrefix(playerId);
     this.clearDisplayHold(playerId);
-    // 跳播总是从 0 起播:删掉旧采样即可(理由同 playFrom 的 startPositionMs=0 分支),
-    // 不能在 0 位置写假采样。
-    this.lastPlaying.delete(playerId);
     const q = this.queues.get(playerId);
     if (!q) return;
     if (!Number.isInteger(index) || index < 0 || index >= q.items.length) return;
+    // 跳播总是从 0 起播:删掉旧采样即可(理由同 playFrom 的 startPositionMs=0 分支),
+    // 不能在 0 位置写假采样。
+    this.lastPlaying.delete(playerId);
     if (this.advancing.has(playerId)) return;
     this.advancing.add(playerId);
     try {
