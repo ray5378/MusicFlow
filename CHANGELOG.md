@@ -2,6 +2,38 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.11.17] - 2026-11-05
+
+### Perf / sendspin FLAC 编码 wasm 化 + PCM 转换缓冲复用(240 CPU 专项巡检)
+
+240 真机 30 分钟采样 + 在线 profile 显示:单台 FLAC 设备播放稳态中 sendspin 子进程
+约 10%(单核口径),其中 libflacjs 自时间占 JS 忙时 61%,是最大头;GC 占 3.3%(25ms
+一帧 `new Int32Array(2400)` = 384KB/s 分配)。本次两项改动:
+
+- **libFLAC 换 wasm 变体(保持 L5)**:`libflacjs` 由 `release`(asm.js)改为
+  `release wasm`。容器内 60s/48k 立体声 L5 基准 **1.60% → 0.66%**,码率不变(988kbps)。
+  ⚠️ Node 下加载必须临时把 `globalThis.fetch` 置 undefined:wasm 变体的
+  `instantiateAsync()` 只判 `typeof fetch` 就用 `fetch()` 读本地 `libflac.wasm.wasm`,
+  会 `ERR_INVALID_URL` 且该链无 catch ⇒ 模块永不 ready;摘掉后 emscripten 走 Node
+  `readBinary`,require 返回后原样恢复。
+- **PCM 转换缓冲复用**:每帧 `new Int32Array(samples*CHANNELS)` 改为复用的
+  `pcmScratch`/`pcmView`。⚠️ 必须传**精确长度视图**:`process_interleaved` 按
+  `buffer.length`(不是样本数)决定拷贝字节数,整块 scratch 会多编码尾样本。
+- **保留 `Math.round`**:F32→S16 的 `(x+0.5)|0` 在负半轴 / 恰好 .5 处差 1 LSB、会改变
+  码流,而 profile 实测该转换仅约 0.11 点,故只做预分配、不做位运算替换。
+- 单测:`tests/sendspin` 相关 80 用例全过;`tsc` 通过。
+
+### 真机验收(240,30 分钟组播放)
+
+| 项 | 改前 | 改后 |
+| --- | --- | --- |
+| sendspin 主线程(真实播放稳态) | 10.0% | **6.9%**(含其余线程 7.6%) |
+| 容器 CPU(30 分钟,单核口径) | — | mean 19.1%、p50 18.2、p95 40.5 |
+| 播放异常(ERROR/underrun/垫音) | — | **0**;桥 `queueMs≈200ms`、`padUs=0` |
+
+峰值 40–61%(及单点 147%)经 `docker top` 快照归因为**换歌时新旧两首 ffmpeg 解码重叠 /
+预填**,与 FLAC 编码器无关。
+
 ## [4.11.16] - 2026-11-04
 
 ### Fix / 换歌取源跨进程复用 + 桥路由逐设备并发准备(240 巡检两项遗留)

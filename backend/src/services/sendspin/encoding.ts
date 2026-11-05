@@ -888,6 +888,31 @@ export class PcmEncoder implements ChunkEncoder {
   close(): void {}
 }
 
+/** libFLAC 的加载入口(2026-11-05 起默认 **wasm** 变体)。
+ *
+ * 为什么要显式摘 `globalThis.fetch`:Node 18+ 自带全局 fetch,而
+ * `libflac.wasm.js` 的 `instantiateAsync()` 只判断 `typeof fetch === "function"`
+ * 就用 fetch 去读本地 `…/libflac.wasm.wasm` → `ERR_INVALID_URL`,且那条链没有
+ * catch,模块永远不 ready(这正是历史上被迫退回 asm.js 的原因)。摘掉后
+ * emscripten 走 Node 分支 `readBinary`(fs.readFileSync);require 是同步的,
+ * 窗口内没有其它代码会用到 fetch,加载完立刻原样恢复。
+ *
+ * 实测(240 容器内,60s/48k/立体声/L5,`nice -n 19`):
+ *   asm.js 1.60% 单核、wasm 0.66% 单核,码率同为 988kbps ⇒ 约 2.4 倍。 */
+const FLAC_VARIANT = "release wasm";
+
+function loadFlacModule(): LibFlacModule {
+  const req = createRequire(import.meta.url);
+  const g = globalThis as unknown as { fetch?: unknown };
+  const savedFetch = g.fetch;
+  try {
+    if (typeof savedFetch === "function") g.fetch = undefined;
+    return (req("libflacjs") as (variant?: string) => LibFlacModule)(FLAC_VARIANT);
+  } finally {
+    g.fetch = savedFetch;
+  }
+}
+
 /** 按 codec 创建 chunk 编码器:opus / flac → 进程内, pcm → 内联。 */
 export function createChunkEncoder(codec: SendspinCodec, bitrateKbps = 320): ChunkEncoder {
   if (codec === "opus") return new OpusEncoder(bitrateKbps);
@@ -896,7 +921,7 @@ export function createChunkEncoder(codec: SendspinCodec, bitrateKbps = 320): Chu
   return new LibFlacEncoder(undefined, defaultFlacModuleReloader);
 }
 
-/** 生产用模块级重载:bust require 缓存重载 libflacjs(新 asm.js 堆),失败 null。 */
+/** 生产用模块级重载:bust require 缓存重载 libflacjs(新 wasm 实例/内存),失败 null。 */
 function defaultFlacModuleReloader(): LibFlacModule | null {
   try {
     const req = createRequire(import.meta.url);
@@ -904,7 +929,7 @@ function defaultFlacModuleReloader(): LibFlacModule | null {
     for (const k of Object.keys(req.cache)) {
       if (k === resolved || k.includes("libflacjs")) delete req.cache[k];
     }
-    return (req("libflacjs") as (variant?: string) => LibFlacModule)("release");
+    return loadFlacModule();
   } catch {
     return null;
   }
@@ -932,7 +957,7 @@ function defaultFlacModuleReloader(): LibFlacModule | null {
  *
  * ## 本实现
  *
- * 用 `libflacjs`(官方 libFLAC 1.4.x 经 emscripten 编译的 **asm.js** 变体,
+ * 用 `libflacjs`(官方 libFLAC 1.4.x 经 emscripten 编译的 **wasm** 变体,
  * MIT,零原生依赖、alpine 免编译)在**同一进程内**编码:
  *
  *   - `create_libflac_encoder(48000, 2, 16, level, 0, verify, 0)` 建实例
@@ -972,13 +997,16 @@ export class LibFlacEncoder implements ChunkEncoder {
   private frameCount = 0;
   /** 首个音频帧的样本数(诊断用;libFLAC 自选块大小,通常 4096)。 */
   private firstFrameSamples = 0;
+  /** F32→Int32 复用缓冲(2026-11-05):原来每帧 `new Int32Array(2400)`(25ms 一帧
+   *  ⇒ 384KB/s)是子进程 GC 的主要来源(profile 实测 GC 占忙时 3.3%)。
+   *  ⚠️ libflacjs 的 `process_interleaved` 按 `buffer.length` 决定拷贝字节数,
+   *  所以只能传**精确长度**的视图(整块 scratch 会多编码尾样本)。 */
+  private pcmScratch = new Int32Array(0);
+  private pcmView = new Int32Array(0);
 
   constructor(mod?: LibFlacModule, reloadModule?: () => LibFlacModule | null) {
-    const req = createRequire(import.meta.url);
-    // ⚠️ 必须用 asm.js 变体(`release`,不带 `.wasm`):
-    // WASM 变体在 Node 下会走浏览器的 `fetch(wasmPath)` 分支 → "unknown scheme" 直接崩;
-    // asm.js 是纯 JS,零加载配置、零镜像改动。
-    this.Flac = mod ?? (req("libflacjs") as (variant?: string) => LibFlacModule)("release");
+    // 默认 wasm 变体(2.4 倍,见 loadFlacModule);mod 仅供单测/工具注入。
+    this.Flac = mod ?? loadFlacModule();
     this.reloadModule = reloadModule ?? null;
     // libFLAC 是**异步**初始化的:首次 require 后要过一轮 tick 才 isReady()。
     // 服务端启动时会 `await waitFlacEncoderReady()` 预热;这里再兜一层 ——
@@ -1139,11 +1167,16 @@ export class LibFlacEncoder implements ChunkEncoder {
     const samples = Math.floor(pcmF32.length / CHANNELS);
     if (samples <= 0) return Promise.resolve([]);
     // F32 [-1,1] → Int32(16bit 有效位,libFLAC 接受未左移的原始样本)
-    const pcm = new Int32Array(samples * CHANNELS);
-    for (let i = 0; i < pcm.length; i++) {
+    // 复用 scratch(M4):块大小固定 4096,所以只有末块会换视图;不逐帧分配。
+    // ⚠️ 这里保留 `Math.round`:换成 `(x+0.5)|0` 之类的快路径在负半轴/恰好 .5
+    // 处会差 1 LSB。转换实测只占 0.11 点,不值得用音频位精确性去换。
+    const n = samples * CHANNELS;
+    if (this.pcmScratch.length < n) this.pcmScratch = new Int32Array(n);
+    if (this.pcmView.length !== n) this.pcmView = this.pcmScratch.subarray(0, n);
+    const pcm = this.pcmView;
+    for (let i = 0; i < n; i++) {
       const v = pcmF32[i];
-      const s = v >= 1 ? 32767 : v <= -1 ? -32768 : Math.round(v * 32768);
-      pcm[i] = s;
+      pcm[i] = v >= 1 ? 32767 : v <= -1 ? -32768 : Math.round(v * 32768);
     }
     this.out = [];
     let ok = this.Flac.FLAC__stream_encoder_process_interleaved(this.encId, pcm, samples);
@@ -1214,7 +1247,7 @@ export class LibFlacEncoder implements ChunkEncoder {
   }
 }
 
-/** libflacjs(asm.js 变体)导出的最小接口面,仅声明本项目用到的部分。 */
+/** libflacjs(wasm 变体)导出的最小接口面,仅声明本项目用到的部分。 */
 export interface LibFlacModule {
   variant?: string;
   isReady(): boolean;
@@ -1236,9 +1269,7 @@ export interface LibFlacModule {
  *  (`create_libflac_encoder` 依赖 Emscripten 运行时已初始化)。 */
 export function isFlacEncoderReady(): boolean {
   try {
-    const req = createRequire(import.meta.url);
-    const factory = req("libflacjs") as (variant?: string) => LibFlacModule;
-    return factory("release").isReady();
+    return loadFlacModule().isReady();
   } catch {
     return false;
   }
@@ -1256,9 +1287,7 @@ export function waitFlacEncoderReady(timeoutMs = 5000): Promise<boolean> {
     };
     const timer = setTimeout(() => finish(false), timeoutMs);
     try {
-      const req = createRequire(import.meta.url);
-      const factory = req("libflacjs") as (variant?: string) => LibFlacModule;
-      const Flac = factory("release");
+      const Flac = loadFlacModule();
       if (Flac.isReady()) return finish(true);
       Flac.onready = () => finish(true);
     } catch {
