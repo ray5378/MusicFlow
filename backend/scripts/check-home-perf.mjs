@@ -78,6 +78,48 @@ function mustNotMatch(rel, re, why) {
   if (hit) errors.push(`${rel}: ${why} —— 命中: ${hit.slice(0, 120)}`);
 }
 
+/**
+ * 断言：Home 首屏即时并发**恰好**是上半屏 3 路（歌单 / 首页配置 / 固定推荐卡）。
+ * 2026-11-05(P1):三路各包了 `softDeadline(...)` 软截止,原来的一行式正则匹配不到;
+ * 改为按括号深度切 Promise.all 数组体做结构性校验 —— 兼容包装,仍禁止第 4 路挤进首屏。
+ */
+function mustFirstScreenTriple(rel) {
+  checks += 1;
+  const text = stripComments(textOf(rel));
+  const mounted = text.indexOf("onMounted(async () => {");
+  const at = mounted < 0 ? -1 : text.indexOf("await Promise.all([", mounted);
+  const fail = (detail) =>
+    errors.push(`${rel}: Home 首屏即时并发只允许上半屏 3 路（歌单 / 首页配置 / 固定推荐卡）${detail ? " —— " + detail : ""}`);
+  if (at < 0) return fail("");
+  const open = text.indexOf("[", at);
+  let depth = 0;
+  let close = -1;
+  for (let i = open; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "(" || ch === "[" || ch === "{") depth++;
+    else if (ch === ")" || ch === "]" || ch === "}") {
+      if (--depth === 0) { close = i; break; }
+    }
+  }
+  if (close < 0) return fail("首屏 Promise.all 数组未闭合");
+  const body = text.slice(open + 1, close);
+  const items = [];
+  let d = 0;
+  let cur = "";
+  for (const ch of body) {
+    if (ch === "(" || ch === "[" || ch === "{") d++;
+    else if (ch === ")" || ch === "]" || ch === "}") d--;
+    if (ch === "," && d === 0) { items.push(cur); cur = ""; continue; }
+    cur += ch;
+  }
+  items.push(cur);
+  const flat = items.map((x) => x.replace(/\s+/g, " ").trim()).filter(Boolean);
+  const names = ["loadPlaylists(", "loadHomeConfig(", "loadHomeCards("];
+  if (!(flat.length === 3 && names.every((n, i) => flat[i].includes(n)))) {
+    fail(`实际 ${flat.length} 路: ${flat.join(" | ").slice(0, 160)}`);
+  }
+}
+
 /** 断言：某个文件里 re 的匹配次数**恰好**为 n（用于防重复定义/防退化回多请求）。 */
 function mustCount(rel, re, n, why) {
   checks += 1;
@@ -249,11 +291,7 @@ mustMatch(
   /function scheduleLowerSections\(\): void \{/,
   "Home 必须保留下半屏延迟排期函数 scheduleLowerSections（下半屏两路不得再回到 onMounted 的即时并发）",
 );
-mustMatch(
-  HOME,
-  /await Promise\.all\(\[loadPlaylists\(\), loadHomeConfig\(\), loadHomeCards\(\)\]\)/,
-  "Home 首屏即时并发只允许上半屏 3 路（歌单 / 首页配置 / 固定推荐卡）",
-);
+mustFirstScreenTriple(HOME);
 mustNotMatch(
   HOME,
   /Promise\.all\(\[[^\]]*loadLocalRandom\(\)/,
