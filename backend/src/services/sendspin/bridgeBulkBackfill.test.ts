@@ -174,13 +174,37 @@ describe("桥开局 bulk 投递(曲中失声根因修复)", () => {
     const dur = deliveredDurUs(b, durByTs);
     expect(dur).toBeGreaterThan(0);
     expect(dur).toBeLessThanOrEqual(1_100_000);
+    // [4.11.19] 下沿宽限:窗口实际底 = lo − 1 个补投周期(见 deliverBridgeWindow
+    //   的 floorDropUs)。拍间隔只多不少,紧贴 lo 的尾片若判过期,每拍稳定丢一片
+    //   ⇒ 桥侧 aligner 补 25ms 静音(240 实测秒卡顿循环)。
+    const floorTs = NOW + BigInt(BRIDGE_PUSH_FLOOR_US - BRIDGE_PUSH_TICK_MS * 1_000);
     expect(
       b.frames.every(
         (f) =>
-          f.ts >= NOW + BigInt(BRIDGE_PUSH_FLOOR_US)
+          f.ts >= floorTs
           && f.ts <= NOW + BigInt(BRIDGE_PUSH_HORIZON_US),
       ),
     ).toBe(true);
+  });
+
+  it("(d) 窗口下沿留一个补投周期:紧贴 lo 之下的尾片不被丢弃(4.11.19 秒卡顿根因)", () => {
+    setNowUsOverride(() => NOW);
+    const { g, ring, durByTs } = makeGroup();
+    const b = new TrackingBridge("d1");
+    g.bridges.set("d1", b as any);
+    g.notifyBridgeGeneration(2, "track");
+    const ep = (g as any).bridgeContentEpoch as number;
+    // 原 ts 覆盖 [lo − 300ms, lo + 100ms];交付戳 = 原 ts − ahead(x 轴不变)
+    injectRange(ring, durByTs, ep, BRIDGE_PUSH_FLOOR_US - 300_000, BRIDGE_PUSH_FLOOR_US + 100_000);
+    g.bridgePushTick();
+    // 以「相对 lo 的 x 轴」断言:x = ts − NOW
+    const minX = Number(b.frames[0].ts - NOW);
+    const grace = BRIDGE_PUSH_TICK_MS * 1_000;
+    const msg = `minX=${minX} pushed=${b.frames.length}`;
+    // lo − grace 以前仍按过期丢弃
+    expect(minX, msg).toBeGreaterThanOrEqual(BRIDGE_PUSH_FLOOR_US - grace);
+    // 一个周期内的尾片必须投出:否则每拍必丢一片 ⇒ aligner 补 25ms 静音
+    expect(minX, msg).toBeLessThan(BRIDGE_PUSH_FLOOR_US);
   });
 
   it("(c) bulk 与常态 tick 并发交错,桥收到的帧仍严格 ts 升序", async () => {

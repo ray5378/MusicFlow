@@ -23,7 +23,7 @@
 //     （把整曲字节取进 membuf）。它**不调用** `resolvePlayableRow` —— 见该文件
 //     `doPrefetch`：只走 `resolvePreferredSong` + `resolveNetworkInput` +
 //     `fetchWholeSongBuffered`。所以 `[RESOLVE-AUDIO]` 那 1030ms **一次都没被它排掉**。
-//   · **本模块**：**曲末前 9 秒**触发，补的正是 `resolvePlayableRow`（`[RESOLVE-AUDIO]`
+//   · **本模块**：**曲末前 30 秒**触发，补的正是 `resolvePlayableRow`（`[RESOLVE-AUDIO]`
 //     的唯一出处，src/services/source/resolveAudio.ts:24 建 logger / :198 打 resolve 行），
 //     顺带让 `prefetchSong` 再跑一次（它自带五道闸门 + 同曲去重，命中即返回）。
 //
@@ -37,9 +37,17 @@
 //   3. **不改既有语义**：`prefetchUpcoming` / `prefetchSong` / `resolvePlayableRow` 一个字都
 //      不改。本模块只在它们**前面**多调一次，失败即退化成「改动前的行为」。
 //
-// ### LEAD = 9000ms 的由来
-//   要覆盖实测 2.34s 就绪 + 余量；同时必须**明显大于**曲末排空窗口（那 3~7 秒静音块正在
-//   跑 drain），否则预热探测会与排空循环抢 IO，反而把静音块拉长。
+// ### LEAD = 30000ms 的由来（2026-11-05 由 9000ms 上调）
+//   240 HIVI 现场（14:02:04 起播、dur=262s 的 a2c12af9）：9s 窗口整首**一次都没进过**，
+//   全曲零 DrainPreheat 行。原因不是「没算」，是「算晚」—— 设备 5s 采样 + 约 9.8s
+//   缓冲让**报出来的位置**永远落后真实进度，末次采样距曲末常在 20s 以上，等 IDLE
+//   才换歌，于是又回到「切歌后才现算音源」的老路（该次空窗 33s）。
+//   30s = 采样粒度(≤5s) + 设备缓冲(≈10s) + 实测 2.34s 就绪 + 余量，
+//   同时仍明显大于曲末排空窗口(3~7s)，不会与排空循环抢 IO。
+//
+//   双触发（2026-11-05）：设备位置进窗口 **或** 队列侧本地时钟进窗口 ——
+//   后者见 QueueController.noteQueueClockAdvance（cast 时刻 + 墙钟），
+//   让**不报位置**的设备也有预热窗口，不再依赖设备采样节奏。
 //
 // ### 触发链（谁在什么时机调本模块）
 //   PlaybackTracker.update()/tick()   —— 每次位置推进就回调（纯通知，不带阈值）
@@ -56,9 +64,13 @@ const log = createLogger("DrainPreheat");
 
 /**
  * 曲末预热窗口（ms）：播放位置进入「本曲已知时长 − 本值」之后才开始预热。
- * 9000 = 覆盖实测 2.34s「音源就绪」+ 余量，且明显大于曲末排空窗口（3~7s）。
+ *
+ * 30000（2026-11-05 由 9000 上调）：240 现场 dur=262s 那首在 9s 窗口里零触发 ——
+ * 设备 5s 采样 + 约 9.8s 缓冲让「报出来的位置」永远落后真实进度，末次采样距曲末
+ * 20s 以上，等 IDLE 才换歌 = 33s 空窗。30s 覆盖 采样粒度(≤5s) + 缓冲(≈10s) +
+ * 实测 2.34s 就绪 + 余量，仍明显大于曲末排空窗口(3~7s)。
  */
-export const DRAIN_PREHEAT_LEAD_MS = 9_000;
+export const DRAIN_PREHEAT_LEAD_MS = 30_000;
 
 /** 预热执行器的返回：只要有「有没有判出可播行」＋判定路径就够，不关心行内容。 */
 export interface DrainPreheatResolveResult {

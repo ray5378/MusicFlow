@@ -304,7 +304,7 @@ export class PlaybackTracker {
     if (dur <= 0 || cur.playbackState !== PlaybackState.PLAYING) return "none";
     const pos = cur.position + (nowMs - cur.updatedAt) / 1000;
     // 曲末预热：本地 500ms 节拍也要喂（不报位置的设备只靠这条外推位置，
-    // 5s 采样粒度会让「曲末前 9 秒」这个窗口最多只剩 4s，预热就来不及了）。
+    // 5s 采样粒度 + 约 10s 设备缓冲会让窗口整首都不出现，预热就来不及了）。
     this.notifyPositionAdvance(pos, dur);
     if (pos < dur) {
       this.overrunAt = null;

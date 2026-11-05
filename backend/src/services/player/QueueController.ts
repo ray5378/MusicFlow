@@ -224,6 +224,17 @@ export class QueueController extends EventEmitter {
    *  它报的 position/duration 不再对应单曲 → 切歌决策由出流侧在曲目边界静默推进
    *  (见 flowAdvance / handleDecision 入口的拦截)。 */
   private flowOwned = new Set<string>();
+  /** 队列侧本地时钟（2026-11-05 曲末预热**双触发**之一）：本代次起播的 songId +
+   *  起播墙钟 + 起点秒。
+   *
+   *  为什么需要:设备位置上报不可靠 —— 5s 采样粒度、约 10s 缓冲延迟，部分设备干脆
+   *  不报位置。只看设备位置时，「曲末前 N 秒」这个窗口可能整首都不出现（240 现场:
+   *  dur=262s 那首零 `DrainPreheat` 行，换歌只能等 IDLE 后现算，33s 空窗）。
+   *  这里用 cast 成功时刻 + 墙钟自己推算进度，与设备位置**取或**。
+   *
+   *  ⚠️ 只喂曲末预热（旁路、只读、幂等），绝不参与切歌/结束判定 —— 后者的唯一
+   *  真相仍是 PlaybackTracker。 */
+  private queueClock = new Map<string, { songId: string; atMs: number; baseSec: number }>();
 
   constructor() {
     super();
@@ -271,7 +282,7 @@ export class QueueController extends EventEmitter {
    * 与 schedulePrefetch 的分工（互补，不是替代）：
    *   · schedulePrefetch（队列变动时）→ prefetchUpcoming：解决「源慢不慢」（整曲字节）。
    *     它**不调** `resolvePlayableRow`，所以 `[RESOLVE-AUDIO]` 那 1030ms 一直没被排掉。
-   *   · 本方法（**曲末前 9 秒**）→ preheatNextOnDrain：补 `resolvePlayableRow`
+   *   · 本方法（**曲末前 30 秒**，见 drainPreheat.ts 的 DRAIN_PREHEAT_LEAD_MS）→ preheatNextOnDrain：补 `resolvePlayableRow`
    *     （+ 让 prefetchSong 再跑一次，它自带闸门与去重）。实测那次换歌的 2.34s
    *     「音源就绪」正是这两段。
    *
@@ -288,6 +299,38 @@ export class QueueController extends EventEmitter {
     } catch (e: any) {
       log.debug(
         `[QueueController][drain-preheat] ${playerId}: 预热排程异常（已忽略）: ${String(e?.message || e).slice(0, 120)}`,
+      );
+    }
+  }
+
+  /**
+   * 曲末预热双触发之「队列侧时钟」（2026-11-05）。
+   *
+   * 触发口径：设备位置上报（notePositionAdvance）**或** 本方法算出的本地进度，
+   * 任一进入曲末窗口即预热。两者都汇到同一个 `preheatNextOnDrain`，幂等标记保证
+   * 只真跑一次，所以重复触发零成本。
+   *
+   * 为什么必须有一条不依赖设备采样的路径:240 现场设备 5s 采样 + 约 10s 缓冲，报出的
+   * 位置永远比真实进度晚，「曲末前 9s」整首都没进过窗口。cast 成功的那一刻就是最可靠
+   * 的时间原点（playCurrent 落笔）。
+   *
+   * 红线:纯旁路、永不抛、永不阻塞；绝不参与切歌判定。
+   */
+  private noteQueueClockAdvance(deviceId: string): void {
+    try {
+      const q = this.queues.get(deviceId);
+      if (!q || !q.isActive || q.currentIndex < 0) return;
+      const item = q.items[q.currentIndex];
+      if (!item) return;
+      const clock = this.queueClock.get(deviceId);
+      if (!clock || clock.songId !== item.songId) return; // 时钟基准已过期(跨曲了)
+      const durSec = this.knownDuration(item);
+      if (!(durSec > 0)) return;
+      const posSec = Math.max(0, clock.baseSec + (Date.now() - clock.atMs) / 1000);
+      this.notePositionAdvance(deviceId, posSec, durSec);
+    } catch (e: any) {
+      log.debug(
+        `[QueueController][drain-preheat] ${deviceId}: 队列侧时钟预热异常（已忽略）: ${String(e?.message || e).slice(0, 120)}`,
       );
     }
   }
@@ -420,6 +463,11 @@ export class QueueController extends EventEmitter {
     // 落进"设备非 PLAYING"的真空里(见 services/player/seekSettle.ts 顶部注释)。
     if (op === "seek") {
       markSeekIssued(playerId);
+      // 队列侧时钟跟着 seek 落点重锚(曲末预热双触发)；没有基准就不建(等 playCurrent)。
+      const clock = this.queueClock.get(playerId);
+      if (clock && typeof arg === "number") {
+        this.queueClock.set(playerId, { songId: clock.songId, atMs: Date.now(), baseSec: Math.max(0, arg) });
+      }
       // ★ S1(2026-11-01 真机):seek 本身就是"这一拍的用户意图",起播/重投留下的
       //   5s「等设备确认 PLAYING」乐观窗口必须就此作废。
       //   窗口开着时 reportState 会**吞掉**非 PLAYING 上报(只回一行"窗口内忽略"),
@@ -447,10 +495,17 @@ export class QueueController extends EventEmitter {
         const q = this.queues.get(playerId);
         if (q && q.currentIndex >= 0 && q.items[q.currentIndex]) {
           this.primeExpectedDuration(player.playerId, playerId, q.items[q.currentIndex]);
+          // 复播 = 时钟重新起算:位置取 lastPos / 末次 PLAYING 读数,拿不到就按 0。
+          const resumeSec = Math.max(0, this.lastPos.get(playerId) ?? this.lastPlaying.get(playerId)?.pos ?? 0);
+          this.queueClock.set(playerId, {
+            songId: q.items[q.currentIndex].songId,
+            atMs: Date.now(),
+            baseSec: resumeSec,
+          });
         }
       }
-      else if (op === "pause") await player.pause();
-      else if (op === "stop") await player.stop();
+      else if (op === "pause") { await player.pause(); this.queueClock.delete(playerId); }
+      else if (op === "stop") { await player.stop(); this.queueClock.delete(playerId); }
       else if (op === "seek") await player.seek(arg!);
       else if (op === "volume") await player.setVolume(arg!);
     } catch (e: any) {
@@ -494,6 +549,9 @@ export class QueueController extends EventEmitter {
     for (const [deviceId, player] of this.players) {
       const q = this.queues.get(deviceId);
       if (!q || !q.isActive || q.currentIndex < 0) continue;
+      // 曲末预热双触发之「队列侧时钟」:不等设备上报,按 cast 时刻 + 墙钟推算位置。
+      // 放在 advancing 守卫**之前** —— 换歌在途时预热同样该做(它只读、幂等)。
+      this.noteQueueClockAdvance(deviceId);
       if (this.advancing.has(deviceId)) continue;
       try {
         const state = await player.pollState();
@@ -1501,6 +1559,13 @@ export class QueueController extends EventEmitter {
       // 拆开的理由见 PlayerController 文件头 —— 合在一起时那 5s 会被 Stop→SetURI→Play
       // 三次 SOAP 往返吃掉,判出的 stalled 只是「命令还没发出去」。
       ctrl.armOptimisticTimeout?.(playerId);
+      // 队列侧时钟基准(曲末预热双触发):cast 已送达,从这里起按墙钟推算本曲进度。
+      // 起点用 castStartMs(0 或 seek 落点),与设备即将播放的位置同源。
+      this.queueClock.set(deviceId, {
+        songId: fullItem.songId,
+        atMs: Date.now(),
+        baseSec: (castStartMs ?? 0) / 1000,
+      });
       // cast 命令已发出,重置 tracker:清掉上一首的 prev 状态 + 残留去抖,
       // 避免上一首的 PLAYING→IDLE 迁移再次触发 advance(对照 MA play_index 后清 prev_state)。
       // 乐观窗口保持开启,等设备上报 PLAYING 确认成功(cast 期间已屏蔽瞬态 IDLE)。
@@ -1790,6 +1855,7 @@ export class QueueController extends EventEmitter {
     playerId = stripPlayerPrefix(playerId);
     this.clearDisplayHold(playerId);
     this.flowOwned.delete(playerId); // 队列清空 → 进行中的 flow 会话作废
+    this.queueClock.delete(playerId); // 队列侧时钟随队列一起作废
     const q = this.queues.get(playerId); if (!q) return;
     // 清空队列同时停止实际播放(dlna=stopDevice,group=扇出各成员)。
     // 成员设备个人清空不打断归属的进行中群组播放。
@@ -2039,6 +2105,7 @@ export class QueueController extends EventEmitter {
   deactivate(playerId: string): void {
     playerId = stripPlayerPrefix(playerId);
     this.flowOwned.delete(playerId); // 停投 → flow 会话由出流侧 abort（这里先摘所有权）
+    this.queueClock.delete(playerId); // 停止投递 → 时钟基准失效
     const q = this.queues.get(playerId); if (!q) return;
     q.isActive = false;
     this.persist(playerId);
@@ -2058,6 +2125,7 @@ export class QueueController extends EventEmitter {
     playerId = stripPlayerPrefix(playerId);
     this.clearDisplayHold(playerId);
     this.flowOwned.delete(playerId); // 用户停止 → 会话由出流侧 abort
+    this.queueClock.delete(playerId); // 用户停止 → 时钟基准失效(恢复时按 lastPos 重锚)
     const q = this.queues.get(playerId);
     this.ctrls.get(playerId)?.resetTracker(this.players.get(playerId)?.playerId ?? playerId);
     if (!q || !q.isActive) return;

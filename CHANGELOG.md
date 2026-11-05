@@ -39,11 +39,96 @@ P0(4.11.18)已把 provider 冷调从 `/v1/local-recommend` 请求路径挪走(�
 - HTTP/2 暂不做:浏览器不支持 h2c,必须 TLS 证书;内网仍为明文 HTTP/1.1。
 - 启动后台任务错峰:本地 provider 预热 1s、上游聚合预热维持 4s,不再同刻抢沙箱。
 
+### Fix / 自动换歌空窗:秒卡顿循环 + 断粮 rebase(240 HIVI 现场采样)
+
+**症状**:240 HiVi H5MKII(RAOP 桥成员)自动换歌时每 250ms 一声"咔哒"持续十余秒,
+随后十几秒断音,再硬跳十几秒恢复。用户侧即"秒卡顿循环"。
+
+**采样(2026-11-05 14:06:26–14:07:02 UTC)**:
+
+- `pushLoop 退出 contentEnded=true endReason=cursor-reached` → `bridge-gap-fill start`;
+- 14:06:34–46 每 250ms 一条 `insert=1102/1103 frames (25.0ms)` 共 30 条,
+  同期 `contentFrontierVsNowUs` 恒 3.22~3.25s(尾部只比窗口下沿 `lo` 高约 220ms);
+- 14:06:46 `bridge-gap-fill-stop reason=timeout filledMs=12535 heldMs=20120`;
+- 14:06:46–58 `inQueueMs=0 queueMs=0`、`deltaUs` 每 tick 正好 −2.0s(完全断粮),
+  6 次 `bridge pacing rebase(lag) +1.79~1.98s`;
+- 14:06:49/58 `RESOLVE-AUDIO reverify-ok ms=23483 / 22583`,14:06:59 音源就绪 →
+  `newgen-skip 594475 frames (13480ms)` + bulk 6s 恢复;空窗共 33s。
+
+**根因 1(咔哒本体)**:`deliverBridgeWindow` 按 `e.tsUs < lo` 硬丢。窗口每拍前移
+`BRIDGE_PUSH_TICK_MS`(250ms),而拍间隔实测**只多不少**(setTimeout 永不早触发),
+补静音尾片的 ts 恰好等于上一拍的 `lo + 1 tick`,于是**每拍必然丢掉最老的一片**;
+丢片 = 桥少 25ms 料 ⇒ `BridgeTimelineAligner` 补 25ms 静音 ⇒ 可闻咔哒。
+修复:下沿留**一个补投周期**宽限 `floorDropUs = lo − 1 tick`,最迟仍领先可听域
+`BRIDGE_PUSH_FLOOR_US − tick`(2.25s);真·过期帧(跳段/重锚/落后 >1 拍)仍按原判丢弃。
+
+**根因 2(断粮 + rebase)**:`BRIDGE_GAP_FILL_MAX_MS` 20s < 实测空窗 33s,补静音先于
+空窗结束而收工,剩余 13s 完全无料 ⇒ `queueMs=0` ⇒ RAOP 发流落后墙钟 ⇒ rebase 硬推。
+修复:上限 20s → **40s**,覆盖音源解析预算;常态仍由 `[pump][play] 音源就绪` 提前收工。
+
+**回归单测**:`bridgeBulkBackfill.test.ts > (d) 窗口下沿留一个补投周期`,断言
+`lo − 1 tick` 内的尾片被投出、更老的仍丢弃。
+
+### Fix / 换歌空窗根因(3):曲末预热双触发 + 本地行硬短路 + 本地预取解析预热
+
+用户口径:方案 1/2/3 都做,4(go-music-dl 侧车 18180)不排查。
+
+**1) 曲末预热窗口 9s → 30s,并改成「设备位置 或 队列侧时钟」双触发**
+
+- `DRAIN_PREHEAT_LEAD_MS` 9000 → **30000**。240 现场 dur=262s 那首在 9s 窗口里
+  **零 `DrainPreheat` 行**:设备 5s 采样 + 约 10s 缓冲让上报位置永远落后真实进度,
+  末次采样距曲末常在 20s 以上,窗口整首没进过 —— 只能等 IDLE 后现算音源(33s 空窗)。
+- 新增 `QueueController.noteQueueClockAdvance`:以 `playCurrent` cast 成功时刻为原点
+  按墙钟推算本曲进度(pause/stop 停表、seek 重锚、play 从 lastPos 续算、跨曲作废),
+  在轮询里与设备位置**取或** —— 不报位置的设备也有预热窗口。纯旁路、只读、幂等,
+  绝不参与切歌/结束判定(切歌真相仍只来自 PlaybackTracker)。
+
+**2) 本地磁盘行硬短路(`resolvePlayableRow`)**
+
+- `l:` 前缀 + 文件 stat 通过 ⇒ 直接返回 `local-stat-ok`,不再走在线校验 / 优选换源 /
+  复核。判据是硬事实,压过任何负缓存(挂载瞬时丢失写的 5 分钟负记忆会把一首就在磁盘
+  上的歌判死 5 分钟)。stat 不过时**不判死**,照旧落回既有探测/换源链。
+- 现场:`949f2677`(`l:.../我是享福的命 - 黄文文.flac`,30MB 实存)曾打出
+  `RESOLVE-AUDIO (reverify-ok) ms=23483 / 22583`,23s 正好落在排空窗口里。
+
+**3) 预取对本地行只做「解析预热」**
+
+- `prefetchCache.doPrefetch` 闸门 5:本地行不再直接 `return`(原来既不下字节、也没提前
+  算结论),改调 `warmLocalResolve` —— **不下一个字节**(本地文件走 membuf 纯浪费),
+  只提前把 `resolvePlayableRow` 的结论算好,并打一行可 grep 的
+  `[prefetch] <id> 本地行解析预热 reason=... ms=...`(5 分钟去重)。
+- 守卫:`backend/tests/drainPreheat.test.ts` 锁死「窗口 = 30s」。
+
 ### 验证(230 构建机)
 
 - `npx tsc --noEmit` 通过;`npm run build`(vue-tsc + vite)通过;
 - 构建产物 `index.html` 已无任何外部字体链接,入口 JS/CSS 位于 head;
-- 后端全量 vitest 通过(见 CI 门禁)。
+- 定向单测:`tests/drainPreheatWindow.test.ts` 3/3(窗口=30s/幂等/dur<=0)、
+  `tests/source/resolveAudioFallback.test.ts` 27/27(含新增「本地行硬短路」两例)、
+  `tests/sendspin/bridgeDrainFill.test.ts` + `tests/airplay/raopBridgeStream.test.ts`
+  21/21(gap-fill 上限 40s 的断言已同步);
+- 后端全量 vitest(623 文件 / 8471 例):8468 通过,3 失败 ——
+  ① `opensubsonic` 歌词用例超时(环境性,需外网);
+  ② `raopBridgeStream` MAJ-10 在 623 worker 满载下有 1 次计时抖动(单跑 6/6 通过);
+  ③ 一次收集中途文件改名导致的「模块不存在」(已确认改名后独立跑通过)。
+- 未做:go-music-dl 侧车 18180(用户口径「4 不用做」)。
+
+### 验证(240 真机 · 曲末预热双触发上线后实况)
+
+用户于常用设备连续点播,容器内日志(UTC)抓到两次**曲末窗口内预热**与对应换歌:
+
+```
+16:32:50 曲末预热 ev=drain-preheat song=46d48892 posMs=232829 durMs=259000 resolve=done ms=551
+16:33:12 曲末排空跳过:接续下一首 continuity=1 next=46d48892
+16:33:13 playCurrent idx=197 song=46d48892            ← 距上一条 0.63s
+16:36:44 曲末预热 ev=drain-preheat song=af8501d8 posMs=210742 durMs=238000 resolve=done ms=11
+16:37:10 曲末排空跳过:接续下一首 continuity=1 next=af8501d8
+16:37:11 playCurrent idx=651 song=af8501d8            ← 距上一条 0.77s
+```
+
+结论:预热在曲末前 26–27s 触发(落在 30s 窗口内),换歌手递 ≤0.8s,
+`continuity=1` 走桥接续、不再出现 33s 空窗;`resolve=done` 表明
+`resolvePlayableRow` 的探测成本已前移到曲末之前。
 
 ## [4.11.18] - 2026-11-05
 

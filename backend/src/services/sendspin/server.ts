@@ -96,8 +96,14 @@ const BRIDGE_DRAIN_SILENCE_SLICE_US = 25_000;
  *  4.11.15:12s → 20s。240 实测「跳过无音源曲 + 离线成员阻塞 + 无预取」最坏空窗
  *  16.8s:12s 到点收工后设备 7s 缓冲播完即出现 5.8s 真静音(silenceChunks=4)。
  *  提到 20s 覆盖该最坏值;正常路径仍由 `[pump][play] 音源就绪` 触发的
- *  endBridgeAutoTrackGap("content") 提前收工,不额外写静音。 */
-const BRIDGE_GAP_FILL_MAX_MS = 20_000;
+ *  endBridgeAutoTrackGap("content") 提前收工,不额外写静音。
+ *
+ *  [4.11.19] 20s → 40s。240 实测 2026-11-05 14:06:26→14:06:59 一次自动换歌
+ *  空窗 **33s**(下一首 `RESOLVE-AUDIO` 23.5s / `judgePlayable` 10s 超时 /
+ *  两次 transient 负缓存)。20s 到点收工后剩 13s **完全无料** ⇒ queueMs=0 ⇒
+ *  RAOP 落后墙钟 ~2s ⇒ 6 次 `pacing rebase(lag)` + `newgen-skip 13.48s`。
+ *  上限必须覆盖音源解析预算,不能让"补静音比空窗先结束"。 */
+const BRIDGE_GAP_FILL_MAX_MS = 40_000;
 
 /** 控制端(WS)全部断开、但仍有桥成员在播时的最长保留时间(ms)。桥是真实听者,
  *  不随控制端掉线立即拆;超过该时长仍无任何 WS 连接才终态回收(防「无听众还继续
@@ -1430,7 +1436,8 @@ export class SendspinGroup {
 
   /** 单桥窗口投递:从水位(缺失/0n 哨兵 = 当前代次尚未投递)向后扫描 ring:
    *  - 旧内容代次帧:跳过(见 notifyBridgeGeneration 的 epoch 注释);
-   *  - ts < lo(已入可听域之下):丢弃(桥来不及排程),水位推过不再重扫;
+   *  - ts < lo − 1 个补投周期(已入可听域之下):丢弃(桥来不及排程),水位推过
+   *    不再重扫;**lo 下留一格宽限**,见下方 floorDropUs 注释;
    *  - ts ∈ [lo, hi]:按 **ts' = ts − ahead** 投递(可听域),水位推过;
    *  - ts > hi:break(顺延到下一 tick,不投不推)。
    *  @returns 本轮实际投递帧数。 */
@@ -1501,11 +1508,21 @@ export class SendspinGroup {
       last = 0n;
       this.bridgeWatermarks.delete(deviceId);
     }
+    // [4.11.19] 下沿留一个补投周期的宽限:窗口每拍整体前移 `tickUs`,而拍间隔实测
+    //   **只多不少**(setTimeout 永不早触发)。上一拍刚进 ring 的尾片 ts 恰好落在
+    //   「上一拍 lo + tickUs」,这一拍就被新 `lo` 判成"已入可听域之下" ⇒ **每拍
+    //   稳定丢一片**。240 实测 2026-11-05 14:06:34–46:30 条 `insert=1102/1103
+    //   (25.0ms)` 的秒卡顿循环,而 `inQueueMs 4.3s→0.6s` 只是它的结果(丢一片 =
+    //   桥少 25ms 料 ⇒ aligner 补 25ms 静音)。丢帧再补静音与直接投它在时间轴上
+    //   等价,但丢帧打断样本连续性 ⇒ 可闻咔哒。
+    //   宽限 = 一个周期:最迟仍领先可听域 `BRIDGE_PUSH_FLOOR_US − tickUs`(2.25s),
+    //   真·过期帧(跳段/重锚/落后超过一拍的旧内容)仍按原判丢弃,stale 清理不受影响。
+    const floorDropUs = lo - tickUs;
     for (const e of ring) {
       if (e.ep !== epoch) continue; // S2(QA):严格相等当前代次才投 —— ep 缺失=未打戳=不可信
       if (!e.data || e.data.length === 0) continue; // 空包必跳过(2026-09-17 ESPHome:严格端收空包判 Invalid data)
       if (last !== 0n && e.tsUs <= last) continue;
-      if (e.tsUs < lo) {
+      if (e.tsUs < floorDropUs) {
         last = e.tsUs; // 丢弃,但水位推过(不再重扫)
         continue;
       }

@@ -165,6 +165,23 @@ export async function resolvePlayableRow(
     log.info(`[resolve] ${songId} -> ${r ? r.id : "null"} (${reason}) ms=${Date.now() - t0}`);
     return { row: r, reason, definitive };
   };
+  // ★ 0) 本地磁盘行硬短路（2026-11-05，240 现场）。
+  //
+  // 事故证据：`949f2677` 的 path 是 `l:dl-...:/MUSIC/LOSSLESS/...flac`（30MB，文件实存），
+  // 却打出 `[RESOLVE-AUDIO] ... (reverify-ok) ms=23483 / 22583` —— 本地探测先返回 false，
+  // 于是「优选换源 → 再复核」被整段跑了两遍，23s 全落在曲末排空窗口里（该次空窗 33s）。
+  //
+  // 判据是**硬事实**：`l:` 前缀 + 文件 stat 通过 = 可播，比任何在线探测都强。因此这里
+  // 不查任何缓存（负缓存尤其不能信：挂载瞬时丢失写的 5 分钟负记忆会把一首就在磁盘上的
+  // 歌判死 5 分钟），也不走确保/换源链。
+  // stat 不过时**不在这里判死** —— 落回既有链路（可能是挂载瞬时丢失，或组内 web 兄弟可播）。
+  const localParsed = parseSongPath((row as any).path || "");
+  if (localParsed && localParsed.type === "l") {
+    try {
+      if (existsSync(localParsed.filePath)) return done(row, "local-stat-ok");
+    } catch { /* stat 异常 → 落回既有探测链 */ }
+  }
+
   // 0) 复用生效源行(零成本:一次主键查找,跳过下面整段优选)。
   //    放在快缓存**之前**:快缓存记的是「这首歌可播」、且回的永远是**原始 songId 那行**,
   //    而实际在播的可能是优选换过的兄弟行 —— 复用生效行才是「接着放原来那条流」的正确语义。

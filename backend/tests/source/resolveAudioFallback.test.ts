@@ -394,3 +394,44 @@ describe("resolveRowInput:与 fetchRowBytes 同构的取输入", () => {
     expect(resolveRowInput(localRow("L12"))).toEqual({ input: "/music/x.wav" });
   });
 });
+
+// ============================================================
+// 2026-11-05 回归:本地磁盘行硬短路。
+// 现场:一首 `l:` 且文件实存的歌(30MB flac)被拿去跑在线校验/换源链,单次裁决 23s,
+// 正好落进曲末排空窗口 → 换歌空窗 33s。判据必须是硬事实(文件在不在),不是在线探测。
+// ============================================================
+describe("resolvePlayableRow:本地磁盘行硬短路(2026-11-05)", () => {
+  it("l: 行文件实存 → local-stat-ok,且不进在线校验/换源", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ra-local-"));
+    const fp = path.join(dir, "a.flac");
+    fs.writeFileSync(fp, Buffer.from("RIF"));
+    try {
+      h.row = localRow("L20");
+      h.parsed = { type: "l", filePath: fp } as any;
+      h.cached = "unplayable"; // 过期负缓存也必须被硬事实压过
+      h.localOk.mockResolvedValue(false);
+
+      const r = await resolvePlayableRow("L20");
+      expect(r.reason).toBe("local-stat-ok");
+      expect(r.row?.id).toBe("L20");
+      expect(h.localOk).not.toHaveBeenCalled();
+      expect(h.preferred).not.toHaveBeenCalled();
+      expect(h.probe).not.toHaveBeenCalled();
+      expect(h.ensure).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("l: 行文件不在 → 仍落回既有链路(不在这里判死)", async () => {
+    h.row = localRow("L21");
+    h.parsed = { type: "l", filePath: "/tmp/definitely-absent-7c1e.flac" } as any;
+    h.localOk.mockResolvedValue(false);
+    h.preferred.mockResolvedValue(null);
+    h.cached = undefined;
+
+    const r = await resolvePlayableRow("L21");
+    expect(r.reason).toBe("local-probe-fail");
+    expect(h.localOk).toHaveBeenCalled();
+  });
+});

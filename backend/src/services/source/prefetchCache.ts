@@ -46,7 +46,8 @@
 //   2. 全局并发 1（串行排队，不并发 —— 天翼那跳带宽共享，并发只会一起变慢并拖慢正在播的那条）；
 //   3. 预算：在途 + 预估 > 全局预算 × 0.5 → 放弃（给正在播的那条留一半）；
 //   4. 单曲 > `STREAM_BUFFER_MAX_FILE_MB`(100MB) → 跳过（必然 too-big，白取）；
-//   5. 只预取网络源（web 无可用 cachePath / `w:` 行）；`l:` 本地磁盘行不走 membuf，预取无意义。
+//   5. 只预取网络源（web 无可用 cachePath / `w:` 行）；`l:` 本地磁盘行**不下字节**，只做
+//      「解析预热」—— 提前把 `resolvePlayableRow` 的结论算好（2026-11-05）。
 //
 // 一句话：**宁可预取失败，也绝不能让正在播的流变慢或断流。**
 
@@ -473,6 +474,39 @@ function drain(): void {
   }
 }
 
+/**
+ * 本地行解析预热的去重记账（resolvedId → 上次预热时刻）。
+ * 5 分钟与 localSourceProbe 的本地失败记忆同量级：同一首在队列里反复成为「下一首」
+ * 时不必每拍都跑一遍（l: 行虽是微秒级，但日志会淹没排障）。
+ */
+const localWarmAt = new Map<string, number>();
+const LOCAL_WARM_TTL_MS = 5 * 60_000;
+
+/**
+ * 本地行「解析预热」：只算可播结论，**不下一个字节**（2026-11-05）。
+ *
+ * 与网络行预取的分工:网络行把整曲字节灌进 membuf；本地行从磁盘直读，灌 membuf
+ * 纯浪费，但「这首到底能不能播」仍值得在曲末之前算完 —— 否则起播路径第一次裁决
+ * 就落在排空窗口里（240 现场 RESOLVE-AUDIO 23s）。
+ */
+async function warmLocalResolve(resolvedId: string, queueId: string): Promise<void> {
+  const last = localWarmAt.get(resolvedId);
+  if (last && Date.now() - last < LOCAL_WARM_TTL_MS) return;
+  localWarmAt.set(resolvedId, Date.now());
+  const t0 = Date.now();
+  try {
+    const { resolvePlayableRow } = await import("./resolveAudio.js");
+    const r = await resolvePlayableRow(resolvedId);
+    // 队列行 id 与解析后 id 不同时仍登记别名(与网络行同一口径)。
+    if (queueId !== resolvedId) alias.set(queueId, resolvedId);
+    log.info(
+      `[prefetch] ${resolvedId} 本地行解析预热 reason=${r.reason} ok=${r.row ? 1 : 0} ms=${Date.now() - t0}`,
+    );
+  } catch (e: any) {
+    log.debug(`[prefetch] ${resolvedId} 本地行解析预热异常(已忽略): ${String(e?.message || e).slice(0, 160)}`);
+  }
+}
+
 async function doPrefetch(songId: string): Promise<void> {
   if (aliasLive(songId)) return; // 闸门 1（排队期间可能已被填上）
   const row = db.select().from(songs).where(eq(songs.id, songId)).get() as any;
@@ -501,8 +535,15 @@ async function doPrefetch(songId: string): Promise<void> {
     return;
   }
 
-  // 闸门 5：只预取网络源（`l:` 本地磁盘行不走 membuf，预取纯浪费）—— 用**解析后**的行判。
-  if (!(await isNetworkSong(resolved))) return;
+  // 闸门 5：网络源才下字节；`l:` 本地磁盘行改走「解析预热」(2026-11-05)。
+  //
+  // 原来的 `return` 什么都不做：本地行既不下字节，也没提前把可播结论算好 ——
+  // 曲末换歌时起播路径才第一次 `resolvePlayableRow`（240 现场那一步耗 23s）。
+  // 现在仍不取字节（本地文件走 membuf 纯浪费），但把结论提前算出来并留一行可 grep 的日志。
+  if (!(await isNetworkSong(resolved))) {
+    await warmLocalResolve(resolvedId, songId);
+    return;
+  }
 
   // ---- 候选源链（组内换源，2026-10-12 用户拍板）----
   // 首选行判死后**不直接跳下一首**：同曲多源组里其他网络源可能完整可播（平台 A 只给
