@@ -431,9 +431,29 @@ function kickProviderInvoke(pluginId: string, p: any): Promise<any> {
 // 成本,后台预热把它挪到无人等待的时间窗口;请求路径仍保持有界(超时转 pending,前端
 // 轮询自愈)。只预热**声明了 recommendCacheTtlSeconds(>0)** 的插件 —— 内置「本地随机」
 // (localPlatformRecommend 能力但无该字段)每次需重洗,缓存分支根本不命中它,预热无意义。
-const LOCAL_PROVIDER_WARMER_INITIAL_MS = 4 * 1000;
+//
+// 2026-11-05(P1):首轮 4s → 1s。容器启动到 HTTP 监听实测约 2.2s,用户常在 3~5s 内打开
+// 首页;4s 首轮与首个 /v1/local-recommend 撞车(请求路径先跑、预热白跑)。提前到 1s 让
+// 沙箱冷调用尽量落在用户点击之前。但插件注册可能晚于 1s(apiRoutes 先于 plugins 挂载),
+// 此时 getEnabledByCapability 为空 —— 原实现会直接顺延到 60s 周期,首轮等于丢失;故新增
+// 「未就绪短重试」:连续若干轮仍无声明 TTL 的插件则退回 60s,避免空转。
+const LOCAL_PROVIDER_WARMER_INITIAL_MS = 1 * 1000;
 const LOCAL_PROVIDER_WARMER_MAX_INTERVAL_MS = 60 * 1000;
+const LOCAL_PROVIDER_WARMER_NOT_READY_RETRY_MS = 2 * 1000;
+const LOCAL_PROVIDER_WARMER_NOT_READY_MAX_TRIES = 10; // ≈20s 内插件仍不出现则退回 60s 周期
 let localProviderWarmerTimer: ReturnType<typeof setTimeout> | null = null;
+let localProviderWarmerNotReadyTries = 0;
+
+/** 声明了 TTL(可预热)的 localPlatformRecommend 插件数量;0 表示插件尚未注册就绪。 */
+function warmableLocalProviderCount(): number {
+  let n = 0;
+  for (const p of getEnabledByCapability("localPlatformRecommend")) {
+    if (typeof p.impl?.recommendLocal !== "function") continue;
+    const ttlSec = Number(p.manifest?.recommendCacheTtlSeconds);
+    if (Number.isFinite(ttlSec) && ttlSec > 0) n++;
+  }
+  return n;
+}
 
 /** 预热周期 = min(60s, 所有声明 TTL 插件的最小 ttl/2)。
  *  取二者较小值:ttl/2 保证 TTL 较短的插件也在过期前被刷新;60s 为上限,避免非必要的
@@ -473,8 +493,8 @@ export function __warmLocalProvidersOnceForTest(): Promise<void> {
 }
 
 /** 启动周期预热(幂等:已有定时器直接 return)。递归 setTimeout + finally re-arm,
- *  与 startRecommendCacheWarmer 同款;定时器 unref,不阻进程退出。首轮用较短初始
- *  延迟(3~5s,避开启动期批量任务抢资源),之后按 min(60s, ttl/2) 周期。 */
+ *  与 startRecommendCacheWarmer 同款;定时器 unref,不阻进程退出。首轮 1s(见上方说明),
+ *  之后按 min(60s, ttl/2) 周期;首轮插件尚未注册时按 2s 短重试,最多 10 次。 */
 export function startLocalProviderWarmer(): void {
   if (localProviderWarmerTimer) return;
   const tick = (delayMs: number) => {
@@ -484,7 +504,19 @@ export function startLocalProviderWarmer(): void {
           console.warn("[LOCAL-RECOMMEND] 预热轮次失败:", e?.message || e);
         })
         .finally(() => {
-          tick(localProviderWarmIntervalMs()); // re-arm(在 finally,异常也不能断链)
+          const ready = warmableLocalProviderCount() > 0;
+          if (ready) {
+            localProviderWarmerNotReadyTries = 0;
+            tick(localProviderWarmIntervalMs());
+            return;
+          }
+          localProviderWarmerNotReadyTries += 1;
+          // 未就绪:短重试;超过上限(≈20s)仍为空说明确实没有可预热插件,退回 60s。
+          tick(
+            localProviderWarmerNotReadyTries <= LOCAL_PROVIDER_WARMER_NOT_READY_MAX_TRIES
+              ? LOCAL_PROVIDER_WARMER_NOT_READY_RETRY_MS
+              : LOCAL_PROVIDER_WARMER_MAX_INTERVAL_MS,
+          );
         });
     }, delayMs);
     localProviderWarmerTimer?.unref?.();

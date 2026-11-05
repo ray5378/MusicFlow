@@ -2,6 +2,49 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.11.19] - 2026-11-05
+
+### Perf / 首页冷启动 P1 + P2(预热提前、首屏门控收窄、去外链字体)
+
+P0(4.11.18)已把 provider 冷调从 `/v1/local-recommend` 请求路径挪走(冷态 last-good
+点查)。本次补齐剩余的首屏体感项:
+
+**P1 后端 · 预热提前 + 就绪重试**
+
+- `LOCAL_PROVIDER_WARMER_INITIAL_MS` 4s → **1s**:容器启动到 HTTP 监听实测约 2.2s,
+  首个首页请求常在 3~5s;4s 首轮会与请求路径撞在同一时刻(请求先到、预热白跑)。
+- 新增「插件未就绪短重试」:1s 时 `getEnabledByCapability` 可能仍为空(apiRoutes 先于
+  plugins 挂载),旧实现会顺延到 60s 周期、首轮形同丢失;现按 2s 重试,最多 10 次(≈20s)
+  仍无插件则退回 60s,避免空转。
+- 预热与请求路径继续共用 `providerInvokeInflight` 单飞表(同一 provider 任意时刻至多一次
+  沙箱调用),预热失败不设退避、下一轮重试。
+
+**P1 前端 · 首屏门控收窄 + 本地兜底**
+
+- `onMounted` 的 3 路首屏请求各加 **2s 软截止**:超时后不再阻塞 `loading` 复位,
+  底层请求继续跑、落地后照常写 ref;单个慢接口不再把整屏骨架拖到 15s。
+- `playlist-pool`(873 条 / ≈35KB 最小投影)新增 **localStorage 24h 兜底**:冷启动先同步
+  上屏、网络返回后覆盖;网络失败不再清空已上屏数据。代价:24h 内被删歌单仍可能出现在
+  并排随机卡里(点进去空态)。
+- 首屏三个接口各自独立降级:`playlist-count` 保默认 8、`home-cards` 保空、歌单池保兜底。
+
+**P2 · 首屏资源与外链**
+
+- 移除 `fonts.googleapis.com` 的 Montserrat(2 条 preconnect + 外链 stylesheet + 4 个字体):
+  该域名在生产网络内解析超时(230 实测 15s),最终仍回退系统字体,纯属白等。
+  改回 `--fnos-font` 回退栈(本机装有 Montserrat 的用户仍命中首选项);生产网络无法下载
+  二进制字体(Google / jsDelivr / npm 镜像均不可达),自托管暂不可行。
+- 入口 `<script type="module">` 移到 `<head>`:构建产物把入口 JS 与主 CSS 都放进 head,
+  浏览器可更早发现。
+- HTTP/2 暂不做:浏览器不支持 h2c,必须 TLS 证书;内网仍为明文 HTTP/1.1。
+- 启动后台任务错峰:本地 provider 预热 1s、上游聚合预热维持 4s,不再同刻抢沙箱。
+
+### 验证(230 构建机)
+
+- `npx tsc --noEmit` 通过;`npm run build`(vue-tsc + vite)通过;
+- 构建产物 `index.html` 已无任何外部字体链接,入口 JS/CSS 位于 head;
+- 后端全量 vitest 通过(见 CI 门禁)。
+
 ## [4.11.18] - 2026-11-05
 
 ### Perf / 首页「本地随机」冷态 SWR(provider last-good 落库)

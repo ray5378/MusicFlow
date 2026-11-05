@@ -390,9 +390,58 @@ async function loadPlaylists(force = false) {
       songCount: p.songCount || 0,
       coverArt: `pl-${p.id}`,
     }));
+    savePlaylistPoolCache(playlists.value);
   } catch {
-    playlists.value = [];
+    // 网络失败时不清空:保留本地兜底(无兜底时本来就是空数组)
   }
+}
+
+// 首屏陈旧兜底:playlist-pool 是首屏唯一体积较大的接口(约 873 条 / 35KB 最小投影)。
+// 本地留一份最近成功结果(24h),重启/空闲回收后的首屏先同步上屏,网络返回后覆盖。
+// 已知代价:24h 内被删除的歌单仍可能出现在并排随机卡里,点进去是空态(可接受)。
+const POOL_CACHE_KEY = "mf.home.playlistPool.v1";
+const POOL_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
+function hydratePlaylistPoolCache(): void {
+  try {
+    const raw = localStorage.getItem(POOL_CACHE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (!parsed || !Array.isArray(parsed.items)) return;
+    if (Date.now() - Number(parsed.ts) > POOL_CACHE_TTL_MS) return;
+    const items = parsed.items.filter((p: any) => p && p.id != null);
+    if (items.length) playlists.value = items;
+  } catch {
+    /* 坏数据 / 隐私模式:忽略,走网络 */
+  }
+}
+
+function savePlaylistPoolCache(items: any[]): void {
+  try {
+    localStorage.setItem(POOL_CACHE_KEY, JSON.stringify({ ts: Date.now(), items }));
+  } catch {
+    /* 配额 / 隐私模式:忽略 */
+  }
+}
+
+// 首屏软截止:到点不再阻塞 loading 复位,底层请求继续跑(落地后照常写 ref)。
+// 单个慢接口(如冷启动索引重建)不再把整块首屏骨架拖到 15s 之外。
+const FIRST_SCREEN_DEADLINE_MS = 2000;
+
+function softDeadline<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(undefined), ms);
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(undefined);
+      }
+    );
+  });
 }
 
 async function loadHomeConfig() {
@@ -528,8 +577,16 @@ onMounted(async () => {
   // P1-3 渐进渲染:各分区基于各自响应式 ref 独立渲染(模板未整页骨架门控 loading)。
   // 只有上半屏 3 路进首屏关键路径(并排随机卡 / 固定卡 / 占位都只依赖它们);平台精选
   // 与本地随机两路由 scheduleLowerSections 在首屏绘制后延迟拉,不阻塞 loading 复位。
+  // 2026-11-05(P1):先同步铺本地兜底(歌单池 24h 缓存),再给 3 路各加 2s 软截止 ——
+  // 任一接口慢(冷启动索引重建 / 空闲回收后 provider 冷调)都不再拖住整屏骨架,
+  // 在途请求照常落地并覆盖。
+  hydratePlaylistPoolCache();
   loading.value = true;
-  await Promise.all([loadPlaylists(), loadHomeConfig(), loadHomeCards()]);
+  await Promise.all([
+    softDeadline(loadPlaylists(), FIRST_SCREEN_DEADLINE_MS),
+    softDeadline(loadHomeConfig(), FIRST_SCREEN_DEADLINE_MS),
+    softDeadline(loadHomeCards(), FIRST_SCREEN_DEADLINE_MS),
+  ]);
   loading.value = false;
   await nextTick(); // 让上半屏先完成一次渲染提交,再放行下半屏外呼
   scheduleLowerSections();
