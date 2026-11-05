@@ -205,6 +205,49 @@ const recommendRefreshInflight = new Map<string, Promise<void>>();
  */
 const providerInvokeInflight = new Map<string, Promise<any>>();
 
+// ==================== provider 结果 last-good 落库(P0,2026-11-05) ====================
+// 痛点:进程重启 / 空闲内存回收(reclaim 会清空 providerRecommendCache)之后,首页首个
+// /v1/local-recommend 对每个声明 TTL 的插件退化为「内存无缓存 → raceDeadline 硬等
+// LOCAL_PROVIDER_DEADLINE_MS(2500ms)」,生产实测重启后首个请求 0.9~3.4s。
+// 这些 provider 的结果是本地库派生的确定性数据,把最后一次**非空**结果 write-through
+// 到 settings 表;冷态时先回灌并返回,sandbox 调用交给后台单飞刷新 ——
+// 请求路径从「等插件」降为「一次 PK 点查」,重启/回收后首页不再付这笔等待。
+const PROVIDER_LASTGOOD_PREFIX = "localrec.provider.";
+const PROVIDER_LASTGOOD_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** 读某 provider 的 last-good(内存 miss 时调用;不存在的 key / 坏行一律当无)。 */
+function readProviderLastGoodDb(pluginId: string): { ts: number; result: any } | null {
+  try {
+    const row = sqlite
+      .prepare("SELECT value FROM settings WHERE key = ?")
+      .get(PROVIDER_LASTGOOD_PREFIX + pluginId) as any;
+    if (!row?.value) return null;
+    const parsed = JSON.parse(String(row.value));
+    if (!parsed || typeof parsed.ts !== "number" || !parsed.result) return null;
+    return { ts: parsed.ts, result: parsed.result };
+  } catch (e: any) {
+    console.warn("[LOCAL-RECOMMEND] last-good 回灌失败:", e?.message || e);
+    return null;
+  }
+}
+
+/** write-through:落 settings 表并顺手清理超龄行(7 天)。失败仅告警,不影响请求路径。 */
+function writeProviderLastGood(pluginId: string, entry: { ts: number; result: any }): void {
+  try {
+    sqlite
+      .prepare(
+        `INSERT INTO settings(key, value, updated_at) VALUES(?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(PROVIDER_LASTGOOD_PREFIX + pluginId, JSON.stringify(entry), new Date().toISOString());
+    sqlite
+      .prepare("DELETE FROM settings WHERE key LIKE ? AND updated_at < ?")
+      .run(PROVIDER_LASTGOOD_PREFIX + "%", new Date(Date.now() - PROVIDER_LASTGOOD_MAX_AGE_MS).toISOString());
+  } catch (e: any) {
+    console.warn("[LOCAL-RECOMMEND] last-good 落库失败:", e?.message || e);
+  }
+}
+
 /** 冷启动/刷新失败退避表:key → { 上次失败时刻, 连续失败次数 }。按指数退避,
  *  退避窗口内不再重复发起后台拉取,防止前端轮询重试把故障中的上游打爆(2026-10-15 B2)。 */
 const recommendColdFailAt = new Map<string, { at: number; streak: number }>();
@@ -363,6 +406,11 @@ function kickProviderInvoke(pluginId: string, p: any): Promise<any> {
     .recommendLocal(getPluginConfig(pluginId) || {})
     .then((fresh: any) => {
       providerRecommendCache.set(pluginId, { ts: Date.now(), result: fresh });
+      // 只在有内容时落 last-good:空频道(上游今日无内容 / 插件异常)不落,
+      // 免得把「空」锁成重启后的兜底结果。
+      if (Array.isArray(fresh?.channels) && fresh.channels.length > 0) {
+        writeProviderLastGood(pluginId, { ts: Date.now(), result: fresh });
+      }
       return fresh;
     })
     .finally(() => {
@@ -551,16 +599,30 @@ app.get("/v1/local-recommend", async (c) => {
           });
           result = cached.result;
         } else if (cacheable) {
-          // 冷启动无缓存:不再同步阻塞(2026-10-15 首页偶发卡死修复)。沙箱 provider 调用
-          // 实测 1.6–16.6s(最坏超过前端 15s 超时),会拖住首页打开。用软截止竞速**单飞调用**:
-          // 截止内返回就用其真值(缓存已由 kickProviderInvoke 写入);超时则本轮该 provider 不产出
-          // 频道并置 pending,后台同一条 promise 仍在跑,settle 后写缓存,下一轮请求即命中秒回。
-          const raced = await raceDeadline(kickProviderInvoke(pluginId, p), LOCAL_PROVIDER_DEADLINE_MS);
-          if (!raced.ok) {
-            pendingAny = true;
-            return; // 本轮跳过该 provider
+          // 冷态(内存无缓存,典型:进程重启 / 空闲回收后的首个请求):先查 last-good。
+          // 有 → 立即回灌内存并返回,sandbox 调用转后台单飞刷新(TTL 内则不必刷);
+          // 无 → 才走软截止竞速(每进程真正冷启的首轮)。
+          const lastGood = readProviderLastGoodDb(pluginId);
+          if (lastGood) {
+            providerRecommendCache.set(pluginId, lastGood);
+            if (Date.now() - lastGood.ts >= ttlSec * 1000) {
+              kickProviderInvoke(pluginId, p).catch((e: any) => {
+                console.warn(`[LOCAL-RECOMMEND] ${pluginId} last-good 后台刷新失败:`, e?.message || e);
+              });
+            }
+            result = lastGood.result;
+          } else {
+            // 冷启动无缓存:不再同步阻塞(2026-10-15 首页偶发卡死修复)。沙箱 provider 调用
+            // 实测 1.6–16.6s(最坏超过前端 15s 超时),会拖住首页打开。用软截止竞速**单飞调用**:
+            // 截止内返回就用其真值(缓存已由 kickProviderInvoke 写入);超时则本轮该 provider 不产出
+            // 频道并置 pending,后台同一条 promise 仍在跑,settle 后写缓存,下一轮请求即命中秒回。
+            const raced = await raceDeadline(kickProviderInvoke(pluginId, p), LOCAL_PROVIDER_DEADLINE_MS);
+            if (!raced.ok) {
+              pendingAny = true;
+              return; // 本轮跳过该 provider
+            }
+            result = raced.value;
           }
-          result = raced.value;
         } else {
           // 未声明 TTL 的 provider(内置本地随机,纯进程内洗牌):保持同步调用。
           result = await p.impl.recommendLocal(getPluginConfig(pluginId) || {});

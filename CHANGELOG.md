@@ -2,6 +2,25 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.11.18] - 2026-11-05
+
+### Perf / 首页「本地随机」冷态 SWR(provider last-good 落库)
+
+240 实测:`GET /v1/local-recommend` 稳态 20–70ms,但**进程重启 / 空闲内存回收后**的
+首个请求为 0.9–3.4s —— reclaim 会清空 `providerRecommendCache`,每个声明
+`recommendCacheTtlSeconds` 的榜单插件退化为「内存无缓存 → `raceDeadline` 硬等 2500ms」。
+本次只做 P0(请求路径 SWR),不动预热时机、不动前端门控:
+
+- provider 成功返回**非空** channels 时,结果 write-through 到 settings 表
+  (`localrec.provider.<pluginId>`,超 7 天自动清理)。空结果不落库,避免把
+  「今日无内容 / 插件异常」锁成重启后的兜底值。
+- 冷态(内存无缓存)请求先查 last-good:有则**立即回灌并返回**,sandbox 调用转后台
+  单飞刷新(未过期则不重复刷);无 last-good 才走原有 2500ms 软截止竞速。
+- 语义边界:last-good 只存各插件本地库派生的确定性结果(与既有 stale-SWR 同口径);
+  内置「本地随机」未声明 TTL,仍每次重洗,随机性不变。
+- 单测:`tests/qa_perf/localRecommendLastGood.test.ts` 4 例(立即返回 / 未过期不刷 /
+  无 last-good 仍 pending / 落库),`tsc` 通过。
+
 ## [4.11.17] - 2026-11-05
 
 ### Perf / sendspin FLAC 编码 wasm 化 + PCM 转换缓冲复用(240 CPU 专项巡检)
