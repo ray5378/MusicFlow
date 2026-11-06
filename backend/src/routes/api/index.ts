@@ -30,6 +30,7 @@ import { registerGroups } from "./groups.js";
 import { registerPlay } from "./play.js";
 import { registerFlows } from "./flows.js";
 import { registerWebhook } from "./webhook.js";
+import { registerSystem } from "./system.js";
 
 export const apiRoutes = new Hono();
 
@@ -69,6 +70,7 @@ registerGroups(apiRoutes);
 registerPlay(apiRoutes);
 registerFlows(apiRoutes);
 registerWebhook(apiRoutes);
+registerSystem(apiRoutes);
 
 // 对外契约保持与拆分前一致
 export { clearRecommendCache, deleteSongDb, getDlnaBaseUrl } from "./shared.js";

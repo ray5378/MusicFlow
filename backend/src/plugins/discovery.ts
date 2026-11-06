@@ -36,6 +36,7 @@ import { loadSandboxedPlugin, type SandboxedPlugin, getSandboxModule, markSandbo
 import { makeScopedStorage } from "./storage.js";
 import { matchSongsToLibrary } from "../services/plugin/libraryMatch.js";
 import { createComm } from "./comm.js";
+import { upsertPluginNotice, clearPluginNotice } from "./notices.js";
 import { proxyFetch } from "../services/proxy.js";
 import type { PluginManifest, PluginType, PluginCapability } from "./types.js";
 import { importOnlineSongs } from "../services/source/online/service.js";
@@ -789,6 +790,10 @@ export async function discoverExternalPlugins(
         http: pluginHttp,
 
         storage: makeScopedStorage(id),
+        notify: {
+          upsert: async (input: any) => { upsertPluginNotice(id, input || {}); return null; },
+          clear: async (key: string) => { clearPluginNotice(id, String(key || "")); return null; },
+        },
         log: (...args: any[]) => console.log(`[PLUGIN:${id}]`, ...args),
         comm: {
           send: (targetId: string, message: any) => comm.send(targetId, message),

@@ -18,6 +18,7 @@
 import type { PluginManifest } from "./types.js";
 import { makeScopedStorage, type PluginStorage } from "./storage.js";
 import { createComm, type CommTarget } from "./comm.js";
+import { upsertPluginNotice, clearPluginNotice, type PluginNoticeInput } from "./notices.js";
 import { proxyFetch } from "../services/proxy.js";
 
 export interface PluginHost {
@@ -29,6 +30,11 @@ export interface PluginHost {
   storage: PluginStorage;
   http: (input: any, init?: any) => Promise<any>;
   comm: CommTarget;
+  /** 用户可见提醒(权限 notify):同一 key 幂等更新,clear 删除。 */
+  notify: {
+    upsert(input: PluginNoticeInput): Promise<void>;
+    clear(key: string): Promise<void>;
+  };
 }
 
 /** All permissions MusicFlow understands. A plugin declaring an unknown
@@ -50,6 +56,7 @@ export const KNOWN_PERMISSIONS: string[] = [
   "playlists:write",
   "inter-plugin",
   "crypto",
+  "notify",
 ];
 
 /** Namespaces a plugin may wildcard with `<ns>.*` (e.g. `songs.*` grants both
@@ -113,6 +120,16 @@ export function createPluginHost(
       return proxyFetch(input, init);
     },
     comm: createComm(manifest.id, permissions),
+    notify: {
+      async upsert(input: PluginNoticeInput) {
+        requirePermission(host, "notify");
+        upsertPluginNotice(manifest.id, input);
+      },
+      async clear(key: string) {
+        requirePermission(host, "notify");
+        clearPluginNotice(manifest.id, key);
+      },
+    },
   };
   return host;
 }

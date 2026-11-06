@@ -273,6 +273,11 @@ export interface SandboxHostEnv {
     delete(key: string): Promise<void>;
     keys(): Promise<string[]>;
   };
+  /** host.notify:用户可见提醒(需 notify 权限)。同一 key 幂等更新,clear 删除。 */
+  notify: {
+    upsert(input: { key: string; level?: string; title?: string; message: string }): Promise<null>;
+    clear(key: string): Promise<null>;
+  };
   log(...args: any[]): void;
   /** host.comm:插件间消息(与 comm.ts CommTarget 同契约)。 */
   comm: {
@@ -970,6 +975,14 @@ export class SandboxedPlugin {
     c.setProp(sourcesObj, "complete", srcComplete);
     srcComplete.dispose();
 
+    // host.notify(用户可见提醒,需 notify 权限):同一 key 幂等更新,clear 删除。
+    const notifyObj = c.newObject();
+    const notifyUpsert = this.hostAsync("upsert", (input: any) => this.env.notify.upsert(input || {}), "notify");
+    const notifyClear = this.hostAsync("clear", (key: any) => this.env.notify.clear(String(key ?? "")), "notify");
+    c.setProp(notifyObj, "upsert", notifyUpsert);
+    c.setProp(notifyObj, "clear", notifyClear);
+    notifyUpsert.dispose(); notifyClear.dispose();
+
     // host.config(每次调用前刷新)/ host.version
     // host.crypto(纯同步密码学原语,需 crypto 权限;实现源唯一 = pluginCrypto.ts:
     // 摘要族 + randomBytes + AES(cbc/ecb/gcm) + RSA。hostSync 把失败信封 { error } 原样透传。)
@@ -1008,6 +1021,7 @@ export class SandboxedPlugin {
     c.setProp(hostObj, "playlists", playlistsObj);
     c.setProp(hostObj, "fallback", fallbackObj);
     c.setProp(hostObj, "sources", sourcesObj);
+    c.setProp(hostObj, "notify", notifyObj);
     c.setProp(hostObj, "plugin", pluginObj);
     c.setProp(hostObj, "crypto", cryptoObj);
     // [FIX] 子 inject 返回的 newObject 句柄必须显式 dispose,否则 host-ref 泄漏 →
@@ -1031,7 +1045,7 @@ export class SandboxedPlugin {
     const versionStr = c.newString(this.env.version || "");
     c.setProp(hostObj, "version", versionStr);
     versionStr.dispose();
-    httpFn.dispose(); storageObj.dispose(); commObj.dispose(); songsObj.dispose(); playlistsObj.dispose(); fallbackObj.dispose(); sourcesObj.dispose(); pluginObj.dispose(); cryptoObj.dispose(); logFn.dispose();
+    httpFn.dispose(); storageObj.dispose(); commObj.dispose(); songsObj.dispose(); playlistsObj.dispose(); fallbackObj.dispose(); sourcesObj.dispose(); notifyObj.dispose(); pluginObj.dispose(); cryptoObj.dispose(); logFn.dispose();
     c.setProp(c.global, "__mfHost", hostObj);
     hostObj.dispose();
   }
@@ -1583,6 +1597,7 @@ export class SandboxedPluginRemote {
         case "command": value = await env.command[sub](...args); break;
         case "playlists": value = await env.playlists[sub](...args); break;
         case "sources": value = await env.sources[sub](...args); break;
+        case "notify": value = await env.notify[sub](...args); break;
         default: throw new Error(`未知 host 能力: ${name}`);
       }
       this.worker?.postMessage({ type: "host-result", callId, ok: true, value });

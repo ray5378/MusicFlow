@@ -70,6 +70,10 @@ function makeWorkerEnv(permissions: string[]): SandboxHostEnv {
       delete: (k) => hostCall("storage.delete", [k]),
       keys: () => hostCall("storage.keys", []),
     },
+    notify: {
+      upsert: (n) => hostCall("notify.upsert", [n]),
+      clear: (k) => hostCall("notify.clear", [k]),
+    },
     log: (...args) => console.log("[PLUGIN-WORKER]", ...args),
     comm: {
       send: (t, m) => { void hostCall("comm.send", [t, m]); },

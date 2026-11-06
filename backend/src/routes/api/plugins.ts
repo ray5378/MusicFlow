@@ -44,6 +44,7 @@ import {
   uuidv4,
 } from "./shared.js";
 import { isQrActionMethod, withImageDataUrl } from "../../plugins/qrAction.js";
+import { clearPluginNotices } from "../../plugins/notices.js";
 import { createLogger } from "../../utils/logger.js";
 
 export function registerPlugins(app: Hono): void {
@@ -173,6 +174,8 @@ app.delete("/v1/plugins/:id", adminMiddleware, (c) => {
   const dir = path.join(getDataDir(), "plugins", p.id);
   if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
   db.delete(plugins).where(eq(plugins.id, p.id)).run();
+  // 删除插件时清掉它遗留的提醒,避免同 id 重装后弹出一条与当前状态无关的旧提醒。
+  clearPluginNotices(p.id);
   log.info(`[PLUGIN] 已删除插件 ${p.id} (${p.name || ""})`);
   return c.json({ success: true });
 });
