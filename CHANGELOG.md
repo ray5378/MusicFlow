@@ -2,6 +2,18 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.12.2] - 2026-11-09
+
+### Fix / CI 守卫对齐（不改变 4.12.1 的运行时行为）
+
+- `check-home-perf.mjs` 的 R2 契约对齐 4.12.1 的架构变更：`/rest/api/v1/home/preload`
+  四合一聚合预热接口已删除（首页并不展示 songs/albums/artists/playlists 四个列表），
+  改为锁「启动期并行预取 + 同 URL 去重 + home-cards 响应到达即预加载封面」，
+  并禁止聚合接口回潮。
+- 首屏封面预加载不再写死 `pl-daily-*` 歌单 id（违反 `check-fixed-playlist-ids.mjs`
+  契约），改为从 home-cards 响应取前 3 张卡的 `coverArt`；预加载时机从 `app.mount`
+  之后提前到响应到达时（约 120ms），效果不弱于 4.12.1。
+
 ## [4.12.1] - 2026-11-09
 
 ### Perf / 首页首屏渲染链路(封面鉴权、接口预取、chunk 合并)
