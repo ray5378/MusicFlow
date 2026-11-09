@@ -1,3 +1,5 @@
+import MainLayout from "@/layouts/MainLayout.vue";
+import HomeView from "@/views/Home/index.vue";
 import { createRouter, createWebHistory } from "vue-router";
 import { useAuthStore } from "@/stores/auth";
 import { PERM } from "@/utils/perms";
@@ -11,10 +13,10 @@ const routes = [
   },
   {
     path: "/",
-    component: () => import("@/layouts/MainLayout.vue"),
+    component: MainLayout,
     meta: { requiresAuth: true },
     children: [
-      { path: "", name: "Home", component: () => import("@/views/Home/index.vue") },
+      { path: "", name: "Home", component: HomeView },
       { path: "songs", name: "Songs", component: () => import("@/views/Music/index.vue"), meta: { perm: PERM.LIBRARY_BROWSE } },
       { path: "genres", name: "Genres", component: () => import("@/views/Genres/index.vue"), meta: { perm: PERM.LIBRARY_BROWSE } },
       { path: "albums", name: "Albums", component: () => import("@/views/Albums/index.vue"), meta: { perm: PERM.LIBRARY_BROWSE } },
