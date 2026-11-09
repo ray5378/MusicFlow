@@ -1300,6 +1300,9 @@ export const usePlayerStore = defineStore("player", () => {
     const schedulePoll = () => {
       if (!st || !st.polling) return; // 已停止(stopCastPoll 置 polling=false)
       st.pollTimer = setTimeout(async () => {
+        // 后台标签页不轮询:一次 tick 会同时拉 status + 队列快照(~37KB),隐藏时每 2s 一次纯属浪费,
+        // 且会和同源的业务请求抢连接。回到前台后下一拍立刻补上,进度条不会停在旧值。
+        if (document.hidden) { schedulePoll(); return; }
         try {
           const res = await api.get(peerApi(st.peerId, "/status"), { timeout: 10000 });
           const s = res.data || {};

@@ -51,6 +51,7 @@
               </el-form-item>
             </div>
 
+            <template v-if="configStage >= 2">
             <el-divider content-position="left">{{ t('admin.fetch.config.semantics') }}</el-divider>
             <div class="config-grid">
               <el-form-item :label="t('admin.fetch.config.skipIfInLibrary')">
@@ -135,7 +136,9 @@
                 <div class="hint">{{ t('admin.fetch.config.transcodeKeepOriginalHint') }}</div>
               </el-form-item>
             </div>
+            </template>
 
+            <template v-if="configStage >= 3">
             <el-divider content-position="left">{{ t('admin.fetch.config.concurrency') }}</el-divider>
             <div class="config-grid">
               <el-form-item :label="t('admin.fetch.config.maxConcurrentJobs')">
@@ -206,6 +209,7 @@
                 </div>
               </div>
             </el-form-item>
+            </template>
           </el-form>
 
           <div class="config-actions">
@@ -215,7 +219,7 @@
       </el-tab-pane>
 
       <!-- ===== 2. 下载：新建任务 + 全库 ===== -->
-      <el-tab-pane :label="t('admin.fetch.tabCreate')" name="create">
+      <el-tab-pane :label="t('admin.fetch.tabCreate')" name="create" lazy>
         <div v-loading="createLoading" class="create-wrap">
         <el-form label-position="top" class="create-form">
           <el-form-item :label="t('admin.fetch.create.inputLabel')">
@@ -248,7 +252,7 @@
       </el-tab-pane>
 
       <!-- ===== 3. 洗版(无损替换低码率) ===== -->
-      <el-tab-pane :label="t('admin.fetch.tabUpgrade')" name="upgrade">
+      <el-tab-pane :label="t('admin.fetch.tabUpgrade')" name="upgrade" lazy>
         <div v-loading="upgradeConfigLoading" class="upgrade-wrap">
           <el-form label-position="top" class="upgrade-form">
             <el-divider content-position="left">{{ t('admin.fetch.upgrade.settings') }}</el-divider>
@@ -310,7 +314,7 @@
       </el-tab-pane>
 
       <!-- ===== 4. 标签修复（独立子页：双挡位） ===== -->
-      <el-tab-pane :label="t('admin.fetch.tabTagRepair')" name="tagRepair">
+      <el-tab-pane :label="t('admin.fetch.tabTagRepair')" name="tagRepair" lazy>
         <div class="tag-repair-wrap">
           <div class="tag-repair-status">
             <el-tag :type="tagRepairTagType">{{ tagRepairStateLabel }}</el-tag>
@@ -1088,11 +1092,13 @@ function formatDuration(sec?: number): string {
 }
 
 onMounted(() => {
+  // 首屏只拉「配置」页签真正要用的两个接口；洗版配置 / 标签修复状态各由自己的页签激活时再拉，
+  // 避免默认停在配置页也要等 4 个请求（其中 tag-repair 状态含集合查询，冷缓存可达数百毫秒）。
   loadConfig();
   loadSources();
-  loadUpgradeConfig();
-  loadTagRepairStatus();
-  // 两个任务面板用 el-tab-pane `lazy` 懒挂载：切到对应页签才 mount 并自拉，不在这里重复请求。
+  // 首帧只渲染「基础 + 音质」，其余分组在后续空闲帧补齐（见 scheduleConfigStages）。
+  scheduleConfigStages();
+  // 全部非默认页签都用 el-tab-pane `lazy` 懒挂载：切到对应页签才 mount 并自拉，不在这里重复请求。
 });
 
 // 离开页面必须清掉标签修复轮询定时器（2026-10-16 修正）：否则切走后定时器仍在后台
@@ -1110,6 +1116,28 @@ onUnmounted(() => {
 // 把整页拖成「卡加载」；之后由页签内的「刷新」按钮手动重拉（loadUpgradeStats / loadLibraryPlan）。
 const libraryPlanLoaded = ref(false);
 const upgradeStatsLoaded = ref(false);
+// 配置页 7 个分组、三十多个 Element Plus 控件一次性实例化，是首屏最大的一段长任务。
+// 拆成 3 段渐进渲染：首屏只出「基础 + 音质」（用户真正第一眼看得到的部分），
+// 其余分组在后续空闲帧补齐，视觉结果完全一致，只是把不可见的下半部分挪出首帧。
+const configStage = ref(1);
+const CONFIG_STAGES = 3;
+function scheduleConfigStages(): void {
+  const queue = (cb: () => void) => {
+    // 必须挂在 window 上调用：取到函数引用后裸调在部分浏览器会报 Illegal invocation，
+    // 那样配置页会永远停在第 1 段（只剩基础/音质两个分组）。
+    if (typeof window.requestIdleCallback === "function") window.requestIdleCallback(cb, { timeout: 400 });
+    else setTimeout(cb, 40);
+  };
+  const step = () => {
+    if (configStage.value >= CONFIG_STAGES) return;
+    configStage.value += 1;
+    if (configStage.value < CONFIG_STAGES) queue(step);
+  };
+  queue(step);
+}
+// 洗版配置 / 标签修复状态同样「首次切到页签才拉」，首屏不再为不可见页签付请求成本。
+const upgradeConfigLoaded = ref(false);
+const tagRepairStatusLoaded = ref(false);
 
 watch(activeTab, (v) => {
   if (v === "create" && !libraryPlanLoaded.value) {
@@ -1117,9 +1145,19 @@ watch(activeTab, (v) => {
     createLoading.value = true;
     loadLibraryPlan().finally(() => { createLoading.value = false; });
   }
-  if (v === "upgrade" && !upgradeStatsLoaded.value) {
-    upgradeStatsLoaded.value = true;
-    loadUpgradeStats();
+  if (v === "upgrade") {
+    if (!upgradeConfigLoaded.value) {
+      upgradeConfigLoaded.value = true;
+      loadUpgradeConfig();
+    }
+    if (!upgradeStatsLoaded.value) {
+      upgradeStatsLoaded.value = true;
+      loadUpgradeStats();
+    }
+  }
+  if (v === "tagRepair" && !tagRepairStatusLoaded.value) {
+    tagRepairStatusLoaded.value = true;
+    loadTagRepairStatus();
   }
   if (v === "jobs") downloadJobsRef.value?.refresh();
   if (v === "upgradeJobs") upgradeJobsRef.value?.refresh();

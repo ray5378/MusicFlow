@@ -307,8 +307,8 @@ mustMatch(
 );
 mustMatch(
   MAINLAYOUT,
-  /requestAnimationFrame\(\(\) => requestAnimationFrame\(\(\) => void initPlayerPeers\(\)\)\)/,
-  "流转播放初始化（两次全量 /v1/peers）必须延后到首屏绘制之后，不得再在 onMounted 里直接 await",
+  /window\.requestIdleCallback\(start, \{ timeout: 1500 \}\)/,
+  "流转播放初始化（两次全量 /v1/peers，329KB）必须在首屏绘制之后、且等到主线程空闲窗口再启动（1.2s 定时器 + requestIdleCallback 1.5s 兜底），不得再在 onMounted 里直接 await",
 );
 mustCountRaw(
   MAINLAYOUT,

@@ -39,7 +39,7 @@
         <el-divider v-if="authStore.isAdmin" />
         <el-menu-item v-if="authStore.isAdmin" index="/admin/plugins"><MfIcon name="Cable" /><template #title>{{ t('layout.pluginManage') }}</template></el-menu-item>
         <el-menu-item v-if="authStore.isAdmin" index="/admin/sources"><MfIcon name="FolderOpen" /><template #title>{{ t('layout.mediaSources') }}</template></el-menu-item>
-        <el-menu-item v-if="authStore.isAdmin" index="/admin/fetch"><MfIcon name="Download" /><template #title>{{ t('layout.fetchManage') }}</template></el-menu-item>
+        <el-menu-item v-if="authStore.isAdmin" index="/admin/fetch" @mouseenter="prefetchRoute('/admin/fetch')"><MfIcon name="Download" /><template #title>{{ t('layout.fetchManage') }}</template></el-menu-item>
         <el-menu-item v-if="authStore.isAdmin" index="/admin/users"><MfIcon name="User" /><template #title>{{ t('layout.userManage') }}</template></el-menu-item>
         <el-menu-item index="/settings"><MfIcon name="Settings" /><template #title>{{ t('layout.systemSettings') }}</template></el-menu-item>
       </el-menu>
@@ -543,9 +543,12 @@ let playerPeersStarted = false;
 let playerPeersTimer: ReturnType<typeof setTimeout> | null = null;
 let playerPeersDisposed = false; // 外壳卸载(登出 → /login)后不得再触发初始化
 
+let playerPeersQueued = false;
+
 async function initPlayerPeers(): Promise<void> {
   if (playerPeersStarted || playerPeersDisposed) return;
   playerPeersStarted = true;
+  playerPeersQueued = false;
   if (playerPeersTimer) {
     clearTimeout(playerPeersTimer);
     playerPeersTimer = null;
@@ -555,11 +558,37 @@ async function initPlayerPeers(): Promise<void> {
 }
 
 function schedulePlayerPeers(): void {
-  if (playerPeersStarted || playerPeersTimer || playerPeersDisposed) return;
-  // rAF 双帧 ≈ 等首屏真实绘制之后;后台标签页会暂停 rAF,故加 1s 兜底定时器。
-  requestAnimationFrame(() => requestAnimationFrame(() => void initPlayerPeers()));
-  playerPeersTimer = setTimeout(() => void initPlayerPeers(), 1000);
+  if (playerPeersStarted || playerPeersQueued || playerPeersDisposed) return;
+  playerPeersQueued = true;
+  // 投屏/peer 状态恢复要拉全量 /v1/peers（几百 KB）并起 2s 队列轮询。原来的「双 rAF + 1s」
+  // 会让它正好落在 0.5-1.5s —— 与业务首屏接口（如音乐下载页的 config/sources）同源抢那 6 条连接。
+  // 改为「至少 1.2s 后、且主线程进入空闲时」再恢复：首屏接口先走完，设备列表晚到一点不影响使用。
+  // 后台标签页 rAF 会被节流，idle 回调靠 timeout 兜底。
+  const start = () => void initPlayerPeers();
+  playerPeersTimer = setTimeout(() => {
+    playerPeersTimer = null;
+    if (playerPeersDisposed) { playerPeersQueued = false; return; }
+    // 必须挂在 window 上调用（裸调函数引用在部分浏览器会 Illegal invocation）。
+    if (typeof window.requestIdleCallback === "function") window.requestIdleCallback(start, { timeout: 1500 });
+    else start();
+  }, 1200);
 }
+
+// 侧边栏 hover 预热重型子页面的路由 chunk：「音乐下载」页含 14 个按需 chunk（~80KB），
+// 点击后才开始下载相当于把首屏骨架整体往后推 300ms 左右。鼠标移到菜单项就先 import()，
+// 真正点击时模块已在缓存里。只预热，不改变任何业务时序；失败静默（下一次点击仍会正常加载）。
+const routePrefetchers: Record<string, () => Promise<unknown>> = {
+  "/admin/fetch": () => import("@/views/admin/Fetch/index.vue"),
+};
+const prefetchedRoutes = new Set<string>();
+function prefetchRoute(path: string): void {
+  if (prefetchedRoutes.has(path)) return;
+  const load = routePrefetchers[path];
+  if (!load) return;
+  prefetchedRoutes.add(path);
+  load().catch(() => prefetchedRoutes.delete(path));
+}
+
 
 onMounted(() => {
   if (!authStore.isLoggedIn) return;
