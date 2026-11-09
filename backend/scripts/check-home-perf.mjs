@@ -8,9 +8,12 @@
 //      raceDeadline 硬等 2500ms(生产实测慢请求 ms=2582/2484/1756/1521/1208)。
 //      另:预热只对「声明了 recommendCacheTtlSeconds>0」的插件有意义,漏了 TTL 过滤会把
 //      每次都要重洗的内置「本地随机」也一起预热,纯属浪费外呼。
-//   R2 聚合预热接口:/rest/api/v1/home/preload 把前端 4 个预热请求合并成 1 个。若前端又
-//      退回 4 个独立请求,HTTP/1.1 每域名 6 连接下会与关键 XHR 争用(实测第二批 XHR 排队
-//      q=177~689ms);若后端接口没挂权限,则变成无鉴权可访问的隐通道。
+//   R2 首屏数据获取路径(2026-11-09 变更):原「/rest/api/v1/home/preload 四合一聚合
+//      预热接口」已删除 —— 首页并不展示 songs/albums/artists/playlists 四个列表,把它们的
+//      第一页全量查出来塞进一次响应纯属白烧 CPU/内存。现改为启动期并行预取
+//      home-cards / playlist-pool / favorites/ids(api/prefetch.ts),组件侧按 URL 去重
+//      复用同一条 promise。若退回「等组件 mount 才发请求」,首屏卡片又要多等 200ms+;
+//      若把已删除的聚合接口重新接回来,则首屏重新背上一堆用不到的列表查询。
 //   R3 封面懒加载:首页 130 张同源封面(实测平均 1397ms、最坏 2442ms)靠 IntersectionObserver
 //      精确控制发请求时机。若退回原生 loading="lazy"(桌面快网阈值过大,会把视口附近整屏
 //      图片一次性预取)或退回默认 size=300,首屏解码/带宽又白白翻倍。
@@ -32,6 +35,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 const RECOMMEND = "backend/src/routes/api/recommend.ts";
 const HOMEPRELOAD = "backend/src/routes/api/homePreload.ts";
+const PREFETCH = "frontend/src/api/prefetch.ts";
 const LIBRARY = "backend/src/routes/api/library.ts";
 const PLAYLISTS = "backend/src/routes/api/playlists.ts";
 const PRELOAD = "frontend/src/stores/preload.ts";
@@ -194,44 +198,28 @@ mustMatch(
   "预热定时器必须 unref：否则会无谓地阻止进程退出",
 );
 
-// ---------- R2 聚合预热接口（后端） ----------
-mustMatch(
+// ---------- R2 首屏数据获取路径(后端接口已删/前端预取) ----------
+mustNotMatch(
   HOMEPRELOAD,
   /app\.get\("\/v1\/home\/preload"/,
-  "必须注册 GET /v1/home/preload 聚合预热接口",
+  "已删除的聚合预热接口不得被加回来（首页不展示四个列表，全量预热纯属浪费）",
 );
-mustCount(
-  HOMEPRELOAD,
-  /permMiddleware\(PERM\./,
-  3,
-  "聚合接口 + 全量歌单池接口必须共挂 3 道权限门（preload 的 LIBRARY_BROWSE + PLAYLIST_VIEW，以及 playlist-pool 的 PLAYLIST_VIEW；少挂即变成无鉴权的隐通道）",
-);
-for (const [fn, why] of [
-  ["buildSongsPage", "歌曲列表预热必须复用 buildSongsPage（重写查询会与服务端真源漂移）"],
-  ["buildAlbumsPage", "专辑列表预热必须复用 buildAlbumsPage"],
-  ["buildArtistsPage", "艺术家列表预热必须复用 buildArtistsPage"],
-  ["buildPlaylistsPage", "歌单列表预热必须复用 buildPlaylistsPage"],
-]) {
-  mustMatch(HOMEPRELOAD, new RegExp(`${fn}\\(`), why);
-}
 mustMatch(LIBRARY, /export function buildSongsPage/, "library.ts 必须导出 buildSongsPage（供聚合接口复用）");
 mustMatch(LIBRARY, /export function buildAlbumsPage/, "library.ts 必须导出 buildAlbumsPage（供聚合接口复用）");
 mustMatch(LIBRARY, /export function buildArtistsPage/, "library.ts 必须导出 buildArtistsPage（供聚合接口复用）");
 mustMatch(PLAYLISTS, /export function buildPlaylistsPage/, "playlists.ts 必须导出 buildPlaylistsPage（供聚合接口复用）");
 
-// ---------- R2b 聚合预热接口（前端） ----------
-mustMatch(
-  PRELOAD,
-  /\/rest\/api\/v1\/home\/preload/,
-  "preload 店必须改调合并后的 /rest/api/v1/home/preload",
-);
-for (const p of ["songs", "albums", "artists", "playlists"]) {
-  mustNotMatch(
-    PRELOAD,
-    new RegExp(`/rest/api/v1/${p}\\b`),
-    `preload 店不得再逐个请求 /rest/api/v1/${p}（退回 4 个独立请求会与关键 XHR 争用 6 条 HTTP/1.1 连接）`,
-  );
-}
+// ---------- R2b 启动期并行预取 + 同 URL 去重（前端） ----------
+mustMatch(PREFETCH, /export function prefetchHomeData/, "必须导出 prefetchHomeData（启动期并行预取入口）");
+mustMatch(PREFETCH, /export function dedupGet/, "必须导出 dedupGet（同 URL 去重复用）");
+mustMatch(PREFETCH, /\/rest\/api\/v1\/recommend\/home-cards/, "启动期预取必须包含首屏卡片接口 home-cards");
+mustMatch(PREFETCH, /preloadCardCovers\(/, "home-cards 到达后必须立刻预加载首屏封面（否则封面要等组件渲染才发请求）");
+mustMatch(MAIN, /prefetchHomeData\(\)/, "main.ts 必须在 mount 前调用 prefetchHomeData");
+mustNotMatch(MAIN, /\/rest\/api\/v1\/home\/preload/, "已删除的聚合预热接口不得被前端重新调用");
+mustMatch(HOME, /dedupGet\("\/rest\/api\/v1\/recommend\/home-cards"\)/, "Home 首屏卡片必须经 dedupGet 复用预取结果");
+mustMatch(HOME, /dedupGet\("\/rest\/api\/v1\/home\/playlist-pool"\)/, "Home 歌单池必须经 dedupGet 复用预取结果");
+mustMatch(FAVORITES, /dedupGet\("\/rest\/api\/v1\/favorites\/ids"\)/, "收藏 id 必须经 dedupGet 复用预取结果");
+mustNotMatch(PRELOAD, /\/rest\/api\/v1\/home\/preload/, "preload 店不得再调已删除的聚合预热接口");
 
 // ---------- R3 封面懒加载 ----------
 mustMatch(
