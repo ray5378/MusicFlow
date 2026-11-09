@@ -12,9 +12,14 @@ export function coverUrl(id: string | undefined, fallback = 300): string {
     typeof window !== "undefined" && window.innerWidth <= 768
       ? Math.min(fallback, 150)
       : fallback;
-  // 封面 <img> 无法携带请求头,鉴权凭据走 URL ?token=(与 /rest/stream 一致)。
-  // 后端 getCoverArt 按 OpenSubsonic 规范要求鉴权,不带 token 会 401。
-  const token = typeof window !== "undefined" ? localStorage.getItem("token") || "" : "";
   const q = `/rest/getCoverArt?id=${id}&size=${size}`;
+  // 封面 <img> 无法携带请求头。2026-11-09 起登录会把 JWT 同步到 mf_token cookie
+  // (见 stores/auth.ts),由浏览器自动随图片请求携带 —— URL 因此不含 token,
+  // 保持稳定,浏览器缓存可跨会话复用。
+  // cookie 不可用(被浏览器禁用/同步未完成)时回退到旧的 ?token= 形式,保证不破图。
+  const hasCookie =
+    typeof document !== "undefined" && /(?:^|;\s*)mf_token=/.test(document.cookie);
+  if (hasCookie) return q;
+  const token = typeof window !== "undefined" ? localStorage.getItem("token") || "" : "";
   return token ? `${q}&token=${encodeURIComponent(token)}` : q;
 }

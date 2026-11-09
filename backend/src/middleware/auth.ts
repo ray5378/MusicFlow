@@ -99,6 +99,19 @@ export async function authMiddleware(c: Context, next: Next) {
     if (user) { c.set("user", user); return next(); }
   }
 
+  // mf_token cookie:封面等 <img> 请求无法自带 Authorization 头,登录后前端把 JWT
+  // 同步到该 cookie(2026-11-09)。这样封面 URL 可以不带 token —— URL 保持稳定,
+  // 浏览器缓存可跨会话复用。纯增量来源:没有该 cookie 时行为与之前完全一致。
+  const cookieToken = (c.req.header("cookie") || "").match(/(?:^|;\s*)mf_token=([^;]+)/)?.[1];
+  if (cookieToken) {
+    let user: AuthUser | null = null;
+    try {
+      const payload = jwt.verify(decodeURIComponent(cookieToken), JWT_SECRET) as any;
+      user = await getUserById(payload.uid || payload.sub);
+    } catch {}
+    if (user) { c.set("user", user); return next(); }
+  }
+
   const ndAuth = c.req.header("X-ND-Authorization");
   if (ndAuth?.startsWith("Bearer ")) {
     const token = ndAuth.substring(7);

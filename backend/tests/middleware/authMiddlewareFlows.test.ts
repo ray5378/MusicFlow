@@ -266,6 +266,54 @@ describe("X-ND-Authorization(Bearer)", () => {
   });
 });
 
+// ==================== mf_token cookie(封面等 <img> 请求) ====================
+// 为什么需要这条来源:<img src> / CSS 背景图无法带 Authorization 头,而封面端点受同一
+// authMiddleware 保护。登录后前端把 JWT 同步进 mf_token cookie,浏览器自动随身携带,
+// 封面 URL 因此可以不带 token(URL 稳定 ⇒ 浏览器缓存可跨会话复用)。
+// 它必须是**纯增量**:没有这个 cookie 时所有既有分支的行为一字不变。
+
+describe("mf_token cookie", () => {
+  it("有效 JWT cookie → 通过", async () => {
+    const id = insertUser({ username: "cookie-user" });
+    const res = await makeApp().request("/ping", {
+      headers: { cookie: `a=1; mf_token=${generateToken(id, "cookie-user", false)}; b=2` },
+    });
+    expect(res.status).toBe(200);
+    expect((await body(res)).user.id).toBe(id);
+  });
+
+  it("URL 编码过的 cookie 值 → 解码后仍能认证", async () => {
+    const id = insertUser({ username: "cookie-encoded" });
+    const token = generateToken(id, "cookie-encoded", false);
+    const res = await makeApp().request("/ping", {
+      headers: { cookie: `mf_token=${encodeURIComponent(token)}` },
+    });
+    expect(res.status).toBe(200);
+    expect((await body(res)).user.id).toBe(id);
+  });
+
+  it("无效 / 指向已删除用户的 cookie → 401(不静默放行)", async () => {
+    insertUser();
+    const app = makeApp();
+    expect((await app.request("/ping", { headers: { cookie: "mf_token=garbage" } })).status).toBe(401);
+    const ghost = jwt.sign({ uid: "ghost-user" }, JWT_SECRET);
+    expect((await app.request("/ping", { headers: { cookie: `mf_token=${ghost}` } })).status).toBe(401);
+  });
+
+  it("Bearer 优先于 cookie(请求头凭据不被 cookie 覆盖)", async () => {
+    const bearerId = insertUser({ username: "bearer-wins" });
+    const cookieId = insertUser({ username: "cookie-loses" });
+    const res = await makeApp().request("/ping", {
+      headers: {
+        Authorization: `Bearer ${generateToken(bearerId, "bearer-wins", false)}`,
+        cookie: `mf_token=${generateToken(cookieId, "cookie-loses", false)}`,
+      },
+    });
+    expect(res.status).toBe(200);
+    expect((await body(res)).user.id).toBe(bearerId);
+  });
+});
+
 // ==================== apiKey 索引:存量自愈 / 过期 / 禁用 ====================
 
 describe("apiKey 索引", () => {

@@ -4,6 +4,18 @@ import api from "@/api";
 
 export const useAuthStore = defineStore("auth", () => {
   const token = ref(localStorage.getItem("token") || "");
+
+  /** 把 JWT 同步到 mf_token cookie:封面等 <img> 请求无法带 Authorization 头,
+   *  由浏览器自动携带 cookie 鉴权(2026-11-09)。非 HttpOnly,与 localStorage 同级。
+   *  页面启动时也调用一次,兼容"升级前已登录、本地有 token 但没有 cookie"的会话。 */
+  function syncAuthCookie(t: string) {
+    try {
+      document.cookie = t
+        ? `mf_token=${t}; path=/; max-age=604800; SameSite=Lax`
+        : "mf_token=; path=/; max-age=0; SameSite=Lax";
+    } catch { /* cookie 被禁用时 coverUrl 会回退到 URL 带 token */ }
+  }
+  syncAuthCookie(token.value);
   const username = ref(localStorage.getItem("username") || "");
   const isAdmin = ref(localStorage.getItem("isAdmin") === "true");
   const userSalt = ref(localStorage.getItem("userSalt") || "");
@@ -51,6 +63,7 @@ export const useAuthStore = defineStore("auth", () => {
     permissions.value = isAdmin.value ? { admin: true } : (data.permissions || {});
     rendererGrants.value = isAdmin.value ? null : (data.rendererGrants || []);
     localStorage.setItem("token", data.token);
+    syncAuthCookie(data.token);
     localStorage.setItem("username", data.username);
     localStorage.setItem("isAdmin", String(data.isAdmin));
     localStorage.setItem("userSalt", data.subsonicToken);
@@ -91,6 +104,7 @@ export const useAuthStore = defineStore("auth", () => {
     localStorage.removeItem("mustChangePassword");
     localStorage.removeItem("permissions");
     localStorage.removeItem("rendererGrants");
+    syncAuthCookie("");
     // Release memory: clear player queue/audio, favorites, cached preload data
     // (dynamic imports avoid circular dependency at module load time)
     import("@/stores/player").then(({ usePlayerStore }) => {
