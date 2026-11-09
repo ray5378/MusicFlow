@@ -99,7 +99,10 @@ async function bootstrap() {
   // mount 后才发(实测首个业务请求在 304~584ms)。先实例化 auth store:它会把
   // JWT 同步到 mf_token cookie,也让 api 拦截器读得到 token;没有 token 不预取。
   const auth = useAuthStore(pinia);
-  if (auth.token) prefetchHomeData();
+  // 预取只在「落地页就是首页」时做(2026-11-10):此前无条件预取,导致其余 16 个
+  // 路由首屏都白拉 /recommend/home-cards 与 /home/playlist-pool(实测后者可慢至
+  // 2s),既拉回几十 KB 用不到的数据,又与渲染关键请求抢 HTTP/1.1 的 6 条连接。
+  if (auth.token && router.resolve(window.location.pathname).name === "Home") prefetchHomeData();
   const localeStore = useLocaleStore(pinia);
   // 英文用户:先拉 en-US 语言包再首帧渲染,避免首屏回落到中文。
   await loadLocaleMessages(localeStore.lang);

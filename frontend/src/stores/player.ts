@@ -1488,8 +1488,7 @@ export const usePlayerStore = defineStore("player", () => {
   // never show — hence the unified restore below.
   async function restoreCast(): Promise<void> {
     try {
-      const peersRes = await api.get("/rest/api/v1/peers");
-      const remotePeers = (peersRes.data?.peers || [])
+      const remotePeers = (await fetchPeerList())
         .filter((p: any) => p.kind !== "local" && p.queue && p.queue.isActive);
       const preferred = localStorage.getItem(PREFERRED_PEER_KEY) || "";
       // 幂等:若已有远端当前目标(上次调用已恢复/用户已手动选择),不再抢占。
@@ -1916,10 +1915,33 @@ export const usePlayerStore = defineStore("player", () => {
     }
   }
 
+  // 启动期 restoreCast() 与 refreshPeers() 会接连各拉一次全量 /v1/peers
+  // (单次数百 KB)。二者间隔通常 <200ms,这里做 1.2s 内的响应共享,把首屏
+  // 的设备列表请求从 2 次降到 1 次;WS 的 peer_snapshot 随后会再校正一次。
+  const PEERS_SHARE_MS = 1200;
+  let peersListInflight: Promise<any[]> | null = null;
+  let peersListAt = 0;
+  let peersListCache: any[] | null = null;
+  function fetchPeerList(): Promise<any[]> {
+    if (peersListCache && Date.now() - peersListAt < PEERS_SHARE_MS) {
+      return Promise.resolve(peersListCache);
+    }
+    if (peersListInflight) return peersListInflight;
+    peersListInflight = api.get("/rest/api/v1/peers")
+      .then((res) => {
+        const list = res.data?.peers || [];
+        peersListCache = list;
+        peersListAt = Date.now();
+        return list;
+      })
+      .finally(() => { peersListInflight = null; });
+    return peersListInflight;
+  }
+
   async function refreshPeers(): Promise<void> {
     try {
-      const res = await api.get("/rest/api/v1/peers");
-      peers.value = filterVisiblePeers(normalizeOwnLocalPeer(res.data?.peers || []));
+      const list = await fetchPeerList();
+      peers.value = filterVisiblePeers(normalizeOwnLocalPeer(list));
       if (!peers.value.find(p => p.peerId === localPeerId.value)) {
         peers.value.unshift({
           peerId: localPeerId.value,

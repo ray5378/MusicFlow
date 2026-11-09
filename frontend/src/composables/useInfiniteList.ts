@@ -125,6 +125,29 @@ export function useInfiniteList<T = any>(fetcher: RangeFetcher<T>, options: UseI
     onWindow(activeStart, activeEnd);
   }
 
+  // 首屏只立即拉「视口所在块」;窗口 ± keepMargin 的预取块推迟 250ms 再拉。
+  // 首次打开时若把 3~5 个分页请求一起发出,会和渲染关键的 JS/接口抢 HTTP/1.1 的
+  // 6 条连接,把首屏内容往后挤(合集页实测一次打 5 页 = 20 个请求)。人从看到
+  // 首屏到滚动需要的时间远大于 250ms,推迟不影响滚动体验。
+  let prefetchTimer: ReturnType<typeof setTimeout> | null = null;
+  const pendingPrefetch = new Set<number>();
+
+  function flushPrefetch() {
+    prefetchTimer = null;
+    for (const ci of [...pendingPrefetch]) {
+      pendingPrefetch.delete(ci);
+      ensureChunk(ci);
+    }
+  }
+  function schedulePrefetch() {
+    if (prefetchTimer || pendingPrefetch.size === 0) return;
+    prefetchTimer = setTimeout(flushPrefetch, 250);
+  }
+  function cancelPrefetch() {
+    if (prefetchTimer) { clearTimeout(prefetchTimer); prefetchTimer = null; }
+    pendingPrefetch.clear();
+  }
+
   /** 渲染层滚动通知进入(global 行区间);同时负责预取与剪枝。 */
   function onWindow(startRow: number, endRow: number) {
     if (!totalKnown) return;
@@ -141,12 +164,20 @@ export function useInfiniteList<T = any>(fetcher: RangeFetcher<T>, options: UseI
         }
       }
     }
-    // 预取范围内缺失的块。
-    for (let ci = first; ci <= last; ci++) ensureChunk(ci);
+    // 视口覆盖的块立即拉;预取范围内的其余块排队到下一轮空闲窗口。
+    const mustFirst = Math.max(0, Math.floor(startRow / chunk));
+    const mustLast = Math.floor(Math.min(total.value - 1, endRow) / chunk);
+    pendingPrefetch.clear();
+    for (let ci = first; ci <= last; ci++) {
+      if (ci >= mustFirst && ci <= mustLast) ensureChunk(ci);
+      else pendingPrefetch.add(ci);
+    }
+    schedulePrefetch();
   }
 
   function init(startRow = 0, endRow = 120) {
     seq++;
+    cancelPrefetch();
     totalKnown = false;
     total.value = 0;
     list.value = [];
@@ -163,6 +194,7 @@ export function useInfiniteList<T = any>(fetcher: RangeFetcher<T>, options: UseI
   // 并把稀疏数组置空以释放已加载对象供 V8 回收。keep-alive 的 deactivate 不触发此处。
   onBeforeUnmount(() => {
     seq++;
+    cancelPrefetch();
     loaded.clear();
     inflight.clear();
     list.value = [];

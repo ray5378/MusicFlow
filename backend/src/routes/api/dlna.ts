@@ -52,8 +52,14 @@ export function registerDlna(app: Hono): void {
 app.use("/v1/dlna/devices/:deviceId/*", rendererGrantParamMiddleware("dlna"));
 
 app.get("/v1/dlna/devices", async (c) => {
-  if (shouldRefreshDevices() || getCachedDevices().length === 0) {
+  // 冷启动(缓存为空)必须等一次扫描,否则列表是空的;之后缓存过期只在后台补扫,
+  // 请求立刻返回上次结果 —— SSDP 扫描实测要 ~4s,阻塞等待会把「播放器」页的
+  // 设备列表整体拖到 4s 后才出现。补扫完成后 emitDeviceListChanged 会推 WS,
+  // 前端收到后自动刷新(与 /v1/peers 的后台补扫策略一致)。
+  if (getCachedDevices().length === 0) {
     await refreshDevices();
+  } else if (shouldRefreshDevices()) {
+    void refreshDevices().catch(() => {});
   }
   const user = c.get("user");
   // 返回设备(在线 + 离线)。离线设备保留在列表,供「播放器」页管理(改名/删除)。

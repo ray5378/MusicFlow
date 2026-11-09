@@ -26,22 +26,22 @@
       </div>
       <el-menu :default-active="activeMenu" :collapse="!isMobile && sidebarCollapsed" router class="sidebar-menu" @select="closeMobileNav">
         <el-menu-item index="/"><MfIcon name="Home" /><template #title>{{ t('layout.home') }}</template></el-menu-item>
-        <el-menu-item v-if="authStore.hasPerm(PERM.PLAYLIST_VIEW)" index="/playlists"><MfIcon name="List" /><template #title>{{ t('layout.playlists') }}</template></el-menu-item>
-        <el-menu-item v-if="authStore.hasPerm(PERM.LIBRARY_BROWSE)" index="/songs"><MfIcon name="Headphones" /><template #title>{{ t('layout.music') }}</template></el-menu-item>
-        <el-menu-item v-if="authStore.hasPerm(PERM.LIBRARY_BROWSE)" index="/artists"><MfIcon name="User" /><template #title>{{ t('layout.artists') }}</template></el-menu-item>
-        <el-menu-item v-if="authStore.hasPerm(PERM.LIBRARY_BROWSE)" index="/albums"><MfIcon name="Disc3" /><template #title>{{ t('layout.albums') }}</template></el-menu-item>
-        <el-menu-item v-if="authStore.hasPerm(PERM.FAVORITES_MANAGE)" index="/favorites"><MfIcon name="Heart" :filled="true" :size="16" /><template #title>{{ t('layout.favorites') }}</template></el-menu-item>
-        <el-menu-item v-if="authStore.hasPerm(PERM.LIBRARY_BROWSE)" index="/genres"><MfIcon name="Library" /><template #title>{{ t('layout.genres') }}</template></el-menu-item>
-        <el-menu-item v-if="authStore.isAdmin || authStore.hasPerm(PERM.RENDERER_MANAGE) || authStore.hasPerm(PERM.RENDERER_USE)" index="/groups"><MfIcon name="Speaker" /><template #title>{{ t('layout.players') }}</template></el-menu-item>
-        <el-menu-item v-if="authStore.isAdmin || authStore.hasPerm(PERM.FLOW_MANAGE)" index="/flows"><MfIcon name="Workflow" /><template #title>{{ t('layout.flows') }}</template></el-menu-item>
-        <el-menu-item v-if="authStore.hasPerm(PERM.HISTORY_MANAGE)" index="/history"><MfIcon name="Clock" /><template #title>{{ t('layout.playHistory') }}</template></el-menu-item>
-        <el-menu-item v-if="authStore.hasPerm(PERM.RENDERER_USE)" index="/audio"><MfIcon name="SlidersHorizontal" /><template #title>{{ t('layout.audio') }}</template></el-menu-item>
+        <el-menu-item v-if="authStore.hasPerm(PERM.PLAYLIST_VIEW)" index="/playlists" @mouseenter="prefetchRoute('/playlists')"><MfIcon name="List" /><template #title>{{ t('layout.playlists') }}</template></el-menu-item>
+        <el-menu-item v-if="authStore.hasPerm(PERM.LIBRARY_BROWSE)" index="/songs" @mouseenter="prefetchRoute('/songs')"><MfIcon name="Headphones" /><template #title>{{ t('layout.music') }}</template></el-menu-item>
+        <el-menu-item v-if="authStore.hasPerm(PERM.LIBRARY_BROWSE)" index="/artists" @mouseenter="prefetchRoute('/artists')"><MfIcon name="User" /><template #title>{{ t('layout.artists') }}</template></el-menu-item>
+        <el-menu-item v-if="authStore.hasPerm(PERM.LIBRARY_BROWSE)" index="/albums" @mouseenter="prefetchRoute('/albums')"><MfIcon name="Disc3" /><template #title>{{ t('layout.albums') }}</template></el-menu-item>
+        <el-menu-item v-if="authStore.hasPerm(PERM.FAVORITES_MANAGE)" index="/favorites" @mouseenter="prefetchRoute('/favorites')"><MfIcon name="Heart" :filled="true" :size="16" /><template #title>{{ t('layout.favorites') }}</template></el-menu-item>
+        <el-menu-item v-if="authStore.hasPerm(PERM.LIBRARY_BROWSE)" index="/genres" @mouseenter="prefetchRoute('/genres')"><MfIcon name="Library" /><template #title>{{ t('layout.genres') }}</template></el-menu-item>
+        <el-menu-item v-if="authStore.isAdmin || authStore.hasPerm(PERM.RENDERER_MANAGE) || authStore.hasPerm(PERM.RENDERER_USE)" index="/groups" @mouseenter="prefetchRoute('/groups')"><MfIcon name="Speaker" /><template #title>{{ t('layout.players') }}</template></el-menu-item>
+        <el-menu-item v-if="authStore.isAdmin || authStore.hasPerm(PERM.FLOW_MANAGE)" index="/flows" @mouseenter="prefetchRoute('/flows')"><MfIcon name="Workflow" /><template #title>{{ t('layout.flows') }}</template></el-menu-item>
+        <el-menu-item v-if="authStore.hasPerm(PERM.HISTORY_MANAGE)" index="/history" @mouseenter="prefetchRoute('/history')"><MfIcon name="Clock" /><template #title>{{ t('layout.playHistory') }}</template></el-menu-item>
+        <el-menu-item v-if="authStore.hasPerm(PERM.RENDERER_USE)" index="/audio" @mouseenter="prefetchRoute('/audio')"><MfIcon name="SlidersHorizontal" /><template #title>{{ t('layout.audio') }}</template></el-menu-item>
         <el-divider v-if="authStore.isAdmin" />
-        <el-menu-item v-if="authStore.isAdmin" index="/admin/plugins"><MfIcon name="Cable" /><template #title>{{ t('layout.pluginManage') }}</template></el-menu-item>
-        <el-menu-item v-if="authStore.isAdmin" index="/admin/sources"><MfIcon name="FolderOpen" /><template #title>{{ t('layout.mediaSources') }}</template></el-menu-item>
+        <el-menu-item v-if="authStore.isAdmin" index="/admin/plugins" @mouseenter="prefetchRoute('/admin/plugins')"><MfIcon name="Cable" /><template #title>{{ t('layout.pluginManage') }}</template></el-menu-item>
+        <el-menu-item v-if="authStore.isAdmin" index="/admin/sources" @mouseenter="prefetchRoute('/admin/sources')"><MfIcon name="FolderOpen" /><template #title>{{ t('layout.mediaSources') }}</template></el-menu-item>
         <el-menu-item v-if="authStore.isAdmin" index="/admin/fetch" @mouseenter="prefetchRoute('/admin/fetch')"><MfIcon name="Download" /><template #title>{{ t('layout.fetchManage') }}</template></el-menu-item>
-        <el-menu-item v-if="authStore.isAdmin" index="/admin/users"><MfIcon name="User" /><template #title>{{ t('layout.userManage') }}</template></el-menu-item>
-        <el-menu-item index="/settings"><MfIcon name="Settings" /><template #title>{{ t('layout.systemSettings') }}</template></el-menu-item>
+        <el-menu-item v-if="authStore.isAdmin" index="/admin/users" @mouseenter="prefetchRoute('/admin/users')"><MfIcon name="User" /><template #title>{{ t('layout.userManage') }}</template></el-menu-item>
+        <el-menu-item index="/settings" @mouseenter="prefetchRoute('/settings')"><MfIcon name="Settings" /><template #title>{{ t('layout.systemSettings') }}</template></el-menu-item>
       </el-menu>
       <div class="sidebar-footer">
         <el-dropdown @command="handleCommand">
@@ -578,15 +578,34 @@ function schedulePlayerPeers(): void {
 // 点击后才开始下载相当于把首屏骨架整体往后推 300ms 左右。鼠标移到菜单项就先 import()，
 // 真正点击时模块已在缓存里。只预热，不改变任何业务时序；失败静默（下一次点击仍会正常加载）。
 const routePrefetchers: Record<string, () => Promise<unknown>> = {
+  "/songs": () => import("@/views/Music/index.vue"),
+  "/genres": () => import("@/views/Genres/index.vue"),
+  "/albums": () => import("@/views/Albums/index.vue"),
+  "/artists": () => import("@/views/Artists/index.vue"),
+  "/playlists": () => import("@/views/Playlists/index.vue"),
+  "/favorites": () => import("@/views/Favorites/index.vue"),
+  "/groups": () => import("@/views/Groups/index.vue"),
+  "/flows": () => import("@/views/Flows/index.vue"),
+  "/history": () => import("@/views/History/index.vue"),
+  "/audio": () => import("@/views/Audio/index.vue"),
+  "/settings": () => import("@/views/Settings/index.vue"),
+  "/admin/plugins": () => import("@/views/admin/Plugins/index.vue"),
+  "/admin/sources": () => import("@/views/admin/Sources/index.vue"),
   "/admin/fetch": () => import("@/views/admin/Fetch/index.vue"),
+  "/admin/users": () => import("@/views/admin/Users/index.vue"),
 };
 const prefetchedRoutes = new Set<string>();
+const prefetchTimers = new Map<string, ReturnType<typeof setTimeout>>();
 function prefetchRoute(path: string): void {
-  if (prefetchedRoutes.has(path)) return;
+  if (prefetchedRoutes.has(path) || prefetchTimers.has(path)) return;
   const load = routePrefetchers[path];
   if (!load) return;
-  prefetchedRoutes.add(path);
-  load().catch(() => prefetchedRoutes.delete(path));
+  // 悬停 120ms 才真正预热:避免鼠标划过侧栏时误下载重型页面(播放器/插件管理)。
+  prefetchTimers.set(path, setTimeout(() => {
+    prefetchTimers.delete(path);
+    prefetchedRoutes.add(path);
+    load().catch(() => prefetchedRoutes.delete(path));
+  }, 120));
 }
 
 

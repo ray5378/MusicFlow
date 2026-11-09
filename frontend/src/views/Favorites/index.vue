@@ -68,13 +68,13 @@
     </div>
 
     <!-- ===== 歌曲收藏 ===== -->
-    <div v-show="tab === 'song'" class="fav-pane">
+    <div v-if="loadedTabs.has('song')" v-show="tab === 'song'" class="fav-pane">
       <SongTable :songs="songs" :loading="loading" show-source show-bitrate :on-window="onWindow" @play="playSong" />
       <EmptyState v-if="!loading && total === 0" icon="Heart" :title="t('favorites.emptySongsTitle')" :description="t('favorites.emptySongsDesc')" compact />
     </div>
 
     <!-- ===== 专辑收藏 ===== -->
-    <div v-show="tab === 'album'" class="fav-pane">
+    <div v-if="loadedTabs.has('album')" v-show="tab === 'album'" class="fav-pane">
       <EmptyState v-if="!loadingAlbums && albumTotal === 0" icon="Disc3" :title="t('favorites.emptyAlbumTitle')" :description="t('favorites.emptyAlbumDesc')" compact />
       <div v-else class="album-grid virt-grid" ref="albumGridEl" v-loading="loadingAlbums" :style="{ height: albumFrameHeight }">
         <template v-for="g in albumViews" :key="g.item ? g.item.id : 'ph-' + g.idx">
@@ -113,7 +113,7 @@
     </div>
 
     <!-- ===== 歌手收藏 ===== -->
-    <div v-show="tab === 'artist'" class="fav-pane">
+    <div v-if="loadedTabs.has('artist')" v-show="tab === 'artist'" class="fav-pane">
       <EmptyState v-if="!loadingArtists && artistTotal === 0" icon="User" :title="t('favorites.emptyArtistTitle')" :description="t('favorites.emptyArtistDesc')" compact />
       <div v-else class="artist-grid virt-grid" ref="artistGridEl" v-loading="loadingArtists" :style="{ height: artistFrameHeight }">
         <template v-for="g in artistViews" :key="g.item ? g.item.id : 'ph-' + g.idx">
@@ -152,7 +152,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from "vue";
+import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
 import { usePlayerStore } from "@/stores/player";
@@ -188,6 +188,7 @@ const tabs = computed(() => [
 function switchTab(key: FavTab) {
   if (tab.value === key) return;
   tab.value = key;
+  ensureTab(key);
   // 切回某个分区后,其窗口化渲染需按当前视口重算(display:none 期间不触发滚动/布局)
   nextTick(() => {
     if (key === "song") window.dispatchEvent(new Event("resize"));
@@ -392,11 +393,24 @@ function plActions(pl: any): MenuAction[] {
   ];
 }
 
+// 四个分区此前都是 v-show,挂载时会把歌单/歌曲/专辑/歌手的数据全部拉一遍、DOM 也
+// 全量渲染(实测 10 个接口、3935 个节点,是收藏页首屏最大开销)。改为「首次切到该
+// 分区才加载数据 + 才挂载 DOM」,首屏只保留默认的歌单分区。
+const loadedTabs = reactive(new Set<FavTab>([tab.value]));
+function ensureTab(key: FavTab) {
+  if (loadedTabs.has(key)) return;
+  loadedTabs.add(key);
+  nextTick(() => {
+    if (key === "song") loadFavorites();
+    else if (key === "album") { albumGrid.reload(); albumGrid.bindGrid(); }
+    else if (key === "artist") { artistGrid.reload(); artistGrid.bindGrid(); }
+  });
+}
 function loadAll() {
-  playlistGrid.reload();
-  loadFavorites();
-  albumGrid.reload();
-  artistGrid.reload();
+  if (loadedTabs.has("playlist")) playlistGrid.reload();
+  if (loadedTabs.has("song")) loadFavorites();
+  if (loadedTabs.has("album")) albumGrid.reload();
+  if (loadedTabs.has("artist")) artistGrid.reload();
 }
 
 onMounted(() => {
@@ -404,10 +418,8 @@ onMounted(() => {
   fav.loadFavorites();
   loadPoolStatus();
   nextTick(() => {
+    // 默认歌单分区立即绑定;其余分区由 ensureTab() 在首次切页时按需 reload + bindGrid。
     playlistGrid.bindGrid();
-    albumGrid.bindGrid();
-    artistGrid.bindGrid();
-    // 默认歌单分区(其窗口化渲染在挂载时自绑定)
   });
   window.addEventListener("mf:song-deleted", onSongDeleted);
 });
