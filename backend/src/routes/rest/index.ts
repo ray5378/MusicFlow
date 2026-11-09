@@ -2876,13 +2876,14 @@ restRoutes.get("/getCoverArt", permMiddleware(PERM.COVER_VIEW), async (c) => {
   const size = Number(getParam(c, "size") || "300") || 300;
   const accept = c.req.header("Accept") || "";
   const wantWebp = accept.toLowerCase().includes("image/webp");
-  // pl- 歌单封面(每日推荐/自定义歌单)的内容会随歌单更新变化,而封面 URL 固定
-  // (前端恒为 /rest/getCoverArt?id=pl-<id>)。强缓存 1 天会让浏览器一直渲染
-  // 过期封面(连 If-None-Match 都不会发)。改用 no-cache:可缓存但强制每次
-  // revalidate,ETag 基于文件 mtime+size —— 封面一变立即返回新图,未变走 304。
+  // 封面缓存策略(2026-11-09 首页提速):pl- 歌单封面此前用 no-cache,导致每次进
+  // 首页都要对第一排 12 张封面逐个 revalidate(实测二次进入产生 10+ 个 304,还占着
+  // 6 条同源连接)。歌单封面不是高频变更,改为 5 分钟强缓存 + 1 天
+  // stale-while-revalidate:5 分钟内重复进入直接命中浏览器缓存(零请求),过期先回
+  // 旧图再后台刷新。私有部署一律 private,避免共享缓存把 A 用户的封面给 B。
   const coverCacheControl = id.startsWith("pl-")
-    ? "no-cache"
-    : "public, max-age=86400, stale-while-revalidate=604800";
+    ? "private, max-age=300, stale-while-revalidate=86400"
+    : "private, max-age=86400, stale-while-revalidate=604800";
 
   // Resolve a cover ref to an on-disk file, trying the same extension
   // fallbacks the old handler used (jpg<->png, plus a webp variant).
@@ -2973,7 +2974,7 @@ restRoutes.get("/getCoverArt", permMiddleware(PERM.COVER_VIEW), async (c) => {
           return new Response(new Uint8Array(buf), {
             headers: {
               "Content-Type": ct,
-              "Cache-Control": "public, max-age=86400, stale-while-revalidate=604800",
+              "Cache-Control": "private, max-age=86400, stale-while-revalidate=604800",
             },
           });
         }
