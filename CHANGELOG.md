@@ -2,6 +2,17 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.12.4] - 2026-11-10
+
+### Fix / 播放端恢复
+
+- **新会话不再被残留队列抢占**：新增 `playerPreferredPeerId` 记录用户**显式**选择过的
+  输出端（`switchPeer` 切到远端、DLNA 投屏起播时写入）。`restoreCast` 只有该端恰好
+  匹配偏好时才把 `currentPeerId` 指过去，否则一律停在本机——修复 AirPlay 设备残留
+  `isActive` 队列上报 PLAYING 但 position 卡在 0.599s、导致新会话 UI 被抢走的问题。
+- 偏好的清除覆盖全部「回本机」路径：显式切回本机、停止投屏、清队、被遥控客户端实例
+  失联（`dropCurrentIfStaleLocal`）、设备离线且无在线设备可切。
+
 ## [4.12.3] - 2026-11-10
 
 ### Perf / 音乐下载页（/admin/fetch）打开速度
