@@ -60,8 +60,10 @@
           </div>
         </div>
 
-        <!-- 占位（无数据时，按 homeCount 补齐） -->
-        <div v-for="n in placeholderHomeCount()" :key="'ph-pl-' + n" class="card placeholder fnos-shimmer">
+        <!-- 占位（无数据时，按 homeCount 补齐）
+             首屏占位只保留静态骨架：不用 fnos-shimmer（每张卡一个带动画的 ::after 图层），
+             也不跑 home-card-in 入场动画——它们会在数据到达后被整体替换，动画纯属浪费首帧预算。 -->
+        <div v-for="n in placeholderHomeCount()" :key="'ph-pl-' + n" class="card placeholder placeholder-static">
           <div class="card-cover-wrap"><div class="card-cover-ph"></div></div>
           <div class="card-body"><div class="sk-line"></div><div class="sk-line short"></div></div>
         </div>
@@ -689,6 +691,8 @@ onMounted(async () => {
 
 /* 占位骨架 */
 .card.placeholder { cursor: default; &:hover { transform: none; box-shadow: none; background: rgba(255,255,255,0.05); } }
+/* 首屏占位不参与入场动画（见模板注释） */
+.card.placeholder-static { animation: none; }
 .sk-line { height: 10px; border-radius: 6px; background: rgba(255, 255, 255, 0.08); margin-bottom: 7px; }
 .sk-line.short { width: 55%; }
 
