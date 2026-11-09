@@ -957,8 +957,9 @@ async function scanDlnaDevices() {
 
 nextTick(() => {
   if (!authStore.isLoggedIn) return;
+  // 收藏 id 集合:歌曲行红心状态要用(轻量接口,有在途去重)。
+  // 原此处还会再调 preloadHome() 预热列表第一页,该预热已移除(见 stores/preload.ts)。
   favoritesStore.loadFavorites();
-  import("@/stores/preload").then(({ usePreloadStore }) => usePreloadStore().preloadHome()).catch(() => {});
 });
 
 watch(() => playerStore.currentLyricIndex, async (idx) => {

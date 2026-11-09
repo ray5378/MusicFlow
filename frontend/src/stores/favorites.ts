@@ -18,8 +18,8 @@ export const useFavoritesStore = defineStore("favorites", () => {
 
   // 在途单飞去重:并发调用共享同一个 promise。
   // 背景:MainLayout 同一处既直接调 loadFavorites()、又通过 preloadHome() 再调一次,
-  // 旧实现只有 `if (loaded) return` 没有在途去重,导致同一个 getStarred2(151KB)被并发
-  // 请求两次并互相排队(实测第二次排队 q≈689ms)。finally 里清空以允许后续重新加载。
+  // 旧实现只有 `if (loaded) return` 没有在途去重,导致同一个收藏请求被并发请求两次
+  // 并互相排队(实测第二次排队 q≈689ms)。finally 里清空以允许后续重新加载。
   let inflight: Promise<void> | null = null;
 
   async function loadFavorites() {
@@ -28,11 +28,14 @@ export const useFavoritesStore = defineStore("favorites", () => {
     const p = (async () => {
       loading.value = true;
       try {
-        const res = await api.get("/rest/getStarred2?f=json");
-        const starred = res.data["subsonic-response"]?.starred2 || { song: [], album: [], artist: [] };
-        favoriteSongIds.value = new Set((starred.song || []).map((s: any) => s.id));
-        favoriteAlbumIds.value = new Set((starred.album || []).map((a: any) => a.id));
-        favoriteArtistIds.value = new Set((starred.artist || []).map((a: any) => a.id));
+        // 只取 id 集合的轻量端点(2026-11-09):收藏状态只需要 id,而标准 getStarred2
+        // 会回完整歌曲/专辑/艺人对象(800+ 收藏实测 ~187KB、~280ms)。标准接口保持不变,
+        // 第三方 Subsonic 客户端与收藏页仍走 getStarred2。
+        const res = await api.get("/rest/api/v1/favorites/ids");
+        const ids = res.data["subsonic-response"]?.favoriteIds || {};
+        favoriteSongIds.value = new Set(ids.song || []);
+        favoriteAlbumIds.value = new Set(ids.album || []);
+        favoriteArtistIds.value = new Set(ids.artist || []);
         loaded.value = true;
       } catch { /* ignore */ }
       finally { loading.value = false; inflight = null; }

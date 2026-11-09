@@ -45,10 +45,9 @@ import {
   touch,
 } from "./shared.js";
 
-// ==================== 歌单列表查询的可复用实现(优化 #3) ====================
-// 首页预热聚合接口(GET /v1/home/preload)要在服务端内部重新触发 /v1/playlists 的
-// 第一页查询,让相关缓存就绪。抽出为「入参即原始 query 字符串 + 当前用户」的纯函数,
-// 路由与预热器共用同一份实现 —— 不复制 SQL,也不重写过滤/排序逻辑。
+// ==================== 歌单列表查询的可复用实现 ====================
+// 抽出为「入参即原始 query 字符串 + 当前用户」的纯函数,供路由直接调用 ——
+// 不复制 SQL,也不重写过滤/排序逻辑。
 export function buildPlaylistsPage(qp: {
   page?: string; pageSize?: string; query?: string; platform?: string;
   local?: string; favorite?: string; sort?: string;

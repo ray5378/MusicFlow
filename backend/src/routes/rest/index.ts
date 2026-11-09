@@ -1285,6 +1285,22 @@ restRoutes.get("/getStarred", permMiddleware(PERM.FAVORITES_MANAGE), (c) => {
   return c.json(ok({ starred: { song: favSongs, album: favAlbums, artist: favArtists } }));
 });
 
+// 收藏状态轻量端点(2026-11-09):歌曲行/首页只需要知道「哪些 id 已收藏」,不需要完整
+// 对象。标准 getStarred2 会逐条查歌曲/专辑/艺人并序列化完整 ID3 对象(800+ 收藏实测
+// ~187KB、~280ms,且与首页其它请求争用事件循环),这里只回三类 id 数组。
+// 标准 getStarred2 保持不变 —— 第三方 Subsonic 客户端与收藏页仍走原接口。
+restRoutes.get("/api/v1/favorites/ids", permMiddleware(PERM.FAVORITES_MANAGE), (c) => {
+  const user = c.get("user");
+  if (!user) return c.json(ok({ favoriteIds: { song: [], album: [], artist: [] } }));
+  const songIds = db.select({ id: userFavoriteSongs.songId }).from(userFavoriteSongs)
+    .where(eq(userFavoriteSongs.userId, user.id)).all().map(r => r.id);
+  const albumIds = db.select({ id: userFavoriteAlbums.albumId }).from(userFavoriteAlbums)
+    .where(eq(userFavoriteAlbums.userId, user.id)).all().map(r => r.id);
+  const artistIds = db.select({ id: userFavoriteArtists.artistId }).from(userFavoriteArtists)
+    .where(eq(userFavoriteArtists.userId, user.id)).all().map(r => r.id);
+  return c.json(ok({ favoriteIds: { song: songIds, album: albumIds, artist: artistIds } }));
+});
+
 restRoutes.get("/getStarred2", permMiddleware(PERM.FAVORITES_MANAGE), (c) => {
   const user = c.get("user");
   if (!user) return c.json(ok({ starred2: { song: [], album: [], artist: [], songTotal: 0, albumTotal: 0, artistTotal: 0 } }));
