@@ -2,6 +2,38 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.12.1] - 2026-11-09
+
+### Perf / 首页首屏渲染链路(封面鉴权、接口预取、chunk 合并)
+
+本版本不改 UI，只改首屏数据与资源的到达顺序，每项均以改动前后实测数据验证。
+
+- **封面鉴权改走 `mf_token` cookie**：封面 URL 不再拼接 `?token=`（Bearer 仍优先），
+  URL 恢复为可缓存形态。跨会话第二次进入首页：带 token 的封面 URL 20/20 → 0/20，
+  封面请求总量 126.3KB / 272ms → 42.2KB / 79–110ms，缓存命中 0 → 10 张。
+  新增 4 个 `mf_token` cookie 回归用例（有效 / URL 编码 / 无效或已删用户 / Bearer 优先）。
+- **封面强缓存**：`Cache-Control: private, max-age=300, stale-while-revalidate` + ETag/304，
+  消除每次进入首页的封面 revalidate。
+- **首屏封面预加载**：在鉴权就绪后（`app.mount` 之后、确认有 token）注入
+  `rel=preload`，避免静态 preload 早于 cookie 建立而拿到 401。封面请求发起
+  498–530ms → 126–154ms，卡片可见中位 630ms → 567ms。
+- **启动期并行预取**：`home-cards` / `playlist-pool` / `favorites/ids` 在 store 初始化后
+  立即发出，Home 侧按 URL 去重复用同一 Promise。接口发起中位 371ms → 120ms，
+  卡片入 DOM 中位 472ms → 396ms。
+- **首屏 chunk 合并**：`MainLayout` 与 `Home` 由懒加载改为静态引入，消除首屏 20 个
+  chunk 的二次请求波次。entry 552KB / 198KB gzip → 726KB / 251KB gzip，产物文件数
+  98 → 76；卡片入 DOM 中位 396ms → 283ms，完成布局中位 438ms → 326ms。
+- **首屏占位卡改静态骨架**：去掉 `fnos-shimmer` 动画层与 `home-card-in` 入场动画
+  （占位卡在数据到达后即被替换），卡片插入后长任务 99ms → 81ms，首屏绘制
+  473ms → 445ms。
+- **入场 stagger 封顶**：首屏卡片延迟由 `idx+1` 改为 `Math.min(idx+1, 4)`，
+  12 张卡的动画起始延迟 60…720ms → 60…240ms，最后一张完成时刻提前 480ms；
+  动画窗口内长任务无回归（86/96ms → 80/93ms）。
+- **首页列表预热移出事件循环**：删除阻塞的首页列表预热，收藏状态改走
+  `/rest/api/v1/favorites/ids` 轻量接口。
+
+回归：后端全量 623 个测试文件 / 8476 个用例通过（1 skipped）。
+
 ## [4.12.0] - 2026-11-09
 
 ### Perf / Web 首屏加载与歌单选择优化
