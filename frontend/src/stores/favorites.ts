@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
 import api from "@/api";
+import { dedupGet } from "@/api/prefetch";
 import { gt } from "@/locales";
 
 type FavoriteKind = "song" | "album" | "artist";
@@ -31,7 +32,7 @@ export const useFavoritesStore = defineStore("favorites", () => {
         // 只取 id 集合的轻量端点(2026-11-09):收藏状态只需要 id,而标准 getStarred2
         // 会回完整歌曲/专辑/艺人对象(800+ 收藏实测 ~187KB、~280ms)。标准接口保持不变,
         // 第三方 Subsonic 客户端与收藏页仍走 getStarred2。
-        const res = await api.get("/rest/api/v1/favorites/ids");
+        const res = await dedupGet("/rest/api/v1/favorites/ids");
         const ids = res.data["subsonic-response"]?.favoriteIds || {};
         favoriteSongIds.value = new Set(ids.song || []);
         favoriteAlbumIds.value = new Set(ids.album || []);

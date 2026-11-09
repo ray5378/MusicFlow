@@ -10,6 +10,7 @@ import PlatformBadge from "./components/PlatformBadge.vue";
 import { i18n, loadLocaleMessages } from "./locales";
 import { useLocaleStore } from "./stores/locale";
 import { useAuthStore } from "./stores/auth";
+import { prefetchHomeData } from "./api/prefetch";
 // Element Plus 组件样式：**按需**引入(T12 打开速度优化)。
 // 说明:不再整体引入 element-plus/dist/index.css(全量样式),改为逐组件引入
 // theme-chalk 下的 el-*.css,只覆盖本项目实际用到的组件;并补齐共享基座
@@ -99,6 +100,12 @@ app.component("PlatformBadge", PlatformBadge);
 async function bootstrap() {
   // 在首帧渲染前落地界面语言偏好(默认 zh-CN)。必须在 mount 之前执行,
   // 否则 el-config-provider 第一次读取 locale 时拿不到持久化语言。
+  // 首屏数据预取(2026-11-09):必须早于 mount —— 让首屏 3 个 GET 与应用启动
+  // (路由解析/布局/Element Plus 初始化,实测 140ms+)并行,而不是等 Home 组件
+  // mount 后才发(实测首个业务请求在 304~584ms)。先实例化 auth store:它会把
+  // JWT 同步到 mf_token cookie,也让 api 拦截器读得到 token;没有 token 不预取。
+  const auth = useAuthStore(pinia);
+  if (auth.token) prefetchHomeData();
   const localeStore = useLocaleStore(pinia);
   // 英文用户:先拉 en-US 语言包再首帧渲染,避免首屏回落到中文。
   await loadLocaleMessages(localeStore.lang);

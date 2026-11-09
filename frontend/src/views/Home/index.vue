@@ -149,6 +149,7 @@ import CoverPlay from "@/components/CoverPlay.vue";
 import { useItemActions } from "@/composables/useItemActions";
 import { usePlayContent } from "@/composables/usePlayContent";
 import { coverUrl } from "@/utils/cover";
+import { dedupGet } from "@/api/prefetch";
 
 const { t } = useI18n();
 const router = useRouter();
@@ -193,7 +194,7 @@ async function playPl(pl: any) {
 const homeCards = ref<any[]>([]);
 async function loadHomeCards() {
   try {
-    const res = await api.get("/rest/api/v1/recommend/home-cards");
+    const res = await dedupGet("/rest/api/v1/recommend/home-cards");
     homeCards.value = res.data?.cards || [];
   } catch {
     homeCards.value = [];
@@ -381,9 +382,10 @@ async function loadPlaylists(force = false) {
     // 导致并排随机池实际只覆盖最新约 200 个(真实缺陷);轻量接口不受分页上限约束。
     // 封面按 pl-<id> 派生后由模板懒加载,故响应体刻意不带 coverArt。
     // force=true(?refresh=1)跳过服务端索引 TTL 缓存:手动「重新生成漫游」后新歌单立刻进池。
-    const res = await api.get(
-      "/rest/api/v1/home/playlist-pool" + (force ? "?refresh=1" : "")
-    );
+    // force=true 表示显式刷新,必须绕过启动期预取的那条请求;普通进入复用预取。
+    const res = await (force
+      ? api.get("/rest/api/v1/home/playlist-pool?refresh=1")
+      : dedupGet("/rest/api/v1/home/playlist-pool"));
     playlists.value = (res.data.items || []).map((p: any) => ({
       id: p.id,
       name: p.name,
