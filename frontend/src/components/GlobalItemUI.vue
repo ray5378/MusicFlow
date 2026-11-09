@@ -65,9 +65,13 @@
       <div class="pl-dialog-song" v-else-if="addDlg.song">
         {{ t('layout.addToPlaylistPrompt', { title: addDlg.song.title, artist: addDlg.song.artist }) }}
       </div>
-      <div class="pl-list" v-loading="addDlg.loading">
+      <div class="pl-search">
+        <el-input v-model="addPl.keyword" :placeholder="t('playlistPicker.searchPlaceholder')" prefix-icon="Search" clearable />
+        <div class="pl-count">{{ t('playlistPicker.countInfo', { loaded: addPl.items.length, total: addPl.total }) }}</div>
+      </div>
+      <div class="pl-list" v-loading="addPl.loading" @scroll="onPlScroll">
         <div
-          v-for="pl in addDlg.playlists"
+          v-for="pl in addPl.items"
           :key="pl.id"
           class="pl-item"
           :class="{ active: addDlg.addingId === pl.id }"
@@ -80,7 +84,9 @@
           </div>
           <MfIcon name="Loader2" v-if="addDlg.addingId === pl.id" class="is-loading pl-spin"  spin />
         </div>
-        <div v-if="addDlg.playlists.length === 0 && !addDlg.loading" class="pl-empty">{{ t('layout.noPlaylistCreate') }}</div>
+        <div v-if="addPl.items.length === 0 && !addPl.loading" class="pl-empty">
+          {{ addPl.keyword.trim() ? t('playlistPicker.noMatch') : t('layout.noPlaylistCreate') }}
+        </div>
       </div>
       <div class="pl-create">
         <el-input v-model="addDlg.newName" :placeholder="t('layout.newPlaylistPlaceholder')" clearable @keyup.enter="createAndAdd" />
@@ -129,7 +135,13 @@ import { platformLabelOf, pluginNameOf, PLATFORM_META } from "@/utils/platformMe
 
 const { t } = useI18n();
 
-const { menu, addDlg, infoDlg, closeMenu, addToPlaylist, createAndAdd, closeAddDlg } = useItemActions();
+const { menu, addDlg, infoDlg, addPl, closeMenu, addToPlaylist, createAndAdd, closeAddDlg } = useItemActions();
+
+/** 歌单列表滚动到底部时自动加载下一页。 */
+function onPlScroll(e: Event) {
+  const el = e.target as HTMLElement;
+  if (el.scrollHeight - el.scrollTop - el.clientHeight <= 24) addPl.loadMore();
+}
 
 // 单曲详情(仅弹窗打开时按需拉取):tags 原始标签 + 歌词概况体积较大,
 // 列表接口刻意不返回,这里单独取一次。失败不影响基础信息展示。
@@ -299,6 +311,8 @@ function fmt(sec: number) {
 }
 
 .pl-dialog-song { font-size: 13px; color: var(--fnos-text-tertiary); margin-bottom: 12px; }
+.pl-search { margin-bottom: 10px; }
+.pl-count { margin-top: 6px; font-size: 12px; color: var(--fnos-text-tertiary); }
 .pl-list { max-height: 320px; overflow-y: auto; }
 .pl-item {
   display: flex; align-items: center; gap: 10px; padding: 10px 12px;

@@ -42,8 +42,12 @@
     <!-- Add to playlist dialog -->
     <el-dialog v-model="showPlaylistDialog" :title="t('genres.addToPlaylistTitle')" width="420px" :append-to-body="true">
       <div class="playlist-dialog-song">{{ t('genres.addToPlaylistHint', { count: selectedSongs.length }) }}</div>
-      <div class="playlist-list" v-loading="playlistsLoading">
-        <div v-for="pl in playlists" :key="pl.id" class="playlist-item" :class="{ active: addingPlaylistId === pl.id }" @click="addToPlaylist(pl)">
+      <div class="playlist-search">
+        <el-input v-model="plPicker.keyword" :placeholder="t('playlistPicker.searchPlaceholder')" prefix-icon="Search" clearable />
+        <div class="playlist-count">{{ t('playlistPicker.countInfo', { loaded: plPicker.items.length, total: plPicker.total }) }}</div>
+      </div>
+      <div class="playlist-list" v-loading="plPicker.loading" @scroll="onPlaylistScroll">
+        <div v-for="pl in plPicker.items" :key="pl.id" class="playlist-item" :class="{ active: addingPlaylistId === pl.id }" @click="addToPlaylist(pl)">
           <MfIcon name="List" class="pl-icon"  />
           <div class="pl-info">
             <div class="pl-name">{{ pl.name }}</div>
@@ -51,7 +55,9 @@
           </div>
           <MfIcon name="Loader2" v-if="addingPlaylistId === pl.id" class="is-loading"  spin />
         </div>
-        <div v-if="playlists.length === 0 && !playlistsLoading" class="empty-tip">{{ t('genres.noPlaylists') }}</div>
+        <div v-if="plPicker.items.length === 0 && !plPicker.loading" class="empty-tip">
+          {{ plPicker.keyword.trim() ? t('playlistPicker.noMatch') : t('genres.noPlaylists') }}
+        </div>
       </div>
       <div class="create-playlist-row">
         <el-input v-model="newPlaylistName" :placeholder="t('genres.newPlaylistPlaceholder')" clearable @keyup.enter="createAndAdd" />
@@ -70,6 +76,7 @@ import api from "@/api";
 import PagePagination from "@/components/PagePagination.vue";
 import { useIsMobile } from "@/composables/useIsMobile";
 import SongTable from "@/components/SongTable.vue";
+import { usePagedPlaylists } from "@/composables/usePagedPlaylists";
 import { runBatched } from "@/utils/asyncTask";
 const playerStore = usePlayerStore();
 const { t } = useI18n();
@@ -87,11 +94,8 @@ if (![15, 25, 50, 100].includes(pageSize.value)) pageSize.value = 25;
 // Batch add to playlist
 const showPlaylistDialog = ref(false);
 const selectedSongs = ref<Song[]>([]);
-const playlists = ref<any[]>([]);
-const playlistsLoading = ref(false);
-// 歌单列表在本次页面停留期间缓存一次:再次打开「加入歌单」弹窗不必重拉。
-// 仅「新建歌单」会改变该列表,故在 createAndAdd 成功后把新歌单追加进缓存。
-let playlistsCache: any[] | null = null;
+// 歌单列表分页 + 名称搜索(后端 /rest/getPlaylists 支持 size/offset/query)。
+const plPicker = usePagedPlaylists();
 const addingPlaylistId = ref("");
 const newPlaylistName = ref("");
 
@@ -139,19 +143,16 @@ function onPageChange(page: number, size?: number) {
   loadSongs();
 }
 
-async function openAddToPlaylistDialog() {
+function openAddToPlaylistDialog() {
   showPlaylistDialog.value = true;
   newPlaylistName.value = "";
-  // 已缓存 → 直接复用,不再每次打开都重拉一份歌单列表(打开弹窗立刻可用)。
-  if (playlistsCache) { playlists.value = playlistsCache; return; }
-  playlistsLoading.value = true;
-  try {
-    const res = await api.get("/rest/getPlaylists?f=json");
-    const list = res.data["subsonic-response"]?.playlists?.playlist || [];
-    playlistsCache = list;
-    playlists.value = list;
-  } catch { playlists.value = []; }
-  finally { playlistsLoading.value = false; }
+  plPicker.load(true);
+}
+
+/** 歌单列表滚动到底部时自动加载下一页。 */
+function onPlaylistScroll(e: Event) {
+  const el = e.target as HTMLElement;
+  if (el.scrollHeight - el.scrollTop - el.clientHeight <= 24) plPicker.loadMore();
 }
 
 async function addToPlaylist(pl: any) {
@@ -182,8 +183,6 @@ async function createAndAdd() {
       await runBatched(selectedSongs.value, (s) =>
         api.post("/rest/updatePlaylist", { playlistId: plId, songIdToAdd: s.id }),
       );
-      // 新建的歌单并入缓存,避免下次打开弹窗因缓存里没有它而显示不全。
-      if (playlistsCache) playlistsCache = [...playlistsCache, { id: plId, name: newPlaylistName.value, songCount: selectedSongs.value.length }];
     }
     ElMessage.success(t("genres.createdAndAdded", { count: selectedSongs.value.length }));
     showPlaylistDialog.value = false;
@@ -213,6 +212,8 @@ onMounted(loadGenres);
 .genre-empty { width: 100%; text-align: center; color: var(--fnos-text-muted); padding: 30px 0; font-size: 13px; }
 .pagination-bar { margin-top: 20px; display: flex; justify-content: center; }
 .playlist-dialog-song { font-size: 13px; color: var(--fnos-text-secondary); margin-bottom: 12px; }
+.playlist-search { margin-bottom: 10px; }
+.playlist-count { margin-top: 6px; font-size: 12px; color: var(--fnos-text-tertiary); }
 .playlist-list { max-height: 320px; overflow-y: auto; }
 .playlist-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 8px; cursor: pointer; transition: background 0.2s;
   &:hover { background: rgba(255,255,255,0.06); }

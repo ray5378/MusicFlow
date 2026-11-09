@@ -7,7 +7,7 @@ import { longpress } from "./directives/longpress";
 import { lazyCover } from "./directives/lazyCover";
 import MfIcon from "./components/MfIcon.vue";
 import PlatformBadge from "./components/PlatformBadge.vue";
-import { i18n } from "./locales";
+import { i18n, loadLocaleMessages } from "./locales";
 import { useLocaleStore } from "./stores/locale";
 // Element Plus 组件样式：**按需**引入(T12 打开速度优化)。
 // 说明:不再整体引入 element-plus/dist/index.css(全量样式),改为逐组件引入
@@ -77,10 +77,6 @@ app.use(pinia);
 app.use(i18n);
 app.use(router);
 
-// 在首帧渲染前落地界面语言偏好(默认 zh-CN)。必须在 mount 之前执行,
-// 否则 el-config-provider 第一次读取 locale 时拿不到持久化语言。
-useLocaleStore(pinia);
-
 // Element Plus components/icons are auto-imported on demand (unplugin-vue-components).
 // Only these three icons are used by string prop (prefix-icon etc.), so they must stay
 // registered globally — nothing else is pulled in from the icon set.
@@ -93,4 +89,12 @@ app.directive("lazy-cover", lazyCover);
 app.component("MfIcon", MfIcon);
 app.component("PlatformBadge", PlatformBadge);
 
-app.mount("#app");
+async function bootstrap() {
+  // 在首帧渲染前落地界面语言偏好(默认 zh-CN)。必须在 mount 之前执行,
+  // 否则 el-config-provider 第一次读取 locale 时拿不到持久化语言。
+  const localeStore = useLocaleStore(pinia);
+  // 英文用户:先拉 en-US 语言包再首帧渲染,避免首屏回落到中文。
+  await loadLocaleMessages(localeStore.lang);
+  app.mount("#app");
+}
+void bootstrap();

@@ -7,6 +7,7 @@ import en from "element-plus/es/locale/lang/en";
 import {
   DEFAULT_LOCALE,
   i18n,
+  loadLocaleMessages,
   SUPPORTED_LOCALES,
   type AppLocale,
 } from "@/locales";
@@ -33,8 +34,10 @@ export const useLocaleStore = defineStore("locale", () => {
     document.documentElement.lang = l;
   }
 
-  function setLang(l: AppLocale) {
+  async function setLang(l: AppLocale) {
     const next = normalizeLang(l);
+    // 切到英文时按需拉取语言包,就绪后再落地语言,避免界面短暂回落到中文。
+    await loadLocaleMessages(next);
     if (next === lang.value) {
       apply(next);
       return;

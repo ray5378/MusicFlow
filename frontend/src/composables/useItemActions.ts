@@ -2,6 +2,7 @@ import { reactive } from "vue";
 import { usePlayerStore } from "@/stores/player";
 import { useFavoritesStore } from "@/stores/favorites";
 import { usePlayContent } from "./usePlayContent";
+import { usePagedPlaylists } from "./usePagedPlaylists";
 import { ElMessage, ElMessageBox } from "element-plus";
 import api from "@/api";
 import router from "@/router";
@@ -35,11 +36,12 @@ const addDlg = reactive({
   song: null as any,
   /** 待加入歌单的歌曲(支持批量多首;单首时长度为 1) */
   songs: [] as any[],
-  playlists: [] as any[],
-  loading: false,
   addingId: "",
   newName: "",
 });
+
+/** 「添加到歌单」弹窗的歌单列表:分页 + 名称搜索,不再全量拉取。 */
+const addPl = usePagedPlaylists();
 
 const infoDlg = reactive({
   open: false,
@@ -56,7 +58,7 @@ export function useItemActions() {
   fav = useFavoritesStore();
   play = usePlayContent();
   return {
-    menu, addDlg, infoDlg,
+    menu, addDlg, infoDlg, addPl,
     openContextMenu, openActionSheet, closeMenu,
     pressStart, pressMove, pressEnd, menuGuard,
     openAddToPlaylist, addToPlaylist, createAndAdd,
@@ -134,16 +136,8 @@ function openSongInfo(song: any) {
 }
 
 // ==================== Add to playlist (shared dialog) ====================
-async function loadPlaylists() {
-  addDlg.loading = true;
-  try {
-    const res = await api.get("/rest/getPlaylists?f=json");
-    addDlg.playlists = res.data?.["subsonic-response"]?.playlists?.playlist || [];
-  } catch {
-    addDlg.playlists = [];
-  } finally {
-    addDlg.loading = false;
-  }
+async function loadPlaylists(resetKeyword = false) {
+  await addPl.load(resetKeyword);
 }
 function openAddToPlaylist(song: any) {
   addDlg.songs = Array.isArray(song) ? song : [song];
@@ -151,7 +145,7 @@ function openAddToPlaylist(song: any) {
   addDlg.newName = "";
   addDlg.addingId = "";
   addDlg.open = true;
-  loadPlaylists();
+  loadPlaylists(true);
 }
 function closeAddDlg() {
   addDlg.open = false;

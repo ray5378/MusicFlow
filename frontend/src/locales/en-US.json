@@ -1906,6 +1906,11 @@
       }
     }
   },
+  "playlistPicker": {
+    "searchPlaceholder": "Search playlists...",
+    "countInfo": "Loaded {loaded} of {total} playlists",
+    "noMatch": "No matching playlists"
+  },
   "globalItem": {
     "addSongsCountPrompt": "Add {count} songs to:",
     "infoTitle": "Song info",

@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vue-tsc && vite build",
+    "build": "vue-tsc && vite build && node scripts/precompress-dist.mjs",
     "preview": "vite preview",
     "e2e": "playwright test"
   },

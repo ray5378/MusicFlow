@@ -2,6 +2,20 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.12.0] - 2026-11-09
+
+### Perf / Web 首屏加载与歌单选择优化
+
+- 英文本地化包改为按需动态加载：入口包只内联 `zh-CN`，`en-US` 拆成独立 chunk，仅在
+  英文用户启动或切换语言时拉取。入口 JS 原始体积 640KB→539KB，brotli 193KB→167KB。
+- 静态资源构建期生成 brotli 预压缩副本（新增 `frontend/scripts/precompress-dist.mjs`，
+  随 `npm run build` 执行），服务端三处 `serveStatic` 开启 `precompressed: true`，
+  按 `Accept-Encoding` 直接下发 `.br`，不再走运行时压缩。构建产物 98 个文件
+  1,879KB→496KB（br）。
+- 「添加到歌单」弹窗改为服务端分页 + 按名称搜索（新增 `usePagedPlaylists`，每页 50 条）：
+  此前一次性拉取全量 `getPlaylists`，实测 871 个歌单 349KB；现首屏请求 22KB（-93.8%），
+  并移除 `Genres` 页的全量歌单缓存。
+
 ## [4.11.21] - 2026-11-06
 
 ### Feat / 插件通知权限 + 启动后一次性提醒

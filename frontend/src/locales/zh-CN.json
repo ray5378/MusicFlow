@@ -1906,6 +1906,11 @@
       }
     }
   },
+  "playlistPicker": {
+    "searchPlaceholder": "搜索歌单...",
+    "countInfo": "已加载 {loaded} / 共 {total} 个歌单",
+    "noMatch": "没有匹配的歌单"
+  },
   "globalItem": {
     "addSongsCountPrompt": "将 {count} 首歌曲添加到：",
     "infoTitle": "歌曲信息",

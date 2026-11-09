@@ -477,9 +477,13 @@
       <div class="playlist-dialog-song" v-if="playlistTargetSong">
         {{ t('layout.addToPlaylistPrompt', { title: playlistTargetSong.title, artist: playlistTargetSong.artist }) }}
       </div>
-      <div class="playlist-list" v-loading="playlistsLoading">
+      <div class="playlist-search">
+        <el-input v-model="addPl.keyword" :placeholder="t('playlistPicker.searchPlaceholder')" prefix-icon="Search" clearable />
+        <div class="playlist-count">{{ t('playlistPicker.countInfo', { loaded: addPl.items.length, total: addPl.total }) }}</div>
+      </div>
+      <div class="playlist-list" v-loading="addPl.loading" @scroll="onPlaylistScroll">
         <div
-          v-for="pl in playlists"
+          v-for="pl in addPl.items"
           :key="pl.id"
           class="playlist-item"
           :class="{ active: addingPlaylistId === pl.id }"
@@ -492,7 +496,9 @@
           </div>
           <MfIcon name="Loader2" v-if="addingPlaylistId === pl.id" class="is-loading"  spin />
         </div>
-        <div v-if="playlists.length === 0 && !playlistsLoading" class="empty-tip">{{ t('layout.noPlaylistCreate') }}</div>
+        <div v-if="addPl.items.length === 0 && !addPl.loading" class="empty-tip">
+          {{ addPl.keyword.trim() ? t('playlistPicker.noMatch') : t('layout.noPlaylistCreate') }}
+        </div>
       </div>
       <div class="create-playlist-row">
         <el-input v-model="newPlaylistName" :placeholder="t('layout.newPlaylistPlaceholder')" clearable @keyup.enter="createAndAdd" />
@@ -517,6 +523,7 @@ import PreProbeNotice from "@/components/PreProbeNotice.vue";
 import { ElMessage } from "element-plus";
 import { formatApiError } from "@/api";
 import api from "@/api";
+import { usePagedPlaylists } from "@/composables/usePagedPlaylists";
 import { PERM } from "@/utils/perms";
 import { coverUrl as coverArtUrl } from "@/utils/cover";
 import { peerKindLabel as peerKindLabelOf } from "@/utils/peerLabel";
@@ -636,8 +643,8 @@ const queueListEl = ref<HTMLElement | null>(null);
 // Add-to-playlist dialog state
 const showPlaylistDialog = ref(false);
 const playlistTargetSong = ref<any>(null);
-const playlists = ref<any[]>([]);
-const playlistsLoading = ref(false);
+// 歌单列表分页 + 名称搜索(后端 /rest/getPlaylists 支持 size/offset/query)。
+const addPl = usePagedPlaylists();
 const addingPlaylistId = ref("");
 const newPlaylistName = ref("");
 
@@ -696,16 +703,13 @@ async function openAddToPlaylist() {
   playlistTargetSong.value = song;
   showPlaylistDialog.value = true;
   newPlaylistName.value = "";
-  await loadPlaylists();
+  await addPl.load(true);
 }
 
-async function loadPlaylists() {
-  playlistsLoading.value = true;
-  try {
-    const res = await api.get("/rest/getPlaylists?f=json");
-    playlists.value = res.data["subsonic-response"]?.playlists?.playlist || [];
-  } catch { playlists.value = []; }
-  finally { playlistsLoading.value = false; }
+/** 歌单列表滚动到底部时自动加载下一页。 */
+function onPlaylistScroll(e: Event) {
+  const el = e.target as HTMLElement;
+  if (el.scrollHeight - el.scrollTop - el.clientHeight <= 24) addPl.loadMore();
 }
 
 async function addToPlaylist(pl: any) {
@@ -1688,6 +1692,8 @@ watch(controlsDrawerOpen, (open) => {
 
 /* ===== Add-to-playlist dialog ===== */
 .playlist-dialog-song { font-size: 13px; color: var(--fnos-text-tertiary); margin-bottom: 12px; }
+.playlist-search { margin-bottom: 10px; }
+.playlist-count { margin-top: 6px; font-size: 12px; color: var(--fnos-text-tertiary); }
 .playlist-list { max-height: 320px; overflow-y: auto; }
 .playlist-item {
   display: flex; align-items: center; gap: 10px;

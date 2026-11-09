@@ -233,7 +233,7 @@ app.use("/assets/*", async (c, next) => {
   await next();
   c.header("Cache-Control", "public, max-age=31536000, immutable");
 });
-app.get("/assets/*", serveStatic({ root: staticDir }));
+app.get("/assets/*", serveStatic({ root: staticDir, precompressed: true }));
 // The SPA shell must always be revalidated. Without an explicit header the
 // browser applies heuristic caching and keeps serving a stale index.html after
 // an image upgrade — it then references asset hashes that no longer exist
@@ -259,9 +259,9 @@ app.get("*", async (c, next) => {
   const filePath = path.resolve(staticDir, rel);
   const inside = filePath === staticDir || filePath.startsWith(staticDir + path.sep);
   if (rel && inside && fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
-    return serveStatic({ root: staticDir })(c, next);
+    return serveStatic({ root: staticDir, precompressed: true })(c, next);
   }
-  return serveStatic({ path: "index.html", root: staticDir })(c, next);
+  return serveStatic({ path: "index.html", root: staticDir, precompressed: true })(c, next);
 });
 
 // Plugins first (pure, in-memory), then the schema. initDatabase() fires the
