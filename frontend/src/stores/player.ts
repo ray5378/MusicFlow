@@ -15,6 +15,13 @@ import { alignSeekSeconds } from "@/utils/seekGranularity";
 import { gt } from "@/locales";
 
 /**
+ * 用户**显式**选择过的输出端。空值 = 无历史偏好，此时必须默认「本机」，
+ * 不能因为某个投影设备残留了 isActive 队列就在新会话把 UI 抢过去。
+ * 只在 switchPeer / 投屏起播 / 停止投屏时写入。
+ */
+const PREFERRED_PEER_KEY = "playerPreferredPeerId";
+
+/**
  * 服务端可播性四态判定(2026-09-11,/rest/api/v1/stream/probe 的 verdict)。
  * 与后端 `getCachedPlayability` 同一套判据 —— 只有 "unplayable" 才允许预跳,
  * "transient"(网络抖动) 与 "unknown"(未探过) 必须照常播放。
@@ -1228,6 +1235,8 @@ export const usePlayerStore = defineStore("player", () => {
     // If the cleared peer was the active one, fall back to本机.
     if (activeRemotePeerId.value === st.peerId) {
       currentPeerId.value = localPeerId.value;
+      // 清队即放弃该端,历史偏好一并清除,下次会话默认回本机。
+      localStorage.removeItem(PREFERRED_PEER_KEY);
       resyncVolumeForPeer(localPeerId.value);
     }
   }
@@ -1439,6 +1448,8 @@ export const usePlayerStore = defineStore("player", () => {
     st.lastCastState = "PLAYING";
     st.lastScrobbledSongId = song?.id || "";
     currentPeerId.value = `dlna:${deviceId}`;
+    // 投屏是显式选择:记下偏好,下次会话才允许恢复该端。
+    localStorage.setItem(PREFERRED_PEER_KEY, `dlna:${deviceId}`);
     // 投屏接管:滑条立即对齐设备真实音量,不带本机/旧端的单例值过去。
     resyncVolumeForPeer(`dlna:${deviceId}`);
     startCastPoll(st);
@@ -1458,13 +1469,16 @@ export const usePlayerStore = defineStore("player", () => {
     stopCastPoll(st);
     removeRemoteState(st.peerId);
     currentPeerId.value = localPeerId.value;
+    // 停止投屏视为放弃远端,清偏好,下次会话默认本机。
+    localStorage.removeItem(PREFERRED_PEER_KEY);
     resyncVolumeForPeer(localPeerId.value);
   }
 
   // On Web tab reopen: restore every peer whose queue is still active (dlna /
   // airplay / group) from the backend so the user can see/control whatever is
-  // still playing. The first restored target becomes the current peer (matches
-  // the old single-device restore).
+  // still playing. **Only an explicitly chosen peer may become the current
+  // target** —— 新会话(本机无历史偏好)必须停在「本机」,不能被某台设备的残留
+  // isActive 队列抢走(实测:AirPlay 上报 PLAYING 但 position 卡在 0.599s)。
   //
   // The unified /v1/peers list is the single source of truth here: it already
   // carries the kind-correct peerId + queue snapshot (with isActive) for ALL
@@ -1477,9 +1491,8 @@ export const usePlayerStore = defineStore("player", () => {
       const peersRes = await api.get("/rest/api/v1/peers");
       const remotePeers = (peersRes.data?.peers || [])
         .filter((p: any) => p.kind !== "local" && p.queue && p.queue.isActive);
-      // 幂等:若已有远端当前目标(上次调用已恢复/用户已手动选择),不再抢占
-      // currentPeerId。注意 mount 时 currentPeerId 是 ""(未初始化),不能用
-      // "!== localPeerId" 判断——那会误判为"已恢复"而跳过首个设备的跳转。
+      const preferred = localStorage.getItem(PREFERRED_PEER_KEY) || "";
+      // 幂等:若已有远端当前目标(上次调用已恢复/用户已手动选择),不再抢占。
       let firstRestored = activeRemotePeerId.value !== "";
       for (const p of remotePeers) {
         if (remoteStates.has(p.peerId)) continue; // already tracked
@@ -1492,7 +1505,7 @@ export const usePlayerStore = defineStore("player", () => {
         if (song) loadCastLyrics(st, song.id);
         st.lastScrobbledSongId = song?.id || "";
         startCastPoll(st);
-        if (!firstRestored) {
+        if (!firstRestored && preferred && p.peerId === preferred) {
           currentPeerId.value = p.peerId;
           // 重开标签页恢复控制:滑条对齐该端真实音量,不用 localStorage 残留值。
           resyncVolumeForPeer(p.peerId);
@@ -1794,6 +1807,8 @@ export const usePlayerStore = defineStore("player", () => {
     if (!cur || !isStaleLocalPeer(cur)) return;
     removeRemoteState(cur.peerId);
     currentPeerId.value = localPeerId.value;
+    // 目标已失联、自动回本机:偏好一并清掉,避免下次会话又被这个已离线的目标抢走。
+    localStorage.removeItem(PREFERRED_PEER_KEY);
     resyncVolumeForPeer(localPeerId.value);
   }
 
@@ -2047,6 +2062,8 @@ export const usePlayerStore = defineStore("player", () => {
         startCastPoll(st);
       }
       currentPeerId.value = peerId;
+      // 显式切到远端:记录偏好,后续会话才恢复该端。
+      localStorage.setItem(PREFERRED_PEER_KEY, peerId);
       // 流转/切换受控目标:立即从新目标端重新拉取音量,消除跨端单例污染。
       resyncVolumeForPeer(peerId);
       // If the player we switched to is already playing, mirror the queue panel.
@@ -2057,6 +2074,8 @@ export const usePlayerStore = defineStore("player", () => {
       // playing). Just flip the UI pointer — the computed properties will
       // show本机 state again.
       currentPeerId.value = peerId;
+      // 显式回到本机:清偏好,下次会话不会被残留远端队列抢走。
+      localStorage.removeItem(PREFERRED_PEER_KEY);
       // 回本机:恢复本机音量(控制远端期间单例被远端读数占用过)。
       resyncVolumeForPeer(localPeerId.value);
       if (localIsPlaying.value) autoshowQueue();
@@ -2174,6 +2193,8 @@ export const usePlayerStore = defineStore("player", () => {
             if (next) void switchPeer(next.peerId).catch(() => {});
             else {
               currentPeerId.value = localPeerId.value;
+              // 无在线设备可切、自动回本机:与显式回本机同样清掉偏好。
+              localStorage.removeItem(PREFERRED_PEER_KEY);
               resyncVolumeForPeer(localPeerId.value);
             }
           }
