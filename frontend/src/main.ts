@@ -9,6 +9,7 @@ import MfIcon from "./components/MfIcon.vue";
 import PlatformBadge from "./components/PlatformBadge.vue";
 import { i18n, loadLocaleMessages } from "./locales";
 import { useLocaleStore } from "./stores/locale";
+import { useAuthStore } from "./stores/auth";
 // Element Plus 组件样式：**按需**引入(T12 打开速度优化)。
 // 说明:不再整体引入 element-plus/dist/index.css(全量样式),改为逐组件引入
 // theme-chalk 下的 el-*.css,只覆盖本项目实际用到的组件;并补齐共享基座
@@ -70,6 +71,12 @@ import "element-plus/theme-chalk/el-message-box.css";
 import "element-plus/theme-chalk/el-loading.css";
 import "./assets/styles/global.scss";
 
+/**
+ * 首页第一排固定推荐卡的封面 id(顺序与推荐插件的 homePosition 一致)。
+ * 这些 id 由推荐插件固定产出,不随会话/日期变化,因此可以在接口返回前预加载。
+ */
+const HOME_COVER_IDS = ["pl-pl-daily-roam", "pl-pl-daily-today", "pl-pl-daily-local"];
+
 const app = createApp(App);
 
 const pinia = createPinia();
@@ -96,5 +103,30 @@ async function bootstrap() {
   // 英文用户:先拉 en-US 语言包再首帧渲染,避免首屏回落到中文。
   await loadLocaleMessages(localeStore.lang);
   app.mount("#app");
+  preloadHomeCovers();
+}
+
+/**
+ * 首屏固定卡封面预加载(2026-11-09 首页提速)。
+ *
+ * 这三张卡的封面 id 固定,但 <img> 要等 /recommend/home-cards 返回(~300ms)才知道
+ * URL;提前发起请求可让图片在卡片渲染时就已就绪(实测封面请求 327ms → 21ms)。
+ *
+ * **必须在登录态确定之后**:封面端点受鉴权保护,无凭据时返回 401,而 <img> 会复用
+ * 这条失败响应 —— 实测封面直接变成 naturalWidth=0 的空图。这里先实例化 auth store
+ * (它把 JWT 同步到 mf_token cookie,见 stores/auth.ts),由 cookie 随图片请求自动
+ * 鉴权;没有 token(未登录)时完全不预加载,避免把匿名请求打进去。
+ */
+function preloadHomeCovers() {
+  const auth = useAuthStore(pinia);
+  if (!auth.token) return;
+  HOME_COVER_IDS.forEach((id, i) => {
+    const link = document.createElement("link");
+    link.rel = "preload";
+    link.as = "image";
+    link.href = `/rest/getCoverArt?id=${id}&size=150`;
+    if (i === 0) link.setAttribute("fetchpriority", "high");
+    document.head.appendChild(link);
+  });
 }
 void bootstrap();
