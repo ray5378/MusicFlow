@@ -33,7 +33,7 @@ jobs:
           cache: npm
           cache-dependency-path: backend/package-lock.json
       - name: Install backend dependencies
-        run: cd backend && npm ci
+        run: bash .github/scripts/npm-ci-backend.sh
       - name: Build backend
         run: cd backend && npm run build
       - name: Start isolated backend instance

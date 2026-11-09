@@ -56,7 +56,7 @@ jobs:
           cache: npm
           cache-dependency-path: backend/package-lock.json
       - name: Install dependencies
-        run: cd backend && npm ci
+        run: bash .github/scripts/npm-ci-backend.sh
       - name: TypeScript 类型检查
         run: cd backend && npx tsc --noEmit
       - name: 全量测试(含导入门禁契约 + 转码链路契约)

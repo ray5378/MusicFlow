@@ -65,7 +65,7 @@ jobs:
           cache: npm
           cache-dependency-path: backend/package-lock.json
       - name: Install dependencies
-        run: cd backend && npm ci
+        run: bash .github/scripts/npm-ci-backend.sh
 
       - name: Run sendspin guard tests
         shell: bash

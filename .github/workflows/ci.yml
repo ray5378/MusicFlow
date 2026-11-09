@@ -147,7 +147,7 @@ jobs:
           cache: npm
           cache-dependency-path: backend/package-lock.json
       - name: Install dependencies
-        run: cd backend && npm ci
+        run: bash .github/scripts/npm-ci-backend.sh
       - name: 校验纳入清单的内置插件 manifest 符合开发规范
         run: cd backend && DATA_DIR=$(mktemp -d) npx tsx scripts/check-builtins.mts
       - name: 校验框架核心符合功能插件化规范(不越界)
@@ -448,7 +448,7 @@ jobs:
           cache: npm
           cache-dependency-path: backend/package-lock.json
       - name: Install dependencies
-        run: cd backend && npm ci
+        run: bash .github/scripts/npm-ci-backend.sh
       - name: 跑本链路测试并校验覆盖率阈值(不足即失败)
         shell: bash
         env:
@@ -480,7 +480,7 @@ jobs:
           cache: npm
           cache-dependency-path: backend/package-lock.json
       - name: Install dependencies
-        run: cd backend && npm ci
+        run: bash .github/scripts/npm-ci-backend.sh
       - name: TypeScript 类型检查
         run: cd backend && npx tsc --noEmit
       - name: TypeScript 类型检查(backend/scripts 护栏)

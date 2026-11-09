@@ -31,7 +31,7 @@ jobs:
           node-version: 22
 
       - name: Install backend deps
-        run: cd backend && npm ci
+        run: bash .github/scripts/npm-ci-backend.sh
 
       - name: Install frontend deps
         run: cd frontend && npm install
