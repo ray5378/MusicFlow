@@ -15,7 +15,7 @@
           v-for="(card, idx) in fixedCards"
           :key="card.pluginId"
           class="card fnos-card-sheen"
-          :style="{ '--stagger': idx + 1 }"
+          :style="{ '--stagger': Math.min(idx + 1, 4) }"
           @contextmenu="openContextMenu($event, playlistActions(card), card.playlistName, t('home.playlist'))"
           v-longpress="() => openActionSheet(playlistActions(card), card.playlistName, t('home.playlist'))"
         >
@@ -45,7 +45,7 @@
           v-for="(pl, idx) in sidePlaylists"
           :key="pl.id"
           class="card fnos-card-sheen"
-          :style="{ '--stagger': idx + 1 }"
+          :style="{ '--stagger': Math.min(idx + 1, 4) }"
           @contextmenu="openContextMenu($event, playlistActions(pl), pl.name, t('home.playlist'))"
           v-longpress="() => openActionSheet(playlistActions(pl), pl.name, t('home.playlist'))"
         >
