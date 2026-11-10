@@ -1102,7 +1102,9 @@ app.get("/v1/peers/:peerId/status", async (c) => {
         status.position = hold.position;
         status.duration = hold.duration;
       }
-      return c.json(status);
+      // 队列版本号(4.12.9):客户端据此判断队列是否真的变了,只有变了才拉 /queue。
+      // 此前客户端每 2s 无条件整包重拉(4216 首的群组队列 404,654 B)。
+      return c.json({ ...status, queueRevision: getQueueController().queueRevision(deviceId) });
     } catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   if (parsed.kind === "group") {
@@ -1129,7 +1131,7 @@ app.get("/v1/peers/:peerId/status", async (c) => {
         status.position = hold.position;
         status.duration = hold.duration;
       }
-      return c.json(status);
+      return c.json({ ...status, queueRevision: getQueueController().queueRevision(parsed.id) });
     } catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   if (parsed.kind === "airplay") {
@@ -1142,7 +1144,7 @@ app.get("/v1/peers/:peerId/status", async (c) => {
     // 可听显示延迟(桥路径:新旧曲交叉窗口)—— 显示按住旧曲(4.11.12)。
     const hold = getQueueController()?.displayHoldState?.(parsed.id);
     if (hold) { st.media = hold.media; st.position = hold.position; st.duration = hold.duration; }
-    return c.json(st);
+    return c.json({ ...st, queueRevision: getQueueController().queueRevision(parsed.id) });
   }
   // sendspin:进程内播放器的实时状态(Position/Duration 由推流引擎驱动)。
   if (parsed.kind === "sendspin") {
@@ -1164,6 +1166,8 @@ app.get("/v1/peers/:peerId/status", async (c) => {
         position: hold ? hold.position : st.position,
         duration: hold ? hold.duration : st.duration,
         updatedAt: st.updatedAt,
+        // 队列版本号(4.12.9):客户端只在它变化时才拉 /queue 窗口。
+        queueRevision: getQueueController().queueRevision(parsed.id),
         volume: vol.volume,
         muted: vol.muted,
         // 当前曲:各端靠 media.songId 变化刷新歌词/封面,缺了切歌后还挂第一首。
@@ -1177,10 +1181,14 @@ app.get("/v1/peers/:peerId/status", async (c) => {
   // 注意 updatedAt 保持队列行的值(客户端用它做恢复新鲜度竞速,不能被上报时间盖掉)。
   const localSnap = pm.getQueueSnapshot(peerId);
   if (!localSnap) return c.json({});
+  // 本机队列没有 QueueController 版本号,updatedAt 就是「队列行最后一次变更」的时间,
+  // 语义与投屏端的 queueRevision 一致(只用于比较,不当时钟)。
+  const localRev = localSnap.updatedAt ?? 0;
   const rep = pm.getLocalStatusReport(peerId);
-  if (!rep) return c.json(localSnap);
+  if (!rep) return c.json({ ...localSnap, queueRevision: localRev });
   return c.json({
     ...localSnap,
+    queueRevision: localRev,
     state: rep.state,
     position: rep.position,
     duration: rep.duration,

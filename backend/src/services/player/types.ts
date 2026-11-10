@@ -142,6 +142,18 @@ export interface QueueSnapshot {
    */
   updatedAt?: number;
   /**
+   * 队列版本号(单调递增,任何对外可见的队列变更都会自增)。
+   *
+   * 用途(4.12.9):客户端控制远端设备时每 2s 轮询 `/status` 镜像进度,原本
+   * 同一拍还会**无条件整包重拉** `/queue`(4216 首的群组队列单次 404,654 B)。
+   * 现在 `/status` 带回该版本号,客户端只在它变化时才拉一次当前曲附近的窗口。
+   *
+   * 与 updatedAt 的分工:updatedAt 是时间戳且只有本机队列快照有;revision 由
+   * QueueController 统一维护,投屏/群组/AirPlay/Sendspin 同款,只用于比较。
+   * 旧后端无此字段 → 客户端退回按 `media.songId` 判断换歌。
+   */
+  revision?: number;
+  /**
    * 本次起播的**起始位置**(秒);**仅一次性下发**,服务端广播后即清。
    *
    * 用途:流转/带进度起播时,本机端(local)的音频会话活在客户端进程里,

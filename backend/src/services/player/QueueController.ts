@@ -235,10 +235,22 @@ export class QueueController extends EventEmitter {
    *  ⚠️ 只喂曲末预热（旁路、只读、幂等），绝不参与切歌/结束判定 —— 后者的唯一
    *  真相仍是 PlaybackTracker。 */
   private queueClock = new Map<string, { songId: string; atMs: number; baseSec: number }>();
+  /** 队列版本号(key=裸 id):每次 `queue_changed` 自增一格。
+   *  客户端控制远端时每 2s 轮询 /status,据此判断「队列是否真的变了」——
+   *  只有变了才去拉 /queue,替代此前每 2s 无条件整包重拉(4.12.9)。 */
+  private queueRevisions = new Map<string, number>();
 
   constructor() {
     super();
     this.setMaxListeners(50);
+    // 任何对外可见的队列变更都会走 queue_changed(换歌/增删/排序/播放模式/预探测),
+    // 在这里统一计数,避免在 20+ 个 emit 点各插一行。
+    // 注意快照本身是 emit 前构造的,故事件里带的 revision 是**变更前**的值;
+    // 客户端以 /status 的读数为准,不会因此漏一拍。
+    this.on("queue_changed", (id: string) => {
+      const key = stripPlayerPrefix(id);
+      this.queueRevisions.set(key, (this.queueRevisions.get(key) ?? 0) + 1);
+    });
     // 预探测状态变化 → 用既有的 queue_changed 重发一次快照即可,
     // **不新增事件类型**(快照里带 preProbe,两个下发通道都是展开语法,自动透传)。
     // 多监听:PeerManager 也会注册一份(本机链路走 peer_queue_changed),互不顶替。
@@ -1883,6 +1895,11 @@ export class QueueController extends EventEmitter {
     this.clearSleepTimer(playerId);
   }
 
+  /** 队列版本号(单调递增):客户端据此判断「队列是否真的变了」,见 QueueSnapshot.revision。 */
+  queueRevision(playerId: string): number {
+    return this.queueRevisions.get(stripPlayerPrefix(playerId)) ?? 0;
+  }
+
   snapshot(playerId: string): QueueSnapshot {
     playerId = stripPlayerPrefix(playerId);
     const q = this.queues.get(playerId);
@@ -1895,6 +1912,8 @@ export class QueueController extends EventEmitter {
       playMode: q?.playMode || "shuffle",
       isActive: q?.isActive || false,
       ended: q?.ended || false,
+      // 队列版本号:客户端轮询 /status 比对它,只有变了才拉 /queue(4.12.9)。
+      revision: this.queueRevision(playerId),
       // 权威洗牌序列随快照下发,客户端只做镜像(见 QueueSnapshot 文档)。
       shuffleOrder: q?.shuffleOrder || [],
       shufflePos: hold ? hold.shufflePos : (q?.shufflePos ?? -1),

@@ -283,6 +283,12 @@ export const usePlayerStore = defineStore("player", () => {
     tickTimer: ReturnType<typeof setInterval> | null;
     lastCastState: string;
     lastScrobbledSongId: string;
+    // 上一次「队列已同步」时正在播的歌 id。旧后端没有 queueRevision 时,
+    // 轮询退回用它判断是否换歌(换歌才拉队列)。
+    lastQueueSyncSongId: string;
+    // 上一次同步时的服务端队列版本号(/status 的 queueRevision)。
+    // 轮询只在它变化时拉一次窗口 —— 覆盖「没换歌但队列变了」(远端插歌/删歌/排序)。
+    lastQueueRevision: number | null;
     // 服务端预探测状态位(2026-09-11):随 queue 快照/WS 透传,仅右上角轻提示消费。
     preProbe: { ready: number; scanned: number; misses: number; exhausted: boolean; cooldownUntil: number | null; at: number } | null;
     // 当前队列的「服务端内容来源」。非 null 时起播走主通道
@@ -331,6 +337,8 @@ export const usePlayerStore = defineStore("player", () => {
         tickTimer: null,
         lastCastState: "STOPPED",
         lastScrobbledSongId: "",
+        lastQueueSyncSongId: "",
+        lastQueueRevision: null,
         contentOrigin: null,
         preProbe: null,
       };
@@ -1371,7 +1379,21 @@ export const usePlayerStore = defineStore("player", () => {
             loadCastLyrics(st, media.songId);
           }
           updateCastLyric(st);
-          syncCastQueueFromBackend(st);
+          // 队列同步收敛:只在「服务端队列真的变了」时拉一次当前曲附近的窗口。
+          // 判据优先用 /status 的 queueRevision(覆盖换歌 + 远端插歌/删歌/排序/改播放模式);
+          // 旧后端没有该字段时退回「当前曲 songId 变了」。
+          // 此前这里每 2s 无条件整包重拉(4216 首的群组队列单次 404,654 B),
+          // 任意页面首屏 7s 内就拉 3 次 ≈ 1.2 MB,每次还要解析并映射整份 JSON。
+          const rev = typeof s.queueRevision === "number" ? s.queueRevision : null;
+          const curSongId = media?.songId || "";
+          const queueChanged = rev !== null
+            ? rev !== st.lastQueueRevision
+            : !!curSongId && curSongId !== st.lastQueueSyncSongId;
+          if (queueChanged) {
+            st.lastQueueRevision = rev; // 先置位:失败也不在同一拍重复打
+            if (curSongId) st.lastQueueSyncSongId = curSongId;
+            void syncCastQueueFromBackend(st, false);
+          }
           pollInterval = 2000; // 成功:回落基准间隔
         } catch {
           // 失败/超时:退避(上限 15s),避免后端繁忙时请求叠加雪上加霜。
@@ -1404,9 +1426,62 @@ export const usePlayerStore = defineStore("player", () => {
     seekDragging.delete(st.peerId);
   }
 
+  // 队列轮询窗口:只同步「当前曲之前 20 首 + 之后 40 首」,共 60 首。
+  // 4216 首的群组队列整包是 404,654 B,而轮询真正需要的只有当前曲附近;
+  // 远端向后端请求本身支持 offset/size,这里把它用起来。
+  const CAST_QUEUE_WINDOW_BEFORE = 20;
+  const CAST_QUEUE_WINDOW_SIZE = 60;
+
   // Pull the backend's authoritative queue snapshot into a peer's state.
-  async function syncCastQueueFromBackend(st: RemoteState): Promise<void> {
+  // full=true:整包拉取(启动恢复 / 切换播放端 / 队列结构变化时)。
+  // full=false:只拉当前曲附近窗口并「就地合并」进已有整包数组(轮询用),
+  //            长度或下标对不上时自动退回整包,保证 index 与数组语义始终一致。
+  async function syncCastQueueFromBackend(st: RemoteState, full = true): Promise<void> {
+    // 拉一次「以 aroundIdx 为中心」的窗口。aroundIdx 是本地下标,调用方保证 >= 0。
+    async function fetchWindow(aroundIdx: number) {
+      const offset = Math.max(0, aroundIdx - CAST_QUEUE_WINDOW_BEFORE);
+      const r = await api.get(peerApi(st.peerId, `/queue?offset=${offset}&size=${CAST_QUEUE_WINDOW_SIZE}`));
+      const snap = r.data || {};
+      return { offset, snap, items: (Array.isArray(snap.items) ? snap.items : []) as any[] };
+    }
     try {
+      if (!full && st.queue.length > CAST_QUEUE_WINDOW_SIZE && st.index >= 0) {
+        let w = await fetchWindow(st.index);
+        const total = typeof w.snap.total === "number" ? w.snap.total : st.queue.length;
+        // 远端增删过歌曲(总长变了)→ 下标与内容都可能整体错位,退回整包。
+        if (total !== st.queue.length) {
+          await syncCastQueueFromBackend(st, true);
+          return;
+        }
+        let idx = typeof w.snap.currentIndex === "number" ? w.snap.currentIndex : st.index;
+        if (idx < w.offset || idx >= w.offset + w.items.length) {
+          // 下标被甩出了本次窗口(点了队列里任意一首跳播):按服务端新下标再拉一次窗口,
+          // 不必为此整包重拉(4216 首 379 KB → 15 KB)。
+          if (idx < 0 || idx >= total) {
+            await syncCastQueueFromBackend(st, true);
+            return;
+          }
+          w = await fetchWindow(idx);
+          idx = typeof w.snap.currentIndex === "number" ? w.snap.currentIndex : idx;
+          const t2 = typeof w.snap.total === "number" ? w.snap.total : total;
+          if (t2 !== total || idx < w.offset || idx >= w.offset + w.items.length || !w.items.length) {
+            await syncCastQueueFromBackend(st, true);
+            return;
+          }
+        }
+        if (!w.items.length) {
+          await syncCastQueueFromBackend(st, true);
+          return;
+        }
+        if (typeof w.snap.playMode === "string") st.playMode = w.snap.playMode as PlayMode;
+        st.preProbe = w.snap.preProbe ?? null;
+        st.index = idx;
+        st.queue.splice(w.offset, w.items.length, ...w.items.map(queueItemToSong));
+        st.lastQueueSyncSongId = st.queue[st.index]?.id || "";
+        // 采纳快照自带的版本号:拉取期间若又变了一版,下次 status 会再触发一次。
+        if (typeof w.snap.revision === "number") st.lastQueueRevision = w.snap.revision;
+        return;
+      }
       const res = await api.get(peerApi(st.peerId, "/queue"));
       const snap = res.data || {};
       if (Array.isArray(snap.items)) {
@@ -1416,6 +1491,8 @@ export const usePlayerStore = defineStore("player", () => {
       if (typeof snap.playMode === "string") st.playMode = snap.playMode as PlayMode;
       // 预探测状态位(枯竭告警/缓冲水位)随快照透传。
       st.preProbe = snap.preProbe ?? null;
+      st.lastQueueSyncSongId = st.queue[st.index]?.id || "";
+      if (typeof snap.revision === "number") st.lastQueueRevision = snap.revision;
     } catch {}
   }
 
@@ -1447,6 +1524,9 @@ export const usePlayerStore = defineStore("player", () => {
     st.isPlaying = true;
     st.lastCastState = "PLAYING";
     st.lastScrobbledSongId = song?.id || "";
+    // 队列刚由本端推上去/整包拉取,首拍轮询不需要再同步一次。
+    // (queueRevision 此刻还不知道,首拍会多拉一次窗口 ≈6KB 用来对齐版本号,可接受。)
+    st.lastQueueSyncSongId = song?.id || "";
     currentPeerId.value = `dlna:${deviceId}`;
     // 投屏是显式选择:记下偏好,下次会话才允许恢复该端。
     localStorage.setItem(PREFERRED_PEER_KEY, `dlna:${deviceId}`);
