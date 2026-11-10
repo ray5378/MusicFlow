@@ -46,6 +46,8 @@ const eng = vi.hoisted(() => {
     cancelNextTrackPrefetch: vi.fn(),
     // P2/P3(2026-11-02):起播前问「能否接续上一曲」;桩默认不接续。
     continuityReady: vi.fn(() => false),
+    // 4.12.16:借流武装前要问「窗口还能退到哪」;桩默认 null = 无窗口,不拦。
+    readableBaseMs: vi.fn((): number | null => null),
   });
   return {
     pumps,
@@ -229,6 +231,21 @@ describe("借流登记:一次性消费 + TTL", () => {
     expect(eng.pumpFor(srv, srv.group("dst")).play).not.toHaveBeenCalled();
     // 源端不留半截状态。
     expect(src.g.current).toBeNull();
+  });
+
+  it("窗口退不回可听位置 → 不武装借流(window-too-shallow)", () => {
+    const srv = makeSrv();
+    const { p } = seedPlaying(srv, "src", "s1", 3_000);
+    srv.group("dst");
+    // 泵已推送很远、窗口只留 5s 历史:物理下限 11.7s,比可听 3.0s 超前 8.7s
+    // (2026-11-10 240 实证:此时移交只会落在 11.7s,听感跳秒 + 重建缓冲)。
+    p.readableBaseMs.mockReturnValue(11_700);
+    expect(armBorrowCore(srv as any, "dst", "src")).toEqual({
+      armed: false,
+      reason: "window-too-shallow",
+    });
+    expect(eng.transferPumpTo).not.toHaveBeenCalled();
+    expect(log.info).toHaveBeenCalled();
   });
 
   it("登记是一次性的:第二次同曲起播不再借流", () => {
