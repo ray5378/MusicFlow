@@ -1171,8 +1171,10 @@ console.log("===== G19 切歌等待后端自适应(手动口已删+分档lead+�
   // --- b) 纯桥 + 混合统一分档 lead;非桥分支原样保留 ---
   // 4.11.3 起 bridges 分支的 lead 在分档之上再取 floor+1tick 下沿,故按「折成单行后
   // 仍包含 Math.max(aheadUs, 分档 lead…)」判定,不钉下一参数的排版。
+  // 2026-11-10:reseed(seek/rehost)并入暖档 —— 桥会话在起播前已完成 RECORD,
+  // 冷 4.5s 只剩 MF_BRIDGE_LEAD_MODE=fixed 回退,表达式里不再有 `!reseed` 分叉。
   const seOne = se.replace(/\s+/g, "");
-  const tieredExpr = "Math.max(aheadUs,bridgeStartLeadUs([{warm:BRIDGE_LEAD_TIERED&&!reseed}]),";
+  const tieredExpr = "Math.max(aheadUs,bridgeStartLeadUs([{warm:BRIDGE_LEAD_TIERED}]),";
   const hasBridgesGuard = se.includes("const hasBridges = this.group.hasBridges?.() === true;")
     && se.includes("const isPureBridge =");
   const tieredOk = seOne.includes(tieredExpr) && hasBridgesGuard
