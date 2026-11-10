@@ -28,6 +28,7 @@ import {
   isCoreRow,
   listMarketplace,
   listRegistries,
+  marketplaceCacheState,
   log,
   path,
   pingAllHealth,
@@ -202,10 +203,12 @@ app.get("/v1/plugins/scrobblers", adminMiddleware, (c) => c.json({ scrobblers: g
 
 app.get("/v1/plugins/registry", adminMiddleware, async (c) => {
   try {
+    // force=1:用户主动点「刷新」时绕过 SWR 缓存,等真实网络结果。
+    const force = c.req.query("force") === "1";
     const [sources, marketplace, groups] = await Promise.all([
       Promise.resolve(listRegistries()),
-      listMarketplace(),
-      collectRegistryGroups(),
+      listMarketplace({ force }),
+      collectRegistryGroups({ force }),
     ]);
     // 注册表来源:把本次拉取的错误状态(enrich)回传给前端,让"加载失败"的注册表显式可见,
     // 而不是像以前那样整组静默消失。前端据此在市场分组里给出网络/可达性提示。
@@ -218,7 +221,8 @@ app.get("/v1/plugins/registry", adminMiddleware, async (c) => {
       const row = stateById.get(m.id);
       return { ...m, installed: !!row, installedVersion: row?.version, enabled: row?.enabled ?? 0 };
     });
-    return c.json({ registries, plugins: merged });
+    // cachedAt/stale:前端据此提示"显示的是 N 分钟前的缓存"。
+    return c.json({ registries, plugins: merged, ...marketplaceCacheState() });
   } catch (e: any) {
     return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.plugin.registryFetchFailed"), apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
   }

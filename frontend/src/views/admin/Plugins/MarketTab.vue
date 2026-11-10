@@ -1,7 +1,7 @@
 <template>
   <div class="page-header">
     <h2>{{ t('admin.plugins.marketTitle') }}</h2>
-    <el-button type="primary" plain @click="loadMarketplace" :loading="marketLoading">{{ t('common.refresh') }}</el-button>
+    <el-button type="primary" plain @click="refreshMarketplace" :loading="marketLoading">{{ t('common.refresh') }}</el-button>
   </div>
 
   <el-card class="market-card" shadow="never">
@@ -42,6 +42,24 @@
 
   <el-card class="market-card" shadow="never">
     <template #header><span>{{ t('admin.plugins.marketGrouped') }}</span></template>
+    <el-alert
+      v-if="marketError"
+      type="warning"
+      :closable="false"
+      show-icon
+      class="market-alert"
+      :title="t('admin.plugins.marketStaleTitle')"
+      :description="marketError"
+    />
+    <el-alert
+      v-else-if="marketStale"
+      type="info"
+      :closable="false"
+      show-icon
+      class="market-alert"
+      :title="t('admin.plugins.marketStaleTitle')"
+      :description="t('admin.plugins.marketStaleDesc')"
+    />
     <div v-for="group in groupedMarket" :key="group.key" class="market-group">
       <div class="group-head">
         <span class="group-title">{{ group.title }}</span>
@@ -144,6 +162,10 @@ defineProps<{
   t: (key: string, ...args: any[]) => string;
   marketLoading: boolean;
   loadMarketplace: () => void;
+  refreshMarketplace: () => void;
+  marketStale: boolean;
+  marketCachedAt: number | null;
+  marketError: string;
   openRegDialog: () => void;
   isMobile: boolean;
   registries: any[];
@@ -172,6 +194,7 @@ defineProps<{
 .market-card { margin-bottom: 20px; }
 .market-card .card-head { display: flex; justify-content: space-between; align-items: center; }
 .market-warn { margin-top: 4px; }
+.market-alert { margin-bottom: 12px; }
 .market-note { margin: 12px 4px 0; font-size: 12px; color: var(--el-text-color-secondary); }
 .market-group { margin-bottom: 18px; }
 .market-group .group-head { display: flex; align-items: center; gap: 8px; margin: 4px 0 8px; }

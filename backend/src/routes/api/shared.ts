@@ -113,7 +113,7 @@ import { pingAllHealth } from "../../plugins/health.js";
 import { getRendererPlugins, discoverRenderers } from "../../plugins/renderers.js";
 import { getScrobblerPlugins } from "../../plugins/scrobblers.js";
 import {
-  listMarketplace, collectRegistryGroups, installPlugin, listRegistries, addRegistry, removeRegistry,
+  listMarketplace, collectRegistryGroups, marketplaceCacheState, installPlugin, listRegistries, addRegistry, removeRegistry,
 } from "../../plugins/registryCatalog.js";
 import { BUILTIN_PLUGINS } from "../../plugins/builtins.js";
 import { pluginSandboxes } from "../../plugins/discovery.js";
@@ -982,6 +982,7 @@ export {
   logLevelSnapshot,
   markSeekIssued,
   markStaleDevices,
+  marketplaceCacheState,
   maskLocalPeerId,
   maybeRefreshRandomSongs,
   md5,

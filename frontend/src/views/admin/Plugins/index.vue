@@ -344,6 +344,11 @@ const newPlugin = reactive({ name: "", description: "" });
 const registries = ref<any[]>([]);
 const marketPlugins = ref<any[]>([]);
 const marketLoading = ref(false);
+// 市场数据状态(4.12.12):stale = 后端返回的是过期缓存(正在后台刷新);
+// error = 本次刷新失败(此时保留列表,不再像以前那样清空)。
+const marketStale = ref(false);
+const marketError = ref("");
+const marketCachedAt = ref<number | null>(null);
 const installing = ref<string>("");
 const showRegDialog = ref(false);
 const newRegistryUrl = ref("");
@@ -1486,19 +1491,37 @@ function backfillText(kind: "lyrics" | "covers"): string {
 }
 
 // ---- marketplace ----
-async function loadMarketplace() {
+async function loadMarketplace(force = false) {
   marketLoading.value = true;
   try {
-    const res = await api.get("/rest/api/v1/plugins/registry");
+    // 后端冷启动要并发拉 2 个注册表 + 11 份 plugin.json(实测 2~3 s),而全局 axios
+    // 超时是 6 s —— 这里单独放宽到 30 s,避免"后端还在拉,前端先超时清空"。
+    const res = await api.get("/rest/api/v1/plugins/registry", {
+      params: force ? { force: 1 } : undefined,
+      timeout: 30000,
+    });
     registries.value = res.data?.registries || [];
     marketPlugins.value = res.data?.plugins || [];
+    marketStale.value = !!res.data?.stale;
+    marketCachedAt.value = typeof res.data?.cachedAt === "number" ? res.data.cachedAt : null;
+    marketError.value = "";
   } catch (e: any) {
-    ElMessage.error(e?.response?.data?.error || t('admin.plugins.marketLoadFailed'));
-    registries.value = [];
-    marketPlugins.value = [];
+    const msg = e?.response?.data?.error || t('admin.plugins.marketLoadFailed');
+    // 失败不再清空:已经展示的插件列表继续保留,只提示"这是上次的结果"。
+    marketError.value = msg;
+    if (marketPlugins.value.length || registries.value.length) {
+      ElMessage.warning(t('admin.plugins.marketStaleKeep'));
+    } else {
+      ElMessage.error(msg);
+    }
   } finally {
     marketLoading.value = false;
   }
+}
+
+/** 「刷新」按钮:绕过服务端 SWR 缓存,等真实上游结果。 */
+async function refreshMarketplace() {
+  await loadMarketplace(true);
 }
 
 async function addRegistry() {
@@ -1585,6 +1608,10 @@ const marketCtx = computed(() => ({
   t,
   marketLoading: marketLoading.value,
   loadMarketplace,
+  refreshMarketplace,
+  marketStale: marketStale.value,
+  marketCachedAt: marketCachedAt.value,
+  marketError: marketError.value,
   openRegDialog,
   isMobile: isMobile.value,
   registries: registries.value,
