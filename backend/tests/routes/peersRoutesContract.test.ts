@@ -1050,7 +1050,8 @@ describe("GET /v1/peers/:peerId/status", () => {
     fns.getDeviceStatus.mockResolvedValueOnce({ state: "PLAYING", position: 12, duration: 200, volume: 30, muted: false });
     eventManager.getEventState.mockReturnValueOnce(null);
     const b = await json(await get("/v1/peers/dlna:dev1/status"));
-    expect(b).toEqual({ state: "PLAYING", position: 12, duration: 200, volume: 30, muted: false });
+    // queueRevision:4.12.9 起 /status 一律带队列版本号(此处 mock 默认 0)
+    expect(b).toEqual({ state: "PLAYING", position: 12, duration: 200, volume: 30, muted: false, queueRevision: 0 });
   });
 
   it("dlna:GENA 事件覆盖 state/volume/muted/updatedAt,但绝不覆盖 position/duration", async () => {
@@ -1121,7 +1122,7 @@ describe("GET /v1/peers/:peerId/status", () => {
 
   it("airplay:直接回传 peer 状态", async () => {
     fns.getAirPlayPeerStatus.mockReturnValueOnce({ state: "PLAYING", media: { songId: "s" } });
-    expect(await json(await get("/v1/peers/airplay:ap1/status"))).toEqual({ state: "PLAYING", media: { songId: "s" } });
+    expect(await json(await get("/v1/peers/airplay:ap1/status"))).toEqual({ state: "PLAYING", media: { songId: "s" }, queueRevision: 0 });
   });
 
   it("airplay:PAUSED / IDLE 在 API 出口归一成统一词表(客户端只认 UPnP 三态)", async () => {
@@ -1173,7 +1174,8 @@ describe("GET /v1/peers/:peerId/status", () => {
 
     pm.getQueueSnapshot.mockReturnValueOnce({ items: [1], currentIndex: 0, updatedAt: 99 });
     pm.getLocalStatusReport.mockReturnValueOnce(null);
-    expect(await json(await get("/v1/peers/local:u1/status"))).toEqual({ items: [1], currentIndex: 0, updatedAt: 99 });
+    // local 的 queueRevision 就是 updatedAt(没有 QueueController 版本号时用它当变更时钟)
+    expect(await json(await get("/v1/peers/local:u1/status"))).toEqual({ items: [1], currentIndex: 0, updatedAt: 99, queueRevision: 99 });
 
     pm.getQueueSnapshot.mockReturnValueOnce({ items: [1], currentIndex: 0, updatedAt: 99 });
     pm.getLocalStatusReport.mockReturnValueOnce({ state: "PLAYING", position: 5, duration: 60, volume: 20, songId: "s1", reportedAt: 7 });

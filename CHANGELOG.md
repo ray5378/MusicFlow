@@ -2,6 +2,20 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.12.11] - 2026-11-10
+
+### Fix / peers 路由契约测试对齐 `queueRevision`
+
+`4.12.9` 让 `/v1/peers/:peerId/status` 统一带 `queueRevision`(local 用
+`updatedAt` 当变更时钟),但 `backend/tests/routes/peersRoutesContract.test.ts`
+有三处**全等**断言仍按旧响应体写死,且共享假体 `_peersFakes.ts` 的
+`queueController` 没有 `queueRevision` 方法——cast 分支一调用就 TypeError,
+整组 10 条断言失败。
+
+- `_peersFakes.ts`:补 `queueRevision: () => 0`(含 `resetPeersFakes` 的恢复项);
+- 三处全等断言补字段:dlna → `0`、airplay → `0`、local → `99`(= `updatedAt`)。
+无产品代码改动。
+
 ## [4.12.10] - 2026-11-10
 
 ### Fix / 队列版本号引起的单测契约漂移

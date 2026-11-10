@@ -73,6 +73,9 @@ export const queueController = {
   stopPlayback: vi.fn(),
   clear: vi.fn(),
   getPlayerState: vi.fn(async () => null as Any),
+  // /status 出口的队列版本号(4.12.9 新增)。测试里默认 0 即可,
+  // 需要验证透传的用例用 mockReturnValueOnce 覆盖。
+  queueRevision: vi.fn(() => 0 as Any),
 };
 
 export const eventManager = {
@@ -182,6 +185,7 @@ const MANAGER_DEFAULTS: Array<[Any, string, Any]> = [
   [queueController, "stopPlayback", () => undefined],
   [queueController, "clear", () => undefined],
   [queueController, "getPlayerState", async () => null as Any],
+  [queueController, "queueRevision", () => 0 as Any],
   [eventManager, "getEventState", () => null as Any],
 ];
 
