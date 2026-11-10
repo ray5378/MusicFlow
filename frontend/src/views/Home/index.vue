@@ -81,7 +81,8 @@
     </div>
 
     <!-- ===== 首页推荐分区（按 sortOrder 排序，go-music-dl 推荐 + 本地随机混合排列） ===== -->
-    <section class="section" v-for="group in sortedAllGroups" :key="group.type + '-' + group.source + '-' + (group._pluginId || '')">
+    <LazyMount v-for="group in sortedAllGroups" :key="group.type + '-' + group.source + '-' + (group._pluginId || '')">
+    <section class="section">
       <template v-if="group.type === 'recommend'">
         <div class="section-title">
           <span>{{ group.name }}{{ t('home.featured') }}</span>
@@ -137,6 +138,7 @@
         </div>
       </template>
     </section>
+    </LazyMount>
   </div>
 </template>
 
@@ -148,6 +150,7 @@ import api, { formatApiError } from "@/api";
 import { waitAsyncTask } from "@/utils/asyncTask";
 import { ElMessage } from "element-plus";
 import CoverPlay from "@/components/CoverPlay.vue";
+import LazyMount from "@/components/LazyMount.vue";
 import { useItemActions } from "@/composables/useItemActions";
 import { usePlayContent } from "@/composables/usePlayContent";
 import { coverUrl } from "@/utils/cover";

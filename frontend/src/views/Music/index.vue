@@ -182,8 +182,9 @@ const { list: songs, loading, total, reload: loadSongs, onWindow } = useInfinite
   },
   // chunk 与后端 /v1/songs 的 pageSize 上限(200)对齐:若 chunk 超过后端上限
   // (如旧值 250),后端只回 200 条,块内剩余 50 个槽位永远 undefined → 滚动后空白。
-  // prefetchBlocks/concurrency 调大:预取跑道更长、并发更高,滚动更丝滑不卡骨架。
-  { chunk: 200, keepRows: 300, prefetchBlocks: 2, concurrency: 3 }
+  // 首屏只需「视口块」+ 一块跑道:keepRows/prefetchBlocks 调小后首屏只拉 page=1..2,
+  // 而不是原来的 page=1..4(每页 200 行);260 行 ≈ 10 屏的保留/预取余量,滚动不卡骨架。
+  { chunk: 200, keepRows: 60, prefetchBlocks: 1, concurrency: 3 }
 );
 
 // 远程搜索共享逻辑(本地/插件搜索来源下拉):插件没声明 songSearch 就不出现在下拉里
