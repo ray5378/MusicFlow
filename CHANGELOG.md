@@ -2,6 +2,19 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.12.19] - 2026-11-10
+
+### Perf / 流转出声提速
+
+桥组 `seek` / `rehost` 重锚不再按 `reseed` 吃冷 4.5s 锚点 lead：桥会话由主进程
+`prepareBridgeRoute` 在起播前已 await 建好（RECORD 完成），rehost 发生时桥侧只剩
+BOUNDARY 重锚，与 track 暖复用同量级。统一暖档后锚点取 `max(2.5s, floor+tick=2.75s)`，
+首帧仍落在投递窗口内（不吞歌开头），client→group 流转出声实测约提前 1.7s。
+
+- `streamEngine`：桥组锚点 lead 始终走暖档；`MF_BRIDGE_LEAD_MODE=fixed` 仍可一键回到
+  冷 4.5s 旧行为。
+- `tests/sendspin/bridgePumpGeneration.test.ts`：更新「rehost 必须 ≥ 冷 4.5s」的旧契约断言。
+
 ## [4.12.18] - 2026-11-10
 
 ### Fix / 补发 4.12.16（功能不变）
