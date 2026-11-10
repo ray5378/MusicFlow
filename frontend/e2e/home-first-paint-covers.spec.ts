@@ -1,23 +1,26 @@
 import { test, expect, type Page } from "@playwright/test";
 
-// 首页首屏封面优先级回归守卫(2026-10-19 首页打开提速)。
+// 首页首屏封面优先级回归守卫(2026-10-19 首页打开提速;2026-11-10 下半屏改为懒挂载)。
 //
 // 契约(与 backend/scripts/check-home-perf.mjs 的 R3 静态计数断言同源,这里补行为级验证):
 //   - 上半屏「固定推荐卡 + 并排随机歌单」封面:**急切加载**(`:src` 直接赋值,不依赖
 //     IntersectionObserver)且 fetchpriority="high" —— 首屏可见的几张先抢到连接;
-//   - 下半屏「平台精选 / 本地随机」封面:保持 v-lazy-cover 懒加载(未滚动时**不设置
-//     src**)且 fetchpriority="low" —— 不把屏外上百张同源封面一次排进队列。
+//   - 下半屏「平台精选 / 本地随机」:**首屏不挂载**(每个分区包 `LazyMount`,滚到视口
+//     附近才渲染),因此首屏既没有这些分区、也没有它们的封面请求;
+//   - 下半屏挂载后仍保持 `v-lazy-cover` 懒加载 + `fetchpriority="low"`。
 //
 // 关键点:如果不 stub IntersectionObserver,上半屏即便误用 v-lazy-cover,因卡片本就在
 // 首屏视口内,observer 回调也会立刻补上 src —— 「急切 vs 懒加载」根本区分不出来,
-// 守卫会退化成空转。故这里把 IntersectionObserver 换成「只注册、永不回调」的替身:
+// 守卫会退化成空转。故「首屏契约」用例把 IntersectionObserver 换成「只注册、永不回调」
+// 的替身:
 //   * `:src` 由 Vue 模板直接写入,不经过 observer ⇒ src 必然存在;
-//   * `v-lazy-cover` 的 src 只在 observer 回调里写入 ⇒ 永不被赋值。
-// 于是「上半屏有 src / 下半屏无 src」成为可判别断言。
+//   * `v-lazy-cover` 的 src 只在 observer 回调里写入 ⇒ 永不被赋值;
+//   * `LazyMount` 的 observer 永不回调 ⇒ 下半屏分区一定不挂载。
+// 「滚动后」用例使用真实 observer,验证懒挂载可以正常补齐、封面仍为 low。
 //
 // CI 后端是临时空库,故本用例用 page.route 注入确定性数据,使断言不依赖真实曲库。
-// 双向可回归:上半屏改回 v-lazy-cover(high 封面将没有 src)判红;下半屏任一改成 `:src`
-// (low 封面将立刻有 src)判红。
+// 双向可回归:上半屏改回 v-lazy-cover(high 封面将没有 src)判红;下半屏去掉 LazyMount
+// (首屏出现多个分区)判红;下半屏任一封面改成 `:src`(挂载即带 src)判红。
 
 const ADMIN = { username: "admin", password: "admin" };
 
@@ -34,7 +37,7 @@ async function stubIntersectionObserver(page: Page) {
         return [];
       }
     }
-    // @ts-ignore 覆盖原生实现,使 lazyCover 走「有 observer 但回调永不触发」分支。
+    // @ts-ignore 覆盖原生实现,使 lazyCover / LazyMount 走「有 observer 但回调永不触发」分支。
     window.IntersectionObserver = NoopIntersectionObserver;
   });
 }
@@ -115,12 +118,28 @@ async function mockHomeData(page: Page) {
   );
 }
 
+/** 逐段下滚页面主滚动容器(站点用的是自定义滚动容器,不一定是 window)。 */
+async function scrollDownSteps(page: Page, steps: number, delta = 1200) {
+  for (let i = 0; i < steps; i++) {
+    await page.evaluate((d) => {
+      const els = Array.from(document.querySelectorAll<HTMLElement>("*")).filter(
+        (e) =>
+          e.scrollHeight > e.clientHeight + 80 &&
+          ["auto", "scroll"].includes(getComputedStyle(e).overflowY),
+      );
+      const el = els.sort((a, b) => b.scrollHeight - a.scrollHeight)[0];
+      if (el) el.scrollTop += d;
+    }, delta);
+    await page.waitForTimeout(300);
+  }
+}
+
 test.beforeEach(async ({ page }) => {
-  await stubIntersectionObserver(page);
   await loginAsAdmin(page);
 });
 
-test("首页首屏封面优先:上半屏 high 且急切加载,下半屏 low 且懒加载不预取", async ({ page }) => {
+test("首页首屏:上半屏 high 且急切加载,下半屏分区首屏不挂载", async ({ page }) => {
+  await stubIntersectionObserver(page);
   await mockHomeData(page);
   await page.goto("/", { waitUntil: "load" });
 
@@ -136,24 +155,38 @@ test("首页首屏封面优先:上半屏 high 且急切加载,下半屏 low 且�
     expect(src, `首屏第 ${i + 1} 张封面应已设置 src(急切加载)`).toBeTruthy();
   }
 
-  // 3) 下半屏(平台精选 + 本地随机,注入 2+2 张)到达后为 low 优先级。
-  await expect.poll(() => low.count(), { timeout: 25_000 }).toBeGreaterThanOrEqual(2);
+  // 3) 下半屏首屏不挂载:分区只有顶部 1 个,low 封面 0 张(LazyMount 未触发)。
+  await expect
+    .poll(() => page.locator(".home-page section.section").count(), { timeout: 20_000 })
+    .toBe(1);
+  expect(await low.count(), "首屏不应存在下半屏封面").toBe(0);
+});
 
-  // 4) 下半屏必须仍是「懒加载」:未滚动时,全部 low 封面都**未设置 src**
-  //    (任一改成 :src 都会立刻有 src → 返回 -1 → 判红)。
+test("首页滚动后:下半屏分区按需挂载,封面 low 且懒加载", async ({ page }) => {
+  await mockHomeData(page);
+  await page.goto("/", { waitUntil: "load" });
+
+  const low = page.locator('img.card-cover[fetchpriority="low"]');
+  const sections = page.locator(".home-page section.section");
+
+  // 逐段下滚:下半屏分区应被 LazyMount 逐个挂载(注入数据为 2 个分区)。
+  await scrollDownSteps(page, 16);
+  await expect.poll(() => sections.count(), { timeout: 20_000 }).toBeGreaterThan(1);
+  await expect.poll(() => low.count(), { timeout: 20_000 }).toBeGreaterThanOrEqual(2);
+
+  // 挂载后仍是懒加载:滚到底的过程中封面会被 observer 补上 src(不能永远不加载)。
+  await scrollDownSteps(page, 8);
   await expect
     .poll(
       async () => {
         const n = await low.count();
-        if (n === 0) return -1; // 数据未就绪,继续轮询
-        let empty = 0;
+        let loaded = 0;
         for (let i = 0; i < n; i++) {
-          if (!(await low.nth(i).getAttribute("src"))) empty += 1;
+          if (await low.nth(i).getAttribute("src")) loaded += 1;
         }
-        // 全部懒加载 ⇒ 返回张数 n(>=2);否则返回 -1 使断言之失败。
-        return empty === n ? n : -1;
+        return loaded;
       },
-      { timeout: 10_000, message: "未滚动时下半屏封面应全部未设置 src(懒加载)" },
+      { timeout: 15_000, message: "下半屏封面滚动进入视口后应被懒加载补上 src" },
     )
     .toBeGreaterThanOrEqual(2);
 });
