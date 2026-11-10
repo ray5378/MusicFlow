@@ -2,6 +2,31 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.12.22] - 2026-11-11
+
+### Perf / 内存:外置插件懒加载 + V8 堆上限 + 手动回收节流
+
+240 内存快照归因(4.12.20,11 分钟空载):cgroup current 355MB = anon 192MB
+(主进程 153 / 子进程 33 / 内核 10)+ page cache 151MB(可回收);主进程 V8
+used 仅 41MB、60s RSS 恒定、强制 full GC 仅 −9MB。结论:没有泄漏,问题在
+**开机峰值**与**默认堆上限诱导的延迟回收**。
+
+- **外置插件懒加载**:`discoverExternalPlugins` 开机只解析 `plugin.json`
+  登记 manifest 与懒门面(方法名来自同一份能力白名单),QuickJS 运行时、
+  `index.js` 求值、`create()`、longRunning worker 全部推迟到首次能力调用
+  (`ensurePluginLoaded`)。声明同步契约(streamUrl / lyricUrl / canHandle /
+  canHandleFile)的插件仍然开机就绪,核心同步取值语义不变。240 现有 9 个
+  外置插件里 7 个(榜单 / 推荐 / 清理)转为懒加载:空载少 7 个 QuickJS 上下文
+  与 1 条 worker 线程。热重载按原懒加载类别重建登记,卸载会清掉登记表。
+- **V8 旧生代上限 160MB**:运行时镜像设置 `NODE_OPTIONS=--max-old-space-size=160`。
+  实测 used 仅 41MB,默认上限让 V8 认为堆很宽裕,延迟回收且不压紧 256KB 页
+  (anon 里 391 个页共 86.6MB);压低上限促使其更早 GC 归还空闲页。子进程
+  (airplay / sendspin)继承同一上限,相对各自 96MB 实测 RSS 仍有余量。
+- **手动回收节流**:`POST /v1/admin/memory/reclaim` 改用 `reclaimManual()`,
+  10 分钟内重复请求直接返回 `throttled` / `retryAfterMs`,不再跑 GC 与
+  WAL truncate。此前设置页约 85s 轮询一次(42 次/小时),回收前后
+  RSS 231→231MB,零收益纯抖动。空闲调度仍走原有 `reclaimNow("idle")`。
+
 ## [4.12.21] - 2026-11-11
 
 ### Fix / 守卫脚本同步 ffmpegArgs 拆分
