@@ -66,6 +66,18 @@ export function isBridgeRouteActive(groupId: string): boolean {
   return (activeBridgeRoutes.get(groupId)?.length ?? 0) > 0;
 }
 
+/** 该 AirPlay 设备当前挂在哪个**群组**的桥路由上(没有 → null)。
+ *
+ *  用途:成员级 `/v1/peers/airplay:<dev>/status` 的状态派生。桥播放时音频来自
+ *  群组泵(`ug:<gid>`),主进程 AirPlay 会话表里没有这台设备的会话 —— 只能按
+ *  路由反查组名再从泵取状态(单机桥另有 soloBridgeRoutes,由 airplay 侧先查)。 */
+export function groupIdOfBridgeMember(deviceId: string): string | null {
+  for (const [gid, route] of activeBridgeRoutes) {
+    if (route.some((r) => r.deviceId === deviceId)) return gid;
+  }
+  return null;
+}
+
 /** 播中加入一台 AirPlay 到桥路由(§5.2:「bridgePrepare + 从 pump ring 回填,
  *  不 rejoinMembersAirplay」)。桥路由未激活时返回 false(调用方回落 legacy join)。
  *  抛错 = bridgePrepare 失败(调用方按 MAJ-07 降级:回落 solo cast)。 */

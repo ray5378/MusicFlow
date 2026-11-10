@@ -204,3 +204,76 @@ export function createAirPlayBridgePlayer(deviceId: string): ProtocolPlayer {
 export function createAirPlayPlayerForDevice(deviceId: string): ProtocolPlayer {
   return isAirplayBridgeEnabled() ? createAirPlayBridgePlayer(deviceId) : createAirPlayProtocolPlayer(deviceId);
 }
+
+/** 桥播放状态(供 `/v1/peers/airplay:<dev>/status` 派生),覆盖两种桥形态:
+ *   ① **单机桥**:音频来自 sendspin 单机伪组泵(`ug:__bridge_solo:<dev>`);
+ *   ② **群组桥成员**:该设备只是群组桥路由里的一员,音频来自群组泵(`ug:<gid>`)。
+ *
+ *  两种形态主进程的 AirPlay 会话表里都没有这台设备的会话,`lastCast` 也从未写入 ⇒
+ *  只靠 `getAirPlayPeerStatus` 时对外恒为 IDLE/STOPPED、media 恒空(2026-11-10 240
+ *  现场:流转成功却显示未播放)。改从对应泵派生 —— 与「组 leader 走桥」时
+ *  getGroupStatus 的口径一致。
+ *
+ *  返回 `null` = 未走桥(调用方回落到设备会话视图,行为与改动前完全一致)。
+ *  任何查询失败也返回 null:**状态查询绝不能反过来打断正在播放的会话**。 */
+export async function getBridgePeerStatus(deviceId: string): Promise<{
+  state: string;
+  position: number;
+  duration: number;
+  media?: { songId: string; title?: string; artist?: string; album?: string; coverArt?: string };
+} | null> {
+  const { sendspinGroupName } = await import("../sendspin/playerCore.js");
+  // 泵名 + 队列归属:单机桥用伪组泵、队列挂在成员自己;群组桥用组泵、队列在组上。
+  let gname: string;
+  let queuePeerId: string;
+  if (soloBridgeRoutes.has(deviceId)) {
+    gname = sendspinGroupName(soloBridgeGroupId(deviceId));
+    queuePeerId = `airplay:${deviceId}`;
+  } else {
+    // 静态导入会与 group/protocolPlayer → airplay/protocolPlayer 构成加载环,动态取。
+    const { groupIdOfBridgeMember } = await import("../group/protocolPlayer.js");
+    const gid = groupIdOfBridgeMember(deviceId);
+    if (!gid) return null;
+    gname = sendspinGroupName(gid);
+    queuePeerId = `group:${gid}`;
+  }
+  try {
+    const { sendspinGroupPoll, getSendspinFront } = await import("../sendspin/index.js");
+    const st = await sendspinGroupPoll(gname);
+    const gv: any = getSendspinFront()?.groups.get(gname);
+    const cur: any = gv?.current;
+    let media: { songId: string; title?: string; artist?: string; album?: string; coverArt?: string } | undefined;
+    if (cur && typeof cur.songId === "string") {
+      media = { songId: cur.songId, title: cur.title, artist: cur.artist, album: cur.album, coverArt: cur.coverArt };
+      // 换曲瞬间泵侧 current 可能只有 songId(拿不到队列)⇒ 按 songId 从队列回填展示字段
+      // (与 group 的 enrichGroupCurrentMedia 同一手法)。
+      if (!media.title || !media.coverArt) {
+        try {
+          const { getQueueController } = await import("../player/index.js");
+          const snap = getQueueController().snapshot(queuePeerId);
+          const item = (snap?.items ?? []).find((it: any) => it?.songId === cur.songId);
+          if (item) {
+            media.title = media.title ?? item.title;
+            media.artist = media.artist ?? item.artist;
+            media.album = media.album ?? item.album;
+            media.coverArt = media.coverArt ?? item.coverArt;
+          }
+        } catch { /* 补字段失败不影响状态 */ }
+      }
+    }
+    // 状态词表与内部一致(路由出口再做 PAUSED→PAUSED_PLAYBACK / IDLE→STOPPED 翻译)。
+    // 泵侧 BUFFERING 归一到 PLAYING:与 pollState 同口径 —— 锚点 lead 期内设备其实
+    // 已经在收包,报 BUFFERING 会让客户端把「正常起播」画成卡顿。
+    const state = st.paused
+      ? PlaybackState.PAUSED
+      : (st.playing ? PlaybackState.PLAYING : PlaybackState.IDLE);
+    return {
+      state,
+      position: Math.floor((st.positionMs || 0) / 1000),
+      duration: Math.floor((st.durationMs || 0) / 1000),
+      ...(media ? { media } : {}),
+    };
+  } catch {
+    return null;
+  }
+}

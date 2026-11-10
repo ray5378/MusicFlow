@@ -112,6 +112,13 @@ interface BorrowEntry {
 
 const armedBorrows = new Map<string, BorrowEntry>();
 
+/** 借流允许的「落点超前」上限(ms)。超过即判定窗口太浅、放弃借流。
+ *
+ *  与 `borrowLandingConfirmed` 的 1.5s 容差同源:交接后本来就是以此判定"落没落位",
+ *  在武装阶段提前拒掉,可省掉一次白搬泵 —— 否则落点被窗口底抬高几秒,听感跳秒,
+ *  且新组还要把这段缓冲重新灌回来(BUFFERING 实测 3–5s,网络差时十几秒)。 */
+const BORROW_MAX_LEAD_MS = 1_500;
+
 /** 登记有效期。武装 → 起播是同步推进的(路由里紧挨着的两步),超时即视为陈旧 ——
  *  否则一次失败的武装会污染很久以后的一次同目标起播。 */
 const BORROW_TTL_MS = 15_000;
@@ -144,6 +151,16 @@ export function armBorrowCore(
   const pos = typeof overrideMs === "number" && Number.isFinite(overrideMs) && overrideMs >= 0
     ? overrideMs
     : gFrom.positionMs;
+  // 可行性:窗口退不回到可听位置时,移交只会落在窗口底(超前 BORROW_MAX_LEAD_MS 以上)
+  // ⇒ 不武装,让调用方走完整起播 + 正确的 seek 落点。行为与"武装失败"同构。
+  const winBase = p.readableBaseMs();
+  if (winBase !== null && winBase > pos + BORROW_MAX_LEAD_MS) {
+    log.info(
+      `[borrow] 放弃 window-too-shallow:窗口底=${winBase}ms 可听=${Math.round(pos)}ms` +
+        `(超前 ${winBase - Math.round(pos)}ms > ${BORROW_MAX_LEAD_MS}ms),走完整起播`,
+    );
+    return { armed: false, reason: "window-too-shallow" };
+  }
   armedBorrows.set(targetGroup, {
     spec: { fromGroup: sourceGroup, positionMs: pos, songId },
     at: Date.now(),

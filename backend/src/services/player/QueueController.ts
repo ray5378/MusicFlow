@@ -145,6 +145,20 @@ interface PlayerControllerLike {
  *  超时/换曲即弃用 —— 复用它是为了省一次探测,不是为了保证可播(旧行仍可能被下架)。 */
 const RESOLVED_ROW_HINT_TTL_MS = 15_000;
 
+/** 冷启动预热结论有效期(ms)。与 resolvedRowHints 同档:只服务「同一首歌的本次起播」,
+ *  过期即重新裁决 —— 预热只是为了省一次重复探测,绝不代表「可播性长期有效」。 */
+const WARM_VERDICT_TTL_MS = 15_000;
+/** 预热结论表条目上限:预热只在流转/起播入口调用,量极小,留个兜底上限防止无界增长。 */
+const WARM_VERDICT_MAX = 200;
+/** 判官等「在途预热」的预算(ms)。
+ *
+ *  为什么要有预算而不是无限等(240 实测 2026-11-10):流转路径上判官是 cast **之前**
+ *  的第一步,没有可重叠的其它工作 —— 冷判决实测 1167ms,无限等就等于把它原样留在
+ *  关键路径上(HTTP 1789ms,与不预热几乎一样)。预算用尽即按「未知即放行」先起播,
+ *  与判官本来的宽容尾巴**同一语义**;预热继续在后台跑完,它的探测会把各行探测记忆
+ *  焐热,出流侧随后那次解析几乎零成本(实测 reuse-active/probe-ok 均为 ms 级)。 */
+const WARM_JUDGE_WAIT_MS = 300;
+
 /** 跨曲连续「卡死→切歌」上限:超过即停队列。
  *  取值 3:一首失败可能是源抖动;三首连续失败说明这一队里当前区域整体不可播
  *  (240 真机:整段网络源歌曲),继续往下走只会拖垮事件循环,不会恢复播放。 */
@@ -212,6 +226,11 @@ export class QueueController extends EventEmitter {
    *  静音并把显示持有顶到 15.5s(采样 #7 P2)。本表只存 songId 匹配的短 TTL 提示,
    *  起播消费后立即删除,绝不影响「不把不知道当成死的」判定语义。 */
   private resolvedRowHints = new Map<string, { songId: string; rowId: string; at: number }>();
+  /** 冷启动预热结论(key=songId):`warmPlayability` 写入、`judgePlayable` 消费。
+   *  生命周期极短(见 WARM_VERDICT_TTL_MS),只为「即将起播的这几首」服务。 */
+  private warmVerdicts = new Map<string, { verdict: "skip" | "play"; rowId?: string; at: number }>();
+  /** 在途预热(key=songId):单飞去重 —— 同一首绝不跑第二份探测(不加大源站压力)。 */
+  private warmInflight = new Map<string, Promise<void>>();
   /** 探测到「链路/子进程不可用」的 player(key=裸 id):记下当时的播放位置。
    *  期间**不接受任何决策**(不切歌、不计数、不重投),等恢复后一次性续播。
    *
@@ -1207,17 +1226,113 @@ export class QueueController extends EventEmitter {
   }
 
   /**
+   * 冷启动预热(2026-11-10):把「这首歌能不能播、走哪一行」的裁决提前到流转/起播的
+   * **准备阶段**,与建会话、整曲预取、成员路由重算并行跑。
+   *
+   * 实测依据(240 真机打点,2026-11-10 群组→AirPlay):HTTP 关键路径上冷判决
+   * (`judgePlayable → resolvePlayableRow`)独占 **1521ms**(WebDAV 24MB FLAC 的
+   * 本行探测 + 优选换行),而这段时间之后才轮到只花 474ms 的建会话 —— 两者本无因果,
+   * 纯属串行。预热即把这段裁决挪到前排并行,判官随后**零等待**命中结论。
+   *
+   * 边界(**只预热,不改判定口径**):
+   *   - 内部跑的就是判官同一段代码(decidePlayable),结论原样复用,不新增任何判死条件;
+   *   - 单飞去重:同一首的并发调用共享同一份探测,不加大源站压力;
+   *   - 结论 15s 内有效(与 resolvedRowHints 同档),过期即重新裁决;
+   *   - fire-and-forget:绝不抛出、绝不阻塞调用方。
+   */
+  warmPlayability(songId: string): void {
+    if (!songId) return;
+    try {
+      if (this.warmInflight.has(songId)) return;
+      const prev = this.warmVerdicts.get(songId);
+      if (prev && Date.now() - prev.at < WARM_VERDICT_TTL_MS) return;
+      const p = this.decidePlayable({ songId } as QueueItem)
+        .then((r) => {
+          this.warmVerdicts.set(songId, { ...r, at: Date.now() });
+          this.pruneWarmVerdicts();
+        })
+        .catch(() => { /* 预热失败:静默回到「不预热」的老行为 */ })
+        .finally(() => { this.warmInflight.delete(songId); });
+      this.warmInflight.set(songId, p);
+    } catch { /* 预热绝不能影响调用方 */ }
+  }
+
+  /** 预热结论表按写入顺序淘汰(只留最近的 WARM_VERDICT_MAX 条)。 */
+  private pruneWarmVerdicts(): void {
+    while (this.warmVerdicts.size > WARM_VERDICT_MAX) {
+      const oldest = this.warmVerdicts.keys().next().value;
+      if (oldest === undefined) return;
+      this.warmVerdicts.delete(oldest);
+    }
+  }
+
+  /** 取「本次起播」可用的预热结论(过期即弃)。 */
+  private takeWarmVerdict(songId: string): { verdict: "skip" | "play"; rowId?: string } | null {
+    const w = this.warmVerdicts.get(songId);
+    if (!w) return null;
+    if (Date.now() - w.at >= WARM_VERDICT_TTL_MS) {
+      this.warmVerdicts.delete(songId);
+      return null;
+    }
+    return { verdict: w.verdict, rowId: w.rowId };
+  }
+
+  /**
    * 判断某首是否应**跳过**。只有「明确的、未过期的不可播判定」才允许跳 ——
    * 无记录 / 已过期 / 网络异常一律视为未知 → 照常播放。
    *
    * **绝不把「不知道」当成「死的」** —— 这是 2026-09-11 拆除永久拉黑时定下的边界。
    */
   private async judgePlayable(item: QueueItem, deviceId?: string): Promise<"skip" | "play"> {
+    // 0) 预热结论(流转/起播准备阶段已并行算好)⇒ 零等待。
+    //    裁决行照旧透传给 player(preferRowId),避免把 resolve 成本转移到出流侧。
+    //    ★ 在途也要等(2026-11-10 实测):只认「已完成」的话,判官会自己再跑一份
+    //      同样的探测(两路并行),关键路径上一点没省 —— 240 出网实测只省 411ms。
+    //      这里改成等同一份在途探测收敛,判官与预热**共用一次**裁决(单飞)。
+    //      但**只等 WARM_JUDGE_WAIT_MS**:判官在流转路径上就是 cast 之前的第一步,
+    //      没有任何可重叠的工作,无限等等于把 1.2s 原样留在关键路径(实测 1789ms)。
+    //      预算用尽 ⇒ 按「未知即放行」先起播(与宽容尾巴同语义),后台复核继续跑。
+    //      等待上界由 playCurrent 外层 withTimeout 兜住,不会新增无兜底的 await。
+    const warmInflight = this.warmInflight.get(item.songId);
+    if (warmInflight) {
+      let settled = false;
+      await Promise.race([
+        warmInflight.then(
+          () => { settled = true; },
+          () => { settled = true; /* 预热内部已兜异常,按「已结束」继续 */ },
+        ),
+        new Promise<void>((resolve) => { setTimeout(resolve, WARM_JUDGE_WAIT_MS).unref?.(); }),
+      ]);
+      if (!settled) {
+        log.info(
+          `[QueueController][judge] ${item.songId}: 预热 ${WARM_JUDGE_WAIT_MS}ms 内未收敛 ⇒ 先放行(后台复核继续)`,
+        );
+        return "play";
+      }
+    }
+    const warm = this.takeWarmVerdict(item.songId);
+    if (warm) {
+      if (warm.verdict === "play" && warm.rowId && deviceId) {
+        this.resolvedRowHints.set(deviceId, { songId: item.songId, rowId: warm.rowId, at: Date.now() });
+      }
+      log.debug(`[QueueController][judge] ${item.songId}: 命中预热结论(${warm.verdict})`);
+      return warm.verdict;
+    }
+    const r = await this.decidePlayable(item);
+    if (r.verdict === "play" && r.rowId && deviceId) {
+      this.resolvedRowHints.set(deviceId, { songId: item.songId, rowId: r.rowId, at: Date.now() });
+    }
+    return r.verdict;
+  }
+
+  /** 可播性裁决的唯一实现(判官与预热共用,口径只此一份)。返回判官结论 +
+   *  裁决出的可播行(供调用方写成 resolvedRowHints)。 */
+  private async decidePlayable(item: QueueItem): Promise<{ verdict: "skip" | "play"; rowId?: string }> {
     // 1) 缓存判定(预探测的成果)→ 零成本。热路径上多数歌在这里就返回了。
     //    正缓存(1 小时 TTL)不盲信:扫描时活、播时死是常态(直链下架),在线直链
     //    做一次短超时复核 —— 与预探测扫描共用 recheckOnlineDirect(同一把尺子)。
     const cached = getCachedPlayability(item.songId);
-    if (cached === "unplayable") return "skip";
+    if (cached === "unplayable") return { verdict: "skip" };
     if (cached === "playable") {
       let songRow: any = null;
       try {
@@ -1226,29 +1341,24 @@ export class QueueController extends EventEmitter {
       const { recheckOnlineDirect, evictStreamFallbackCache, ensurePlayableStream } =
         await import("../source/online/streamFallback.js");
       const rc = await recheckOnlineDirect(songRow, 2500);
-      if (rc !== "gone") {
-        if (deviceId && songRow?.id) {
-          this.resolvedRowHints.set(deviceId, { songId: item.songId, rowId: songRow.id, at: Date.now() });
-        }
-        return "play";
-      }
+      if (rc !== "gone") return { verdict: "play", rowId: songRow?.id };
       // 直链明确已死:逐出正缓存,找兄弟/远程替代;无替代 → skip。
       // 这是知识(404 照妖镜),不是"未知" —— 不违"不把不知道当成死的"边界。
       evictStreamFallbackCache(item.songId);
       try {
-        if (await ensurePlayableStream(songRow ?? { id: item.songId }, 8000)) return "play";
+        if (await ensurePlayableStream(songRow ?? { id: item.songId }, 8000)) return { verdict: "play" };
       } catch { /* 落到跳过 */ }
       log.info(`[QueueController][judge] ${item.songId}: 直链已死且无替代,跳过`);
-      return "skip";
+      return { verdict: "skip" };
     }
 
     let songRow: any;
     try {
       songRow = db.select().from(songs).where(eq(songs.id, item.songId)).get();
     } catch {
-      return "play";
+      return { verdict: "play" };
     }
-    if (!songRow) return "play";
+    if (!songRow) return { verdict: "play" };
 
     // 2) 统一裁决(与 /rest/stream 同口径,见 source/resolveAudio):
     //    快缓存 → 优选换行(含验证) → 本行探测 → 本行复核。
@@ -1260,22 +1370,17 @@ export class QueueController extends EventEmitter {
     // 18:29:06 主进程自己的预取跑完才判死。这一闸补的就是「落点歌首次起播前先判一次」。
     if ((await this.precheckIntegrity(item.songId, songRow)) === "skip") {
       log.info(`[QueueController][judge] ${item.songId}: 起播前完整性预检判死,跳过`);
-      return "skip";
+      return { verdict: "skip" };
     }
     const r = await resolvePlayableRow(item.songId);
-    if (r.row) {
-      if (deviceId && r.row.id) {
-        this.resolvedRowHints.set(deviceId, { songId: item.songId, rowId: r.row.id, at: Date.now() });
-      }
-      return "play";
-    }
+    if (r.row) return { verdict: "play", rowId: r.row.id };
     if (r.definitive) {
       log.info(`[QueueController][judge] ${item.songId}: 确定无源(${r.reason}),跳过`);
-      return "skip";
+      return { verdict: "skip" };
     }
     log.info(`[QueueController][judge] ${item.songId}: 无可播行(${r.reason}),进宽容尾巴`);
     // 返回 null 时再确认是「没有源」还是「网络抖动」—— 抖动不跳,照常试播。
-    return getCachedPlayability(item.songId) === "unplayable" ? "skip" : "play";
+    return { verdict: getCachedPlayability(item.songId) === "unplayable" ? "skip" : "play" };
   }
 
   /** 起播前完整性预检(第六闸,2026-10-28):负缓存 unknown 的**网络源**在起播前先触发

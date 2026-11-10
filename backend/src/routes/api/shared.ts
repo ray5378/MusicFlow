@@ -635,7 +635,7 @@ export async function tryArmSendspinBorrow(
   toPeerId: string,
   askPosition: number | null,
 
-): Promise<{ armed: boolean; positionSeconds: number | null; songId: string | null }> {
+): Promise<{ armed: boolean; positionSeconds: number | null; songId: string | null; reason?: string }> {
   const miss = { armed: false, positionSeconds: null, songId: null };
   try {
     const { sendspinArmBorrow, sendspinGroupNameForPeer } = await import("../../services/sendspin/index.js");
@@ -645,7 +645,8 @@ export async function tryArmSendspinBorrow(
     const r = await sendspinArmBorrow(toGroup, fromGroup, askPosition != null ? askPosition * 1000 : null);
     if (!r?.armed) {
       if (r?.reason) seekLog.info(`[transfer] 借流未武装(${r.reason}),走常规对齐`);
-      return miss;
+      // reason 一并回传:调用方据此判断"源端现场还能不能晚读"(见 window-too-shallow)。
+      return { ...miss, ...(r?.reason ? { reason: r.reason } : {}) };
     }
     return {
       armed: true,

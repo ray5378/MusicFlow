@@ -2062,6 +2062,16 @@ export class GroupPump {
     return start;
   }
 
+  /** 窗口当前还能回退到的最早位置(ms,已对齐帧栅格);没有窗口 → null。
+   *
+   *  给**借流武装前的可行性判定**用:预填充水位(已推送 − 可听)比窗口历史深时,
+   *  rehost 只能落在窗口底 —— 听感一下子超前好几秒,且新组要把这段缓冲重建回来
+   *  (对外表现为 BUFFERING 数秒)。与其白搬一次泵,不如提前拒掉、走完整起播。 */
+  readableBaseMs(): number | null {
+    if (!this.window) return null;
+    return Math.ceil(this.window.baseMs / FRAME_MS) * FRAME_MS;
+  }
+
 }
 
 // ---- 单组 pump 池(server:group 生命周期内复用) ----

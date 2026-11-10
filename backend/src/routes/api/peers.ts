@@ -1,6 +1,7 @@
 // 自动生成 —— 由 index.ts 物理拆分而来（peers 域，35 条路由）。零逻辑改动。
 import type { Hono } from "hono";
 import { createLogger } from "../../utils/logger.js";
+import { getBridgePeerStatus } from "../../services/airplay/protocolPlayer.js";
 import { isRecentlyBridgeSettledDlnaPeer, raopSuppressDlnaResetAfterBridge } from "../../services/airplay/bridgeSettleMarks.js";
 import {
   BusinessErrorCode,
@@ -216,6 +217,7 @@ app.get("/v1/peers/:peerId/queue", (c) => {
   const peerId = decodePeerId(c);
   const snap = pm.getQueueSnapshot(peerId);
   if (!snap) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
+  const items = Array.isArray(snap.items) ? snap.items : [];
   // dlna peer:补 currentMedia(原 QueueSnapshot 字段,新 snapshot 改用 ended)。
   const parsed = parsePeerId(peerId);
   let currentMedia = parsed
@@ -227,12 +229,26 @@ app.get("/v1/peers/:peerId/queue", (c) => {
           ? getSendspinFront()?.currentMedia(parsed.id)
           : undefined
     : undefined;
+  // ★ AirPlay 桥播放时 lastCast 恒空(音频走 sendspin 单机伪组泵,从未写会话表)⇒
+  //   队列视图没有「当前曲」。用队列 current 兜底,否则客户端只看到一条空队列
+  //   正在播(2026-11-10 240 现场:流转成功但界面显示未播放)。
+  if (parsed?.kind === "airplay" && !currentMedia) {
+    const cur = items[snap.currentIndex ?? 0] as any;
+    if (cur?.songId) {
+      currentMedia = {
+        songId: cur.songId,
+        title: cur.title,
+        artist: cur.artist,
+        album: cur.album,
+        coverArt: cur.coverArt,
+      } as any;
+    }
+  }
   // 可听显示延迟:上一首还可听时,队列视图的 currentMedia 也必须是旧曲(4.11.12)。
   if (parsed) {
     const hold = getQueueController()?.displayHoldState?.(parsed.id);
     if (hold) currentMedia = hold.media;
   }
-  const items = Array.isArray(snap.items) ? snap.items : [];
   const total = items.length;
   const offset = Math.max(0, parseInt(c.req.query("offset") || "0", 10) || 0);
   const size = parseInt(c.req.query("size") || "0", 10) || 0;
@@ -400,6 +416,14 @@ app.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
   );
   let landedPosition: number | null = null;
   if (isCastPeer(parsedTo)) {
+    // ★ 冷启动预热(2026-11-10):落点歌的可播性裁决提前开跑,与后面的「脱离活跃组 /
+    //   回流加成员 / 建会话 / 整曲预取」**并行** —— 判官随后直接命中预热结论,省掉
+    //   实测 1521ms 的冷判决(240 打点:群组→AirPlay 的 HTTP 关键路径)。
+    //   只预热,不改任何判定口径;失败静默(回到「不预热」的老行为)。
+    try {
+      const warmSongId = items[start]?.songId;
+      if (typeof warmSongId === "string" && warmSongId) getQueueManager().warmPlayability(warmSongId);
+    } catch { /* 预热失败不挡流转 */ }
     // exp3 回流:源端设备此前因「群组→设备」流转被**自动**摘组(autoDetachedFromGroup
     // 记录),现在又流转回**同一个组** ⇒ 先把成员加回去 —— 否则群组路由不含该成员
     // (case 3:HiVi→全屋组 → ap=0 桥无从建 → HiVi 无声)。紧跟的 playFrom 全量
@@ -441,23 +465,25 @@ app.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
           //    早读=唯一救命值(源端已被互斥停掉,晚读恒 0)。
           : (sameDevice ? srcPosEarly : null))
       : null;
-    // ★ AirPlay 目标 + 带起点:先把源曲灌进服务端整曲缓冲(membuf)再 cast。
-    //   sendspin 泵源是自拉流,**不经过** /rest/stream 的 membuf —— 转到 AirPlay 时
-    //   回环流冷启动,web 源整曲缓冲单次 deadline 短,冷取流一旦失败推流全程饥饿
-    //   (设备 PLAYING 但无数据 → 无声,拖一下进度重建会话才出声;240 实证 2026-10-24)。
-    //   DLNA 源不受影响:其播放路径本就经 /rest/stream 把整曲灌进了 membuf。
-    //   有界等 8s:落地 ⇒ 回环流预取命中秒供流;未落地 ⇒ 回环流搭车在途预取或直通,
-    //   最坏退化成起播稍慢,不再出现「会话活着但永远没数据」。
+    // ★ AirPlay 目标 + 带起点:整曲预取**与建会话并行**(2026-11-10)。
+    //   过去是「先 await 预取落地(上限 8s,实测 1427ms)再 cast」—— 这段串行白等在
+    //   HTTP 关键路径上;而预取真正服务的对象是**建桥之后的回环拉流**:
+    //     ① sendspin 泵源是自拉流,不经过 /rest/stream 的 membuf —— 转到 AirPlay 时
+    //        回环流冷启动,web 源整曲缓冲单次 deadline 短,冷取流失败会推流饥饿
+    //        (2026-10-24 240 实证:设备 PLAYING 但无数据,拖一下进度重建会话才出声);
+    //     ② 但回环拉流走 /rest/stream,`bufferNetworkSource` 会先
+    //        `prefetchInFlight(songId)` 搭车在途预取(有界 8s,**绝不起第二份下载**);
+    //     ③ `prefetchSong` 是**同步登记**在途的 —— 只要在 cast 之前调用,桥拉流时
+    //        必然能搭上这条车;桥自身的锚点 lead(≈2.5s)也足够预取在这段窗口内落地。
+    //   所以改为 fire-and-forget:cast 立刻发,预取在后台跑,两者重叠省掉整段串行等待。
     if (parsedTo.kind === "airplay" && !borrow.armed && inCastPos !== null && inCastPos > 0) {
       const warmSongId = items[start]?.songId;
       if (typeof warmSongId === "string" && warmSongId) {
         try {
           const { prefetchSong, prefetchHit } = await import("../../services/source/prefetchCache.js");
           if (!prefetchHit(warmSongId)) {
-            await Promise.race([
-              prefetchSong(warmSongId).catch(() => {}),
-              new Promise((r) => setTimeout(r, 8000)),
-            ]);
+            // 不 await:预取结果由桥的回环拉流搭车消费(见上 ②③),失败也不挡流转。
+            void prefetchSong(warmSongId).catch(() => { /* 预取失败不挡流转 */ });
           }
         } catch { /* 预热失败不挡流转 */ }
       }
@@ -485,7 +511,12 @@ app.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
       // 晚读数优先(跨设备时更贴近目标端真正出声的时刻);源端已被互斥停掉/被群组
       // settle 停掉(同 host 或群内成员同 host)时晚读恒 0 → 起播前的定格值兜底
       // (exp3:srcPosEarly 恒有值,自动救回)。
-      const late = askPosition ?? await readPeerPositionSeconds(fromPeerId);
+      // ★ 借流武装过(含因窗口太浅被拒)时**不得**晚读(2026-11-10 240 实证):
+      //   交接把泵搬走/组泵接管源端后,晚读数已是"交接后的现场" —— rehost 被窗口底
+      //   抬高,读到 11.7s(用户其实只听到 3.08s),用它 seek 等于把超前落点钉死。
+      //   此时只有起播前定格值可信。
+      const borrowTouched = borrow.armed || borrow.reason === "window-too-shallow";
+      const late = askPosition ?? (borrowTouched ? null : await readPeerPositionSeconds(fromPeerId));
       const pos = late !== null && late > 0 ? late : srcPosEarly;
       if (pos !== null && pos > 0 && await seekPeerToSeconds(toPeerId, pos)) landedPosition = pos;
     }
@@ -1168,6 +1199,17 @@ app.get("/v1/peers/:peerId/status", async (c) => {
     // PLAYING / PAUSED_PLAYBACK / TRANSITIONING;AirPlay 内部的 PAUSED / IDLE
     // 会让「已暂停」在 UI 上退化成「未在播」。翻译只在本 API 出口做(内部语义不变)。
     const st: any = { ...getAirPlayPeerStatus(parsed.id) };
+    // ★ 桥播放时 AirPlay 会话表恒空 ⇒ 改从 sendspin 泵派生(2026-11-10 240):
+    //   单机桥取单机伪组泵,群组桥成员取群组泵;否则流转/起播成功后对外恒报
+    //   STOPPED 且 media 为空,客户端显示「未播放」。
+    //   非桥路径返回 null ⇒ 与改动前完全一致。
+    const bridgeSt = await getBridgePeerStatus(parsed.id);
+    if (bridgeSt) {
+      st.state = bridgeSt.state;
+      st.position = bridgeSt.position;
+      st.duration = bridgeSt.duration;
+      if (bridgeSt.media) st.media = bridgeSt.media;
+    }
     if (st.state === "PAUSED") st.state = "PAUSED_PLAYBACK";
     else if (st.state === "IDLE") st.state = "STOPPED";
     // 可听显示延迟(桥路径:新旧曲交叉窗口)—— 显示按住旧曲(4.11.12)。
