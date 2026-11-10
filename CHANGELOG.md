@@ -2,6 +2,17 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.12.21] - 2026-11-11
+
+### Fix / 守卫脚本同步 ffmpegArgs 拆分
+
+- `check-airplay-decode-af`：解码侧的 import 断言从 `audio/pipeline` 改为
+  `audio/ffmpegArgs`，并收紧为**精确符号集**（多取任何符号即红）。
+- `check-airplay-playback-chain`：`AirplayChildEvent` 联合类型写法、`decodeArgs`
+  的新位置（`ffmpegArgs.ts`）同步，两处断言恢复有效。
+
+无运行时变更（4.12.20 的产物即当前线上版本）。
+
 ## [4.12.20] - 2026-11-11
 
 ### Perf / 子进程按需加载与空闲回收
