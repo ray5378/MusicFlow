@@ -55,10 +55,19 @@ check(
   count(decCode, "pipelineSwitches") === 0 && count(decCode, "isChannelEnabled") === 0,
   "解码侧仍引用渠道开关",
 );
+// 2026-11-11:decodeArgs / outputFilters / isLoopbackUrl 已从 pipeline 拆到
+// `audio/ffmpegArgs.ts`(切断子进程对 db/index 的静态依赖)。断言跟随新模块,
+// 并收紧为**精确符号集** —— 多取任何一个符号(尤其响度相关)都会红。
+const AF_IMPORT = decCode.match(/import\s*\{([^}]*)\}\s*from\s*"\.\.\/audio\/ffmpegArgs\.js"/);
+const afSymbols = (AF_IMPORT?.[1] ?? "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean)
+  .sort();
 check(
-  "decoder.ts 从 pipeline 只取 decodeArgs / outputFilters / isLoopbackUrl",
-  /import\s*\{[^}]*decodeArgs[^}]*outputFilters[^}]*isLoopbackUrl[^}]*\}\s*from\s*"\.\.\/audio\/pipeline\.js"/.test(decCode),
-  "pipeline 的 import 清单已变,请复核是否又引回了响度相关符号",
+  "decoder.ts 从 ffmpegArgs 只取 decodeArgs / outputFilters / isLoopbackUrl",
+  JSON.stringify(afSymbols) === JSON.stringify(["decodeArgs", "isLoopbackUrl", "outputFilters"]),
+  `ffmpegArgs 的 import 清单已变:${afSymbols.join(", ") || "(未找到 import)"}`,
 );
 
 console.log("===== R2 输出段必须仍在,且 44.1k/16bit/stereo 参数锁定(RAOP 硬性要求) =====");

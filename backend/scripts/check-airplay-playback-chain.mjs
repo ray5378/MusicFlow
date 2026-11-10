@@ -215,7 +215,9 @@ check(
 }
 check(
   "ipcProtocol:sessionEnded 事件类型挂上 AirplaySessionEndInfo",
-  /export\s+type\s+AirplayChildEvent\s*=\s*\{\s*t:\s*"sessionEnded";\s*deviceId:\s*string\s*\}\s*&\s*AirplaySessionEndInfo/.test(ipc)
+  // 2026-11-11:AirplayChildEvent 扩成联合类型(sessionEnded | idleReclaim),
+  // sessionEnded 成员写成 `| ({...} & AirplaySessionEndInfo)`,断言跟随该写法。
+  /export\s+type\s+AirplayChildEvent\s*=\s*(?:\|\s*)?(?:\(\s*)?\{\s*t:\s*"sessionEnded";\s*deviceId:\s*string\s*\}\s*&\s*AirplaySessionEndInfo\s*\)?/.test(ipc)
     && /AirplaySessionEndInfo/.test(ipc.split("export type AirplayChildEvent")[0]),
   "AirplayChildEvent 未交叉 AirplaySessionEndInfo(或未从 sessionRuntime 透出)",
 );
@@ -317,7 +319,8 @@ check(
 );
 check(
   "**反向断言**:decodeArgs 的重连是可选开关(缺省仍为 true,其它链路零变化)",
-  /req\.reconnect\s*!==\s*false/.test(stripComments(read("backend/src/services/audio/pipeline.ts"))),
+  // 2026-11-11:decodeArgs 已拆到 audio/ffmpegArgs.ts(零 DB 依赖),断言跟随新位置。
+  /req\.reconnect\s*!==\s*false/.test(stripComments(read("backend/src/services/audio/ffmpegArgs.ts"))),
   "decodeArgs 未按 req.reconnect !== false 判定(可能把其它链路的重连一起关了)",
 );
 
