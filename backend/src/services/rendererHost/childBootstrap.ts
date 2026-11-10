@@ -68,6 +68,87 @@ export async function bootstrapChildDataLayer(opts: ChildDataLayerOptions): Prom
   }
 }
 
+/** 只做 DB 建表/回填的**轻量数据层**选项。 */
+export interface ChildDatabaseOptions {
+  logName: string;
+  /** 日志里对自身的称呼,如 "sendspin 子进程"。 */
+  label: string;
+}
+
+const dbLayerLoaded = new Set<string>();
+
+/**
+ * 只做「DB 建表 + 类型回填」:不注册内置插件、不发现外置插件。
+ *
+ * 供「插件层按需加载」的常驻子进程使用(目前是 sendspin):
+ *   - 设备上线/激活、6053 凭据、持久音量、拨号目标都只依赖 DB,必须在 mainReady 前就绪;
+ *   - 音源解析才需要插件层,推迟到首次 playMedia / preheat(见 ensureChildPluginLayer)。
+ *
+ * 与 `bootstrapChildDataLayer` 的顺序**不等价**:这里刻意不注册插件,因此
+ * `initDatabase()` 里 db-ready 钩子(插件行播种)不会在此时执行 ——
+ * 插件层稍后加载时 `onDatabaseReady` 会立即补跑(dbReady 已置位),播种不丢。
+ */
+export async function bootstrapChildDatabase(opts: ChildDatabaseOptions): Promise<void> {
+  if (dbLayerLoaded.has(opts.logName)) return;
+  const log = createLogger(opts.logName);
+  try {
+    const { initDatabase, backfillGenres } = await import("../../db/index.js");
+    initDatabase();
+    backfillGenres();
+    dbLayerLoaded.add(opts.logName);
+  } catch (e: any) {
+    log.error(`${opts.label} DB 初始化失败`, { err: e?.message || e });
+    throw e;
+  }
+}
+
+/** 插件层按需加载选项(可省略,默认 "renderer-child")。 */
+export interface ChildPluginLayerOptions {
+  logName?: string;
+  label?: string;
+  /** 外置插件发现用的版本号,默认取 process.env.APP_VERSION。 */
+  appVersion?: string;
+}
+
+/** 插件层单飞 Promise。失败即清空 —— 下一次起播可重试,不会永久锁死。 */
+let pluginLayerPromise: Promise<void> | null = null;
+/** 插件层是否已成功加载(停播回收据此判断「有没有可回收的内存」)。 */
+let pluginLayerLoaded = false;
+
+/** 插件层是否已加载完成(未加载的子进程本来就很轻,不需要回收)。 */
+export function isChildPluginLayerLoaded(): boolean {
+  return pluginLayerLoaded;
+}
+
+/**
+ * 按需加载**插件层**:注册内置插件 + 发现外置插件(单飞、幂等)。
+ *
+ * 调用点必须覆盖所有会解析音源的入口(子进程侧目前是 playMedia / groupPlay / preheat);
+ * 设备上线、配对、6053、音量等控制链路不依赖它。
+ *
+ * 为什么可以放在 DB 之后:插件目录通过 `onDatabaseReady` 登记播种钩子,
+ * 而 `onDatabaseReady` 在 dbReady 已置位时会**立即执行**,故晚注册不会丢插件行。
+ */
+export function ensureChildPluginLayer(opts: ChildPluginLayerOptions = {}): Promise<void> {
+  if (pluginLayerPromise) return pluginLayerPromise;
+  const logName = opts.logName ?? "renderer-child";
+  const label = opts.label ?? "子进程";
+  const t0 = Date.now();
+  pluginLayerPromise = (async () => {
+    const { registerBuiltinPlugins } = await import("../../plugins/builtins.js");
+    registerBuiltinPlugins();
+    const { discoverExternalPlugins } = await import("../../plugins/discovery.js");
+    await discoverExternalPlugins(opts.appVersion || process.env.APP_VERSION || "dev");
+    pluginLayerLoaded = true;
+    createLogger(logName).info(`${label}插件层按需加载完成 ms=${Date.now() - t0}`);
+  })().catch((e: any) => {
+    pluginLayerPromise = null;
+    createLogger(logName).error(`${label}插件层按需加载失败: ${e?.message || e}`);
+    throw e;
+  });
+  return pluginLayerPromise;
+}
+
 /**
  * 装 IPC 消息循环:过滤非对象消息 + 统一错误日志(不吞错,日志里带原文便于排障)。
  * 业务在 onMessage 里只写自己的分发逻辑。

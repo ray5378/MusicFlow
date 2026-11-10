@@ -1401,10 +1401,31 @@ describe("服务开关(startAirPlayService / isAirPlayEnabled / stopAirPlayServi
     await expect(Promise.resolve(handler({ type: "byebye", id: "b31-none" }))).resolves.toBeUndefined();
   });
 
-  it("startAirPlayService:fork 模式顺带把推流子进程拉起来(但不等它起完)", async () => {
+  it("startAirPlayService:fork 模式**不**预热推流子进程(空载零常驻,首次投屏/建桥再懒启动)", async () => {
     S.fork = true;
     C.startAirPlayService();
-    await vi.waitFor(() => expect(sup.start).toHaveBeenCalled());
+    // 若仍有 fire-and-forget 预热,微任务/定时器兜底后必然能看到 start。
+    await new Promise((r) => setTimeout(r, 20));
+    expect(sup.start).not.toHaveBeenCalled();
+  });
+
+  it("bridgePrepareDevice:懒启动子进程,并把设备落库音量/静音随载荷下发(子进程不碰 DB)", async () => {
+    S.fork = true;
+    S.setDevices([dev()]);
+    const now = new Date().toISOString();
+    sqlite.prepare("DELETE FROM airplay_device_state WHERE device_id = ?").run(devId());
+    sqlite.prepare(
+      "INSERT INTO airplay_device_state (device_id, volume, muted, updated_at) VALUES (?,?,?,?)",
+    ).run(devId(), 55, 1, now);
+    try {
+      await C.bridgePrepareDevice(devId(), "tok-bridge", "raop");
+      expect(sup.start).toHaveBeenCalledTimes(1);
+      const call = sup.rpc.mock.calls.find((c) => c[0] === "bridgePrepare");
+      expect(call?.[1]).toMatchObject({ deviceVolume: 55, deviceMuted: true });
+    } finally {
+      C.clearBridgeOwner(devId());
+      sqlite.prepare("DELETE FROM airplay_device_state WHERE device_id = ?").run(devId());
+    }
   });
 
   it("isAirPlayEnabled:没有插件行(表结构异常)→ false,不能把启动流程打死", () => {

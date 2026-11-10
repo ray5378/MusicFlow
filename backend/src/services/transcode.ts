@@ -21,7 +21,7 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import type { Readable } from "node:stream";
 import { createLogger } from "../utils/logger.js";
-import { decodeArgs, codecArgs } from "./audio/pipeline.js";
+import { decodeArgs, codecArgs } from "./audio/ffmpegArgs.js";
 
 const log = createLogger("TRANSCODE");
 const require_ = createRequire(import.meta.url);

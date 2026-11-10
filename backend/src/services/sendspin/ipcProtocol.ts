@@ -97,7 +97,10 @@ export type SendspinChildEvent =
    *  子进程的 streamFallback 缓存是 module-local Map,主进程读不到(2026-10-28 事故:
    *  子进程 18:28:22 已判死,主进程 18:28:46 重播时仍读到 unknown ⇒ 又播一遍试听片段)。 */
   | { t: "songUnplayable"; clientId: string; songId: string; reason: string }
-  | { t: "pauseStopIssued"; clientId: string };
+  | { t: "pauseStopIssued"; clientId: string }
+  /** 停播空闲:插件层按需加载占住的内存只能靠换进程释放(见 idleReclaim.ts)。
+   *  子进程只负责判定与上报,真正的 stop→start 由主进程 supervisor.recycle 执行。 */
+  | { t: "idleReclaim"; idleMs: number };
 
 /** 主进程 → child。 */
 export type ParentToSendspinChild = HostToChild<SendspinHostExtra>;

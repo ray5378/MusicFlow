@@ -18,12 +18,15 @@
 //     只有用户显式移除且不再回来时才需要人工清理。
 import { sqlite } from "../../db/index.js";
 import { createLogger } from "../../utils/logger.js";
+import { DEFAULT_AIRPLAY_VOLUME } from "./volumeDefault.js";
 
 const log = createLogger("AIRPLAY");
 
 /** 从未设置过音量的 AirPlay 设备缺省值(0-100)。
- *  与改动前的内存缺省保持一致(80),确保「无持久行」的旧行为逐字不变。 */
-export const DEFAULT_AIRPLAY_VOLUME = 80;
+ *  与改动前的内存缺省保持一致(80),确保「无持久行」的旧行为逐字不变。
+ *  值定义在 volumeDefault.ts(无依赖):子进程的 bridgeSession 也要用,不能经本文件
+ *  (本文件 import db/index,会让子进程在 import 时多开一条 SQLite 连接)。 */
+export { DEFAULT_AIRPLAY_VOLUME };
 
 export interface AirPlayVolumeState {
   volume: number;

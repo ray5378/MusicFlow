@@ -41,6 +41,7 @@ import {
 } from "./playerCore.js";
 import { syncGroupBridges, detachGroupBridge, type BridgeSocketSpec } from "./bridgeAttach.js";
 import { cleanupStaleBridgeSockets } from "../airplay/bridgeChannel.js";
+import { ensureChildPluginLayer } from "../rendererHost/childBootstrap.js";
 import type { QueueItem } from "../player/types.js";
 import { isLogLevel, setLogLevel } from "../../utils/logger.js";
 
@@ -119,6 +120,8 @@ export class SendspinChildController extends ChildRpcHost<SendspinChildToParent,
       }
       case "playMedia": {
         if (!srv) throw new Error("sendspin server 未运行");
+        // 插件层按需加载:音源解析(插件注册表)在这里才需要,空载不常驻。
+        await ensureChildPluginLayer({ logName: "sendspin-child", label: "sendspin 子进程" });
         const clientId = String(p.clientId);
         const item = p.item as QueueItem;
         playCore(srv, clientId, item, (cid, songId, message) => {
@@ -178,6 +181,8 @@ export class SendspinChildController extends ChildRpcHost<SendspinChildToParent,
         // Phase 3:p.bridge.sockets(主进程 bridgePrepare 产物)透传给 playGroupCore
         // 同步到组桥集合;只接受主进程下发的 socket,不自行发现 AirPlay。
         if (!srv) throw new Error("sendspin server 未运行");
+        // 插件层按需加载:同 playMedia(组起播也要解析音源)。
+        await ensureChildPluginLayer({ logName: "sendspin-child", label: "sendspin 子进程" });
         const members = Array.isArray(p.members) ? p.members.map(String) : [];
         const bridgeSockets: BridgeSocketSpec[] | undefined =
           Array.isArray(p.bridge?.sockets) && p.bridge.sockets.length > 0

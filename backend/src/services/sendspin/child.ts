@@ -3,10 +3,15 @@
 // 由 supervisor.ts fork(prod: dist/services/sendspin/child.js;dev: src/child.ts,
 // tsx loader 经 fork 继承)。常驻而非一次性,启动序列:
 //
-//   致命异常兜底 + 数据层 bootstrap(插件注册 + DB 建表/回填 + 外置插件发现,音源解析要用)
+//   致命异常兜底 + **轻量数据层**(仅 DB 建表/回填:设备上线/6053 凭据/音量恢复要用)
 //     → startSendspinInProcess(hooks)(WS 38927 + mDNS + 拨号 + 6053 桥 + 推流引擎)
 //     → mainReady(主进程 supervisor 解除等待)
 //     → 消息循环:RPC(playMedia/transport/poll/配对/拨号/6053…)+ cfg 热更新 + stop
+//
+// ⚠️ 插件层(内置插件注册 + 外置插件发现)是**按需加载**的:只在首次音源解析
+//    (playMedia / groupPlay / preheat)时由 ensureChildPluginLayer() 拉起。
+//    设备上线自动连接、配对、6053、音量等控制链路都不依赖它 —— 空载不再常驻
+//    整套插件模块图(22 内置 + 外置),冷启动内存明显更低。
 //
 // 事件回流:设备激活/断开/起播失败 → IPC → 主进程注册/注销 QC/PM 播放器。
 // 状态镜像:周期+脏触发推 state(150ms 节流 / 1s 兜底扫),主进程同步读。
@@ -22,13 +27,16 @@ import {
   createProcessSend,
   installChildFatalHandlers,
   installChildMessageLoop,
-  bootstrapChildDataLayer,
+  bootstrapChildDatabase,
+  ensureChildPluginLayer,
+  isChildPluginLayerLoaded,
   exitChildSoon,
 } from "../rendererHost/childBootstrap.js";
 import { getServer, setServer } from "./runtime.js";
 import type { ParentToSendspinChild, SendspinChildToParent } from "./ipcProtocol.js";
 import type { SendspinChildController } from "./childMain.js";
 import { warmSongInChild } from "./preheatChild.js";
+import { startIdleReclaim } from "../rendererHost/idleReclaim.js";
 
 const LOG_NAME = "sendspin-child";
 const LABEL = "sendspin 子进程";
@@ -99,6 +107,16 @@ async function main(): Promise<void> {
   const srv = getServer();
   send({ t: "mainReady", serverId: srv?.serverId ?? "", port: srv?.port ?? 0 });
   controller.markReady();
+  // 停播空闲回收:插件层加载过、且连续 2 分钟没有任何组持有 current → 请主进程换进程。
+  // 子进程只判定与上报;stop→start 由 supervisor.recycle 执行(设备按 mDNS/拨号目标重连)。
+  startIdleReclaim({
+    pluginLayerLoaded: isChildPluginLayerLoaded,
+    isBusy: () => {
+      for (const g of getServer()?.groups.values() ?? []) if (g.current) return true;
+      return false;
+    },
+    onIdle: (idleMs) => send({ t: "idleReclaim", idleMs }),
+  });
 }
 
 // ---- bootstrap(与 batch/child.ts 一致;音源解析/换源探测需要插件与库结构) ----
@@ -109,6 +127,8 @@ installChildMessageLoop<ParentToSendspinChild>(LOG_NAME, LABEL, async (raw) => {
   if (raw.t === "preheat") {
     // 主进程在曲末前 9s 就算好了「可播结论」;在本进程重算一次,只为把结论落进
     // **本进程**的 module-local 缓存 —— 泵起播才能命中 fresh-cache(详见 preheatChild.ts)。
+    // 插件层按需加载:预热本身要解析音源,必须先就绪;失败只记日志,起播时还会再兜一次。
+    await ensureChildPluginLayer({ logName: LOG_NAME, label: LABEL });
     warmSongInChild(raw.songId);
     return;
   }
@@ -124,7 +144,8 @@ installChildMessageLoop<ParentToSendspinChild>(LOG_NAME, LABEL, async (raw) => {
   }
 });
 
-bootstrapChildDataLayer({ logName: LOG_NAME, label: LABEL })
+// 只等 DB 就绪就起运行时:设备上线/自动连接不依赖插件层(见文件头说明)。
+bootstrapChildDatabase({ logName: LOG_NAME, label: LABEL })
   .then(() => main())
   .catch(() => process.exit(1));
 

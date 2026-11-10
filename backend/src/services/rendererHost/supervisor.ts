@@ -82,6 +82,8 @@ export class RendererHostSupervisor<
   private pending = new Map<number, PendingRpc>();
   private respawnTimer: ReturnType<typeof setTimeout> | null = null;
   private respawnDelay = RENDERER_RESPAWN_BASE_MS;
+  /** 是否正在计划内回收重启(recycle 单飞)。 */
+  private recycling = false;
   private startedAt = 0;
   private lastHeartbeat = 0;
   private heartbeatCheck: ReturnType<typeof setInterval> | null = null;
@@ -153,11 +155,45 @@ export class RendererHostSupervisor<
     }
     const child = this.child;
     if (!child) return;
+    // ⚠ 必须等旧进程**真正退出**再返回:recycle 紧接着 fork 新进程,若旧进程的
+    // exit 事件晚到,onExit 会无条件 `this.child = null`,把新 child 的引用清掉
+    // (表现为子进程活着、镜像照收,但所有 RPC 报「子进程未运行」)。
+    // 监听在 rpc/kill 之前挂,避免事件先到导致永远等不到。
+    const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
     try {
       await this.rpc("stop", undefined, this.opts.stopTimeoutMs ?? RENDERER_STOP_TIMEOUT_MS);
     } catch { /* 超时/已死都走强杀兜底 */ }
     this.killChild("SIGKILL");
+    let exitTimer: ReturnType<typeof setTimeout> | null = null;
+    await Promise.race([
+      exited,
+      new Promise<void>((resolve) => { exitTimer = setTimeout(resolve, 3_000); }),
+    ]);
+    if (exitTimer) clearTimeout(exitTimer);
     this.log.info(`${this.opts.name} 子进程已停止`);
+  }
+
+  /**
+   * 计划内回收重启:停 → 起,不走「意外退出」分支(不报 error、不计退避)。
+   *
+   * 用途:按需加载的模块(如插件层)一旦 import 就留在子进程里,Node 无法卸载;
+   * 停播空闲后换个新进程是唯一真正把这块内存还给系统的办法(见 rendererHost/idleReclaim.ts)。
+   * 期间设备会短暂断连,mainReady 后按既有路径(mDNS/拨号目标)自动重连。
+   */
+  async recycle(reason: string): Promise<void> {
+    if (!this.running || this.stopping || this.recycling) return;
+    this.recycling = true;
+    this.log.info(`${this.opts.name} 子进程回收重启: ${reason}`);
+    try {
+      await this.stop();
+      await this.start();
+    } catch (e: any) {
+      // 起不来就置为未运行:下一次用户操作(路由/配置)会再触发 start。
+      this.running = false;
+      this.log.error(`${this.opts.name} 子进程回收失败: ${e?.message || e}`);
+    } finally {
+      this.recycling = false;
+    }
   }
 
   /** RPC 请求:发 req{id,op,payload},按 id 等 res。子进程不在则立刻失败。 */
@@ -199,7 +235,7 @@ export class RendererHostSupervisor<
     });
     this.child = child;
     child.on("message", (raw: ChildToHost<TReady, TSnapshot, TEvent>) => this.onMessage(raw));
-    child.once("exit", (code, signal) => this.onExit(code, signal));
+    child.once("exit", (code, signal) => this.onExit(child, code, signal));
     // 等 mainReady(或失败)。
     await new Promise<void>((resolve, reject) => {
       const onMsg = (raw: ChildToHost<TReady, TSnapshot, TEvent>) => {
@@ -269,7 +305,10 @@ export class RendererHostSupervisor<
     }
   }
 
-  private onExit(code: number | null, signal: string | null): void {
+  private onExit(child: ChildProcess, code: number | null, signal: string | null): void {
+    // 旧进程的迟到 exit:新进程已经接管(回收重启/快速重试),绝不能清掉新 child 的引用,
+    // 否则会出现「进程活着、镜像照收、RPC 全报未运行」的僵死态。
+    if (this.child && this.child !== child) return;
     this.child = null;
     this.pendingBootCleanup?.();
     this.pendingBootCleanup = null;

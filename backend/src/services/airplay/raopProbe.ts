@@ -9,14 +9,15 @@
 //  - S1:握手失败 → 先发一次显式 TEARDOWN 探测(新 RTSP 连接,无 session 也发,
 //    设备回 454 无害)→ 退避 5s/15s 两档重试完整握手;probe 不可达(设备真离线)
 //    立即放弃,不空耗 20s。
-//  - S3:容器启动 60s 后(设备清单已由 mDNS 回填)对每台已知 AirPlay 设备各发
-//    一次 blind TEARDOWN 探测,把僵死态在用户起播前清掉。
+//  - S3:容器启动 12s 后对每台**已有可路由地址**的 AirPlay 设备各发一次 blind
+//    TEARDOWN 探测,把僵死态在用户起播前清掉;45s 兜底轮补探 mDNS 迟到的设备。
 //
 // 分层:RTSP 探测的本体(raopTeardownProbe)在 raop.ts(纯协议,子进程执行,
 // 无状态可单测);本文件是主进程编排(RPC + 重试梯 + boot 挂钩)。
 import { airplaySupervisor } from "./supervisor.js";
-import { getAirPlayDevice, getAirPlayDevices } from "./discovery.js";
-import { isBridgeOwned } from "./control.js";
+import { getAirPlayDevice, getAirPlayDevices, type AirPlayDevice } from "./discovery.js";
+import { ensureAirplayHost, hasActiveSession, isBridgeOwned } from "./control.js";
+import { isAirPlayForkMode } from "./mode.js";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("airplay-raopProbe");
@@ -51,6 +52,16 @@ export function isBridgeHandshakeDeviceError(msg: string): boolean {
 export async function raopProbeDevice(deviceId: string, timeoutMs = 6_000): Promise<RaopProbeResult> {
   const dev = getAirPlayDevice(deviceId);
   if (!dev) return { reachable: false, optionsStatus: null, teardownStatus: null, detail: `设备不存在: ${deviceId}` };
+  // 2026-11-11:开机预热已去掉,但 S3 清理探测是**真实工作**(要在子进程里跑 RTSP
+  // TEARDOWN) —— 这里按需把子进程拉起来;探测完它照常空闲 3 分钟后被回收。
+  // 探不到就按「未运行」回落,不阻断启动流程。
+  if (isAirPlayForkMode() && !airplaySupervisor.isRunning()) {
+    try {
+      await ensureAirplayHost();
+    } catch (e) {
+      log.warn(`probe 懒启动 airplay 子进程失败(按未运行回落): ${(e as Error)?.message || e}`);
+    }
+  }
   if (!airplaySupervisor.isRunning()) {
     return { reachable: false, optionsStatus: null, teardownStatus: null, detail: "airplay 子进程未运行" };
   }
@@ -113,23 +124,39 @@ export async function retryBridgePrepareWithProbe(deps: BridgePrepareRetryDeps):
  *  立刻起播建立的合法桥会话,绝不能被 45s 兜底轮清掉。 */
 const bootProbedDevices = new Set<string>();
 
+/** 可探测 = mDNS 已把可路由 host/port 回填进来。
+ *  持久化行恒为 `host:"" port:0`(airplay_devices 不存地址),拿它盲发 TEARDOWN
+ *  只会连 `:0` 失败 —— 2026-11 实测 72h 里 89 次失败、仅 8 次真正拿到地址。
+ *  这类设备既不探测 **也不拉起子进程**(见 runBootClearProbes)。 */
+function probeable(d: AirPlayDevice): boolean {
+  return !!d.host && d.port > 0;
+}
+
 /** S3:对已知 AirPlay 设备发 blind TEARDOWN 探测(幂等,454 无害)。
  *  @param onlyUnprobed true = 只探测首轮没确认过的设备(兜底轮语义)。
- *  两类设备一律跳过:
- *  ① isBridgeOwned(正被合法桥会话占用 —— 用户可能已起播,blind TEARDOWN 会杀掉它);
- *  ② 兜底轮里首轮已确认过的设备。
- *  设备清单为空(mDNS 发现未完成)时直接跳过本轮。 */
+ *  四类设备一律跳过:
+ *  ① 无可用地址(host/port 未回填)—— 连不上,且不该为它拉起子进程;
+ *  ② isBridgeOwned / hasActiveSession(正被合法会话占用 —— blind TEARDOWN 会杀掉它);
+ *  ③ 兜底轮里首轮已确认过的设备;
+ *  ④ 设备清单为空(mDNS 发现未完成)时整轮跳过。
+ *  无地址的设备**不写入** bootProbedDevices,留待兜底轮(mDNS 回填后再探)。 */
 export async function runBootClearProbes(onlyUnprobed = false): Promise<void> {
-  const devices = getAirPlayDevices();
-  if (devices.length === 0) {
+  const all = getAirPlayDevices();
+  if (all.length === 0) {
     log.info("[boot-probe] 设备清单为空(发现未完成),跳过本轮");
     return;
   }
-  log.info(`[boot-probe] 启动后清理探测:${devices.length} 台 AirPlay 设备${onlyUnprobed ? "(兜底轮,只补首轮未确认的)" : ""}`);
+  const devices = all.filter(probeable);
+  if (devices.length === 0) {
+    // 只记一行:否则每次开机 5~N 条噪声,且这里绝不能触发子进程懒启动。
+    log.info(`[boot-probe] ${all.length} 台设备均无可用地址(mDNS 未回填),本轮不探测、不拉起子进程${onlyUnprobed ? "(兜底轮)" : ""}`);
+    return;
+  }
+  log.info(`[boot-probe] 启动后清理探测:${devices.length} 台 AirPlay 设备(跳过 ${all.length - devices.length} 台无地址)${onlyUnprobed ? "(兜底轮,只补首轮未确认的)" : ""}`);
   for (const d of devices) {
-    if (isBridgeOwned(d.id)) {
+    if (isBridgeOwned(d.id) || hasActiveSession(d.id)) {
       bootProbedDevices.add(d.id);
-      log.info(`[boot-probe] device=${d.id} 正被桥会话占用(用户已起播)→ 跳过`);
+      log.info(`[boot-probe] device=${d.id} 正被会话占用(用户已起播)→ 跳过`);
       continue;
     }
     if (onlyUnprobed && bootProbedDevices.has(d.id)) continue;
@@ -144,7 +171,9 @@ export async function runBootClearProbes(onlyUnprobed = false): Promise<void> {
 /** S3 boot 挂钩:12s 首轮 + 45s 兜底轮(只补首轮未确认的设备)。
  *  提前依据:loadPersistedAirPlayDevices() 启动即恢复持久化清单,不等 mDNS;
  *  子进程 fork + 握手 ~3s。12s 首轮赶在用户起播前;45s 兜底覆盖 mDNS 迟到的
- *  设备 —— 已确认过的设备(含用户已起播的)绝不重复探测。 */
+ *  设备 —— 首轮无地址的设备不会被标记,45s 时若地址已回填就补探一轮。
+ *  已确认过 / 正被会话占用的设备绝不重复探测(blind TEARDOWN 会真杀会话)。
+ *  两轮都没有可用地址时**不拉起子进程**(2026-11-11:开机零常驻)。 */
 export function scheduleBootClearProbes(): void {
   const t1 = setTimeout(() => { void runBootClearProbes(false).catch((e) => log.error(`[boot-probe] 首轮失败: ${(e as Error)?.message || e}`)); }, 12_000);
   t1.unref?.();

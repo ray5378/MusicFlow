@@ -35,6 +35,8 @@ export interface AirplayHostHooks {
   /** Phase 5(§5.2):airplay 子进程崩溃退避重启完成 —— 主进程据此重建桥路由
    *  (原 token 重发 bridgePrepare,泵侧 BridgeMember 退避重连自动接上)。 */
   onBridgeChildRestarted?: () => void;
+  /** 停播空闲回收:子进程连续 N 分钟无 native/桥会话 → 主进程停掉它(下次投屏懒启动)。 */
+  onIdleReclaim?: (idleMs: number) => void;
 }
 
 class AirplaySupervisor extends RendererHostSupervisor<
@@ -66,6 +68,10 @@ class AirplaySupervisor extends RendererHostSupervisor<
           // ev 本身就是 AirplaySessionEndInfo 的形状(current/positionSec/durationSec/
           // loudnessStderr),原样交给主进程,不再只挑 loudnessStderr 传。
           try { hooks.onSessionEnded?.(ev.deviceId, ev); } catch { /* 上报失败不拖垮桥 */ }
+          return;
+        }
+        if (ev.t === "idleReclaim") {
+          try { hooks.onIdleReclaim?.(ev.idleMs); } catch { /* 回收失败不影响子进程 */ }
         }
       },
     });

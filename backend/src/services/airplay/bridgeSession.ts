@@ -54,7 +54,7 @@ import {
   type BridgeStreamEndReason,
   type RaopSession,
 } from "./raop.js";
-import { getAirPlayVolumeState, DEFAULT_AIRPLAY_VOLUME } from "./deviceState.js";
+import { DEFAULT_AIRPLAY_VOLUME } from "./volumeDefault.js";
 import { degreesToDb } from "./decoder.js";
 import { AP2_SEND_ERROR_LIMIT, Ap2StreamSession, type Ap2StreamOptions, type Ap2StreamState } from "./ap2/ap2Stream.js";
 import { createLogger } from "../../utils/logger.js";
@@ -169,6 +169,8 @@ function pushInitialVolume(
   deviceId: string,
   groupVolume?: number,
   sameHostDlnaPeer?: string,
+  /** 无组上下文时的设备落库音量/静音(主进程从 DB 解析后下发;子进程不碰 DB)。 */
+  deviceFallback?: { volume?: number; muted?: boolean },
 ): void {
   try {
     if (raopSuppressInitialVolume()) {
@@ -181,16 +183,16 @@ function pushInitialVolume(
     }
     // v4.9.3(§音量语义):组上下文桥会话初始音量 = player_groups 落库值(用户裁定:
     // 流转/起播绝不采用成员设备自身音量,否则「流转后组音量变成员旧值」);
-    // 无组上下文(undefined)回落 airplay_device_state 设备落库值(旧行为)。
+    // 无组上下文(undefined)回落设备落库值 —— 由主进程随 bridgePrepare 下发
+    // (2026-11-11:子进程不再 import deviceState,那条链会拉 db/index 多开一条连接)。
     if (typeof groupVolume === "number") {
       const gdb = groupVolume === 0 ? -144 : degreesToDb(groupVolume);
       player.setVolumeDb(gdb);
       log.info(`push initial volume: ${gdb.toFixed(2)}dB (groupVol=${groupVolume}%) device=${deviceId}`);
       return;
     }
-    const saved = getAirPlayVolumeState(deviceId);
-    const vol = saved?.volume ?? DEFAULT_AIRPLAY_VOLUME;
-    const db = saved?.muted || vol === 0 ? -144 : degreesToDb(vol);
+    const vol = deviceFallback?.volume ?? DEFAULT_AIRPLAY_VOLUME;
+    const db = deviceFallback?.muted || vol === 0 ? -144 : degreesToDb(vol);
     player.setVolumeDb(db);
     log.info(`push initial volume: ${db.toFixed(2)}dB (vol=${vol}%) device=${deviceId}`);
   } catch (e: any) {
@@ -912,8 +914,13 @@ export interface BridgeSessionOpts {
   /** A/V 标定位移(微秒,正 = 桥延后;主进程按 settings 下发)。见 bridgeCalib.ts。 */
   anchorShiftUs?: number;
   /** v4.9.3(§音量语义):桥会话初始音量(0-100,player_groups 落库值,主进程下发)。
-   *  undefined = 无组上下文,pushInitialVolume 回落设备落库值(旧行为)。 */
+   *  undefined = 无组上下文,pushInitialVolume 回落 deviceVolume(旧行为)。 */
   initialVolume?: number;
+  /** 2026-11-11:无组上下文时的设备落库音量/静音(主进程从 airplay_device_state 解析后下发)。
+   *  子进程**不 import deviceState** —— 那条链会拉 db/index,在 import 时就多开一条
+   *  SQLite 连接(airplay 子进程本该零 DB)。 */
+  deviceVolume?: number;
+  deviceMuted?: boolean;
   /** v4.9.4-exp4:同 host DLNA renderer id(主进程判定后下发;子进程注册表恒空,
    *  不可自查)。初始 SET_PARAMETER volume 的 Linkplay 豁免依据。 */
   sameHostDlnaPeer?: string;
@@ -1112,7 +1119,10 @@ export class BridgeSession {
     this.raopSession = session;
     this.player = player;
     this.connected = true;
-    pushInitialVolume(player, this.opts.deviceId, this.opts.initialVolume, this.opts.sameHostDlnaPeer);
+    pushInitialVolume(player, this.opts.deviceId, this.opts.initialVolume, this.opts.sameHostDlnaPeer, {
+      volume: this.opts.deviceVolume,
+      muted: this.opts.deviceMuted,
+    });
     // exp4:RECORD 后立即灌静音(缺省关闭)—— 把「设备见到 RTP 流」压到 solo 量级。
     // 必须传 session:端口在这里才被 apply,否则 sendto 目标端口=0(见 primeSilence 注释)。
     if (raopBridgeConnectPrimeEnabled()) {
@@ -1171,12 +1181,12 @@ export class BridgeSession {
     return Math.max(1, this.opts.ap2?.latencyMin ?? AP2_DEFAULT_LATENCY_FRAMES);
   }
 
-  /** AP2 初始音量(dB,0-100 标尺 → -30..0dB,静音 → -144):与 RAOP 同源(库值,失败回退 80)。 */
+  /** AP2 初始音量(dB,0-100 标尺 → -30..0dB,静音 → -144):与 RAOP 同源(主进程下发的
+   *  设备落库值,未下发回退 80 —— 子进程不读 DB)。 */
   private ap2InitialVolumeDb(): number {
     try {
-      const saved = getAirPlayVolumeState(this.deviceId);
-      const vol = saved?.volume ?? DEFAULT_AIRPLAY_VOLUME;
-      return saved?.muted || vol === 0 ? -144 : degreesToDb(vol);
+      const vol = this.opts.deviceVolume ?? DEFAULT_AIRPLAY_VOLUME;
+      return this.opts.deviceMuted || vol === 0 ? -144 : degreesToDb(vol);
     } catch {
       return degreesToDb(DEFAULT_AIRPLAY_VOLUME);
     }
@@ -1756,7 +1766,10 @@ export class BridgeSession {
         this.timingCountAtFire = 0;
         this.raopReconnectAttempt = 0;
         log.info(`[airplay-bridge] raop reconnected: device=${this.deviceId}(新 RECORD,等待新代次首帧重锚)`);
-        pushInitialVolume(player, this.deviceId, this.opts.initialVolume, this.opts.sameHostDlnaPeer);
+        pushInitialVolume(player, this.deviceId, this.opts.initialVolume, this.opts.sameHostDlnaPeer, {
+          volume: this.opts.deviceVolume,
+          muted: this.opts.deviceMuted,
+        });
         if (raopBridgeConnectPrimeEnabled()) {
           try { player.primeSilence(RAOP_CONNECT_PRIME_CHUNKS, session); } catch (e: any) { log.error(`prime silence failed(reconnect): ${e?.message || e}`); }
         }

@@ -89,6 +89,12 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
     return { t: "state", ...this.runtime.snapshot() };
   }
 
+  /** 是否还有活要干(native 会话或桥会话任一存在)—— 停播空闲回收的判定依据。
+   *  桥会话不在 runtime.sessions 里(见 setVolumeDb 注释),必须两张表一起看。 */
+  hasActiveWork(): boolean {
+    return this.runtime.snapshot().sessions.length > 0 || this.bridgeSessions.list().length > 0;
+  }
+
   private async dispatch(op: string, p: any): Promise<unknown> {
     switch (op) {
       case "cast": {
@@ -192,7 +198,7 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
   // ------------------------- Phase 3:桥会话管理 -------------------------
 
   private async prepareBridge(args: BridgePrepareArgs): Promise<BridgePreparedResult> {
-    const { deviceId, socketPath, token, protocol, host, port, pk, et, anchorShiftUs, ap2, initialVolume, sameHostDlnaPeer, groupKey } = args;
+    const { deviceId, socketPath, token, protocol, host, port, pk, et, anchorShiftUs, ap2, initialVolume, deviceVolume, deviceMuted, sameHostDlnaPeer, groupKey } = args;
     if (!deviceId || !socketPath || !token) {
       throw new Error("bridgePrepare: deviceId/socketPath/token 必填");
     }
@@ -214,6 +220,9 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
         anchorShiftUs,
         // v4.9.3(§音量语义):桥会话初始音量透传(0-100;undefined 回落设备落库值)。
         initialVolume,
+        // 2026-11-11:无组上下文时的设备落库音量/静音(主进程解析后下发,子进程不碰 DB)。
+        deviceVolume,
+        deviceMuted,
         // exp4:同 host DLNA renderer(主进程判定)——桥侧初始音量豁免依据。
         sameHostDlnaPeer,
         // AP2 realtime 建链载荷(仅 ap2-* 协议时非空;RAOP 传 undefined ⇒ 行为不变)。

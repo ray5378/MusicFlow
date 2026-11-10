@@ -428,6 +428,11 @@ export async function startSendspinService(port?: number): Promise<SendspinRunti
       log.warn(`sendspin 判死回传: ${songId} (${reason}) ⇒ 主进程记负缓存`);
       markSongUnplayableInMain(songId);
     },
+    // 停播空闲回收:插件层(按需加载)已常驻在子进程里,Node 卸不掉 → 换进程释放。
+    // 设备会经 mDNS/拨号目标自动重连(与崩溃重启同一路径),QC/PM 注册在 activated 里重建。
+    onIdleReclaim: (idleMs) => {
+      void sendspinSupervisor.recycle(`停播空闲 ${Math.round(idleMs / 1000)}s,回收插件层内存`);
+    },
   });
   await sendspinSupervisor.start(port ?? pluginCfg.port);
   return null;

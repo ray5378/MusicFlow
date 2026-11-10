@@ -326,6 +326,8 @@ export async function bridgePrepareDevice(
 ): Promise<{ listening: true; socketPath: string }> {
   const dev = getAirPlayDevice(deviceId);
   if (!dev) throw new Error(`AirPlay 设备不存在: ${deviceId}`);
+  // 懒启动(2026-11-11):开机预热已去掉,首次建桥在这里把子进程拉起来(与冷建 settle 并行)。
+  if (isAirPlayForkMode()) await ensureAirplayHost();
   const socketPath = bridgeSocketPath(deviceId, token);
   // v4.9.4:桥 prepare 冷建路径补「同 host DLNA settle」—— 直连路径 2026-10-22 已修
   // (yieldSiblingDlnaForAirPlay),桥路径漏了:DLNA Stop 后 ~500ms 内即建 RAOP 会话,
@@ -358,6 +360,8 @@ export async function bridgePrepareDevice(
       log.info(`[bridge-prepare] 同 host DLNA settle 完成,开始建桥会话`, { deviceId, dlnaPeer: peer, ms: Date.now() - t });
     }
   }
+  // 2026-11-11:设备落库音量/静音读一次,随 bridgePrepare 下发(子进程不碰 DB)。
+  const volState = getAirPlayVolumeState(deviceId);
   const r = await airplaySupervisor.rpc<{ listening: true; socketPath: string }>("bridgePrepare", {
     deviceId,
     socketPath,
@@ -380,6 +384,11 @@ export async function bridgePrepareDevice(
         : 0,
     // v4.9.3(§音量语义):桥会话初始音量(0-100,player_groups 落库值);子进程不碰 DB。
     initialVolume: opts?.initialVolume,
+    // 2026-11-11:无组上下文时的设备落库音量/静音 —— 子进程不 import deviceState
+    // (那条链会拉 db/index,在 import 时就多开一条 SQLite 连接),一律由主进程解析下发。
+    // 语义与改动前桥侧自读一致(无行 → 缺省 80 / 未静音)。
+    deviceVolume: volState?.volume ?? DEFAULT_AIRPLAY_VOLUME,
+    deviceMuted: volState?.muted ?? false,
     // exp4:同 host DLNA renderer(主进程判定;undefined = 无,Linkplay 豁免不生效)。
     sameHostDlnaPeer: dlnaPeer,
     // D7(2026-11-01):组 id 仅作「同组同 gen 共享锚点」的键 —— 子进程据此让同组各成员
@@ -1446,7 +1455,7 @@ export async function handleAirplaySessionEnded(
 
 /** 确保 airplay 子进程在跑(fork 模式)。懒启动兜底:服务启动时的 start 是 fire-and-forget;
  *  in-flight 去重,避免并发投屏各 fork 一个。 */
-async function ensureAirplayHost(): Promise<void> {
+export async function ensureAirplayHost(): Promise<void> {
   if (airplaySupervisor.isRunning()) return;
   hostStarting ??= (async () => {
     airplaySupervisor.setHooks({
@@ -1460,6 +1469,16 @@ async function ensureAirplayHost(): Promise<void> {
         void import("../group/protocolPlayer.js")
           .then((m) => m.rebuildBridgeRoutes())
           .catch((err) => log.warn("桥路由重建失败(忽略)", { err: (err as Error)?.message || err })),
+      // 停播空闲回收(2026-11-11):子进程连续 ~3 分钟无 native/桥会话 → 直接停掉,
+      // 下次投屏/建桥按 ensureAirplayHost 懒启动。停之前再核一次主进程侧事实
+      // (镜像 native 会话 + 桥 owner 登记),避免与刚落地的投屏抢跑。
+      onIdleReclaim: (idleMs) => {
+        if (airplaySupervisor.mirror.sessions.size > 0 || bridgeOwners.size > 0) return;
+        log.info(`airplay 子进程空闲 ${Math.round(idleMs / 1000)}s,停掉(下次投屏懒启动)`);
+        void airplaySupervisor
+          .stop()
+          .catch((err) => log.warn("airplay 子进程空闲停止失败(忽略)", { err: (err as Error)?.message || err }));
+      },
     });
     await airplaySupervisor.start();
   })().finally(() => { hostStarting = null; });
@@ -1862,10 +1881,8 @@ export function startAirPlayService(): void {
     .then((m) => m.cleanupStaleBridgeSockets())
     .then((n) => { if (n > 0) log.info(`mfab 残留 socket 清理: ${n} 个`); })
     .catch(() => { /* 清理失败不拖垮启动 */ });
-  // fork 模式:顺带把推流子进程拉起来(不阻塞启动流程;投屏时还有懒启动兜底)。
-  if (isAirPlayForkMode()) {
-    void ensureAirplayHost().catch((err) => log.error("airplay 子进程启动失败", { err: (err as Error)?.message || err }));
-  }
+  // fork 模式**不预热**子进程(2026-11-11):空载常驻毫无收益,首次投屏/建桥时
+  // 由 ensureAirplayHost 懒启动(多 ~0.3s 握手);停播空闲 3 分钟由子进程上报回收。
 }
 
 /** AirPlay renderer 插件是否启用(plugins 表 airplay-renderer 行)。 */

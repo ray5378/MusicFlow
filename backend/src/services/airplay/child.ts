@@ -21,6 +21,7 @@ import {
   exitChildSoon,
 } from "../rendererHost/childBootstrap.js";
 import { createLogger } from "../../utils/logger.js";
+import { startIdleReclaim } from "../rendererHost/idleReclaim.js";
 import type { ParentToAirplayChild, AirplayChildToParent } from "./ipcProtocol.js";
 import type { AirplayChildController } from "./childMain.js";
 
@@ -38,6 +39,13 @@ async function main(): Promise<void> {
   send({ t: "mainReady", pid: process.pid });
   controller.markReady();
   log.info(`airplay 推流运行时已就绪: pid=${process.pid}`);
+  // 停播空闲回收:连续 3 分钟无 native 会话、无桥会话 → 请主进程停掉本进程
+  // (下次投屏/建桥由 ensureAirplayHost 懒启动)。子进程只判定与上报。
+  startIdleReclaim({
+    afterMs: 180_000,
+    isBusy: () => controller?.hasActiveWork() ?? false,
+    onIdle: (idleMs) => send({ t: "idleReclaim", idleMs }),
+  });
 }
 
 installChildFatalHandlers(LOG_NAME, LABEL);

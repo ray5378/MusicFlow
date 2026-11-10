@@ -46,6 +46,8 @@ export interface SupervisorHooks {
   /** 子进程把某首歌判死(提前 EOF / 完整性判官) —— 主进程据此自己写负缓存。
    *  子进程那份 streamFallback 缓存是 module-local,主进程读不到(2026-10-28 事故)。 */
   onSongUnplayable?: (songId: string, reason: string) => void;
+  /** 停播空闲 → 回收重启子进程,释放按需加载的插件层内存(idleReclaim.ts)。 */
+  onIdleReclaim?: (idleMs: number) => void;
 }
 
 /** 子进程业务事件 → hooks 分发(纯函数抽出,便于单测)。
@@ -66,6 +68,9 @@ export function dispatchSendspinChildEvent(ev: SendspinChildEvent, hooks: Superv
       return;
     case "songUnplayable":
       try { hooks.onSongUnplayable?.(ev.songId, ev.reason); } catch { /* ignore */ }
+      return;
+    case "idleReclaim":
+      try { hooks.onIdleReclaim?.(ev.idleMs); } catch { /* ignore */ }
       return;
     default:
       return;

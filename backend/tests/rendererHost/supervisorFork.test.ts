@@ -138,6 +138,25 @@ describe("RendererHostSupervisor 真 fork 冒烟", () => {
     expect(alive(pid2)).toBe(true);
   }, 30_000);
 
+  it("recycle():停→起换新进程,RPC 仍可用(旧进程迟到的 exit 不得清掉新 child)", async () => {
+    const sup = makeSup();
+    await sup.start();
+    const pid1 = sup.childPid!;
+    expect(pid1).toBeGreaterThan(0);
+
+    await sup.recycle("单测:停播回收");
+
+    expect(sup.isRunning()).toBe(true);
+    const pid2 = sup.childPid!;
+    expect(pid2).not.toBe(pid1);
+    // 旧进程必须被真正收掉,不能留双份常驻
+    await waitFor(() => !alive(pid1));
+    expect(alive(pid1)).toBe(false);
+    // 回归点:旧进程 exit 晚到曾会把 this.child 清空 → 这里必须还能打到新进程
+    const r = await sup.rpc<{ pong: boolean; pid: number }>("ping");
+    expect(r.pid).toBe(pid2);
+  }, 30_000);
+
   it("子进程启动即退 → start() 明确报错,不静默半死", async () => {
     const sup = makeSup({ STUB_EXIT_ON_BOOT: "1" });
     await expect(sup.start()).rejects.toThrow(/启动即退/);

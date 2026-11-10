@@ -33,7 +33,10 @@ export interface AirplayReadyInfo {
  *  主进程据此判断该上报 IDLE 还是**抑制**过期 IDLE(被新起播/显式 stop 取代的旧会话
  *  不得污染新曲的 tracker),并用真实落点驱动自动续播。
  *  loudnessStderr 可附解码器全量 stderr(P0-4 解析 loudnorm 用,截断传,无则省略)。 */
-export type AirplayChildEvent = { t: "sessionEnded"; deviceId: string } & AirplaySessionEndInfo;
+export type AirplayChildEvent =
+  | ({ t: "sessionEnded"; deviceId: string } & AirplaySessionEndInfo)
+  /** 停播空闲回收:子进程连续 afterMs 无会话/无桥 → 主进程停掉它(下次投屏懒启动)。 */
+  | { t: "idleReclaim"; idleMs: number };
 
 // ------------------------- Phase 2:桥接 op 载荷(§6.2) -------------------------
 
@@ -72,6 +75,11 @@ export interface BridgePrepareArgs {
   /** v4.9.3(§音量语义):桥会话初始音量(0-100,player_groups 落库值,主进程算好)。
    *  undefined = 无组上下文,桥侧回落设备落库值(旧行为)。 */
   initialVolume?: number;
+  /** 无组上下文(initialVolume=undefined)时的设备落库音量/静音(0-100)。
+   *  2026-11-11:主进程从 airplay_device_state 解析后下发 —— 子进程不 import
+   *  deviceState(那条链会拉 db/index,在 import 时就多开一条 SQLite 连接)。 */
+  deviceVolume?: number;
+  deviceMuted?: boolean;
   /** v4.9.4-exp4:同 host DLNA renderer id(主进程 dlnaPeerOfAirPlay 判定后下发)。
    *  ⚠️ 子进程**不得**自查注册表 —— airplay discovery 的 devices 与 DLNA
    *  cachedDevices 都在主进程,子进程里两张表恒空(240 实证:E1 开了

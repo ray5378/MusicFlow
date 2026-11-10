@@ -25,16 +25,21 @@ const h = vi.hoisted(() => {
   };
   const supervisorRunning = { value: true };
   const bridgeOwned = new Set<string>();
-  return { devices, byId, rpcCalls, rpcReply, supervisorRunning, bridgeOwned };
+  const activeSessions = new Set<string>();
+  const ensureCalls = { value: 0 };
+  return { devices, byId, rpcCalls, rpcReply, supervisorRunning, bridgeOwned, activeSessions, ensureCalls };
 });
 
 vi.mock("../../src/services/airplay/discovery.js", () => ({
   getAirPlayDevice: (id: string) => h.byId.get(id),
   getAirPlayDevices: () => h.devices,
 }));
-// raopProbe 依赖 control.js 的 isBridgeOwned(S3 防杀合法会话),mock 掉避免加载重模块。
+// raopProbe 依赖 control.js 的 isBridgeOwned / hasActiveSession(S3 防杀合法会话),
+// mock 掉避免加载重模块。
 vi.mock("../../src/services/airplay/control.js", () => ({
   isBridgeOwned: (id: string) => h.bridgeOwned.has(id),
+  hasActiveSession: (id: string) => h.activeSessions.has(id),
+  ensureAirplayHost: async () => { h.ensureCalls.value++; h.supervisorRunning.value = true; },
 }));
 vi.mock("../../src/services/airplay/supervisor.js", () => ({
   airplaySupervisor: {
@@ -85,6 +90,8 @@ beforeEach(() => {
   h.rpcReply.value = { reachable: true, optionsStatus: 200, teardownStatus: 454, detail: "ok" };
   h.supervisorRunning.value = true;
   h.bridgeOwned.clear();
+  h.activeSessions.clear();
+  h.ensureCalls.value = 0;
   resetBootProbeStateForTest();
   setBridgePrepareRetrySleepForTest(null);
 });
@@ -264,10 +271,37 @@ describe("raopProbeDevice / runBootClearProbes(S3)", () => {
     await runBootClearProbes();
     expect(h.rpcCalls).toHaveLength(0);
   });
+
+  it("无地址设备(持久化行 host=\"\" port=0)不探测、也不为它拉起子进程;地址回填后兜底轮补探", async () => {
+    h.devices.push({ id: "a1", host: "", port: 0 }, { id: "a2", host: "10.0.0.2", port: 5000 });
+    h.byId.set("a1", h.devices[0]!);
+    h.byId.set("a2", h.devices[1]!);
+    await runBootClearProbes(false);
+    // 只探有地址的 a2;a1(host="" port=0)整轮不参与
+    expect(h.rpcCalls.map((c) => c.payload.host)).toEqual(["10.0.0.2"]);
+    // a1 的 mDNS 地址迟到:首轮没标记它,兜底轮补探
+    h.devices[0] = { id: "a1", host: "10.0.0.1", port: 5000 };
+    h.byId.set("a1", h.devices[0]!);
+    h.rpcCalls.length = 0;
+    await runBootClearProbes(true);
+    expect(h.rpcCalls.map((c) => c.payload.host)).toEqual(["10.0.0.1"]);
+  });
+
+  it("全部设备无地址 ⇒ 两轮都不探测,子进程保持未运行(开机零常驻)", async () => {
+    h.devices.push({ id: "a1", host: "", port: 0 }, { id: "a2", host: "", port: 0 });
+    h.byId.set("a1", h.devices[0]!);
+    h.byId.set("a2", h.devices[1]!);
+    h.supervisorRunning.value = false;
+    await runBootClearProbes(false);
+    await runBootClearProbes(true);
+    expect(h.rpcCalls).toHaveLength(0);
+    expect(h.ensureCalls.value).toBe(0); // 没有一台可探 → 绝不懒启动子进程
+    expect(h.supervisorRunning.value).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
-describe("S3 防误杀:boot probe 绝不碰合法桥会话(用户 12s 内起播的场景)", () => {
+describe("S3 防误杀:boot probe 绝不碰合法会话(用户 12s 内起播的场景)", () => {
   it("isBridgeOwned 的设备两轮都跳过(blind TEARDOWN 会真杀会话,HiVi 实测回 200)", async () => {
     h.devices.push({ id: "a1", host: "10.0.0.1", port: 5000 }, { id: "a2", host: "10.0.0.2", port: 5000 });
     h.byId.set("a1", h.devices[0]!);
@@ -297,6 +331,17 @@ describe("S3 防误杀:boot probe 绝不碰合法桥会话(用户 12s 内起播�
     h.bridgeOwned.add("a1");
     await runBootClearProbes(false); // a1 被 owner 检查跳过
     h.bridgeOwned.delete("a1"); // 之后会话停了也不影响:已记入确认集合
+    h.rpcCalls.length = 0;
+    await runBootClearProbes(true);
+    expect(h.rpcCalls).toHaveLength(0);
+  });
+
+  it("原生 solo 会话中的设备两轮都跳过(native cast 不在 bridgeOwners 里)", async () => {
+    h.devices.push({ id: "a1", host: "10.0.0.1", port: 5000 });
+    h.byId.set("a1", h.devices[0]!);
+    h.activeSessions.add("a1");
+    await runBootClearProbes(false); // 首轮被 hasActiveSession 跳过并记入确认
+    h.activeSessions.delete("a1"); // 会话结束后兜底轮也不碰
     h.rpcCalls.length = 0;
     await runBootClearProbes(true);
     expect(h.rpcCalls).toHaveLength(0);

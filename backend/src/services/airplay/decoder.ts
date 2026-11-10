@@ -14,7 +14,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
 import { PCM_BYTES_PER_CHUNK, SAMPLE_RATE } from "./raop.js";
 import { createLogger } from "../../utils/logger.js";
 import { resolveFfmpeg } from "../transcode.js";
-import { decodeArgs, outputFilters, isLoopbackUrl } from "../audio/pipeline.js";
+import { decodeArgs, outputFilters, isLoopbackUrl } from "../audio/ffmpegArgs.js";
 import { StderrTail } from "../audio/stderrTail.js";
 
 const log = createLogger("AIRPLAY");
