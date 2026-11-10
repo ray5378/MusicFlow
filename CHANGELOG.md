@@ -2,6 +2,18 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.12.17] - 2026-11-10
+
+### Fix / 补发 4.12.16（功能不变）
+
+4.12.16 的 tag 构建在全量测试门禁阶段判红并被自动回滚：`armBorrowCore` 新增的
+`readableBaseMs` 调用缺少对应测试桩（`TypeError: p.readableBaseMs is not a function`），
+镜像 tag 被回滚到旧 digest、Release 被删除，产物实际未发布。本次只补测试，行为与
+4.12.16 完全一致。
+
+- `tests/sendspin/playerCoreUnits.test.ts`：假泵补 `readableBaseMs` 桩（默认 null = 无窗口）；
+  新增「窗口退不回可听位置 → 不武装借流（window-too-shallow）」用例。
+
 ## [4.12.16] - 2026-11-10
 
 ### Fix / 流转落点前跳 + AirPlay 桥状态恒空
