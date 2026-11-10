@@ -34,7 +34,7 @@ import {
   PREFETCH_NUM_SPECS,
   plugins,
   preferLocalEnabled,
-  reclaimNow,
+  reclaimManual,
   saveLogLevel,
   setLyricsCoversSettings,
   setPrefetchSettings,
@@ -52,8 +52,12 @@ app.get("/v1/settings", adminMiddleware, (c) => c.json({ writeBackTags: false, f
 // 手动触发一轮空闲内存回收(系统设置页「立即回收」按钮)。返回各层回收结果 + 回收前后内存。
 
 app.post("/v1/admin/memory/reclaim", adminMiddleware, (c) => {
-  const r = reclaimNow("manual");
-  return c.json({ success: true, ...r });
+  // 10 分钟最小间隔:设置页的轮询会以 ~85s 周期打这个端点,无节流时等于
+  // 每小时做 40+ 次 GC + WAL truncate,RSS 却纹丝不动(240 实测)。
+  // 被节流时返回 throttled/retryAfterMs,并回放上一次真实回收的报告保持响应形状。
+  const r = reclaimManual();
+  const last = getReclaimStatus().lastReclaim;
+  return c.json({ success: true, throttled: r.throttled, retryAfterMs: r.retryAfterMs, ...(last ?? {}) });
 });
 
 // 空闲内存自动回收设置:开关 + 空闲阈值(分钟)。存 settings 表,reclaim 运行时读取。

@@ -90,10 +90,15 @@ ARG GIT_COMMIT=unknown
 # ffmpeg 输入硬性只允许回环 token URL / 本地路径(见 SPEC §1.8 与
 # services/dlna/control.ts 注释),域名与 302 全部由 Node 侧处理,
 # 故运行时用 ffmpeg-static 即可,无需系统 ffmpeg。
+# V8 旧生代上限:240 实测主进程堆 used 仅 41MB,而默认上限(约物理内存一半)
+# 让 V8 认为堆很宽裕 → 延迟回收、不压紧 256KB 页,anon 长期停在 192MB。
+# 压到 160MB 后 V8 会更早触发增量/全量 GC,把空闲页还给 OS。子进程
+# (airplay/sendspin)继承同一上限,与其 96MB 实测 RSS 相比仍有余量。
 ENV NODE_ENV=production \
     PORT=46400 \
     TZ=Asia/Shanghai \
     UV_USE_IO_URING=0 \
+    NODE_OPTIONS=--max-old-space-size=160 \
     APP_VERSION=${APP_VERSION} \
     APP_COMMIT=${GIT_COMMIT}
 WORKDIR /app/backend

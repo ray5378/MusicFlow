@@ -197,6 +197,24 @@ const CAP_METHODS: Record<string, string[]> = {
 // source 插件额外暴露 test(连线探测)
 const EXTRA_METHODS = new Set(["test"]);
 
+/** 供 discovery 的「懒加载登记」推导门面会暴露的方法名(与 makeImpl 同一份白名单)。
+ *  必须在没有 QuickJS 实例的情况下也能回答,否则懒加载无从知道该挂哪些方法。 */
+export function pluginMethodNames(manifest: Pick<PluginManifest, "capabilities" | "type">): string[] {
+  const out = new Set<string>();
+  for (const cap of manifest.capabilities || []) {
+    for (const m of CAP_METHODS[cap] || []) out.add(m);
+  }
+  if (manifest.type === "source") for (const m of EXTRA_METHODS) out.add(m);
+  return [...out];
+}
+
+/** 该门面方法是否属于「同步契约」(核心同步取值,不能返回 Promise)。
+ *  懒加载只能推迟异步方法:同步方法一旦落到未加载的插件上就必须有沙箱实例,
+ *  因此声明了这类方法的插件在发现阶段仍然要开机就绪。 */
+export function isSyncPluginMethod(m: string): boolean {
+  return SYNC_METHODS.has(m);
+}
+
 // ---- host.crypto 契约类型(结构必须与 pluginCrypto.ts 的 PluginCrypto 对齐)----
 // sandbox.ts 刻意**不 import** pluginCrypto.ts:本文件会被 worker 以原生 ESM 动态加载,
 // 保持零新依赖;此处只声明转发契约,实现源唯一 = pluginCrypto.ts(discovery / sandboxWorker 注入)。

@@ -525,7 +525,7 @@ export async function installPlugin(downloadUrl: string): Promise<{ id: string; 
     // 升级（同 id 重装）必须 reload：dispose 旧沙箱、覆盖注册，并同步 DB 行版本，
     // 否则内存/DB 都停留在旧版本（此前"升级成功但插件页仍显示旧版本"的根因）。
     syncPluginRowAfterInstall(manifest);
-    await discoverExternalPlugins(APP_VERSION, undefined, { reload: true });
+    await discoverExternalPlugins(APP_VERSION, undefined, { reload: true, lazy: true });
     return { id: manifest.id, name: manifest.name };
   } catch (e) {
     // 把真实失败原因打进服务端日志(响应体只有 error message,容器日志此前看不到原因)。

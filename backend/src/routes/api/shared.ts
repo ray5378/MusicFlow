@@ -32,7 +32,7 @@ import { testWebDAVConnection, cleanupOrphans, ScanProgress } from "../../servic
 import { encryptPassword } from "../../db/index.js";
 import { ImportedPlaylist, ImportedTrack, parsePlaylistFile, NATIVE_APP } from "../../services/plugin/playlistImport.js";
 import { clearLibraryIndex, getLibraryIndexStats } from "../../services/plugin/libraryIndex.js";
-import { touch, registerCacheCleaner, reclaimNow, isIdle, getMemorySnapshot, getReclaimStatus } from "../../services/memory/reclaim.js";
+import { touch, registerCacheCleaner, reclaimNow, reclaimManual, isIdle, getMemorySnapshot, getReclaimStatus } from "../../services/memory/reclaim.js";
 import { getCoverCacheBytes } from "../../services/coverCache.js";
 import { getRenderedCoverBytes } from "../../services/coverImage.js";
 import { getLyricsCacheEntries } from "../../services/lyrics.js";
@@ -1038,6 +1038,7 @@ export {
   readNormalizationSettings,
   readPipelineSwitches,
   rearmDailyScheduler,
+  reclaimManual,
   reclaimNow,
   recordBaseUrl,
   refreshDevices,

@@ -74,6 +74,7 @@ import {
   isIdle,
   getMemorySnapshot,
   reclaimNow,
+  reclaimManual,
   getReclaimStatus,
   startIdleReclaimer,
   _resetReclaimForTest,
@@ -424,5 +425,34 @@ describe("reclaim: 观测与调度", () => {
     expect(getReclaimStatus().lastReclaim).toBeNull();
     idleFor(999);
     expect(isIdle()).toBe(true);
+  });
+});
+
+describe("reclaim: 手动回收节流(D)", () => {
+  it("10 分钟内重复请求被节流,不会重复 GC", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+    const gc = vi.fn();
+    s.runInNewContext.mockReturnValue(gc);
+
+    const r1 = reclaimManual();
+    expect(r1.throttled).toBe(false);
+    expect(r1.report?.gc).toBe(true);
+    expect(gc).toHaveBeenCalledTimes(2);
+
+    // 设置页实测 ~85s 轮询一次:必须被节流,且不再跑 GC。
+    vi.advanceTimersByTime(85 * 1000);
+    const r2 = reclaimManual();
+    expect(r2.throttled).toBe(true);
+    expect(r2.report).toBeUndefined();
+    expect(r2.retryAfterMs).toBeGreaterThan(0);
+    expect(r2.retryAfterMs).toBeLessThanOrEqual(10 * MIN);
+    expect(gc).toHaveBeenCalledTimes(2);
+
+    // 满 10 分钟后恢复。
+    vi.advanceTimersByTime(10 * MIN);
+    const r3 = reclaimManual();
+    expect(r3.throttled).toBe(false);
+    expect(gc).toHaveBeenCalledTimes(4);
   });
 });

@@ -282,7 +282,7 @@ seedDefaultRegistry();
 
 // Phase 3: scan data/plugins for drop-in plugins, validate + register them, and
 // seed their rows (DB is already ready, so the re-seed only adds the new ids).
-await discoverExternalPlugins(APP_VERSION);
+await discoverExternalPlugins(APP_VERSION, undefined, { lazy: true });
 
 // Phase 6: watch data/plugins for file changes and hot-reload external plugins
 // (no restart needed when an admin edits a drop-in plugin).

@@ -25,14 +25,17 @@ import { and, eq, like, or } from "drizzle-orm";
 import { getDataDir } from "../utils/env.js";
 import { db, sqlite } from "../db/index.js";
 import { songs } from "../db/schema.js";
-import { registerPlugin, getPlugin, getPluginConfig, getEnabledByCapability } from "./registry.js";
+import { registerPlugin, getPlugin, getPluginImpl, getPluginConfig, getEnabledByCapability } from "./registry.js";
 import { seedPluginRows } from "./builtins.js";
 import { validatePermissions } from "./host.js";
 import { createPluginCrypto } from "./pluginCrypto.js";
 import { matchPlaylistInBackground } from "../services/plugin/shared.js";
 import { systemOwnerId } from "../services/plugin/shared.js";
 import { cacheRemoteCover, firstPlayableCoverFile } from "../services/playlistCover.js";
-import { loadSandboxedPlugin, type SandboxedPlugin, getSandboxModule, markSandboxModulePoisoned } from "./sandbox.js";
+import {
+  loadSandboxedPlugin, type SandboxedPlugin, getSandboxModule, markSandboxModulePoisoned,
+  pluginMethodNames, isSyncPluginMethod,
+} from "./sandbox.js";
 import { makeScopedStorage } from "./storage.js";
 import { matchSongsToLibrary } from "../services/plugin/libraryMatch.js";
 import { createComm } from "./comm.js";
@@ -117,6 +120,189 @@ export function derivePermissions(caps: string[] | undefined): string[] {
 
 /** 已加载外置插件的沙箱实例(id → SandboxedPlugin),热重载/卸载时 dispose。 */
 export const pluginSandboxes = new Map<string, SandboxedPlugin>();
+
+// ==================== 外置插件懒加载 ====================
+//
+// 根因(240 内存快照,4.12.20):开机 `discoverExternalPlugins` 会对 data/plugins
+// 下**每一个**外置插件立刻建 QuickJS 运行时、eval 整份 index.js、调 create(),
+// 哪怕这个插件本次开机根本不会被调用(榜单类插件只在「刷新/每日任务」用一次,
+// playlist-cleaner 这类 longRunning 插件还会顺手拉起一条 worker 线程)。
+// 实测 11 个外置插件里只有 go-music-dl / lx-source 的 streamUrl 是「同步契约」
+// (由核心同步取值),其余 9 个的能力全是异步方法 —— 完全可以推迟到首次调用。
+//
+// 因此:发现阶段只解析 plugin.json + 建好宿主 env(纯闭包,不碰 QuickJS),登记
+// manifest 与一个**懒加载门面**(方法调用时才 ensurePluginLoaded);沙箱实例、
+// index.js 求值、create()、worker 线程全部推迟到第一次真正调用该插件的能力。
+//
+// 同步契约(streamUrl/lyricUrl/canHandle/canHandleFile)不能返回 Promise,
+// 声明了这些方法的插件仍然开机就绪,语义与改造前完全一致。
+interface ExternalPluginRecord {
+  /** 最终注册 id(= manifest.id,延迟加载成功后回填)。 */
+  id: string;
+  dir: string;
+  file: string;
+  /** plugin.json(权威 manifest;缺失时不允许懒加载)。 */
+  expected?: PluginManifest;
+  /** 宿主 env(闭包,不占沙箱内存)。 */
+  env: any;
+  initialPerms: string[];
+  appVersion: string;
+  lazy: boolean;
+  loaded: boolean;
+  loading: Promise<void> | null;
+  /** 懒加载门面要暴露的方法名(已剔除同步方法)。 */
+  methods: string[];
+  impl?: any;
+}
+
+/** 外置插件登记表(manifest.id → 记录);ensurePluginLoaded / 删除插件都要用。 */
+const externalPlugins = new Map<string, ExternalPluginRecord>();
+
+/** 曾经由外置插件占用的 id(含懒加载门面)。用来区分「注册表里的是自己的门面」
+ *  与「内置插件」——前者允许在首次加载/热重载时被真实 impl 替换,后者永远不可遮蔽。 */
+const externalOwnedIds = new Set<string>();
+
+/** 删除插件时同步清掉登记表(否则同 id 重装后 ensure 会命中已删除目录的旧记录)。 */
+export function forgetExternalPlugin(id: string): void {
+  const rec = externalPlugins.get(String(id));
+  if (!rec) return;
+  if (rec.impl) {
+    try { pluginSandboxes.get(rec.id)?.dispose(); } catch { /* ignore */ }
+    pluginSandboxes.delete(rec.id);
+  }
+  externalPlugins.delete(String(id));
+  externalOwnedIds.delete(String(id));
+}
+
+/** 懒加载门面:方法被调用时才建沙箱,再转给真实 impl。
+ *  未实现的方法返回 undefined(插件缺方法时核心一律按「没有结果」兜底,
+ *  这也与 makeImpl 不暴露该方法时的可观测行为一致)。
+ *  注意:这里**不挂 health**。health 只由插件页主动 ping,若门面暴露它,
+ *  一次打开插件页就会把全部懒插件拉起来,懒加载等于白做;未加载插件的健康度
+ *  回落到 plugin_health 表的被动观测记录(首次真实调用后即有)。 */
+function makeLazyImpl(rec: ExternalPluginRecord): any {
+  const impl: any = {};
+  for (const m of rec.methods) {
+    impl[m] = async (...args: any[]) => {
+      const real = await ensurePluginLoaded(rec.id);
+      const fn = real?.[m];
+      if (typeof fn !== "function") return undefined;
+      return fn(...args);
+    };
+  }
+  return impl;
+}
+
+/** 确保某个外置插件已加载(首次调用/热重载后调用时触发)。
+ *  内置插件或未知 id 直接回 registry 里的 impl,不抛错。 */
+export async function ensurePluginLoaded(id: string): Promise<any> {
+  const rec = externalPlugins.get(String(id));
+  if (!rec) return getPluginImpl(id);
+  if (rec.loaded) return rec.impl;
+  if (!rec.loading) {
+    rec.loading = (async () => {
+      try {
+        // 记录可能在等待期间被热重载替换/删除:此时放弃本次加载,避免旧代码覆盖新登记。
+        if (externalPlugins.get(rec.id) !== rec) return;
+        const code = fs.readFileSync(rec.file, "utf8");
+        const { sandbox, impl } = await loadSandboxedPlugin(rec.id, code, rec.env, rec.expected);
+        await finishExternalLoad(rec, sandbox, impl, false, true);
+      } catch (e: any) {
+        log.warn(`[PLUGIN] 懒加载外置插件 ${rec.id} 失败: ${e?.message || e}`);
+      } finally {
+        rec.loading = null;
+      }
+    })();
+  }
+  const p = rec.loading;
+  await p;
+  return rec.impl;
+}
+
+/** 沙箱创建成功后的收尾:manifest 合并/权限推导/校验/冲突处理/注册。
+ *  返回 false 表示该插件被跳过(调用方不计入 loaded)。 */
+async function finishExternalLoad(
+  rec: ExternalPluginRecord,
+  sandbox: SandboxedPlugin,
+  impl: any,
+  reload: boolean,
+  replaceSelf = false,
+): Promise<boolean> {
+  const env = rec.env;
+  try {
+    const manifest: PluginManifest = sandbox.manifest;
+    const expectedManifest = rec.expected;
+    const appVersion = rec.appVersion;
+    // plugin.json 的 schedules 声明优先于 index.js(让外置插件无需改 index.js
+    // 就能在 plugin.json 里声明定时开关能力)。index.js 未声明时用 plugin.json 的。
+    if (manifest.schedules === undefined && expectedManifest?.schedules !== undefined) {
+      manifest.schedules = expectedManifest.schedules;
+    }
+    // P0 根因修复(权威来源 = index.js manifest.capabilities):无论 plugin.json
+    // 是否声明 permissions,凡声明了网络型能力的插件都自动获得 `net`(同理
+    // 文件型→fs、调度型→storage),与 plugin.json 声明权限、index.js 自身
+    // 声明的 permissions 三者取并集。彻底根除「漏写 permissions 静默失效」
+    // (测试连接 HTTP undefined / 歌词拿不到 / 无可用音源)整类问题。
+    // 沙箱 hasPerm 每次调用读 this.env.permissions 同一引用,此处修改即时生效。
+    const derived = derivePermissions(manifest.capabilities);
+    const merged = new Set<string>([...env.permissions, ...(manifest.permissions ?? []), ...derived]);
+    // 源插件按契约必然需要联网(source 的职责就是从远端取数据);
+    // 即使插件文件老旧、未声明 capabilities/permissions,也保证能联网,
+    // 兜住「HTTP undefined」整类静默失效(实测:net 未授权时 host.http 返回
+    // {ok:false,error} 无 status 字段 → 插件读 r.status 得 undefined)。
+    // 注意:仅补 net/storage/fs 这类最小必要权限,绝不动用 jsenv/command/*。
+    if (manifest.type === "source") merged.add("net");
+    const added = [...merged].filter((p) => !env.permissions.includes(p));
+    if (added.length) {
+      env.permissions = [...merged];
+      log.warn(`[PLUGIN] ${rec.id}: 按能力/类型推导自动补齐权限: ${added.join(",")}`);
+    }
+    const reason = validateManifest(manifest);
+    if (reason) { sandbox.dispose(); log.warn(`[PLUGIN] 跳过外置插件 ${rec.id}: ${reason}`); return false; }
+    if (!impl || typeof impl !== "object") {
+      sandbox.dispose();
+      log.warn(`[PLUGIN] 跳过外置插件 ${rec.id}: create() 未返回 impl 对象`);
+      return false;
+    }
+    if (getPlugin(manifest.id) && !reload && !replaceSelf) {
+      sandbox.dispose();
+      log.warn(`[PLUGIN] 跳过外置插件 ${rec.id}: 与已注册插件 id 冲突`);
+      return false;
+    }
+    // 允许覆盖自己的门面/旧沙箱,但**内置插件永远不可被外置插件遮蔽**。
+    if ((reload || replaceSelf) && getPlugin(manifest.id) && !externalOwnedIds.has(manifest.id)) {
+      sandbox.dispose();
+      log.warn(`[PLUGIN] 跳过外置插件 ${rec.id}: 与内置插件 id 冲突,不可覆盖`);
+      return false;
+    }
+    if (reload || replaceSelf) {
+      const existingSandbox = pluginSandboxes.get(manifest.id);
+      if (existingSandbox) {
+        try { existingSandbox.dispose(); } catch { /* ignore */ }
+        pluginSandboxes.delete(manifest.id);
+      }
+    }
+    if (!isAppVersionCompatible(manifest, appVersion)) {
+      sandbox.dispose();
+      log.warn(`[PLUGIN] 跳过外置插件 ${rec.id}: 需要 App >= ${manifest.minAppVersion}, 当前 ${appVersion}`);
+      return false;
+    }
+    registerPlugin(manifest, impl);
+    pluginSandboxes.set(manifest.id, sandbox);
+    rec.id = manifest.id;
+    rec.impl = impl;
+    rec.loaded = true;
+    rec.loading = null;
+    externalOwnedIds.add(manifest.id);
+    externalPlugins.set(manifest.id, rec);
+    log.info(`[PLUGIN] 已加载外置插件 ${rec.id} (${manifest.type}, ${manifest.capabilities.join("/")}) [沙箱]`);
+    return true;
+  } catch (e: any) {
+    try { sandbox.dispose(); } catch { /* ignore */ }
+    log.warn(`[PLUGIN] 加载外置插件 ${rec.id} 失败: ${e?.message || e}`);
+    return false;
+  }
+}
 
 /** 本机 IPv4 地址(非回环),供 host.plugin.getNetworkAddresses 使用。 */
 function getNetworkAddresses(): string[] {
@@ -696,9 +882,12 @@ export function safeResolve(root: string, id: string): string | null {
 export async function discoverExternalPlugins(
   appVersion: string,
   rootDir?: string,
-  opts?: { reload?: boolean },
+  opts?: { reload?: boolean; lazy?: boolean },
 ): Promise<number> {
   const reload = opts?.reload === true;
+  /** 懒加载开关:开机/子进程/热重载路径显式传 true;测试与旧调用方不传 → 保持
+   *  「发现即建沙箱」的原有语义(插件沙箱可被同步观测)。 */
+  const lazyMode = opts?.lazy === true;
   const root = rootDir ?? path.join(getDataDir(), "plugins");
   if (!rootDir && !fs.existsSync(root)) return 0; // real dir absent → nothing to do
   if (rootDir && !fs.existsSync(root)) return 0;
@@ -716,7 +905,7 @@ export async function discoverExternalPlugins(
     }
     try {
       // 外置插件一律在 QuickJS 沙箱里运行(拿不到 Node 能力,只能用 host.*)。
-      const code = fs.readFileSync(file, "utf8");
+      // 注意:index.js 源码**不在这里读**——懒加载路径要等到首次调用才读盘/求值。
       // 优先用插件目录里的 plugin.json 作为 manifest(与 index.js 内 manifest 比对)。
       let expectedManifest: PluginManifest | undefined;
       const jsonPath = path.join(path.dirname(file), "plugin.json");
@@ -735,6 +924,15 @@ export async function discoverExternalPlugins(
       // (plugin.json 缺 capabilities 时,待沙箱加载后用 index.js manifest 再补一次)。
       const derivedFromJson = derivePermissions(expectedManifest?.capabilities);
       const initialPerms = [...new Set([...declaredPerms, ...derivedFromJson])];
+      // 懒加载资格(判定必须只看 plugin.json,不能碰 index.js):
+      //   - plugin.json 合法(authoritative manifest 可直接登记);
+      //   - 门面方法里**没有同步契约**(SYNC_METHODS 由核心同步取值,不能返回 Promise);
+      //   - 有实际要暴露的方法,否则登记了也没有调用入口。
+      const lazyEligible = lazyMode
+        && !!expectedManifest
+        && validateManifest(expectedManifest) === null
+        && pluginMethodNames(expectedManifest).length > 0
+        && !pluginMethodNames(expectedManifest).some(isSyncPluginMethod);
       const comm = createComm(id, initialPerms);
       // 宿主 HTTP 实现(具名提升:env.http 与 jsenv 网络桥共用,避免 env 自引用)
       const pluginHttp = async (input: string, init?: any) => {
@@ -888,66 +1086,69 @@ export async function discoverExternalPlugins(
         ws: makeWsApi(),
         jsenv: makeJsenvApi({ http: pluginHttp }),
       };
-      const { sandbox, impl } = await loadSandboxedPlugin(id, code, env, expectedManifest);
-      const manifest: PluginManifest = sandbox.manifest;
-      // plugin.json 的 schedules 声明优先于 index.js(让外置插件无需改 index.js
-      // 就能在 plugin.json 里声明定时开关能力)。index.js 未声明时用 plugin.json 的。
-      if (manifest.schedules === undefined && expectedManifest?.schedules !== undefined) {
-        manifest.schedules = expectedManifest.schedules;
-      }
-      // P0 根因修复(权威来源 = index.js manifest.capabilities):无论 plugin.json
-      // 是否声明 permissions,凡声明了网络型能力的插件都自动获得 `net`(同理
-      // 文件型→fs、调度型→storage),与 plugin.json 声明权限、index.js 自身
-      // 声明的 permissions 三者取并集。彻底根除「漏写 permissions 静默失效」
-      // (测试连接 HTTP undefined / 歌词拿不到 / 无可用音源)整类问题。
-      // 沙箱 hasPerm 每次调用读 this.env.permissions 同一引用,此处修改即时生效。
-      const derived = derivePermissions(manifest.capabilities);
-      const merged = new Set<string>([...env.permissions, ...(manifest.permissions ?? []), ...derived]);
-      // 源插件按契约必然需要联网(source 的职责就是从远端取数据);
-      // 即使插件文件老旧、未声明 capabilities/permissions,也保证能联网,
-      // 兜住「HTTP undefined」整类静默失效(实测:net 未授权时 host.http 返回
-      // {ok:false,error} 无 status 字段 → 插件读 r.status 得 undefined)。
-      // 注意:仅补 net/storage/fs 这类最小必要权限,绝不动用 jsenv/command/*。
-      if (manifest.type === "source") merged.add("net");
-      const added = [...merged].filter((p) => !env.permissions.includes(p));
-      if (added.length) {
-        env.permissions = [...merged];
-        log.warn(`[PLUGIN] ${id}: 按能力/类型推导自动补齐权限: ${added.join(",")}`);
-      }
-      const reason = validateManifest(manifest);
-      if (reason) { sandbox.dispose(); log.warn(`[PLUGIN] 跳过外置插件 ${id}: ${reason}`); continue; }
-      if (!impl || typeof impl !== "object") {
-        sandbox.dispose();
-        log.warn(`[PLUGIN] 跳过外置插件 ${id}: create() 未返回 impl 对象`);
-        continue;
-      }
-      if (getPlugin(manifest.id) && !reload) {
-        sandbox.dispose();
-        log.warn(`[PLUGIN] 跳过外置插件 ${id}: 与已注册插件 id 冲突`);
-        continue;
-      }
-      if (reload) {
-        // 重载:仅允许覆盖「同 id 的外置插件」;内置插件不可被外置遮蔽。
-        const existingSandbox = pluginSandboxes.get(manifest.id);
-        if (!existingSandbox && getPlugin(manifest.id)) {
-          sandbox.dispose();
-          log.warn(`[PLUGIN] 跳过外置插件 ${id}: 与内置插件 id 冲突,不可覆盖`);
+
+      // ---- 懒加载分支:只登记元数据 + 懒门面,不建 QuickJS ----
+      if (lazyEligible) {
+        const mid = expectedManifest!.id;
+        // id 冲突:内置/已注册插件优先(与下方急加载路径同一判定)。
+        if (getPlugin(mid) && !reload) {
+          log.warn(`[PLUGIN] 跳过外置插件 ${id}: 与已注册插件 id 冲突`);
           continue;
         }
-        if (existingSandbox) {
-          existingSandbox.dispose();
-          pluginSandboxes.delete(manifest.id);
+        if (reload) {
+          const prev = externalPlugins.get(mid);
+          if (prev) {
+            if (prev.impl) {
+              try { pluginSandboxes.get(mid)?.dispose(); } catch { /* ignore */ }
+              pluginSandboxes.delete(mid);
+            }
+            externalPlugins.delete(mid);
+          } else if (getPlugin(mid)) {
+            // 内置插件不可被外置遮蔽。
+            log.warn(`[PLUGIN] 跳过外置插件 ${id}: 与内置插件 id 冲突,不可覆盖`);
+            continue;
+          }
         }
-      }
-      if (!isAppVersionCompatible(manifest, appVersion)) {
-        sandbox.dispose();
-        log.warn(`[PLUGIN] 跳过外置插件 ${id}: 需要 App >= ${manifest.minAppVersion}, 当前 ${appVersion}`);
+        const rec: ExternalPluginRecord = {
+          id: mid,
+          dir: path.dirname(file),
+          file,
+          expected: expectedManifest,
+          env,
+          initialPerms,
+          appVersion,
+          lazy: true,
+          loaded: false,
+          loading: null,
+          methods: pluginMethodNames(expectedManifest!).filter((m) => !isSyncPluginMethod(m)),
+        };
+        externalPlugins.set(mid, rec);
+        externalOwnedIds.add(mid);
+        registerPlugin(expectedManifest!, makeLazyImpl(rec));
+        loaded++;
+        log.info(
+          `[PLUGIN] 已登记外置插件 ${mid} (${expectedManifest!.type}, ${expectedManifest!.capabilities.join("/")}) [懒加载,首次调用时建沙箱]`,
+        );
         continue;
       }
-      registerPlugin(manifest, impl);
-      pluginSandboxes.set(manifest.id, sandbox);
-      loaded++;
-      log.info(`[PLUGIN] 已加载外置插件 ${id} (${manifest.type}, ${manifest.capabilities.join("/")}) [沙箱]`);
+
+      // ---- 急加载(index.js 同步契约插件 / 无合法 plugin.json 的老插件)----
+      const code = fs.readFileSync(file, "utf8");
+      const rec: ExternalPluginRecord = {
+        id,
+        dir: path.dirname(file),
+        file,
+        expected: expectedManifest,
+        env,
+        initialPerms,
+        appVersion,
+        lazy: false,
+        loaded: false,
+        loading: null,
+        methods: [],
+      };
+      const { sandbox, impl } = await loadSandboxedPlugin(id, code, env, expectedManifest);
+      if (await finishExternalLoad(rec, sandbox, impl, reload)) loaded++;
     } catch (e: any) {
       log.warn(`[PLUGIN] 加载外置插件 ${id} 失败: ${e?.message || e}`);
     }

@@ -36,10 +36,15 @@ const DEFAULT_IDLE_MINUTES = 5;             // 默认空闲阈值
 const GC_COOLDOWN_MS = 5 * 60 * 1000;       // L2 GC 节流(30min→5min:批量任务(每日同步等)后 V8 提交页
                                             // 迟迟不回落,RSS 停在峰值;空闲期每 5 分钟一次 gc 及时压实压回)
 const CHECKPOINT_COOLDOWN_MS = 30 * 60 * 1000; // L3 checkpoint 节流
+// 手动「立即回收」最小间隔:系统设置页会以 ~85s 的周期打这个端点(240 实测
+// 42 次/小时),而 GC+WAL checkpoint 后 RSS 231→231MB —— 零收益纯抖动。
+// 10 分钟内重复调用直接返回节流结果,不再跑 GC/checkpoint。
+const MANUAL_MIN_INTERVAL_MS = 10 * 60 * 1000;
 
 let lastActivityAt = Date.now();
 let lastGcAt = 0;
 let lastCheckpointAt = 0;
+let lastManualReclaimAt = 0;
 let timer: ReturnType<typeof setInterval> | null = null;
 let running = false;
 
@@ -184,6 +189,31 @@ export function reclaimNow(reason: "idle" | "manual" = "manual"): ReclaimReport 
   return report;
 }
 
+/** 手动「立即回收」的节流结果。
+ *  throttled=true 表示距上次手动回收不足 MANUAL_MIN_INTERVAL_MS,本次没有真的回收
+ *  (连 L1 缓存清理也不做,避免无意义地抖掉热数据);调用方可据此提示「稍后再试」。 */
+export interface ManualReclaimResult {
+  throttled: boolean;
+  retryAfterMs: number;
+  report?: ReclaimReport;
+}
+
+/** 手动回收入口(带 10 分钟最小间隔)。路由只应该走这里,不要直接调 reclaimNow,
+ *  否则设置页的轮询会把 GC 变成高频抖动(实测 42 次/小时、RSS 零收益)。
+ *  `reclaimNow("manual")` 本身保持原有语义(强制跳过 GC/checkpoint 节流),
+ *  供空闲调度与测试使用。 */
+export function reclaimManual(): ManualReclaimResult {
+  const now = Date.now();
+  if (lastManualReclaimAt && now - lastManualReclaimAt < MANUAL_MIN_INTERVAL_MS) {
+    const retryAfterMs = MANUAL_MIN_INTERVAL_MS - (now - lastManualReclaimAt);
+    log.info(`手动回收请求被节流,${Math.ceil(retryAfterMs / 1000)}s 后允许再次回收`);
+    return { throttled: true, retryAfterMs };
+  }
+  const report = reclaimNow("manual");
+  lastManualReclaimAt = Date.now();
+  return { throttled: false, retryAfterMs: 0, report };
+}
+
 /** 最近一次回收状态(供管理端点观测)。 */
 export function getReclaimStatus(): { lastReclaimAt: number | null; lastReclaim: ReclaimReport | null } {
   return { lastReclaimAt, lastReclaim: lastReclaimReport };
@@ -213,6 +243,7 @@ export function _resetReclaimForTest(): void {
   lastCheckpointAt = 0;
   lastReclaimAt = null;
   lastReclaimReport = null;
+  lastManualReclaimAt = 0;
   if (timer) { clearInterval(timer); timer = null; }
   running = false;
   cleaners.length = 0;

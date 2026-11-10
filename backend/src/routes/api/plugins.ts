@@ -1,5 +1,6 @@
 // 自动生成 —— 由 index.ts 物理拆分而来（plugins 域，14 条路由）。零逻辑改动。
 import type { Hono } from "hono";
+import { forgetExternalPlugin } from "../../plugins/discovery.js";
 import {
   BusinessErrorCode,
   MAX_PROBE_BATCH,
@@ -172,6 +173,8 @@ app.delete("/v1/plugins/:id", adminMiddleware, (c) => {
   }
   unregisterPlugin(p.id);
   unregisterPlugin(p.name);
+  // 懒加载登记表也要清:否则同 id 重装后 ensurePluginLoaded 会命中已删目录的旧记录。
+  forgetExternalPlugin(p.id);
   const dir = path.join(getDataDir(), "plugins", p.id);
   if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
   db.delete(plugins).where(eq(plugins.id, p.id)).run();

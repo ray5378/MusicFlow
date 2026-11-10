@@ -60,7 +60,7 @@ export async function bootstrapChildDataLayer(opts: ChildDataLayerOptions): Prom
     registerBuiltinPlugins();
     initDatabase();
     backfillGenres();
-    await discoverExternalPlugins(opts.appVersion || process.env.APP_VERSION || "dev");
+    await discoverExternalPlugins(opts.appVersion || process.env.APP_VERSION || "dev", undefined, { lazy: true });
     await opts.after?.();
   } catch (e: any) {
     log.error(`${opts.label} bootstrap 失败`, { err: e?.message || e });
@@ -138,7 +138,7 @@ export function ensureChildPluginLayer(opts: ChildPluginLayerOptions = {}): Prom
     const { registerBuiltinPlugins } = await import("../../plugins/builtins.js");
     registerBuiltinPlugins();
     const { discoverExternalPlugins } = await import("../../plugins/discovery.js");
-    await discoverExternalPlugins(opts.appVersion || process.env.APP_VERSION || "dev");
+    await discoverExternalPlugins(opts.appVersion || process.env.APP_VERSION || "dev", undefined, { lazy: true });
     pluginLayerLoaded = true;
     createLogger(logName).info(`${label}插件层按需加载完成 ms=${Date.now() - t0}`);
   })().catch((e: any) => {

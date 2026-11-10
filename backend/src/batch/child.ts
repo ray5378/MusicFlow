@@ -97,7 +97,7 @@ process.on("unhandledRejection", (e: any) => {
 registerBuiltinPlugins();
 initDatabase();
 backfillGenres();
-discoverExternalPlugins(APP_VERSION)
+discoverExternalPlugins(APP_VERSION, undefined, { lazy: true })
   .then(() => send({ type: "ready", pid: process.pid }))
   .catch((e: any) => {
     log.error("子进程 bootstrap 失败", { err: e?.message || e });
