@@ -48,6 +48,7 @@ import {
   pauseDevice,
   playDevice,
   pm,
+  readPeerCurrentSongId,
   readPeerPositionSeconds,
   refreshDevices,
   resolveBodyPeerId,
@@ -252,6 +253,16 @@ app.post("/v1/peers/:peerId/queue/play", async (c) => {
   if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   // 起始位置(流转场景:整队推送时把源端进度一起带过来)。
   const askPosition = typeof position === "number" && Number.isFinite(position) ? Math.max(0, position) : null;
+  // 整队推送的身份快照(debug 级,默认级别不输出)。
+  // 判据:同一 start 下标下 songId[start] 是否每次都变(队列被重建)、pos 是否携带
+  // (只有「带着进度交队列」的路径才带),用于定位「流转后反复重推整队」的来源。
+  log.debug(
+    `[queue/play] peer=${peerId} kind=${parsed.kind} client=${clientIdOf(c) ?? "-"} items=${items.length} start=${start} `
+      + `pos=${askPosition === null ? "-" : askPosition.toFixed(2)} `
+      + `songId[0]=${items[0]?.songId ?? "-"} songId[start]=${items[start]?.songId ?? "-"} `
+      + `songId[start+1]=${items[start + 1]?.songId ?? "-"} songId[last]=${items[items.length - 1]?.songId ?? "-"} `
+      + `title[start]=${items[start]?.title ?? "-"}`,
+  );
   if (isCastPeer(parsed)) {
     // 成员被显式指派播放 → 先脱离活跃组再独立播(MA ensure_player_ungrouped)。
     await detachFromActiveGroups(parsed);
@@ -354,7 +365,8 @@ app.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
   // 源端没内容:不算错误(与「搬了个空队列」等价),回 0 让调用方自行处理提示。
   if (items.length === 0) return c.json({ success: true, transferred: 0 });
 
-  const start = typeof src.currentIndex === "number" && src.currentIndex >= 0 && src.currentIndex < items.length
+  // 镜像索引:服务端队列快照里的 currentIndex,仅在拿不到「源端实报当前曲」时兜底。
+  const mirrorIndex = typeof src.currentIndex === "number" && src.currentIndex >= 0 && src.currentIndex < items.length
     ? src.currentIndex
     : 0;
 
@@ -369,6 +381,23 @@ app.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
   //   全屋组,群组 playFrom 的桥 settle 把主卧停了 → 晚读 0 → 群组从 0 播)。
   const sameDevice = await isSamePhysicalDevice(fromPeerId, toPeerId);
   const srcPosEarly = askPosition ?? await readPeerPositionSeconds(fromPeerId);
+  // ★ 起点校正(索引错位):优先用源端「实报当前曲」在队列里定位下标,镜像只兜底。
+  //   镜像(src.currentIndex)只在客户端主动上报队列时更新;投屏中客户端不写本机队列
+  //   (_watchLocalQueue 在 activePeer 非空时直接返回),镜像会停在上一次的值。
+  //   240 实证(2026-11-10):源端实报进度 23.94s、镜像 currentIndex 仍是 0 ⇒
+  //   「第 1 首 + 23.94 秒」起播,客户端随即用自己的队列(48)整队重推纠正,
+  //   把刚出声的 AirPlay 桥打断 —— 位置对、歌错,根因就在这一处。
+  const srcSongId = await readPeerCurrentSongId(fromPeerId);
+  const reportedIndex = srcSongId ? items.findIndex((it) => it?.songId === srcSongId) : -1;
+  const start = reportedIndex >= 0 ? reportedIndex : mirrorIndex;
+  // 起点定格快照(debug 级):srcIdx 是服务端镜像的 currentIndex,pos 是源端实报进度。
+  // 两者本应对齐;若 pos 已走很远而 srcIdx 仍是 0,说明镜像落后 → 落点(歌)会错。
+  log.debug(
+    `[transfer] 起点定格 from=${fromPeerId} to=${toPeerId} kind=${parsedTo.kind} items=${items.length} `
+      + `srcIdx=${src.currentIndex} srcSong=${srcSongId ?? "-"} hit=${reportedIndex >= 0} start=${start} `
+      + `pos=${srcPosEarly === null ? "-" : srcPosEarly.toFixed(2)} sameDevice=${sameDevice} `
+      + `songId[start]=${items[start]?.songId ?? "-"} title[start]=${items[start]?.title ?? "-"}`,
+  );
   let landedPosition: number | null = null;
   if (isCastPeer(parsedTo)) {
     // exp3 回流:源端设备此前因「群组→设备」流转被**自动**摘组(autoDetachedFromGroup

@@ -2,6 +2,24 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.12.15] - 2026-11-10
+
+### Fix / 流转起点索引错位（位置对、歌错）
+
+`POST /v1/peers/:peerId/queue/transfer-from` 的起点下标只取服务端队列镜像的
+`currentIndex`。镜像仅在客户端主动上报队列时更新，而**投屏中客户端不写本机队列**
+（`_watchLocalQueue` 在 `activePeer` 非空时直接返回），镜像会停在上一次的值。
+
+240 实证（2026-11-10 14:00）：源端实报进度 23.94s、镜像 `currentIndex` 仍是 0
+⇒ 目标端按「第 1 首 + 23.94 秒」起播；客户端随后用自己的队列（下标 48）整队重推
+纠正，把刚出声的 AirPlay 桥打断，表现为「有声音但 1~2 秒就跳」。
+
+- 新增 `readPeerCurrentSongId()`：`local` 读客户端上报的 `songId`，
+  `dlna/group/airplay/sendspin` 读各自实时状态，拿不到返回 `null`。
+- `transfer-from` 起点改为**源端实报当前曲在队列中的下标优先**，镜像 `currentIndex` 兜底。
+- 起始定格与整队推送各加一条 `debug` 级快照日志（`[transfer] 起点定格` /
+  `[queue/play]`），默认日志级别不输出，便于线上复现时定位。
+
 ## [4.12.14] - 2026-11-10
 
 ### Fix / 歌曲来源正确区分「本地」与「WebDAV」

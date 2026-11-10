@@ -524,6 +524,30 @@ export async function readPeerPositionSeconds(peerId: string): Promise<number | 
   }
 }
 
+/** 读播放端「实报的当前曲 id」。
+ *
+ *  用途:流转起点定格时校正队列下标 —— 镜像队列(currentIndex)只在客户端主动上报时
+ *  更新,投屏中客户端不写本机队列,镜像可能停在旧值(240 实证:实报 23.94s、
+ *  镜像 index 仍为 0)。local 取客户端上报,dlna/group/airplay/sendspin 取各自实时状态。
+ *  拿不到就返回 null,调用方回落到镜像下标。 */
+export async function readPeerCurrentSongId(peerId: string): Promise<string | null> {
+  const parsed = parsePeerId(peerId);
+  if (!parsed) return null;
+  try {
+    let st: any = null;
+    if (parsed.kind === "dlna") st = await getDeviceStatus(parsed.id);
+    else if (parsed.kind === "group") st = await getGroupStatus(parsed.id);
+    else if (parsed.kind === "airplay") st = getAirPlayPeerStatus(parsed.id);
+    else if (parsed.kind === "sendspin") st = await getQueueController().getPlayerState(parsed.id);
+    else st = pm.getLocalStatusReport(peerId);
+    const sid = st?.songId ?? st?.media?.songId ?? st?.currentMedia?.songId;
+    return typeof sid === "string" && sid ? sid : null;
+  } catch (e: any) {
+    seekLog.debug(`[position] 读取 ${peerId} 当前曲失败: ${e?.message || e}`);
+    return null;
+  }
+}
+
 /** 把某个播放端 seek 到 [seconds] 秒(在起播完成后调用)。返回是否下发成功。
  *  <=0 视为「从头播」,不下发(既无意义,也可能被设备当成异常 target)。 */
 
