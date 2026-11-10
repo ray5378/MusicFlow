@@ -707,6 +707,11 @@ export function resolveLocalGroup(meta: MusicMetadata): { groupId: string; group
 }
 
 export function upsertSong(songPath: string, meta: MusicMetadata, sourceId: string, fingerprint?: string): "added" | "updated" {
+  // 行类型以路径前缀为唯一真相:WebDAV 扫描写 `w:<sourceId>:<href>`,本地写
+  // `l:<sourceId>:<绝对路径>`。此前 insert/update 都不写 type,WebDAV 行全落
+  // 建表默认 'local' —— 前端来源列因此把两类都显示成「本地」,播放优选的
+  // local 优先排序也退化成并列(谁先入库谁在前)。
+  const rowType = songPath.startsWith("w:") ? "webdav" : "local";
   const existing = db.select().from(songs).where(eq(songs.path, songPath)).get();
   const artistId = findOrCreateArtist(meta.artist) || null;
   const albumId = findOrCreateAlbum(meta.album, artistId || "", meta.artist, meta.year, meta.picture, meta.genre) || null;
@@ -726,6 +731,7 @@ export function upsertSong(songPath: string, meta: MusicMetadata, sourceId: stri
       // 歌词只标注「有没有」,不存正文(DB 不承载歌词文本):1=有 / 0=检测过无。
       // 文件里没有歌词时不把已有的 1 降级(在线歌词文件可能已落盘),NULL 视为未检测。
       hasLyrics: meta.lyrics ? 1 : (existing.hasLyrics ?? 0),
+      type: rowType,
       updatedAt: new Date().toISOString(),
       ...(backfill ? { groupId: backfill.groupId, groupKey: backfill.groupKey } : {}),
       ...(fingerprint ? { fingerprint } : {}),
@@ -740,6 +746,7 @@ export function upsertSong(songPath: string, meta: MusicMetadata, sourceId: stri
     id: songId, title: meta.title, artist: meta.artist, artistId, album: meta.album, albumId,
     duration: meta.duration, bitRate: meta.bitRate, contentType: meta.contentType,
     suffix: meta.suffix, path: songPath, size: meta.size, genre: meta.genre,
+    type: rowType,
     discNumber: meta.discNumber, track: meta.track, playCount: 0,
     // 文件头能拿到的标签全部入库;歌词只标注存在性(正文不落库),
     // 冷门标签进 tags JSON;入库后这首歌的批量回填(has_lyrics 已有值)会自动跳过。

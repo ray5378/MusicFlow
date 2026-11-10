@@ -78,15 +78,16 @@ export async function fetchCoverForSong(song: CoverSongInput, force = false): Pr
   // 已有封面(本地内嵌/之前落库)→ 直接用
   if (song.coverArt) return song.coverArt;
 
-  // 本地歌曲守卫:本地歌的封面走「专辑封面兜底」(songs.cover_art 恒为空,显示时
-  // 由 getCoverArt 的 al-/so- 分支回落到专辑封面)。若专辑已有可用封面文件,则
-  // 这首歌其实"已经有封面",**不得**再用在线搜来的图覆盖 —— 只补齐真正没有任何
-  // 封面的本地歌。
+  // 自持源(本地/WebDAV)歌曲守卫:本地歌的封面走「专辑封面兜底」(songs.cover_art
+  // 恒为空,显示时由 getCoverArt 的 al-/so- 分支回落到专辑封面)。若专辑已有可用
+  // 封面文件,则这首歌其实"已经有封面",**不得**再用在线搜来的图覆盖 —— 只补齐
+  // 真正没有任何封面的自持源歌。
   // 必要性:批量补全(C)按 `cover_art IS NULL` 扫全库,本地歌全部命中;若无此守卫,
   // 数万首本地歌会被写入在线搜来的 song 级封面,既覆盖原有专辑封面兜底(在线匹配
   // 常命中翻唱/同名异版),又白白消耗大量外部搜索请求。
   // 注意:命中时只返回引用、不写库,保持本地歌数据原样。
-  if (song.type === "local" && song.albumId) {
+  // 口径是 `!== "web"`(含 webdav):WebDAV 行与本地行一样以专辑封面为准。
+  if ((song.type || "local") !== "web" && song.albumId) {
     const album = db.select({ coverArt: albums.coverArt }).from(albums)
       .where(eq(albums.id, song.albumId)).get();
     const albumRef = album?.coverArt || null;

@@ -2,6 +2,24 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.12.14] - 2026-11-10
+
+### Fix / 歌曲来源正确区分「本地」与「WebDAV」
+
+扫描器入库时从不写 `songs.type`，WebDAV 扫描出来的行全部落在建表默认值 `local`，
+前端来源列因此把 5.2 万首 WebDAV 歌曲也显示成「本地」，播放优选的
+`local > webdav` 排序同时退化为并列（谁先入库谁在前）。
+
+- `services/source/scanner.ts`：`upsertSong()` 按路径前缀写 `type`
+  （`w:` → `webdav`，其余 → `local`），insert 与 update 都写；
+- `db/index.ts`：启动时幂等回填历史行（`type='local' AND path LIKE 'w:%'`），
+  本次修正 52,244 行，之后每次匹配 0 行；
+- `services/covers.ts`、`services/backfill.ts`：封面守卫由 `type='local'` 放宽为
+  自持源（`local` + `webdav`），避免类型修正后 WebDAV 歌被在线封面覆盖专辑封面；
+- 播放优选（`services/source/preferredSource.ts`）无需改动：类型正确后
+  web → 自持源方向按真本地文件优先、WebDAV 次之，自持源失效 → web 回退方向
+  对两种来源同样生效。
+
 ## [4.12.13] - 2026-11-10
 
 ### Chore / 移除「减少动画」设置项（该开关从未生效）

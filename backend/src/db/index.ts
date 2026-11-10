@@ -742,6 +742,11 @@ export function initDatabase() {
   sqlite.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run("daily_recommend_hour", "3");
   sqlite.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run("daily_recommend_local_enabled", "true");
 
+  // 修正历史歌曲行类型(幂等):WebDAV 扫描入库的行走 path `w:<sourceId>:`
+  // 前缀,但旧扫描器不写 type,全部落在建表默认 'local'。首次启动改正 5 万行,
+  // 之后每次匹配 0 行(path LIKE 走 idx_songs_path)。
+  backfillSongTypes();
+
   // Seed DB rows for every registered plugin (manifest-driven, idempotent).
   // Deferred require-style import: the registry imports `db` from this module,
   // so a static import here would create a load-time cycle. Doing it *inside*
@@ -749,6 +754,17 @@ export function initDatabase() {
   seedRegisteredPlugins();
 
   log.info("Database initialized successfully");
+}
+
+// 歌曲行类型回填(幂等,启动时调用):2026-11 之前扫描器入库不写 type,WebDAV 行
+// 全落默认 'local'。按路径前缀一次性纠正 —— 来源列显示(本地/WebDAV)与播放优选
+// 的 local > webdav 排序都以此为准。返回本次修正行数(0 = 已是最新)。
+export function backfillSongTypes(): number {
+  const r = sqlite
+    .prepare("UPDATE songs SET type = 'webdav' WHERE type = 'local' AND path LIKE 'w:%'")
+    .run();
+  if (r.changes > 0) log.info(`songs.type 回填:${r.changes} 行 WebDAV 歌曲标记为 webdav`);
+  return r.changes;
 }
 
 // 风格表回填:从 songs.genre 全量同步(幂等,启动时调用)。
