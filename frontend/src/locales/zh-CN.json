@@ -80,12 +80,6 @@
       "desc": "当前使用飞牛音乐暗色玻璃主题",
       "value": "FnOS Dark"
     },
-    "reduceMotion": {
-      "title": "减少动画",
-      "desc": "开启后减弱页面动效，适合敏感人群",
-      "on": "已开启减弱动画",
-      "off": "已关闭减弱动画"
-    },
     "systemInfo": "系统信息",
     "serverVersion": "服务器版本",
     "gitHash": "哈希版本号",

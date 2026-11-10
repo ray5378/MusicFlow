@@ -2,6 +2,23 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.12.13] - 2026-11-10
+
+### Chore / 移除「减少动画」设置项（该开关从未生效）
+
+系统设置里的「减少动画 / 开启后减弱页面动效」是一个**无效开关**：
+
+- `document.documentElement.style.setProperty('prefers-reduced-motion', ...)` 写入的是
+  CSS 媒体特性名，不是 CSS 属性，浏览器直接忽略；
+- 同时添加的 `html.reduce-motion` class 在全站**没有任何 CSS 规则**引用；
+- 开关值也不持久化（不写 localStorage / 后端 preferences），刷新即恢复系统值。
+
+因此移除该设置项及其 `reduceMotion` / `toggleMotion` 代码与中英文文案，避免误导。
+系统级 `@media (prefers-reduced-motion: reduce)` 的三段样式仍保留——那是真正生效的
+无障碍支持（跟随操作系统「减少动态效果」），与本开关无关。
+
+无功能行为变化。
+
 ## [4.12.12] - 2026-11-10
 
 ### Perf / 插件市场:并发 + 跨注册表去重 + SWR 缓存 + Gitee 优先

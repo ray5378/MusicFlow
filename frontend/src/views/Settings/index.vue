@@ -18,10 +18,6 @@
         <div class="setting-label"><div class="title">{{ t('settings.theme.title') }}</div><div class="desc">{{ t('settings.theme.desc') }}</div></div>
         <div class="setting-value"><el-tag size="small" type="info">{{ t('settings.theme.value') }}</el-tag></div>
       </div>
-      <div class="setting-item">
-        <div class="setting-label"><div class="title">{{ t('settings.reduceMotion.title') }}</div><div class="desc">{{ t('settings.reduceMotion.desc') }}</div></div>
-        <div class="setting-value"><el-switch v-model="reduceMotion" @change="toggleMotion" /></div>
-      </div>
     </el-card>
 
     <!-- ===== 系统（仅管理员） ===== -->
@@ -405,16 +401,6 @@ async function saveLogLevel(lv: LogLevelValue) {
 }
 
 // ---------- 外观 / 通用 ----------
-const reduceMotion = ref(window.matchMedia('(prefers-reduced-motion: reduce)').matches);
-
-function toggleMotion(v: string | number | boolean) {
-  const on = Boolean(v);
-  document.documentElement.style.setProperty('prefers-reduced-motion', on ? 'reduce' : 'no-preference');
-  if (on) document.documentElement.classList.add('reduce-motion');
-  else document.documentElement.classList.remove('reduce-motion');
-  ElMessage.success(on ? t('settings.reduceMotion.on') : t('settings.reduceMotion.off'));
-}
-
 function clearCache() {
   localStorage.clear();
   ElMessage.success(t('settings.clearCache.done'));

@@ -80,12 +80,6 @@
       "desc": "Currently using the FnOS dark glass theme",
       "value": "FnOS Dark"
     },
-    "reduceMotion": {
-      "title": "Reduce motion",
-      "desc": "Reduce page animations when enabled; suitable for sensitive users",
-      "on": "Reduced motion enabled",
-      "off": "Reduced motion disabled"
-    },
     "systemInfo": "System Info",
     "serverVersion": "Server version",
     "gitHash": "Git commit",
