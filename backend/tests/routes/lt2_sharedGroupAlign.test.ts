@@ -83,7 +83,11 @@ describe("tryArmSendspinBorrow", () => {
   it("武装被拒且有 reason → 返回未武装(退回常规对齐),不抛", async () => {
     leaf.sendspinGroupNameForPeer.mockReturnValue("grp");
     leaf.sendspinArmBorrow.mockResolvedValueOnce({ armed: false, reason: "encoder busy" });
-    await expect(tryArmSendspinBorrow("sendspin:a", "sendspin:b", 5)).resolves.toEqual(MISS);
+    // reason 一并回传:调用方据 window-too-shallow 判断「源端现场还能不能晚读」。
+    await expect(tryArmSendspinBorrow("sendspin:a", "sendspin:b", 5)).resolves.toEqual({
+      ...MISS,
+      reason: "encoder busy",
+    });
   });
 
   it("武装成功 → 落点 ms 换算成秒、songId 透传", async () => {
