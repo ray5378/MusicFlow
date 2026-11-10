@@ -142,10 +142,13 @@ describe("QueueController", () => {
     qc.clear("d1");
     // 空快照含权威洗牌序列字段(客户端镜像用,见 PlayStartOwnership.test.ts)。
     // preProbe:预探测状态位(2026-09-11)—— clear 时一并清空,前端提示随之消失。
+    // revision:队列版本号(4.12.9)—— 每次 queue_changed 自增,具体值取决于本用例
+    // 之前发生过几次队列变更,故只校验类型(它是客户端「变了才拉」的判据,不参与空快照契约)。
     expect(listener).toHaveBeenCalledWith("d1", {
       items: [], currentIndex: -1, playMode: "shuffle", isActive: false, ended: false,
       shuffleOrder: [], shufflePos: -1,
       preProbe: { ready: 0, scanned: 0, misses: 0, exhausted: false, cooldownUntil: null, at: 0 },
+      revision: expect.any(Number),
     });
   });
 

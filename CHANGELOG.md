@@ -2,6 +2,19 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.12.10] - 2026-11-10
+
+### Fix / 队列版本号引起的单测契约漂移
+
+`4.12.9` 给队列快照加了 `revision`(客户端「变了才拉」的判据),但
+`backend/tests/player/QueueController.test.ts` 里「clear: emit queue_changed
+(空快照)」用例仍在做**全等**断言,于是 `Playback Chain Guard` 在 72 条中断 1 条:
+快照多出 `"revision": 1`。
+
+`revision` 的具体值取决于该用例之前发生过几次队列变更,写死常量会让用例跟执行
+顺序耦合,因此断言改为 `revision: expect.any(Number)` —— 只校验类型。该字段本就
+不属于「空快照长什么样」的契约。无产品代码改动。
+
 ## [4.12.9] - 2026-11-10
 
 ### Perf / 远端队列轮询:只拉窗口 + 变了才拉
