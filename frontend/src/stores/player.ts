@@ -1927,7 +1927,9 @@ export const usePlayerStore = defineStore("player", () => {
       return Promise.resolve(peersListCache);
     }
     if (peersListInflight) return peersListInflight;
-    peersListInflight = api.get("/rest/api/v1/peers")
+    // 启动期只要「是否在播 / 共几首 / 当前曲」,队列详情按块另取;完整响应在设备在播时
+    // 可达 1.4MB(见后端 slimQueueForStartup)。
+    peersListInflight = api.get("/rest/api/v1/peers?slim=1")
       .then((res) => {
         const list = res.data?.peers || [];
         peersListCache = list;

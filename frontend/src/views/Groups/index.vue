@@ -953,7 +953,7 @@ function localPeerPrefKey(p: any): string {
 async function loadLocalPlayers(): Promise<boolean> {
   loadingClients.value = true;
   try {
-    const res = await api.get("/rest/api/v1/peers?includeHidden=1");
+    const res = await api.get("/rest/api/v1/peers?includeHidden=1&slim=1");
     playerInstances.value = (res.data?.peers || []).filter((p: any) => p.kind === "local");
     clientsError.value = "";
     return true;

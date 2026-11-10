@@ -154,7 +154,7 @@ function hasTargets(f: any): boolean { return (f.definition?.nodes || []).some((
 
 async function loadPeers() {
   try {
-    const res = await api.get("/rest/api/v1/peers");
+    const res = await api.get("/rest/api/v1/peers?slim=1");
     peers.value = (res.data?.peers || []).filter((p: any) => p.kind === "dlna" || p.kind === "group" || p.kind === "airplay" || p.kind === "sendspin");
   } catch { peers.value = []; }
 }

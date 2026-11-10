@@ -480,7 +480,7 @@ async function loadFlow() {
 
 async function loadPeers() {
   try {
-    const res = await api.get("/rest/api/v1/peers");
+    const res = await api.get("/rest/api/v1/peers?slim=1");
     peers.value = res.data?.peers || [];
   } catch { peers.value = []; }
 }

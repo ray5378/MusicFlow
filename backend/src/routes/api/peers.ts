@@ -68,6 +68,25 @@ import {
   userIdOfLocalPeer,
 } from "./shared.js";
 
+/** 启动期设备列表的队列瘦身:保留 isActive / total / 当前曲,丢弃整条队列与内部预探测
+ *  字段(preProbe / shuffleOrder)。完整响应会把每台设备整个队列的歌曲对象都带上
+ *  (13 台设备实测 1.39MB,br 后仍 415KB),而启动期只用到「是否在播 / 共几首 /
+ *  正在放哪首」。真实队列仍由播放器按块走 /v1/peers/:peerId/queue?offset=&size=。
+ *  items 只剩当前这一首,故 currentIndex 归 0;未带 ?slim=1 的老客户端行为不变。 */
+function slimQueueForStartup(q: any): any {
+  if (!q || !Array.isArray(q.items)) return q;
+  const items = q.items;
+  const idx = typeof q.currentIndex === "number" ? q.currentIndex : -1;
+  const cur = idx >= 0 && idx < items.length ? items[idx] : null;
+  const { items: _items, preProbe: _preProbe, shuffleOrder: _shuffleOrder, ...rest } = q;
+  return {
+    ...rest,
+    total: typeof q.total === "number" ? q.total : items.length,
+    currentIndex: cur ? 0 : -1,
+    items: cur ? [cur] : [],
+  };
+}
+
 export function registerPeers(app: Hono): void {
 app.get("/v1/peers", (c) => {
   const user = c.get("user");
@@ -83,8 +102,12 @@ app.get("/v1/peers", (c) => {
   // 列表消失,再无落点取消隐藏,强刷也恢复不了(隐藏行本就不在默认响应里)。
   // 切换器 / 选择器不带该参数,行为与从前完全一致(隐藏即不出现在可选目标里)。
   const includeHidden = c.req.query("includeHidden") === "1";
+  // ?slim=1:Web 启动期拉「设备列表」专用,队列压成「当前曲 + total」(见 slimQueueForStartup)。
+  const slim = c.req.query("slim") === "1";
   const peers = decoratePeersForClient(pm.listWithQueues(), user?.id ?? "", !!user?.isAdmin, clientIdOf(c), includeHidden);
-  return c.json({ peers });
+  return c.json({
+    peers: slim ? peers.map((p: any) => ({ ...p, queue: slimQueueForStartup(p.queue) })) : peers,
+  });
 });
 
 // ===== 播放器「按用户级隐藏」偏好 =====

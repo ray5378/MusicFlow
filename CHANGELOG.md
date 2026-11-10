@@ -2,6 +2,27 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.12.6] - 2026-11-10
+
+### Perf / 设备列表接口瘦身
+
+`GET /v1/peers` 此前为每台设备返回**完整队列**：13 台设备中一台群组 4216 首，
+响应体实测 **1,373,934 B（br 405,598 B）**。但设备切换器、播放器页客户端列表、
+音流目标选择只消费「是否在播 / 共几首 / 当前曲」三个字段 —— WS 的 `peer_snapshot`
+早已摘要，HTTP 却全量。
+
+- 后端新增 `slim=1`：`slimQueueForStartup()` 把每条队列压成
+  `{ total, currentIndex, items: [当前曲] }`，丢弃 `items/preProbe/shuffleOrder`；
+  不带参数的老客户端行为不变。
+- 前端四个消费点改用 slim：`stores/player.ts`（启动恢复 + 20s 本机实例轮询）、
+  `views/Groups/index.vue`（`includeHidden=1&slim=1`）、`views/Flows/index.vue`、
+  `views/Flows/Editor.vue`。需要队列明细时仍走 `/v1/peers/:id/queue`。
+
+实测：响应 **1,373,934 B → 4,437 B**、br **405,598 B → 1,025 B（−99.7%）**，
+服务端 17.4ms → 3~5ms；`/groups` 首屏接口体积 **80KB → 7.7KB**、`/flows`
+**81KB → 8.4KB**、首页 **132KB → 95KB**。13 台设备的 name/isActive/total/当前曲
+与全量响应逐条一致，切换器 14 行正常渲染。
+
 ## [4.12.5] - 2026-11-10
 
 ### Perf / 全站页面打开速度
