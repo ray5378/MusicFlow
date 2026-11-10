@@ -2,6 +2,34 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.12.20] - 2026-11-11
+
+### Perf / 子进程按需加载与空闲回收
+
+渲染器子进程不再「开机即全套常驻」：sendspin 的插件层（22 内置 + 外置）改为首次解析
+音源时才加载，airplay 子进程完全懒启动（首次投屏 / 清理探测才拉起），两者停播空闲后
+自动回收，内存随进程销毁归还。空载时容器内只剩 sendspin 一个子进程。
+
+- `rendererHost/childBootstrap`：拆出 `bootstrapChildDatabase`（只建表/回填）与
+  `ensureChildPluginLayer`（单飞、失败可重试）；子进程启动不再拖整套插件模块图。
+- `sendspin/child`：启动只做数据层；`playMedia` / `groupPlay` / `preheat` 前按需加载插件层。
+- `rendererHost/idleReclaim`（新）：通用空闲回收跟踪器（sendspin 120s、airplay 180s）；
+  子进程只判定与上报，stop→start 由 supervisor 执行。
+- `airplay`：去掉开机预热改懒启动；`decodeArgs` / `outputFilters` / `codecArgs` 抽到
+  `audio/ffmpegArgs`（零 DB 依赖），子进程静态图不再触达 `db/index`（SQLite 依赖消失）；
+  初始音量 / 静音随 prepare 载荷下发，不再反查设备表。
+
+### Fix / S3 开机清理探测空转
+
+- `airplay/raopProbe`：设备无 host/port 时不探测、也不写入已探测集合（留给 45s 兜底轮），
+  避免 12s 轮把无地址设备永久标记为已处理；桥持有 / 会话进行中的设备跳过，不误杀合法会话。
+- `raopProbeDevice` 在 fork 模式且子进程未运行时懒启动，修复去预热后探测恒「未运行」。
+- `rendererHost/supervisor`：`stop()` 等待 exit（3s 兜底）、`onExit` 校验 child 身份，
+  避免旧子进程的 exit 事件清空新子进程引用。
+
+测试：`tests/airplay`、`tests/sendspin`、`tests/rendererHost` 全绿；240 实测重启后无
+airplay 子进程、12s 清理轮零拉起、192s 空闲回收、health 200。
+
 ## [4.12.19] - 2026-11-10
 
 ### Perf / 流转出声提速
