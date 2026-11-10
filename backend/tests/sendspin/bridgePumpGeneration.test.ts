@@ -275,7 +275,8 @@ describe("③ 桥在场绕过 800ms 钳制(MAJ-01)", () => {
     expect(genCalls[0]).toEqual([1_000_003, "track"]);
     const leadUs = Number(g.timelineBaseUs - nowUs()); // 与锚点同源的单调钟
     // P1 分档(2026-11-02):track 走暖 lead 2.5s —— 仍远高于 800ms 的 prefill 钳制,
-    // 也高于 3s 的 reseed lead 之外的最小桥投递下沿(1.75s);冷 4.5s 只留给 seek/rehost。
+    // 也高于 3s 的 reseed lead 之外的最小桥投递下沿(1.75s)。
+    // 2026-11-10 起 seek/rehost 也统一走暖档(桥会话在起播前已完成 RECORD),冷 4.5s 停用。
     expect(leadUs).toBeGreaterThanOrEqual(bridgeStartLeadUs([{ warm: true }]) - 1_000_000);
     expect(leadUs).toBeGreaterThan(1_500_000);
     // MAJ-01 回归断言:组公共提前量没有被污染 —— 同一个函数、同一个返回值
@@ -325,7 +326,7 @@ describe("③b 深锚仅纯桥组(E3 判决,2026-10-26)", () => {
     await waitInactive(pump, 5000);
   }, 30_000);
 
-  it("纯桥组 seek/rehost 重锚 → 仍吃冷 lead 4.5s(P1 只放松 track)", async () => {
+  it("纯桥组 seek/rehost 重锚 → 暖 lead 2.5s(2026-11-10 起不再吃冷 4.5s)", async () => {
     H.rows = [{ id: "row-5r", duration: 10 }];
     const { g, genCalls } = makeGroup({ hasBridges: () => true, hasDirectMembers: () => false });
     const pump = new GroupPump(server, g);
@@ -339,7 +340,10 @@ describe("③b 深锚仅纯桥组(E3 判决,2026-10-26)", () => {
 
     expect(genCalls[1]![1]).toBe("rehost");
     const leadUs = Number(g.timelineBaseUs - nowUs());
-    expect(leadUs).toBeGreaterThan(bridgeStartLeadUs([{ warm: false }]) - 1_000_000);
+    // 桥会话由 prepareBridgeRoute 在起播前 await 建好 ⇒ reseed 与 track 同档(暖 2.5s,
+    // 实际取 max(2.5s, floor + tick=2.75s));冷 4.5s 仅剩 `MF_BRIDGE_LEAD_MODE=fixed` 回退。
+    expect(leadUs).toBeGreaterThanOrEqual(bridgeStartLeadUs([{ warm: true }]) - 1_000_000);
+    expect(leadUs).toBeLessThan(3_500_000); // 明确不再是 cold 4.5s
     releaseSlices(); // EOF 收尾
     await waitInactive(pump, 5000);
   }, 30_000);

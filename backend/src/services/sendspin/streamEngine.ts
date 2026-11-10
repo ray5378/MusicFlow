@@ -1296,15 +1296,16 @@ export class GroupPump {
           //   整首开头丢」。抬到「下沿 + 一个补投周期」后首帧即落窗内 ⇒ 开头零丢失;
           //   代价 = 每首歌起播多等 ~1.25s(全组一致,组内同步与时间线语义不变,
           //   仍**不是** cold 深锚 4.5s —— 直连 esp32 不承受秒级跳变)。
-          // ★ P1(2026-11-02)分档:track 边界(暖,桥会话原地续用)只等 2.5s,
-          //   seek/rehost 才吃冷 4.5s。`MF_BRIDGE_LEAD_MODE=fixed` ⇒ warm 恒 false,
-          //   回到「任何边界都冷 4.5s」的旧行为。
+          // ★ P1(2026-11-02)分档:track 边界(暖,桥会话原地续用)只等 2.5s;
+          //   旧实现让 seek/rehost 吃冷 4.5s,已于 2026-11-10 改为暖档(见下)。
+          //   `MF_BRIDGE_LEAD_MODE=fixed` ⇒ warm 恒 false,回到「任何边界都冷 4.5s」的旧行为(唯一回退口)。
           // ★ P3(2026-11-02):**纯桥组与混合组统一口径**,不再有独立的
           //   `mixed_anchor_lead_ms`。旧实现给混合组配 5s(前端弹窗逐组覆盖)换
           //   「切歌后全组静默 5s」来避开接收端就绪窗口 —— 那 5s 就是切歌慢的直接
           //   来源,也是前端「切歌延迟」手动入口的由来(已删)。
-          //   现在:起播/手切/seek 一律按分档 lead 抬锚(2.5s / 4.5s,均 ≥ 桥投递
-          //   窗口下沿 1.5s ⇒ 首帧必落窗内,不吞开头);**自然换歌**再由接续锚点
+          //   现在:起播/手切/seek 一律抬锚(暖档 2.5s;仅 `MF_BRIDGE_LEAD_MODE=fixed`
+          //   回退时仍是冷 4.5s —— 均 ≥ 桥投递窗口下沿 1.5s ⇒ 首帧必落窗内,不吞开头);
+          //   **自然换歌**再由接续锚点
           //   接上一曲时间线尾 ⇒ 既不等 5s,也不吞开头。
           //   两道防线分工仍不可混:本分支 = 时间线锚点;切歌垫片
           //   (pendingTrackLeadUs,server.ts)= 桥侧投递整形。
@@ -1312,10 +1313,17 @@ export class GroupPump {
           //   ≥「下沿 + 一个补投周期」,否则新曲首帧 ts 落在下沿以下被直接跳过
           //   (水位推过)= 每首歌开头被吞。暖档 2.5s 恰好等于下沿 ⇒ 显式取
           //   floor + tick(2.75s),只对桥生效;直连 sendspin 路径不变。
+          // ★ 2026-11-10(流转出声提速):seek/rehost 不再按 `reseed` 吃冷 4.5s。
+          //   冷档原本兜的是「RAOP 握手 + 设备缓冲」,但桥会话由主进程
+          //   `prepareBridgeRoute` **在起播前**已 await 建好(RECORD 完成)——
+          //   reseed 重锚发生时,桥侧只剩 BOUNDARY 重锚,与 track 暖复用同量级
+          //   (那一段已由切歌垫片按暖档 800ms 覆盖)。故停用冷档,统一暖档;
+          //   下限仍是 floor + tick(2.75s),首帧必落投递窗口内,不会吞歌开头。
+          //   实测收益:client→group 流转的 rehost 首帧从 ~4.5s 提前到 ~2.75s。
           const anchorLead = hasBridges
             ? Math.max(
                 aheadUs,
-                bridgeStartLeadUs([{ warm: BRIDGE_LEAD_TIERED && !reseed }]),
+                bridgeStartLeadUs([{ warm: BRIDGE_LEAD_TIERED }]),
                 BRIDGE_PUSH_FLOOR_US + BRIDGE_PUSH_TICK_MS * 1000,
               )
             : prefillEnabled()
