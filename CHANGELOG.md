@@ -4,19 +4,23 @@
 
 ## [4.12.28] - 2026-11-11
 
-### Fix / CI:豁免 AP2/HAP 测试向量的 generic-api-key 误报
+### Fix / CI:豁免 AP2/HAP 测试向量与 vendored 前端的 generic-api-key 误报
 
-定时 `security` 工作流的 gitleaks 全历史扫描每天失败,6 处命中全部落在
-`backend/tests/fixtures/ap2/{transport,hap}_vectors.json`:内容是 AP2/HAP 协议的
-公开测试向量(RFC 5869 HKDF 标准 IKM、HAP 规范示例的公钥与证明值),用于校验
-对端实现,不是任何真实凭据。
+定时 `security` 工作流的 gitleaks 全历史扫描持续失败(每天 02:00 UTC 重跑),
+命中项全部是误报:
 
-- 新增 `.gitleaks.toml`:`[extend] useDefault = true` 保持默认规则集与阈值不变,
-  仅对 `backend/tests/fixtures/ap2/` 追加路径豁免。
-- 未改用 `.gitleaksignore` 指纹豁免:指纹绑定「引入提交 + 行号」,fixture 改一次
-  行号即失效、需反复追;路径豁免对同目录后续新增的向量同样生效。
-- 验证:用与 CI 同版本的 gitleaks(8.30.1)复跑全历史,豁免前 `leaks found: 6`,
-  豁免后 `no leaks found`。
+- 6 处在 `backend/tests/fixtures/ap2/{hap,transport}_vectors.json`:AP2/HAP 协议的
+  公开测试向量(RFC 5869 HKDF 标准 IKM、RFC 5054 SRP 盐、HAP 规范示例的公钥与
+  证明值),用于逐字节校验对端实现,不是真实凭据。
+- 1 处在 `refs/music-assistant-server/.../3rd-party/libflac.js:31133`:
+  `var keyStr = 'ABC…+/='` 是 flac.js 自带的 Base64 字母表,不是密钥。该参考源码
+  目录已于 9a4e5c97 从工作区移出,但 git 历史仍会被全历史扫描覆盖。
+
+处理方式:在 `.gitleaksignore` 里按「提交 + 文件 + 规则 + 行号」精确豁免这 7 条
+指纹(与仓内既有豁免 1/2 同一机制)。先前一版用 `.gitleaks.toml` 的
+`[[allowlists]]` 做路径豁免,本地 gitleaks 8.30.1 有效,但 gitleaks-action 拉起
+的二进制对该表不生效(整轮仍报 6 处),因此改回指纹豁免 —— action 日志里能直接
+看到 `skipping finding: fingerprint …`,证明该机制确实被识别。
 
 ## [4.12.27] - 2026-11-11
 

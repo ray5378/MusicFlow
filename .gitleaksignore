@@ -76,3 +76,26 @@ bcf9e037043542c94b2b392fdb5016b08382706b:backend/tests/utils/qrcode.test.ts:gene
 #   但 2ffd0d2 这个提交已在 git 历史里(本次 push 才首次推上远端),只能按指纹精确豁免。
 #   ⚠ 遵循本文件既有教训:注释里不复写任何「关键词 + 引号字符串」形态的原文。
 2ffd0d2a1e2851354767fbae626a3f456e385a77:backend/tests/middleware/restExempt.test.ts:generic-api-key:14
+# ── 豁免 3:AP2/HAP 协议测试向量(公开规格常量) ───────────────────────────
+#   backend/tests/fixtures/ap2/{hap,transport}_vectors.json
+#
+# 内容是 Apple AP2/HAP 协议的公开测试向量:RFC 5869 HKDF 标准 IKM(0x404142…)、
+# RFC 5054 SRP 的盐、HAP 规范示例里的公钥/证明值,用于逐字节校验对端实现,
+# 不是任何真实凭据。generic-api-key 按「关键词 + 相邻高熵串」命中,属误报。
+#
+# 先试过 .gitleaks.toml 的 [[allowlists]] 做路径豁免,本地 gitleaks 8.30.1 有效,
+# 但 gitleaks-action 拉起的二进制整轮仍报这 6 处(该表未生效),故改回本仓既有的
+# 指纹豁免 —— 指纹已被 action 明确识别(日志里有 skipping finding)。
+c250b6262900f70d58ae9798bff67631aaa229ff:backend/tests/fixtures/ap2/hap_vectors.json:generic-api-key:21
+c250b6262900f70d58ae9798bff67631aaa229ff:backend/tests/fixtures/ap2/hap_vectors.json:generic-api-key:29
+c250b6262900f70d58ae9798bff67631aaa229ff:backend/tests/fixtures/ap2/transport_vectors.json:generic-api-key:120
+c250b6262900f70d58ae9798bff67631aaa229ff:backend/tests/fixtures/ap2/transport_vectors.json:generic-api-key:122
+c250b6262900f70d58ae9798bff67631aaa229ff:backend/tests/fixtures/ap2/transport_vectors.json:generic-api-key:126
+c250b6262900f70d58ae9798bff67631aaa229ff:backend/tests/fixtures/ap2/transport_vectors.json:generic-api-key:128
+
+# ── 豁免 4:第三方 vendored 前端的 Base64 查表常量 ────────────────────────
+#   refs/music-assistant-server/.../snapweb/3rd-party/libflac.js:31133
+#
+# `var keyStr = 'ABC…+/='` 是 flac.js 自带的手写 Base64 字母表,不是密钥。
+# 该参考源码目录已于 9a4e5c97 从工作区移出,但 git 历史仍在,故按指纹精确豁免。
+e93716473d708ade584975930d84c56d04094151:refs/music-assistant-server/music_assistant/providers/snapcast/snapweb/3rd-party/libflac.js:generic-api-key:31133
