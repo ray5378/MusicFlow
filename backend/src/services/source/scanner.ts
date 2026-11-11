@@ -10,6 +10,7 @@ import { deleteSongLyric } from "../lyricsStore.js";
 import { deleteAnalysisMany } from "../audio/analysisStore.js";
 import { invalidateArtistList } from "../../utils/artistListCache.js";
 import { createLogger } from "../../utils/logger.js";
+import { recoverUnknownTags, isUnknownAlbum } from "./tagRecovery.js";
 import { songGroupEnabled, groupKeyForConfig, findGroupForSongConfig } from "../plugin/core/songGroup.js";
 import { newGroupId, normalizeGroupText } from "../../utils/songGroup.js";
 import { buildSmbConfig, normalizeSmbPath, smbReaddir, smbReadRange, type SmbEntry } from "./smbClient.js";
@@ -19,6 +20,15 @@ const HEADER_SIZE = 4 * 1024 * 1024; // 4MB - enough for ID3v2 + embedded cover 
 /** WebDAV 分级取头:FLAC 的元数据块(STREAMINFO/VORBIS_COMMENT/PICTURE)紧跟文件头,
  *  实测 25/25 首 256KB 就解析完整;只有超大内嵌封面或异常 PADDING 才需升档。
  *  逐级重试把全库取头流量从固定 4MB/首 降到约 1/16。 */
+// 分级取头:先 256KB,判不完整再升 1MB / 4MB。上限是「流量」与「覆盖」的折中。
+//
+// ⚠️ 这里只是**第一道**手段,不是万能:FLAC 的元数据块顺序是
+//    STREAMINFO → (PICTURE 封面,实测 4~8MB) → VORBIS_COMMENT(真正的标签)。
+// 封面一旦超过上限,标签就永远落在取头区间之外 —— 2026-11 的线上事故正是如此:
+// SMB 源 1257 首落成 Unknown Artist / Unknown Album,而同一个文件在本地(走
+// parseFile 随机读)完全正常。所以「取头到顶仍不完整」时必须再走
+// readFlacTagsByBlocks() 按块头跳读,**不要靠继续加大这个固定上限**:
+// 4MB→16MB 只会把每个文件的取头流量放大 4 倍,而且下次遇到更大的封面照样失效。
 const HEADER_LADDER = [256 * 1024, 1024 * 1024, 4 * 1024 * 1024];
 /** 歌词标签字段名白名单(大小写不敏感):Vorbis Comment 与 ID3 的常见写法。
  *  实测本库只用 LYRICS,但别的抓轨/转码工具可能写 UNSYNCEDLYRICS/SYNCEDLYRICS/LYRIC。 */
@@ -258,6 +268,19 @@ export async function scanWebDAVSource(sourceId: string, config: any, mode: Scan
         // 只有真正解析失败才升档;WAV 这类天生无标签的格式解析本身是成功的,不会白升。
         if (!parsed.incomplete || i === HEADER_LADDER.length - 1) meta = parsed;
       }
+      // 分级取头到顶仍判不完整且是 FLAC:大概率是「大封面 + 标签在后」,按块跳读精确取。
+      if (meta?.incomplete && path.extname(href).toLowerCase() === ".flac") {
+        const synth = await readFlacTagsByBlocks(async (start, end) => {
+          const res = await fetchWithRetry(downloadUrl, {
+            headers: { ...(auth ? { Authorization: auth } : {}), Range: `bytes=${start}-${end}` },
+          });
+          return res.ok || res.status === 206 ? Buffer.from(await res.arrayBuffer()) : Buffer.alloc(0);
+        }, entry.size);
+        if (synth) {
+          const precise = await extractMetadataHeader(synth, path.basename(href), entry.size);
+          if (!precise.incomplete) meta = precise;
+        }
+      }
       if (!meta) { skipped++; return; }
       if (meta.incomplete) {
         // 升到顶(4MB)仍解析不出标签 —— 此前完全静默,现在留一条可检索的 warn。
@@ -355,6 +378,13 @@ export async function scanWebDAVSource(sourceId: string, config: any, mode: Scan
     if (!seenPaths.has(s.path)) removedIds.push(s.id);
   }
   if (removedIds.length > 0) {
+    // 第二道安全阀:一次扫描要删掉半数以上曲目,几乎一定是「遍历提前结束 /
+    // 部分目录没列到」,而不是用户真的删了一半文件。宁可留下旧行等下次核对,
+    // 也不能把曲库清空(实测一次中断的增量为「-16360」)。
+    if (existingSongs.length > 50 && removedIds.length > existingSongs.length * 0.5) {
+      log.warn(`[SCANNER] WebDAV ${mode} scan: 待删 ${removedIds.length}/${existingSongs.length} 超过半数,疑似遍历不完整,本次不删除`);
+      return { added, updated, removed: 0, skipped, failed };
+    }
     // P0-6:只有「至少一个目录列举成功」才说明这次看到的是源的真实全貌。
     // 零目录可达 = 源整体不可达(网络抖动 / 远端重启)的最强信号,此时既不能抹
     // 测量回写,更不能删歌曲行 —— 否则一次瞬断就把整个 WebDAV 源从曲库抹掉,
@@ -458,7 +488,14 @@ export async function scanSmbSource(
       if (existing) {
         const storedFp = existing.fingerprint || "";
         const matches = storedFp ? storedFp === fp : (existing.size || 0) === entry.size;
-        if (matches) { skipped++; return; }
+        // 指纹一致但标签是空的(Unknown Artist/空 artist):历史上有过取头读到空 buffer
+        // 的版本,把这类行落成了文件名推断。坑已经修好,但指纹没变会被永久跳过,
+        // 所以这里对「标签缺失」的行强制重解析一次。文件本身没变,重读很便宜。
+        const tagsMissing = !existing.artist || existing.artist === "Unknown Artist";
+        // 曾经被坏标签写进来的行,group_key 里还留着 unknown artist/album ——
+        // 歌手已修正但分组没跟上的,也要再解析一次,让 upsert 重算并并入正确的组。
+        const staleGroupKey = !!existing.groupKey && existing.groupKey.includes("unknown artist");
+        if (matches && !tagsMissing && !staleGroupKey) { skipped++; return; }
       }
     }
 
@@ -473,6 +510,17 @@ export async function scanSmbSource(
         const headerBuf = await smbReadRange(sourceId, cfg, entry.path, 0, end);
         const parsed = await extractMetadataHeader(headerBuf, entry.name, entry.size);
         if (!parsed.incomplete || i === HEADER_LADDER.length - 1) meta = parsed;
+      }
+      // 同 WebDAV:大封面把标签顶到 4MB 之后时,按 FLAC 块头跳读精确取标签。
+      if (meta?.incomplete && path.extname(entry.name).toLowerCase() === ".flac") {
+        const synth = await readFlacTagsByBlocks(
+          (start, end) => smbReadRange(sourceId, cfg, entry.path, start, end),
+          entry.size,
+        );
+        if (synth) {
+          const precise = await extractMetadataHeader(synth, entry.name, entry.size);
+          if (!precise.incomplete) meta = precise;
+        }
       }
       if (!meta) { skipped++; return; }
       if (meta.incomplete) {
@@ -564,6 +612,11 @@ export async function scanSmbSource(
   }
   let removed = 0;
   if (removedIds.length > 0) {
+    // 与 WebDAV 同口径的防误删:一次删掉半数以上 = 遍历不完整,不是用户删了歌。
+    if (existingSongs.length > 50 && removedIds.length > existingSongs.length * 0.5) {
+      log.warn(`[SCANNER] SMB ${mode} scan: 待删 ${removedIds.length}/${existingSongs.length} 超过半数,疑似遍历不完整,本次不删除`);
+      return { added, updated, removed: 0, skipped, failed };
+    }
     if (visited.size > 0) {
       deleteAnalysisMany(removedIds);
       for (const id of removedIds) db.delete(songs).where(eq(songs.id, id)).run();
@@ -587,6 +640,31 @@ export async function scanSmbSource(
  */
 const LOSSLESS_SIZE_BITRATE_EXTS = new Set([".flac", ".wav", ".ape", ".aiff", ".aif", ".wv"]);
 
+/**
+ * 从「文件头部字节」解析标签(WebDAV / SMB 共用;本地源走 parseFile 随机读,不用这里)。
+ *
+ * ── 接入新源 / 新格式时必读(踩过的坑)────────────────────────────────
+ * 1) 「解析出 duration」≠「标签完整」。
+ *    FLAC 的 STREAMINFO 在文件最前 34 字节,任何 256KB 的头都能算出时长;
+ *    但 VORBIS_COMMENT 可能排在 4~8MB 的 PICTURE 之后。若把 hasAudioInfo 当作
+ *    「完整」判据,分级取头会在第一档就停,结果 title=文件名、artist=Unknown Artist,
+ *    且日志只有一条「仍解析不出标签」的 warn,极易被忽略。
+ *    → 判据必须按容器区分:FLAC 以「有没有标签」为准(见下方 tagsMayFollowAudio)。
+ *
+ * 2) 到顶仍不完整时,按块头跳读,而不是加大固定上限。
+ *    readFlacTagsByBlocks() 只读 4 字节块头逐块跳过 PICTURE,再精确取 STREAMINFO /
+ *    VORBIS_COMMENT,拼成元数据块合成体交给解析器:流量几 KB、与封面大小无关。
+ *    新增容器(如 APE / WV)出现同类问题时,照这个模式加跳读,不要改 HEADER_LADDER。
+ *
+ * 3) 三处调用要保持同一口径:
+ *    · WebDAV(scanWebdavSource) 与 SMB(scanSmbSource) 共用本函数与 HEADER_LADDER;
+ *    · 本地源(localSourceProbe / parseFile)有随机访问能力,不受头部长度的限制;
+ *    · 因此修这类问题要同时检查 webdav/smb 两条链路,只改一侧会留下同源缺陷。
+ *
+ * 4) 判定「不完整」后,调用方必须真的升档或跳读;直接把 incomplete 结果入库,
+ *    就会得到一条「有正确时长、但歌手/专辑是 Unknown」的脏数据。
+ * ────────────────────────────────────────────────────────────────
+ */
 export async function extractMetadataHeader(headerBuf: Buffer, fileName: string, fileSize: number): Promise<MusicMetadata> {
   const ext = path.extname(fileName).toLowerCase();
   const nameWithoutExt = path.basename(fileName, ext);
@@ -651,7 +729,14 @@ export async function extractMetadataHeader(headerBuf: Buffer, fileName: string,
     // (tags 已由 buildTagsJson 滤掉全 null 的占位壳,故 !!tags 是可信的「有标签」信号)
     const hasTags = !!tags || !!common.title || !!common.artist || !!common.album;
     const hasAudioInfo = duration > 0 || bitRate > 0;
-    const incomplete = !inherentlyTagless && !hasTags && !hasAudioInfo;
+    // FLAC 的 STREAMINFO 在最前面,解析出时长只能证明「读到了音频结构」——
+    // VORBIS_COMMENT 却可能排在几 MB 的封面块之后。实测库里的
+    // `Adventure of a Lifetime - Coldplay.flac`(封面 1.59MB):256KB 头已能拿到
+    // dur=251,但 artist 仍是 Unknown;旧判据因此认为「完整」不再升档,
+    // 全库约 4.6% 的歌就这样落成了 Unknown Artist / Unknown Album。
+    // 所以 FLAC 必须以「有没有标签」为唯一判据,没标签就继续升档(256KB→1MB→4MB)。
+    const tagsMayFollowAudio = ext === ".flac";
+    const incomplete = !inherentlyTagless && !hasTags && (tagsMayFollowAudio || !hasAudioInfo);
     return {
       title, artist, album, duration, bitRate, genre, year, track, discNumber,
       contentType: mime, suffix: ext.replace(".", ""), size: fileSize,
@@ -666,6 +751,54 @@ export async function extractMetadataHeader(headerBuf: Buffer, fileName: string,
   } catch {
     return fallback();
   }
+}
+
+
+/**
+ * FLAC 大封面场景的精确取标签：标签块(VORBIS_COMMENT)排在几 MB 的 PICTURE 之后时,
+ * 固定上限的头部读取永远够不到(实测封面 4~8MB,库里 1257 首因此落成 Unknown)。
+ * 这里只读 4 字节块头逐块跳读,定位 STREAMINFO / VORBIS_COMMENT,再精确取这两块,
+ * 拼成一个「只有元数据块」的合法 FLAC 交给解析器 —— 流量几 KB,与封面大小无关。
+ *
+ * 说明:合成流不含 PICTURE,所以这类歌的封面不会入库(相对 4~8MB 的正文体积,这是
+ * 有意的取舍);时长/码率仍由 STREAMINFO 正常给出。
+ */
+async function readFlacTagsByBlocks(
+  readRange: (start: number, end: number) => Promise<Buffer>,
+  fileSize: number,
+): Promise<Buffer | null> {
+  const magic = await readRange(0, 3);
+  if (magic.length < 4 || magic.toString("latin1") !== "fLaC") return null;
+  let off = 4;
+  let streamInfo: Buffer | null = null;
+  let vorbis: Buffer | null = null;
+  let guard = 0;
+  while (off + 4 <= fileSize && guard++ < 64) {
+    const h = await readRange(off, off + 3);
+    if (h.length < 4) break;
+    const last = (h[0] & 0x80) !== 0;
+    const type = h[0] & 0x7f;
+    const len = (h[1] << 16) | (h[2] << 8) | h[3];
+    if (len < 0 || off + 4 + len > fileSize) break;
+    if (type === 0) {
+      streamInfo = await readRange(off + 4, off + 4 + len - 1);
+    } else if (type === 4) {
+      vorbis = await readRange(off + 4, off + 4 + len - 1);
+      break;
+    }
+    if (last) break;
+    off += 4 + len; // 关键:跳过 PICTURE 等大块,不读正文
+  }
+  if (!streamInfo || !vorbis) return null;
+  const hdr = (last: number, len: number) =>
+    Buffer.from([(last ? 0x80 : 0) | 0, (len >> 16) & 0xff, (len >> 8) & 0xff, len & 0xff]);
+  return Buffer.concat([
+    Buffer.from("fLaC", "latin1"),
+    hdr(0, streamInfo.length),
+    streamInfo,
+    Buffer.from([0x84, (vorbis.length >> 16) & 0xff, (vorbis.length >> 8) & 0xff, vorbis.length & 0xff]),
+    vorbis,
+  ]);
 }
 
 /** 多值标签折叠成单串(以 "; " 连接),供 songs.album_artist / composer / comment 这类单列存储。 */
@@ -908,7 +1041,15 @@ export function resolveLocalGroup(meta: MusicMetadata): { groupId: string; group
   }
 }
 
+
 export function upsertSong(songPath: string, meta: MusicMetadata, sourceId: string, fingerprint?: string): "added" | "updated" {
+  // 三条扫描链路(webdav/smb/local)的唯一入库入口:Unknown 标签在这里统一兜底。
+  recoverUnknownTags(meta, songPath.split(/[\\/]/).pop() || songPath);
+  // 专辑被清成空(Unknown/网址/广告/GBK 乱码)时用歌名当专辑,与下载/洗版口径一致:
+  // 宁可让专辑=歌名,也不要把「空」「www.xxx.com」「ÔÚÏß...」这类脏值写进库里。
+  if (isUnknownAlbum(meta.album) && meta.title && !/^unknown(\s*title)?$/i.test(meta.title.trim())) {
+    meta.album = meta.title.trim();
+  }
   // 行类型以路径前缀为唯一真相:WebDAV 扫描写 `w:<sourceId>:<href>`,本地写
   // `l:<sourceId>:<绝对路径>`,SMB 写 `s:<sourceId>:<共享内路径>`。此前 insert/update
   // 都不写 type,WebDAV 行全落建表默认 'local' —— 前端来源列因此把两类都显示成
@@ -920,7 +1061,14 @@ export function upsertSong(songPath: string, meta: MusicMetadata, sourceId: stri
   if (existing) {
     // 同曲多源归组:已分组行保持组不变;历史 NULL 组行(归组启用前/插件关闭期
     // 扫入的存量)在元数据更新时顺带补组,与 web 导入同规则。
-    const backfill = !existing.groupId && songGroupEnabled() ? resolveLocalGroup(meta) : null;
+    //
+    // 但「分组键变了」必须重算:标签从 Unknown Artist 修正为真实歌手后,旧 key
+    // 仍指向旧组,这行就永远进不了同曲组(实测 SMB 的 Coldplay 一条歌手已修正,
+    // group_key 仍是 `...\x01unknown artist\x01unknown album`)。同 key 命中已有组
+    // 时 resolveLocalGroup 会并入,不会另开新组。
+    const resolvedGroup = songGroupEnabled() ? resolveLocalGroup(meta) : null;
+    const groupKeyChanged = !!resolvedGroup && existing.groupKey !== resolvedGroup.groupKey;
+    const backfill = (!existing.groupId || groupKeyChanged) ? resolvedGroup : null;
     db.update(songs).set({
       title: meta.title, artist: meta.artist, artistId, album: meta.album, albumId,
       duration: meta.duration, bitRate: meta.bitRate, contentType: meta.contentType,

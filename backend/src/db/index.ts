@@ -322,6 +322,17 @@ export function initDatabase() {
       updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
     );
 
+    -- 音源异步删除进度(断点续删):删完才删 media_sources 行,重启后按剩余歌曲继续。
+    CREATE TABLE IF NOT EXISTS source_delete_jobs (
+      source_id TEXT PRIMARY KEY,
+      total INTEGER NOT NULL DEFAULT 0,
+      removed INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'running',
+      error TEXT,
+      created_at INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL DEFAULT 0
+    );
+
     CREATE TABLE IF NOT EXISTS plugins (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,

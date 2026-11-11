@@ -25,9 +25,11 @@ import {
   userFavoriteSongs,
   uuidv4,
 } from "./shared.js";
+import { like, or } from "drizzle-orm";
 import { isSourceScanRunning, listScanJobs, scanJobs, startSourceScan } from "../../services/source/scanRunner.js";
 import { closeSmbSource, testSmbConnection } from "../../services/source/smbClient.js";
 import { recomputeSourceSongCount } from "../../services/source/songCount.js";
+import { listSourceDeleteJobs, startSourceDelete } from "../../services/source/sourceDelete.js";
 
 /**
  * 归一化媒体源开关。
@@ -68,7 +70,18 @@ function sanitizeScanAuto(config: Record<string, unknown>): Record<string, unkno
 export function registerSources(app: Hono): void {
 // 歌曲数读存字段（扫描结束/单曲删除/换源后由 songCount.ts 重算写回）：
 // 打开音源页不再按源各扫一遍索引。NULL = 老库升级或新建源尚未统计 → 惰性算一次并回填。
-app.get("/v1/sources", adminMiddleware, (c) => c.json(db.select().from(mediaSources).all().map(s => ({ ...s, songCount: s.songCount ?? recomputeSourceSongCount(s.id), config: JSON.parse(s.config || "{}") }))));
+app.get("/v1/sources", adminMiddleware, (c) => {
+  // deleting:删到一半的源仍然在表里(删完才删行),前端据此显示「正在删除 x/y」。
+  const del = listSourceDeleteJobs();
+  return c.json(db.select().from(mediaSources).all().map(s => ({
+    ...s,
+    songCount: s.songCount ?? recomputeSourceSongCount(s.id),
+    config: JSON.parse(s.config || "{}"),
+    deleting: del[s.id] ?? null,
+  })));
+});
+// 删除进度快照(前端 3s 轮询,与 scan-status 同一节奏)。
+app.get("/v1/sources/delete-status", adminMiddleware, (c) => c.json({ jobs: listSourceDeleteJobs() }));
 app.post("/v1/sources", adminMiddleware, async (c) => {
   const body = await c.req.json();
   const id = uuidv4();
@@ -100,24 +113,15 @@ app.put("/v1/sources/:id", adminMiddleware, async (c) => {
 
 app.delete("/v1/sources/:id", adminMiddleware, (c) => {
   const id = c.req.param("id")!;
-  // Find all songs belonging to this source (webdav: w:<id>:, smb: s:<id>:, local: l:<id>:)
-  const sourceSongs = db.select().from(songs).all().filter(s => s.path.startsWith(`w:${id}:`) || s.path.startsWith(`s:${id}:`) || s.path.startsWith(`l:${id}:`));
-  const songIds = sourceSongs.map(s => s.id);
-  if (songIds.length > 0) {
-    // Delete dependent rows first (FK constraints)
-    db.delete(playlistSongs).where(inArray(playlistSongs.songId, songIds)).run();
-    db.delete(userFavoriteSongs).where(inArray(userFavoriteSongs.songId, songIds)).run();
-    db.delete(playHistory).where(inArray(playHistory.songId, songIds)).run();
-    // P0-6:源整个删掉,回写跟删(行永久消失,不存在"源抖动误删",无需可达门)。
-    // 顺序:先回写后歌曲行(FK 无 CASCADE,反了抛错)。
-    deleteAnalysisMany(songIds);
-    db.delete(songs).where(inArray(songs.id, songIds)).run();
-    cleanupOrphans();
+  const src = db.select().from(mediaSources).where(eq(mediaSources.id, id)).get();
+  if (!src) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.source.notFound"), 404);
+  // 扫描进行中先拦下:边扫边删会把刚删掉的文件又写回来,永远删不完。
+  if (isSourceScanRunning(id)) {
+    return c.json({ success: false, error: translate("errors.source.scanRunning") }, 409);
   }
-  db.delete(mediaSources).where(eq(mediaSources.id, id)).run();
-  // SMB 连接池不留死连接（非 SMB 源无条目，调用无副作用）。
-  closeSmbSource(id);
-  return c.json({ success: true, removedSongs: songIds.length });
+  // 202:任务已入队,立即返回;前端轮询 /sources/delete-status 看进度。
+  const { total, removed } = startSourceDelete(id);
+  return c.json({ success: true, deleting: true, total, removed }, 202);
 });
 
 // Test connection

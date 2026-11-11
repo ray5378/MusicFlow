@@ -359,6 +359,7 @@ import { startScanScheduler } from "./services/source/scanScheduler.js";
 import { startStreamProbeScheduler } from "./services/source/streamProbe.js";
 import { ensureDownloadSource } from "./services/fetch/source.js";
 import { resumeInterruptedFetchJobs, BOOT_RESUME_DELAY_MS } from "./services/fetch/jobRunner.js";
+import { resumePendingSourceDeletes } from "./services/source/sourceDelete.js";
 import { currentFetchConfig } from "./services/fetch/configStore.js";
 import { cleanCacheRootContents, ensureWritableDir } from "./services/fetch/writable.js";
 
@@ -426,6 +427,9 @@ try {
 // libraryScheduler 的 busy 判定会照常跳过，不会重复起批。
 setTimeout(() => {
   try {
+    // 音源删除是后台任务:重启前没删完的在这里续删(删过的行已不存在,幂等)。
+    const delResumed = resumePendingSourceDeletes();
+    if (delResumed > 0) log.info(`[SRC-DEL] boot 恢复：${delResumed} 个音源继续删除`);
     const resumed = resumeInterruptedFetchJobs();
     if (resumed > 0) log.info(`[FETCH] boot 恢复：${resumed} 个中断任务已重新入队续跑`);
   } catch (e: any) {

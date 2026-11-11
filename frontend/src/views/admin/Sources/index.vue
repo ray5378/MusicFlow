@@ -5,7 +5,7 @@
       <el-button type="primary" @click="showAddDialog = true">{{ t('admin.sources.add') }}</el-button>
     </div>
     <div class="source-grid" v-if="sources.length > 0">
-      <el-card v-for="source in sources" :key="source.id" class="source-card">
+      <el-card v-for="source in sources" :key="source.id" :class="['source-card', { 'is-deleting': !!source._deleting }]">
         <div class="source-header">
           <div class="source-info">
             <h3>{{ source.name }}</h3>
@@ -31,7 +31,11 @@
           <p v-if="source.config?.url"><strong>URL:</strong> {{ source.config.url }}</p>
           <p v-if="source.config?.root_path"><strong>{{ t('admin.sources.rootPath') }}:</strong> {{ source.config.root_path }}</p>
           <p v-if="source.config?.username"><strong>{{ t('common.username') }}:</strong> {{ source.config.username }}</p>
-          <p><strong>{{ t('common.status') }}:</strong> <el-tag :type="source.enabled ? 'success' : 'info'" size="small">{{ source.enabled ? t('common.enabled') : t('common.disabled') }}</el-tag></p>
+          <p>
+            <strong>{{ t('common.status') }}:</strong>
+            <el-tag v-if="source._deleting" type="warning" size="small">{{ t('admin.sources.deletingTag') }}</el-tag>
+            <el-tag v-else :type="source.enabled ? 'success' : 'info'" size="small">{{ source.enabled ? t('common.enabled') : t('common.disabled') }}</el-tag>
+          </p>
           <p>
             <strong>{{ t('admin.sources.autoScan') }}:</strong>
             <el-tag v-if="source.config?.scanAutoEnabled" type="warning" size="small">{{ t('admin.sources.autoScanOn', { time: source.config?.scanAutoTimeOfDay || '03:00' }) }}</el-tag>
@@ -85,10 +89,26 @@
           </div>
         </div>
 
+        <!-- 后台删除进度:删完前源行仍在,接口把进度挂在 deleting 上 -->
+        <div v-if="source._deleting" class="scan-progress">
+          <div class="progress-header">
+            <span class="progress-label">{{ t('admin.sources.deletingTitle') }}</span>
+            <span class="progress-count">
+              {{ source._deleting.removed }} / {{ source._deleting.total }}
+              <span v-if="source._deleting.total > 0">({{ Math.min(100, Math.round((source._deleting.removed / source._deleting.total) * 100)) }}%)</span>
+            </span>
+          </div>
+          <el-progress
+            :percentage="source._deleting.total > 0 ? Math.min(100, Math.round((source._deleting.removed / source._deleting.total) * 100)) : 100"
+            :stroke-width="8"
+            status="warning"
+          />
+        </div>
+
         <div class="source-actions">
           <el-button size="small" @click="testConnection(source)" :loading="source._testing">{{ t('admin.sources.testConnection') }}</el-button>
-          <el-button size="small" type="primary" @click="scanSource(source, 'full')" :loading="source._scanning" :disabled="source._scanning">{{ t('admin.sources.fullScan') }}</el-button>
-          <el-button size="small" type="warning" @click="scanSource(source, 'incremental')" :loading="source._scanning" :disabled="source._scanning">{{ t('admin.sources.incrementalScan') }}</el-button>
+          <el-button size="small" type="primary" @click="scanSource(source, 'full')" :loading="source._scanning" :disabled="source._scanning || !!source._deleting">{{ t('admin.sources.fullScan') }}</el-button>
+          <el-button size="small" type="warning" @click="scanSource(source, 'incremental')" :loading="source._scanning" :disabled="source._scanning || !!source._deleting">{{ t('admin.sources.incrementalScan') }}</el-button>
           <el-button v-if="source._scanning" size="small" type="danger" @click="stopScan(source)">{{ t('admin.sources.stopScan') }}</el-button>
         </div>
       </el-card>
@@ -114,7 +134,7 @@
           <el-form-item label="WebDAV URL"><el-input v-model="newSource.config.url" placeholder="http://192.168.1.100:5000/dav" /></el-form-item>
           <el-form-item :label="t('common.username')"><el-input v-model="newSource.config.username" :placeholder="t('common.optional')" /></el-form-item>
           <el-form-item :label="t('common.password')"><el-input v-model="newSource.config.password" type="password" :placeholder="t('common.optional')" show-password /></el-form-item>
-          <el-form-item :label="t('admin.sources.rootPath')"><el-input v-model="newSource.config.root_path" placeholder="/music" /></el-form-item>
+          <el-form-item :label="t('admin.sources.rootPath')"><el-input v-model="newSource.config.root_path" placeholder="/docker/musicflow/无损音乐" /></el-form-item>
         </template>
         <template v-else-if="newSource.type === 'smb'">
           <p style="margin: -4px 0 12px 100px; font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.5;">{{ t('admin.sources.smbExample') }}</p>
@@ -204,6 +224,8 @@ const showEditDialog = ref(false);
 const newSource = reactive({ name: "", type: "webdav", autoEnabled: false, autoTime: "03:00", config: { url: "", username: "", password: "", root_path: "", path: "", host: "", share: "", port: 445, domain: "WORKGROUP" } });
 const editSource = reactive({ id: "", name: "", type: "webdav", enabled: 1, config: { url: "", username: "", password: "", root_path: "", path: "", host: "", share: "", port: 445, domain: "WORKGROUP", scanAutoEnabled: false, scanAutoTimeOfDay: "03:00" } });
 let pollTimer: ReturnType<typeof setInterval> | null = null;
+// 本页发起的删除任务:完成/失败只提示一次
+const pendingDeletes = new Set<string>();
 
 async function loadSources() {
   try {
@@ -218,6 +240,8 @@ async function loadSources() {
         _scanning: old?._scanning ?? false,
         _scanProgress: old?._scanProgress ?? null,
         _scanTrigger: old?._scanTrigger ?? null,
+        // 后端在源行删完前会带 deleting:{total,removed,status},据此显示删除进度。
+        _deleting: s.deleting ?? null,
       };
     });
   } catch { sources.value = []; }
@@ -321,6 +345,21 @@ async function pollScanStatus() {
     }
   }
   if (needReload) loadSources();
+
+  // 删除进度:有任务就重拉列表(列表接口自带 deleting),完成/失败各提示一次。
+  if (pendingDeletes.size > 0 || sources.value.some((s: any) => s._deleting)) {
+    await loadSources();
+    for (const id of [...pendingDeletes]) {
+      const cur = sources.value.find((s: any) => s.id === id);
+      if (!cur) {
+        pendingDeletes.delete(id);
+        ElMessage.success(t("admin.sources.deleteDone"));
+      } else if (cur._deleting?.status === "failed") {
+        pendingDeletes.delete(id);
+        ElMessage.error(t("admin.sources.deleteFailedHint", { error: cur._deleting.error || "" }));
+      }
+    }
+  }
 }
 
 async function stopScan(source: any) {
@@ -373,8 +412,19 @@ async function saveEdit() {
 
 async function deleteSource(source: any) {
   await ElMessageBox.confirm(t("admin.sources.confirmDeleteSource", { name: source.name }), t("common.confirmDelete"), { type: "warning" });
-  try { await api.delete(`/rest/api/v1/sources/${source.id}`); ElMessage.success(t("common.deleted")); loadSources(); }
-  catch (e: any) { ElMessage.error(e.response?.data?.error || t("common.deleteFailed")); }
+  try {
+    // 后端后台删(两万多首要跑一会),这里只拿到 202 + 总数,进度靠轮询。
+    const res = await api.delete(`/rest/api/v1/sources/${source.id}`);
+    if (res.status === 202) {
+      pendingDeletes.add(source.id);
+      source._deleting = { total: res.data?.total || 0, removed: res.data?.removed || 0, status: "running" };
+      ElMessage.success(t("admin.sources.deleteStarted"));
+      pollScanStatus();
+    } else {
+      ElMessage.success(t("common.deleted"));
+      loadSources();
+    }
+  } catch (e: any) { ElMessage.error(e.response?.data?.error || t("common.deleteFailed")); }
 }
 
 onMounted(() => {
@@ -401,6 +451,12 @@ onUnmounted(() => {
     .more-btn { cursor: pointer; font-size: 18px; color: var(--fnos-text-secondary); &:hover { color: var(--fnos-red); } }
   }
   .source-config { margin: 12px 0; color: var(--fnos-text-tertiary); font-size: 13px; p { margin: 6px 0; } }
+  .source-card.is-deleting {
+    opacity: 0.6;
+    filter: grayscale(0.6);
+    .source-actions { pointer-events: none; }
+  }
+
   .scan-progress {
     margin: 12px 0; padding: 12px; background: rgba(27, 115, 251, 0.08); border-radius: 8px; border: 1px solid rgba(27, 115, 251, 0.15);
     .progress-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;

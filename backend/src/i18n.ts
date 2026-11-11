@@ -51,6 +51,7 @@ const CATALOG: Record<BackendLocale, Catalog> = {
     "errors.airplay.disabled": "AirPlay 播放器已关闭(插件管理页开启后可用)",
 
     "errors.source.notFound": "媒体源不存在",
+    "errors.source.scanRunning": "该音源正在扫描,请先停止扫描再删除",
     "errors.source.disabled": "媒体源已禁用",
     "errors.source.unsupportedType": "不支持的媒体源类型",
     "errors.source.connectFailed": "连接失败",
@@ -248,6 +249,7 @@ const CATALOG: Record<BackendLocale, Catalog> = {
     "errors.airplay.disabled": "AirPlay player is disabled (enable it from the plugin management page)",
 
     "errors.source.notFound": "Media source not found",
+    "errors.source.scanRunning": "This source is scanning; stop the scan before deleting",
     "errors.source.disabled": "Media source is disabled",
     "errors.source.unsupportedType": "Unsupported media source type",
     "errors.source.connectFailed": "Connection failed",

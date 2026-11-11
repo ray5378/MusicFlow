@@ -218,7 +218,9 @@ function tokenValue(key: string, spec: string | undefined, ctx: NamingCtx, cfg: 
     case "title":
       return ctx.title ?? "";
     case "album":
-      return ctx.album || "Unknown Album";
+      // 专辑缺失时用歌名当专辑目录(而不是 Unknown Album):下载/洗版成品
+      // 至少落在「歌手/歌名/」下,便于按歌识别与后续整理。
+      return ctx.album || ctx.title || "Unknown Album";
     case "year":
       return ctx.year && ctx.year > 0 ? String(ctx.year) : "";
     case "track":

@@ -39,6 +39,7 @@ import {
 } from "./quality.js";
 import { probeFile, toCandidateQuality } from "./probe.js";
 import { verifyIntegrity } from "./integrity.js";
+import { recoverUnknownTags, isUnknownAlbum } from "../source/tagRecovery.js";
 import { writeTags, applyTagsVariant, type SongTags } from "./tagWriter.js";
 import { transcodeFile } from "./transcode.js";
 import { finalizeFile, type FinalizeResult } from "./finalize.js";
@@ -1520,6 +1521,18 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
       const extra = await collectExtraTags(t, cand, { title, artist, album });
       Object.assign(tags, extra.extra);
       builtinTagSrc = extra.builtinSrc;
+      // 兜底(2026-11):Unknown 的歌手/专辑先用歌词头回填,再用信源搜索结果兜底。
+      // 必须放在这里 —— 下面的 title/artist/album 回写与 finalizeFile 的命名模板
+      // (默认「歌名 - 歌手」)都取这几个变量,先修才能让文件名与标签同时正确。
+      if (recoverUnknownTags(tags, "", t.artist && t.artist !== artist ? t.artist : cand.artist || "")) {
+        warnings.push("标签为 Unknown,已按歌词/信源信息回填");
+      }
+      // 专辑仍然缺失(信源与歌词都没有)→ 用歌名当专辑。产品口径(2026-11):
+      // 下载/洗版不接受「专辑 = Unknown Album」的成品,目录按歌名分,标签也写歌名。
+      if (isUnknownAlbum(tags.album) && tags.title && !/^unknown(\s*title)?$/i.test(tags.title.trim())) {
+        tags.album = tags.title.trim();
+        warnings.push(`专辑标签缺失,已用歌名作为专辑: ${tags.album}`);
+      }
     } catch (e) {
       warnings.push(`增值标签采集异常(忽略): ${msgOf(e)}`);
     }
