@@ -2,6 +2,14 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.12.30] - 2026-11-11
+
+### Fix / CI:恢复群组不变量守卫(105 条断言)
+
+- `media_sources.song_count` 的老库补列(`PRAGMA table_info` + `ALTER TABLE`)从
+  `db/index.ts` 挪到 `db/songCountColumn.ts`:该文件被守卫要求「CREATE TABLE 是唯一
+  schema 来源、不得出现 ad-hoc 迁移」,与 `services/fetch/attempts.ts` 保持同一约定
+  (谁的表谁幂等补列)。新库仍由 CREATE TABLE 直接建好该列,行为不变。
 ## [4.12.29] - 2026-11-11
 
 ### Fix / 音源:SMB 改为 smbprotocol 桥接,支持 SMB3 加密共享
