@@ -1123,6 +1123,7 @@
       "smbShare": "Share Name",
       "smbPort": "Port",
       "smbDomain": "Domain",
+      "smbExample": "Example: \\\\192.168.1.100\\Music\\Pop — host 192.168.1.100, share Music, root /Pop (leading slash optional)",
       "songCount": "Songs",
       "songUnit": "tracks",
       "namePlaceholder": "Enter a name",

@@ -34,6 +34,15 @@ describe("SMB 配置与路径归一", () => {
     });
   });
 
+  it("根目录带不带前导斜杠等价（用户手填两种都常见）", () => {
+    const a = buildSmbConfig({ host: "nas", share: "HDD", root_path: "docker/musicflow/音乐下载" });
+    const b = buildSmbConfig({ host: "nas", share: "HDD", root_path: "/docker/musicflow/音乐下载" });
+    const c = buildSmbConfig({ host: "nas", share: "HDD", root_path: "\\docker\\musicflow\\音乐下载\\" });
+    expect(a?.root_path).toBe("/docker/musicflow/音乐下载");
+    expect(b?.root_path).toBe("/docker/musicflow/音乐下载");
+    expect(c?.root_path).toBe("/docker/musicflow/音乐下载");
+  });
+
   it("保留显式端口与域", () => {
     const cfg = buildSmbConfig({ host: "nas", share: "music", port: 1445, domain: "HOME" });
     expect(cfg?.port).toBe(1445);
