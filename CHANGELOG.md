@@ -2,6 +2,19 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.12.25] - 2026-11-11
+
+### Fix / 修复:重启后不自动续播
+
+优雅停机(SIGTERM)会依次 `stopPlayback()` + `transport("stop")` 发 TEARDOWN,
+而 `stopPlayback` 会把队列 `isActive` 置 false **并落库**。下次启动 `activeDevices()`
+为空 ⇒ 启动 +10s 的 `resumeActive` 与组看门狗(依赖 isActive)都不会触发,
+自动续播静默失效(240 重启后实证:`[queue] resuming ...` 一次未打印)。
+
+- 新增 `QueueController.retainActiveQueues(ids)`:关停尾声按停机前活跃快照恢复
+  `isActive` 并落库;空队列/未知 id 跳过。
+- `index.ts` 关停流程:停传输前记录 `activeDevices()` 快照,TEARDOWN 结束后恢复。
+- 新增 `tests/player/retainActiveQueues.test.ts`(恢复 / 空队列 / 未知 id)。
 ## [4.12.24] - 2026-11-11
 
 ### Fix / 内存:空闲驱逐的「在途调用」改为按插件 id 统计

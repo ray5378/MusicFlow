@@ -2258,6 +2258,23 @@ export class QueueController extends EventEmitter {
     this.emit("queue_changed", playerId, this.snapshot(playerId));
   }
 
+  /**
+   * 关停(SIGTERM)尾声:把关停前活跃的队列重新标记为 active 并落库。
+   * 停机流程要发 stop/TEARDOWN,队列可能在过程中被标记 inactive(is_active=0 落库),
+   * 那会让下次启动的「自动续播」因为 activeDevices() 为空而静默跳过
+   * (index.ts 启动 +10s 的 resumeActive / 组 watchdog 都依赖 isActive)。
+   * 这里按关停前的快照原样恢复。
+   */
+  retainActiveQueues(ids: string[]): void {
+    for (const raw of ids) {
+      const id = stripPlayerPrefix(raw);
+      const q = this.queues.get(id);
+      if (!q || q.isActive || q.items.length === 0) continue;
+      q.isActive = true;
+      this.persist(id);
+    }
+  }
+
   /** 停止后再次点播放:解冻自动推进,让这首播完还能续下一首。
    *  仅在队列"被按停"(有当前曲且未播完)时恢复;自然播完的队列不复活。 */
   resumePlayback(playerId: string): void {

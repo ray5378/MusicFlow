@@ -715,6 +715,9 @@ async function gracefulShutdown(sig: string): Promise<void> {
     const { getPeerManager } = await import("./services/peer.js");
     const { getQueueController } = await import("./services/player/index.js");
     const qc = getQueueController();
+    // 关停流程要发 stop/TEARDOWN,队列可能在这个过程中被标记为 inactive 并落库,
+    // 下次启动的自动续播就会因为 activeDevices() 为空而静默跳过。先记快照,停完再恢复。
+    const activeBefore = qc.activeDevices().map((a) => a.deviceId);
     const cast = getPeerManager()
       .list()
       .filter((p) => /^(group|airplay|dlna|sendspin):/.test(String(p.peerId)));
@@ -727,6 +730,7 @@ async function gracefulShutdown(sig: string): Promise<void> {
       Promise.allSettled(cast.map((p) => qc.transport(String(p.peerId), "stop"))),
       new Promise((r) => setTimeout(r, 4000)),
     ]);
+    qc.retainActiveQueues(activeBefore); // 关停尾声:恢复活跃标记,保住下次启动的自动续播
   } catch { /* 停传输失败也要继续退出 */ }
   try { server.close(); } catch { /* ignore */ }
   setTimeout(() => process.exit(0), 800).unref?.();
