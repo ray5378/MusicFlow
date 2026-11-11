@@ -35,7 +35,7 @@ import { runBatchJob } from "./batch/runner.js";
 import {
   setDailyRunner, startDailyScheduler, getDailyMasterEnabled, formatDailyTime,
 } from "./services/dailyScheduler.js";
-import { getCorsOrigins, getPlayHistoryRetentionDays } from "./utils/env.js";
+import { corsOrigins, playHistoryRetentionDays } from "./services/appConfig.js";
 import { runWithLocale, parseLocale, translate } from "./i18n.js";
 
 const app = new Hono();
@@ -76,17 +76,16 @@ app.use("*", async (c, next) => {
 // trigger CORS, so the default allowlist only needs to cover localhost. Direct
 // cross-origin callers must be whitelisted via CORS_ORIGINS (comma separated),
 // or set CORS_ORIGINS=* to allow all origins (previous behavior).
-const allowedOrigins = getCorsOrigins();
-// 默认(白名单为空)即"反射请求方 Origin"——恢复 previous behavior,让浏览器侧
-// 的跨域客户端(如 Home Assistant Lovelace 卡片,其源与后端不同)能直接调用 REST/WS。
-// 鉴权是 token-in-URL 而非 cookie,因此 CORS 在此并非安全边界。如需锁死到具体
-// 来源,显式设置 CORS_ORIGINS(逗号分隔)即可。
-const reflectAllOrigins = allowedOrigins.length === 0 || allowedOrigins.includes("*");
+// 白名单每次请求现读设置表(前端「系统设置 → 服务配置」改完即时生效,不必重启容器)。
+// 默认(白名单为空)即"反射请求方 Origin",让浏览器侧的跨域客户端(如 Home Assistant
+// Lovelace 卡片)能直接调用 REST/WS。鉴权是 token-in-URL 而非 cookie,因此 CORS 在此
+// 并非安全边界;需要锁死来源时在前端填具体地址即可。
 app.use("*", cors({
   origin: (origin) => {
     if (!origin) return origin;
-    if (reflectAllOrigins) return origin;
-    return allowedOrigins.includes(origin) ? origin : undefined;
+    const allowed = corsOrigins();
+    if (allowed.length === 0 || allowed.includes("*")) return origin;
+    return allowed.includes(origin) ? origin : undefined;
   },
 }));
 
@@ -292,7 +291,7 @@ startPluginIdleSweeper();
 startPluginHotReload();
 
 // Retention cleanup for play history (play_history grows with every play).
-cleanupPlayHistory(getPlayHistoryRetentionDays());
+cleanupPlayHistory(playHistoryRetentionDays());
 
 // ==================== Daily sync scheduler ====================
 // 每天在**可配置的具体时刻**触发一次全量同步管线(settings.daily_recommend_time
@@ -339,7 +338,7 @@ async function runMaintenanceOnce() {
   // play_history 保留期清理留在主进程(单条 DELETE,不构成内存峰)。
   // 单独 try/catch:任何异常都不能中断定时器 re-arm 链(见 services/dailyScheduler.ts)。
   try {
-    cleanupPlayHistory(getPlayHistoryRetentionDays());
+    cleanupPlayHistory(playHistoryRetentionDays());
   } catch (e: any) {
     log.error("[AUTO-SYNC] history cleanup error", { err: e?.message || e });
   }

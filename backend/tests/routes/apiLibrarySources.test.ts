@@ -340,7 +340,14 @@ describe("sources 域", () => {
       { id: "sd3", title: "Keep", path: "l:other:/c.mp3" },
     ]).run();
     const r = await call("DELETE", "/v1/sources/src-del");
-    expect(r.body).toMatchObject({ success: true, removedSongs: 2 });
+    // 2026-11 起删除改为后台任务:接口立即回 202,前端轮询 /sources/delete-status 看进度
+    expect(r.body).toMatchObject({ success: true, deleting: true, total: 2 });
+    // 等后台 drain 收尾(删完歌曲后还要 cleanupOrphans + 删源行)
+    for (let i = 0; i < 150; i++) {
+      const src = db.select().from(mediaSources).where(eq(mediaSources.id, "src-del")).get();
+      if (!src) break;
+      await new Promise((res) => setTimeout(res, 20));
+    }
     expect(db.select().from(songs).where(eq(songs.id, "sd1")).get()).toBeUndefined();
     expect(db.select().from(songs).where(eq(songs.id, "sd3")).get()).toBeTruthy();
     expect(db.select().from(mediaSources).where(eq(mediaSources.id, "src-del")).get()).toBeUndefined();

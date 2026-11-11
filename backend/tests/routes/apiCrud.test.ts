@@ -131,9 +131,15 @@ describe("媒体源 CRUD 闭环", () => {
     const up404 = await call("PUT", "/v1/sources/no-such", { name: "x" });
     expect(up404.status).toBe(404);
 
+    // 2026-11 起删除是后台任务:接口立即 202,前端轮询进度;这里等它落库消失
     const del = await call("DELETE", "/v1/sources/" + sid);
-    expect(del.status).toBe(200);
-    const gone = await call("GET", "/v1/sources");
+    expect([200, 202]).toContain(del.status);
+    let gone: any = null;
+    for (let i = 0; i < 100; i++) {
+      gone = await call("GET", "/v1/sources");
+      if (!gone.body.some((s: any) => s.id === sid)) break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
     expect(gone.body.some((s: any) => s.id === sid)).toBe(false);
   });
 });

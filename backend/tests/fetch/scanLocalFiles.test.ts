@@ -101,7 +101,8 @@ describe("scanLocalFiles", () => {
     // WAV 无标签 -> 标题落文件名兜底
     expect(row.title).toBe("one");
     expect(row.artist).toBe("Unknown Artist");
-    expect(row.album).toBe("Unknown Album");
+    // 产品口径 2026-11:专辑标签缺失时用歌名当专辑(不再写 Unknown Album)
+    expect(row.album).toBe("one");
     expect(row.suffix).toBe("wav");
     // 裸 SQL 取回的是 snake_case 列名
     expect(row.content_type).toBe("audio/wav");

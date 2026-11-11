@@ -307,11 +307,16 @@ describe("upsertSong", () => {
     expect(song.has_lyrics).toBe(1);
   });
 
-  it("Unknown Artist / Unknown Album 不建 artist/album 行(NULL 关联)", () => {
+  it("Unknown Artist 不建 artist 行;专辑缺失时用歌名且 album.artist_id 为 NULL", () => {
     upsertSong("l:s1:/m/d.mp3", makeMeta({ title: "D", artist: "Unknown Artist", album: "Unknown Album" }), "s1");
     const song = sqlite.prepare("SELECT artist_id, album_id FROM songs WHERE path = ?").get("l:s1:/m/d.mp3") as any;
     expect(song.artist_id).toBeNull();
-    expect(song.album_id).toBeNull();
+    // 产品口径 2026-11:专辑标签是 Unknown/占位时用歌名当专辑;
+    // 但歌手未知 => album.artist_id 必须是 NULL(此前写空串会触发外键失败)
+    expect(song.album_id).not.toBeNull();
+    const album = sqlite.prepare("SELECT name, artist_id FROM albums WHERE id = ?").get(song.album_id) as any;
+    expect(album.name).toBe("D");
+    expect(album.artist_id).toBeNull();
   });
 
   it("同名专辑二次入库复用同一 album 行,并补写缺失的流派/封面", () => {

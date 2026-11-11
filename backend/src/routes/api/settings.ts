@@ -1,5 +1,6 @@
 // 自动生成 —— 由 index.ts 物理拆分而来（settings 域，19 条路由）。零逻辑改动。
 import type { Hono } from "hono";
+import { corsOrigins, playHistoryRetentionDays, saveAppConfig } from "../../services/appConfig.js";
 import { BRIDGE_AV_SHIFT_KEY, BRIDGE_AV_SHIFT_MAX_MS, BRIDGE_AV_SHIFT_MIN_MS, getBridgeAvShiftMs, parseBridgeAvShiftMs } from "../../services/airplay/bridgeCalib.js";
 import {
   BusinessErrorCode,
@@ -48,6 +49,18 @@ import {
 
 export function registerSettings(app: Hono): void {
 app.get("/v1/settings", adminMiddleware, (c) => c.json({ writeBackTags: false, fingerprintEnabled: false }));
+
+// 服务配置(原 compose 的 CORS_ORIGINS / PLAY_HISTORY_RETENTION_DAYS):前端设置页读写。
+// 改完即时生效 —— CORS 按请求读设置表,播放记录清理每次跑批也现读。
+app.get("/v1/admin/app-settings", adminMiddleware, (c) =>
+  c.json({ corsOrigins: corsOrigins(), playHistoryRetentionDays: playHistoryRetentionDays() }),
+);
+
+app.put("/v1/admin/app-settings", adminMiddleware, async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const input = body && typeof body === "object" && !Array.isArray(body) ? body : {};
+  return c.json({ success: true, ...saveAppConfig(input) });
+});
 
 // 手动触发一轮空闲内存回收(系统设置页「立即回收」按钮)。返回各层回收结果 + 回收前后内存。
 

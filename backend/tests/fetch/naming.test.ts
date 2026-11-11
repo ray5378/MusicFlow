@@ -28,9 +28,9 @@ describe("buildRelativePath 默认模板", () => {
     expect(buildRelativePath(ctx, DEFAULT_NAMING_CONFIG, "flac")).toBe("歌手/专辑/歌 - 歌手.flac");
   });
 
-  it("缺 album 回落 Unknown Album", () => {
+  it("缺 album 时用歌名当专辑目录", () => {
     const ctx: NamingCtx = { title: "歌", artist: "歌手" };
-    expect(buildRelativePath(ctx, DEFAULT_NAMING_CONFIG, "mp3")).toBe("歌手/Unknown Album/歌 - 歌手.mp3");
+    expect(buildRelativePath(ctx, DEFAULT_NAMING_CONFIG, "mp3")).toBe("歌手/歌/歌 - 歌手.mp3");
   });
 
   it("缺 artist 时文件名的悬挂分隔符被消去", () => {
@@ -65,7 +65,7 @@ describe("renderTemplate 空段消除", () => {
   it("连续缺失 token 不留空目录层级 / 连续斜杠", () => {
     const ctx: NamingCtx = { title: "歌", artist: "歌手" };
     const out = renderTemplate("{albumArtist}/{year}/{album}", ctx, DEFAULT_NAMING_CONFIG);
-    expect(out).toBe("歌手/Unknown Album");
+    expect(out).toBe("歌手/歌");
     expect(out).not.toContain("//");
   });
 
@@ -323,7 +323,7 @@ describe("覆盖率补充:更多 token 与截断分支", () => {
   it("扩展名为 undefined 且不从容器推断时按空串处理", () => {
     const ctx: NamingCtx = { title: "歌", artist: "人" };
     expect(buildRelativePath(ctx, cfgOf({ extFromContainer: false }), undefined as any)).toBe(
-      "人/Unknown Album/歌 - 人.",
+      "人/歌/歌 - 人.",
     );
   });
 

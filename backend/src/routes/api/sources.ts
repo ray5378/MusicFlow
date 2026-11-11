@@ -117,7 +117,7 @@ app.delete("/v1/sources/:id", adminMiddleware, (c) => {
   if (!src) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.source.notFound"), 404);
   // 扫描进行中先拦下:边扫边删会把刚删掉的文件又写回来,永远删不完。
   if (isSourceScanRunning(id)) {
-    return c.json({ success: false, error: translate("errors.source.scanRunning") }, 409);
+    return c.json(apiError(BusinessErrorCode.CONFLICT, translate("errors.source.scanRunning")), 409);
   }
   // 202:任务已入队,立即返回;前端轮询 /sources/delete-status 看进度。
   const { total, removed } = startSourceDelete(id);

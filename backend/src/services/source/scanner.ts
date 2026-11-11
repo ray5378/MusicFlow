@@ -997,7 +997,7 @@ function findOrCreateArtist(name: string): string {
   return id;
 }
 
-function findOrCreateAlbum(name: string, artistId: string, artistName: string, year: number, picture?: { format: string; data: Buffer }, genre?: string): string {
+function findOrCreateAlbum(name: string, artistId: string | null, artistName: string, year: number, picture?: { format: string; data: Buffer }, genre?: string): string {
   if (!name || name === "Unknown Album") return "";
   const existing = db.select().from(albums).where(eq(albums.name, name)).get();
   if (existing) {
@@ -1015,7 +1015,10 @@ function findOrCreateAlbum(name: string, artistId: string, artistName: string, y
   }
   const id = uuidv4();
   const coverRef = saveCoverArt(id, picture);
-  db.insert(albums).values({ id, name, artistId, artist: artistName, year, genre: genre || "", coverArt: coverRef, songCount: 0, duration: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }).run();
+  // 🔴 artist_id 必须写 NULL 而不是空串:歌手是 Unknown(artistId=null)时,
+    // 空串会去外键表 artists(id='')找父行 → FOREIGN KEY constraint failed,
+    // 整首歌入库失败(2026-11 实测:未知歌手 + 专辑=歌名 的扫描全挂在这里)。
+    db.insert(albums).values({ id, name, artistId: artistId || null, artist: artistName, year, genre: genre || "", coverArt: coverRef, songCount: 0, duration: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }).run();
   return id;
 }
 
@@ -1044,7 +1047,7 @@ export function resolveLocalGroup(meta: MusicMetadata): { groupId: string; group
 
 export function upsertSong(songPath: string, meta: MusicMetadata, sourceId: string, fingerprint?: string): "added" | "updated" {
   // 三条扫描链路(webdav/smb/local)的唯一入库入口:Unknown 标签在这里统一兜底。
-  recoverUnknownTags(meta, songPath.split(/[\\/]/).pop() || songPath);
+  recoverUnknownTags(meta, songPath);
   // 专辑被清成空(Unknown/网址/广告/GBK 乱码)时用歌名当专辑,与下载/洗版口径一致:
   // 宁可让专辑=歌名,也不要把「空」「www.xxx.com」「ÔÚÏß...」这类脏值写进库里。
   if (isUnknownAlbum(meta.album) && meta.title && !/^unknown(\s*title)?$/i.test(meta.title.trim())) {
@@ -1057,7 +1060,7 @@ export function upsertSong(songPath: string, meta: MusicMetadata, sourceId: stri
   const rowType = songPath.startsWith("w:") ? "webdav" : songPath.startsWith("s:") ? "smb" : "local";
   const existing = db.select().from(songs).where(eq(songs.path, songPath)).get();
   const artistId = findOrCreateArtist(meta.artist) || null;
-  const albumId = findOrCreateAlbum(meta.album, artistId || "", meta.artist, meta.year, meta.picture, meta.genre) || null;
+  const albumId = findOrCreateAlbum(meta.album, artistId, meta.artist, meta.year, meta.picture, meta.genre) || null;
   if (existing) {
     // 同曲多源归组:已分组行保持组不变;历史 NULL 组行(归组启用前/插件关闭期
     // 扫入的存量)在元数据更新时顺带补组,与 web 导入同规则。

@@ -223,12 +223,29 @@ export function recoverUnknownTags(meta: RecoverableTags, fileName = "", fallbac
     return m ? m[1].trim() : "";
   };
 
-  // 文件名去掉扩展名与下载器附加的 ` - Unknown Artist` 尾巴
-  const base = fileName
+  // 文件名去掉扩展名与下载器附加的 ` - Unknown Artist` 尾巴。
+  // fileName 可以是完整路径:目录能告诉我们「歌名 - 歌手」还是「歌手 - 歌名」
+  // (本项目下载落 `歌手/专辑/歌名 - 歌手.ext`,外部下载器常见 `歌手 - 歌名`)。
+  const segs = fileName.split(/[\\/]+/).filter(Boolean);
+  const baseName = segs.length > 0 ? segs[segs.length - 1] : "";
+  const parentDir = segs.length >= 2 ? segs[segs.length - 2] : "";
+  const grandDir = segs.length >= 3 ? segs[segs.length - 3] : "";
+  const base = baseName
     .replace(/\.[^.]+$/, "")
     .replace(/\s*-\s*(unknown(\s*(artist|album))?|未知(歌手|专辑)?)\s*$/i, "")
     .trim();
   const sep = base.lastIndexOf(" - ");
+  const left = sep > 0 ? base.slice(0, sep).trim() : "";
+  const right = sep > 0 ? base.slice(sep + 3).trim() : "";
+  const same = (a: string, b: string): boolean => !!a && !!b && a.trim().toLowerCase() === b.trim().toLowerCase();
+  // 只有目录能给出线索时才敢拆标题:父/祖父目录命中右侧说明是本项目命名(歌名在前),
+  // 命中左侧说明是外部命名(歌手在前);两边都对不上就不猜,保持原样。
+  const titleFirst: boolean | null =
+    same(parentDir, right) || same(grandDir, right)
+      ? true
+      : same(parentDir, left) || same(grandDir, left)
+        ? false
+        : null;
 
   let changed = false;
   // 专辑:先按歌词头 [al:] 回填,再统一清洗(乱码还原/脏值置空)。
@@ -245,7 +262,8 @@ export function recoverUnknownTags(meta: RecoverableTags, fileName = "", fallbac
   }
   if (needArtist) {
     let ar = lyricTag("ar");
-    if (isUnknownArtist(ar)) ar = sep > 0 ? base.slice(sep + 3).trim() : "";
+    if (isUnknownArtist(ar) && sep > 0 && titleFirst === true) ar = right;
+    if (isUnknownArtist(ar) && sep > 0 && titleFirst === false) ar = left;
     if (isUnknownArtist(ar)) ar = fallbackArtist;
     if (ar && !isUnknownArtist(ar)) {
       meta.artist = ar;
@@ -253,9 +271,9 @@ export function recoverUnknownTags(meta: RecoverableTags, fileName = "", fallbac
       changed = true;
     }
   }
-  // 标签 title 就是整条 `歌名 - 歌手` 时收敛成歌名(仅在完全相等时动,避免误伤真标题)
-  if (sep > 0 && meta.title && meta.title.trim() === base) {
-    meta.title = base.slice(0, sep).trim();
+  // 标签 title 就是整条 `歌名 - 歌手` 时收敛成歌名(仅在完全相等且方向已知时动)。
+  if (sep > 0 && titleFirst !== null && meta.title && meta.title.trim() === base) {
+    meta.title = titleFirst ? left : right;
     changed = true;
   }
   return changed;

@@ -143,6 +143,23 @@
       </el-card>
     </template>
 
+    <!-- ===== 服务配置(原 compose 环境变量) ===== -->
+    <el-card class="mt-card" data-settings-load="service">
+      <h3>{{ t('settings.service.title') }}</h3>
+      <div class="setting-item">
+        <div class="setting-label"><div class="title">{{ t('settings.service.cors.title') }}</div><div class="desc">{{ t('settings.service.cors.desc') }}</div></div>
+        <div class="setting-value"><el-input v-model="corsOriginsText" type="textarea" :rows="3" class="service-input" placeholder="http://192.168.1.10:5173" /></div>
+      </div>
+      <div class="setting-item">
+        <div class="setting-label"><div class="title">{{ t('settings.service.retention.title') }}</div><div class="desc">{{ t('settings.service.retention.desc') }}</div></div>
+        <div class="setting-value"><el-input-number v-model="retentionDays" :min="0" :max="3650" /></div>
+      </div>
+      <div class="setting-item">
+        <div class="setting-label"></div>
+        <div class="setting-value"><el-button type="primary" :loading="serviceSaving" @click="saveServiceConfig">{{ t('common.save') }}</el-button></div>
+      </div>
+    </el-card>
+
     <!-- ===== 通用 ===== -->
     <el-card class="mt-card">
       <h3>{{ t('settings.general') }}</h3>
@@ -407,6 +424,37 @@ function clearCache() {
   setTimeout(() => location.reload(), 800);
 }
 
+// ---------- 服务配置(跨域白名单 / 播放记录保留天数) ----------
+// 这两项原先只能写在 docker-compose 的 environment 里,改一次得重建容器;
+// 现在落设置表,保存即生效(CORS 按请求读、保留天数每次清理现读)。
+const corsOriginsText = ref("");
+const retentionDays = ref(3);
+const serviceSaving = ref(false);
+
+async function loadServiceConfig() {
+  try {
+    const res = await api.get("/rest/api/v1/admin/app-settings");
+    corsOriginsText.value = Array.isArray(res.data?.corsOrigins) ? res.data.corsOrigins.join("\n") : "";
+    if (Number.isFinite(res.data?.playHistoryRetentionDays)) retentionDays.value = res.data.playHistoryRetentionDays;
+  } catch { /* 静默 */ }
+}
+
+async function saveServiceConfig() {
+  serviceSaving.value = true;
+  try {
+    const res = await api.put("/rest/api/v1/admin/app-settings", {
+      corsOrigins: corsOriginsText.value,
+      playHistoryRetentionDays: retentionDays.value,
+    });
+    corsOriginsText.value = Array.isArray(res.data?.corsOrigins) ? res.data.corsOrigins.join("\n") : "";
+    ElMessage.success(t("settings.service.saved"));
+  } catch (e: any) {
+    ElMessage.error(apiErrorText(e, t("settings.saveFailed")));
+  } finally {
+    serviceSaving.value = false;
+  }
+}
+
 // ---- 打开速度:配置卡「进视口才拉」(2026-10-14) ----
 // 原先一进页面并发 6 个 GET(版本 / 代理 / 档位 / 内存 / 定时 + 管理员日志等级)。
 // 这些卡纵向排列,屏幕外的卡没必要在首屏就请求 → 按卡片进视口(rootMargin 200px)才拉,
@@ -418,6 +466,7 @@ const settingCardLoaders: Record<string, () => void> = {
   batchPace: () => { void loadBatchPace(); },
   daily: () => { void loadDailyConfig(); },
   memory: () => { void loadMemorySettings(); },
+  service: () => { void loadServiceConfig(); },
   // 日志等级卡只在管理员可见(模板里 v-if="authStore.isAdmin"):非管理员没有这张卡,
   // 也就没有元素被观察 → 天然不发请求(与原先 if (authStore.isAdmin) 等效)。
   logLevel: () => { void loadLogLevel(); },
@@ -469,6 +518,7 @@ h3 { font-size: 15px; font-weight: 600; margin: 0 0 2px; color: var(--fnos-text-
 .gh-link { color: var(--el-color-primary); text-decoration: none; &:hover { text-decoration: underline; } }
 .proxy-actions { display: flex; gap: 8px; align-items: center; }
 .proxy-input { width: 300px; }
+.service-input { width: 320px; }
 .batch-pace-actions { display: flex; gap: 10px; align-items: center; }
 .memory-actions { display: flex; gap: 10px; align-items: center; }
 .log-level-actions { display: flex; gap: 10px; align-items: center; }

@@ -9,8 +9,6 @@ services:
     environment:
       # 可选:JWT 签名密钥。留空则首次启动自动生成并保存到数据目录 .jwt-secret(重启稳定)。
       - JWT_SECRET=${JWT_SECRET:-}
-      - CORS_ORIGINS=${CORS_ORIGINS:-*}
-      - PLAY_HISTORY_RETENTION_DAYS=${PLAY_HISTORY_RETENTION_DAYS:-3}
       - TZ=Asia/Shanghai
       - UV_USE_IO_URING=0
       # 可选:V8 堆上限(MB)。默认不设;内存紧张的机器可设 256 及时压堆。
