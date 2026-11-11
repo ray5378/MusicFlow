@@ -146,6 +146,18 @@ function looksLikeMojibakeResidue(s: string): boolean {
  *   - GBK 乱码 → 还原后的原文
  *   - 其余正常专辑名 → 原样返回(仅去首尾空白)
  */
+/**
+ * 是否命中网址/联系方式/广告措辞。
+ * 与「空 / ♡ 这类无法自证的短值」分开:后者可能是真专辑(暗杠《空》),要交给
+ * 多平台共识去裁定,不能一律当脏值丢掉。
+ */
+function isAdLike(cand: string): boolean {
+  // 裸域名只有「整串就是一个网址」时才算广告:否则 `MTV.com Live - Avril Lavigne`
+  // 这种把域名写进标题的真专辑会被误杀。带 www./协议头的仍然直接判脏。
+  const urlHit = URL_RE.test(cand) && (/https?:\/\/|www\./i.test(cand) || !/\s/.test(cand.trim()));
+  return urlHit || CONTACT_RE.test(cand) || AD_WORDS_RE.test(cand);
+}
+
 export function cleanAlbumTag(value?: string): string {
   const raw = (value ?? "").trim();
   if (!raw) return "";
@@ -154,15 +166,43 @@ export function cleanAlbumTag(value?: string): string {
   const decoded = unMojibake(raw);
   const cand = decoded && /[\u4e00-\u9fff]/.test(decoded) ? decoded : raw;
   if (JUNK_ALBUM_RE.test(cand)) return "";
-  // 裸域名只有「整串就是一个网址」时才算广告:否则 `MTV.com Live - Avril Lavigne`
-  // 这种把域名写进标题的真专辑会被误杀。带 www./协议头的仍然直接判脏。
-  const urlHit = URL_RE.test(cand) && (/https?:\/\/|www\./i.test(cand) || !/\s/.test(cand.trim()));
-  if (urlHit) return "";
-  if (CONTACT_RE.test(cand)) return "";
-  if (AD_WORDS_RE.test(cand)) return "";
+  if (isAdLike(cand)) return "";
   // 纯符号(♡ / ☻ / ⊙▽⊙ / …)不判脏:这类是真实专辑名,宁可保留也不要用歌名覆盖。
   if (looksLikeMojibakeResidue(cand)) return "";
   return cand;
+}
+
+/**
+ * 多平台专辑共识:至少 minPlatforms 个**不同平台**给出同一个专辑名,才认为它是真数据。
+ *
+ * 为什么需要:专辑写成 `空` / `♡` / `Unknown` 时,单看字符串无法区分「占位垃圾」和
+ * 「真专辑」——暗杠的专辑就叫《空》,Yee 的专辑就叫《♡》。产品口径(2026-11):
+ * 命中这类无法自证的值时,去多个平台比对,一致才采信;不一致则退回用歌名当专辑。
+ *
+ * 过滤:空值 / Unknown / 网址广告 一律不参与投票(这些即使一致也不可信)。
+ */
+export function consensusAlbum(
+  items: Array<{ album?: string | null; platform?: string | null; pluginId?: string | null }>,
+  minPlatforms = 2,
+): string {
+  const groups = new Map<string, { value: string; platforms: Set<string> }>();
+  for (const it of items) {
+    const value = (it.album ?? "").trim();
+    if (!value || isUnknownAlbum(value) || isAdLike(value)) continue;
+    const key = value.toLowerCase().replace(/\s+/g, "");
+    const g = groups.get(key) ?? { value, platforms: new Set<string>() };
+    g.platforms.add(String(it.platform || it.pluginId || "unknown"));
+    groups.set(key, g);
+  }
+  let best = "";
+  let bestN = 0;
+  for (const g of groups.values()) {
+    if (g.platforms.size > bestN) {
+      bestN = g.platforms.size;
+      best = g.value;
+    }
+  }
+  return bestN >= minPlatforms ? best : "";
 }
 
 /**

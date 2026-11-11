@@ -39,7 +39,7 @@ import {
 } from "./quality.js";
 import { probeFile, toCandidateQuality } from "./probe.js";
 import { verifyIntegrity } from "./integrity.js";
-import { recoverUnknownTags, isUnknownAlbum } from "../source/tagRecovery.js";
+import { recoverUnknownTags, isUnknownAlbum, consensusAlbum } from "../source/tagRecovery.js";
 import { writeTags, applyTagsVariant, type SongTags } from "./tagWriter.js";
 import { transcodeFile } from "./transcode.js";
 import { finalizeFile, type FinalizeResult } from "./finalize.js";
@@ -1241,7 +1241,7 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
           return item;
         }
         item.attempts++;
-        const outcome = await tryCandidate(cand, t, existing);
+        const outcome = await tryCandidate(cand, t, existing, cands);
 
         if (outcome.kind === "success") {
           item.status = "done";
@@ -1294,6 +1294,8 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
     cand: Candidate,
     t: FetchTarget,
     existing: ReturnType<typeof findExistingPlayable>,
+    /** 本轮所有平台的候选:仅用于「专辑写空/符号时多平台一致性」判定。 */
+    allCandidates: Candidate[] = [],
   ): Promise<AttemptOutcome> {
     const ext = candidateExt(cand);
     const dir = path.join(cfg.cacheRoot, safeSegment(t.id, shortHash(t.title)));
@@ -1527,11 +1529,19 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
       if (recoverUnknownTags(tags, "", t.artist && t.artist !== artist ? t.artist : cand.artist || "")) {
         warnings.push("标签为 Unknown,已按歌词/信源信息回填");
       }
-      // 专辑仍然缺失(信源与歌词都没有)→ 用歌名当专辑。产品口径(2026-11):
-      // 下载/洗版不接受「专辑 = Unknown Album」的成品,目录按歌名分,标签也写歌名。
+      // 专辑仍然缺失(信源与歌词都没有,或原值是「空」「♡」这类无法自证的值):
+      // 先看**多个平台是否报同一个专辑**,一致才当真实数据(产品口径 2026-11,
+      // 例:暗杠的真专辑《空》在两个平台都报「空」时保留);不一致/只有一个平台
+      // 才退回「用歌名当专辑」——下载/洗版不接受「专辑 = Unknown Album」的成品。
       if (isUnknownAlbum(tags.album) && tags.title && !/^unknown(\s*title)?$/i.test(tags.title.trim())) {
-        tags.album = tags.title.trim();
-        warnings.push(`专辑标签缺失,已用歌名作为专辑: ${tags.album}`);
+        const consensus = consensusAlbum(allCandidates);
+        if (consensus) {
+          tags.album = consensus;
+          warnings.push(`专辑缺失,已按多平台一致结果回填: ${consensus}`);
+        } else {
+          tags.album = tags.title.trim();
+          warnings.push(`专辑标签缺失,已用歌名作为专辑: ${tags.album}`);
+        }
       }
     } catch (e) {
       warnings.push(`增值标签采集异常(忽略): ${msgOf(e)}`);
