@@ -159,7 +159,7 @@ export function initDatabase() {
       genre TEXT DEFAULT '',
       size INTEGER DEFAULT 0,
       fingerprint TEXT,
-      -- 在线/插件源歌曲列:type('local'|'webdav'|'web')、URL、流请求头、来源平台数据、
+      -- 在线/插件源歌曲列:type('local'|'smb'|'webdav'|'web')、URL、流请求头、来源平台数据、
       -- 插件入口、缓存路径;lyrics 为落库歌词(歌词补全 B 选项),离线也能显示。
       type TEXT DEFAULT 'local',
       url TEXT,
@@ -182,7 +182,7 @@ export function initDatabase() {
       comment TEXT DEFAULT '',
       tags TEXT,
       -- 同曲多源归组:规范化标题+歌手相同且时长差 ≤3s 的行共享同一 group_id;
-      -- 组内优先级 local > webdav > web,播放优选/展示合并基于它。分组只附加列,不删行。
+      -- 组内优先级 local > smb > webdav > web,播放优选/展示合并基于它。分组只附加列,不删行。
       group_id TEXT,
       group_key TEXT,
       created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
@@ -316,6 +316,7 @@ export function initDatabase() {
       type TEXT NOT NULL DEFAULT 'local',
       enabled INTEGER DEFAULT 1,
       config TEXT DEFAULT '{}',
+      song_count INTEGER,
       created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
     );
@@ -641,7 +642,7 @@ export function initDatabase() {
     );
     -- 每源一行的响度/节奏/频谱测量值(MA AudioAnalysisData 对齐),供②段静态增益取值。
     -- row_id 指向 songs.id:同曲多源各有自己的一行,不按 group 合并。
-    -- 写侧纪律见 D8:仅 local/webdav 行回写,网络源永不入库(永远走实时 loudnorm)。
+    -- 写侧纪律见 D8:仅 local/smb/webdav 行回写,网络源永不入库(永远走实时 loudnorm)。
     -- 无 CASCADE:删除 songs 行由业务侧同事务清理,避免一次源抖动连带抹掉测量值(P0-6)。
     CREATE TABLE IF NOT EXISTS audio_analysis (
       row_id TEXT PRIMARY KEY,
@@ -710,6 +711,16 @@ export function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_tag_repair_done_at ON tag_repair_done(at);
   `);
 
+  // media_sources.song_count：每源已入库曲目数（扫描结束后重算写回，见
+  // services/source/songCount.ts）。项目没有迁移框架，老库该列不存在 → 用 PRAGMA
+  // 探测后补列；新库由上面的 CREATE TABLE 直接建好。NULL = 尚未统计（老库升级 /
+  // 新建源），列表接口会惰性算一次并回填，不需要启动时全量算。
+  const sourceCols = sqlite.prepare("PRAGMA table_info(media_sources)").all() as Array<{ name?: string }>;
+  if (!sourceCols.some((c) => c.name === "song_count")) {
+    sqlite.exec("ALTER TABLE media_sources ADD COLUMN song_count INTEGER");
+    log.info("[DB] media_sources 补列 song_count");
+  }
+
   // Plugins (built-in and external drop-ins) are seeded from the unified catalog
   // at boot via registerBuiltinPlugins() — see plugins/registry.ts.
   // No hardcoded plugin names live here.
@@ -757,14 +768,19 @@ export function initDatabase() {
 }
 
 // 歌曲行类型回填(幂等,启动时调用):2026-11 之前扫描器入库不写 type,WebDAV 行
-// 全落默认 'local'。按路径前缀一次性纠正 —— 来源列显示(本地/WebDAV)与播放优选
-// 的 local > webdav 排序都以此为准。返回本次修正行数(0 = 已是最新)。
+// 全落默认 'local'。按路径前缀一次性纠正 —— 来源列显示(本地/SMB/WebDAV)与播放优选
+// 的 local > smb > webdav 排序都以此为准。返回本次修正行数(0 = 已是最新)。
 export function backfillSongTypes(): number {
-  const r = sqlite
+  const webdav = sqlite
     .prepare("UPDATE songs SET type = 'webdav' WHERE type = 'local' AND path LIKE 'w:%'")
     .run();
-  if (r.changes > 0) log.info(`songs.type 回填:${r.changes} 行 WebDAV 歌曲标记为 webdav`);
-  return r.changes;
+  const smb = sqlite
+    .prepare("UPDATE songs SET type = 'smb' WHERE type = 'local' AND path LIKE 's:%'")
+    .run();
+  const changes = webdav.changes + smb.changes;
+  if (webdav.changes > 0) log.info(`songs.type 回填:${webdav.changes} 行 WebDAV 歌曲标记为 webdav`);
+  if (smb.changes > 0) log.info(`songs.type 回填:${smb.changes} 行 SMB 歌曲标记为 smb`);
+  return changes;
 }
 
 // 风格表回填:从 songs.genre 全量同步(幂等,启动时调用)。

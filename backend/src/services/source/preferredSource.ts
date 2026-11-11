@@ -1,13 +1,13 @@
 // ==================== 组内跨源优选(播放优选插件) ====================
 // 「播放优选(首选 Local)」插件的两个方向:
-//   1. web → local/webdav 优选:web 行出流时,若同曲多源组内有本地/WebDAV 核心
-//      曲库源,优先用本地源(无损优先)。
-//   2. local/webdav → web 回退:本地源不可用(文件缺失/WebDAV 探测失败)时,
+//   1. web → 核心曲库源优选:web 行出流时,若同曲多源组内有本地/SMB/WebDAV 核心
+//      曲库源,按 Local > SMB > WebDAV 的顺序挑第一个可用的(无损优先)。
+//   2. 核心曲库源 → web 回退:本地/SMB/WebDAV 不可用(文件缺失/探测失败)时,
 //      回退组内 web 源,保证组内永远有可播源。
 //
 // 两个方向都必须**先检测候选源是否真的有效**再切换 —— 直接切到失效的本地源
-// 会让原本能播的歌播不出来。local 用零成本 existsSync,WebDAV 用 HEAD(+GET
-// Range 兜底),失败记忆 5 分钟(见 utils/localSourceProbe.ts)。
+// 会让原本能播的歌播不出来。local 用零成本 existsSync,SMB 用 stat,WebDAV 用
+// HEAD(+GET Range 兜底),失败记忆 5 分钟(见 utils/localSourceProbe.ts)。
 //
 // /rest/stream、/rest/dlna/stream/:token 与流可播性探测(ensurePlayableStream)
 // 共用这一份解析,保证「探测结论」与「实际出流」始终一致 —— 否则出流会换源
@@ -32,7 +32,7 @@ type SongRow = typeof songs.$inferSelect;
  * 插件总开关关闭时原样返回 —— 「插件关闭 = 按原源播放」。
  */
 export async function resolvePreferredSong(song: SongRow): Promise<SongRow> {
-  // 方向 1:web → 组内 local/webdav 优选(local 优先,然后 webdav)。
+  // 方向 1:web → 组内核心曲库源优选(优先级 Local > SMB > WebDAV)。
   if (
     (song.type || "local") === "web" &&
     song.groupId &&
@@ -44,12 +44,12 @@ export async function resolvePreferredSong(song: SongRow): Promise<SongRow> {
         .select()
         .from(songs)
         .where(
-          and(eq(songs.groupId, song.groupId), inArray(songs.type, ["local", "webdav"])),
+          and(eq(songs.groupId, song.groupId), inArray(songs.type, ["local", "smb", "webdav"])),
         )
-        .orderBy(sql`CASE ${songs.type} WHEN 'local' THEN 0 ELSE 1 END`)
+        .orderBy(sql`CASE ${songs.type} WHEN 'local' THEN 0 WHEN 'smb' THEN 1 ELSE 2 END`)
         .all();
       for (const alt of alts) {
-        // 必须先验证候选源真实有效:本地文件不存在 / WebDAV 不可达时继续试下一个。
+        // 必须先验证候选源真实有效:本地文件不存在 / SMB 不可达 / WebDAV 不可达时继续试下一个。
         if (!(await probeLocalSourceOk(alt))) {
           log.info("播放优选:候选源不可用,继续下一个", {
             webId: song.id,
@@ -73,7 +73,7 @@ export async function resolvePreferredSong(song: SongRow): Promise<SongRow> {
     }
   }
 
-  // 方向 2:local/webdav → 组内 web 回退(首选 Local,失败回退平台)。
+  // 方向 2:local/smb/webdav → 组内 web 回退(首选 Local,失败回退平台)。
   if (
     (song.type || "local") !== "web" &&
     song.groupId &&

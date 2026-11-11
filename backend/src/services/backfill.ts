@@ -78,13 +78,13 @@ function whereClause(kind: BackfillKind): string {
   // covers.ts 的专辑守卫命中后「只返回引用、不写库,保持本地歌数据原样」——
   // 这批歌因此永远不会离开候选集,界面数字点了不降,还会让整表 select 白跑一遍
   // (实测 49174 个候选里 48968 首属此类,真正要搜在线的只有 ~206 首)。
-  // 故把同一守卫条件下沉到这里:自持源歌(本地/WebDAV) + 有专辑 + 专辑已有封面
+  // 故把同一守卫条件下沉到这里:自持源歌(本地/SMB/WebDAV) + 有专辑 + 专辑已有封面
   // → 不算候选。口径必须与 covers.ts 的 JS 守卫一致(那里是 `!== "web"`)。
   // 局限:SQL 判不了封面文件是否真的存在(那是 resolveCoverFile 的活);JS 侧守卫
   // 保留作第二道网,万一专辑封面断链也不会误写在线图。
   return `(cover_art IS NULL OR cover_art = '')
     AND NOT (
-      COALESCE(NULLIF(type, ''), 'local') IN ('local', 'webdav')
+      COALESCE(NULLIF(type, ''), 'local') IN ('local', 'smb', 'webdav')
       AND album_id IS NOT NULL
       AND EXISTS (
         SELECT 1 FROM albums a

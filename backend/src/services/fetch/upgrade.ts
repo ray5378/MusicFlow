@@ -24,6 +24,7 @@ import { eq, and, like } from "drizzle-orm";
 import { db, sqlite } from "../../db/index.js";
 import { songs, albums } from "../../db/schema.js";
 import { extractMetadataLocal, upsertSong } from "../source/scanner.js";
+import { recomputeSourceSongCount, sourceIdOfSongPath } from "../source/songCount.js";
 import type { FetchTarget } from "./candidates.js";
 import { DEFAULT_DOWNLOAD_ROOT, DEFAULT_LOSSLESS_ROOT, type FetchConfig } from "./config.js";
 import type { QualityConfig } from "./types.js";
@@ -491,6 +492,10 @@ export async function migrateUpgradedSong(args: {
     db.delete(songs).where(eq(songs.id, newRow.id)).run();
     // 删行会让扫描阶段算出的专辑计数多 1：修正旧行/新行涉及的专辑。
     recomputeAlbumCounts([oldRow.albumId, newRow.albumId]);
+    // 迁移 = 一行从旧源挪到新源，曲目数不经过扫描就变了：两个源都重算一次。
+    const oldSourceId = sourceIdOfSongPath(oldRow.path);
+    if (oldSourceId) recomputeSourceSongCount(oldSourceId);
+    recomputeSourceSongCount(args.newSourceId);
 
     return { migrated: true, removedRowId: newRow.id, warnings };
   } catch (e) {

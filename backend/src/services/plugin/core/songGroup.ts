@@ -23,7 +23,7 @@ export const songGroupManifest: PluginManifest = {
   version: "1.0.0",
   type: "core",
   description:
-    "把本地/WebDAV 曲库与插件平台收录的同一首歌归为一组(规范化标题+歌手+专辑一致,时长差≤容差),组内 local>webdav>web 排序。开启后各端自动按组合并展示并按组优选播放,端侧零改动;关闭后恢复平铺与按原源播放。",
+    "把本地/SMB/WebDAV 曲库与插件平台收录的同一首歌归为一组(规范化标题+歌手+专辑一致,时长差≤容差),组内 local>smb>webdav>web 排序。开启后各端自动按组合并展示并按组优选播放,端侧零改动;关闭后恢复平铺与按原源播放。",
   capabilities: ["songGroup"],
   defaultEnabled: true,
   configSchema: [
@@ -35,9 +35,9 @@ export const songGroupManifest: PluginManifest = {
     en: {
       name: "Same-Track Multi-Source Group",
       description:
-        "Group the same song from the local/WebDAV library and plugin-platform sources together (normalized title + artist + matching album, duration diff <= tolerance), sorted local > webdav > web within a group. When on, all clients auto-merge the group for display and play the preferred source with zero client changes; when off, fall back to a flat list and source playback.",
+        "Group the same song from the local/SMB/WebDAV library and plugin-platform sources together (normalized title + artist + matching album, duration diff <= tolerance), sorted local > smb > webdav > web within a group. When on, all clients auto-merge the group for display and play the preferred source with zero client changes; when off, fall back to a flat list and source playback.",
       documentation: `### Same-Track Multi-Source Group (built-in)
-Groups the same song from the local/WebDAV library and plugin-platform sources together (normalized title + artist + matching album, duration diff ≤ tolerance), sorted local > webdav > web within a group.
+Groups the same song from the local/SMB/WebDAV library and plugin-platform sources together (normalized title + artist + matching album, duration diff ≤ tolerance), sorted local > smb > webdav > web within a group.
 
 - When on, all clients automatically merge the group for display and play the preferred source with zero client changes;
 - When off, falls back to a flat list and source playback;
@@ -55,10 +55,10 @@ Groups the same song from the local/WebDAV library and plugin-platform sources t
     },
   },
   documentation: `### 同曲多源组(服务端内置)
-同一首歌可能同时存在于本地 / WebDAV 曲库与插件平台(QQ 音乐 / 网易云等)。本插件按「规范化标题 + 歌手 + 专辑一致 + 时长差 ≤ 容差」把它们归为同曲多源组,并写入 \`songs.group_id\` / \`group_key\`。
+同一首歌可能同时存在于本地 / SMB / WebDAV 曲库与插件平台(QQ 音乐 / 网易云等)。本插件按「规范化标题 + 歌手 + 专辑一致 + 时长差 ≤ 容差」把它们归为同曲多源组,并写入 \`songs.group_id\` / \`group_key\`。
 
-- **展示**:开启后服务端在歌曲列表 / 歌单 / 收藏序列化时输出 \`groupId\` / \`sources\`(组内成员含自身、local > webdav > web 排序),各端(Web / 客户端 / HA 卡片)自动按组合并展示主行,无需端侧任何代码;
-- **播放**:配合「播放优选」插件(\`playPreference\`),所有播放入口自动落组内 local / WebDAV 主源,Local 不可用时自动回退平台源;
+- **展示**:开启后服务端在歌曲列表 / 歌单 / 收藏序列化时输出 \`groupId\` / \`sources\`(组内成员含自身、local > smb > webdav > web 排序),各端(Web / 客户端 / HA 卡片)自动按组合并展示主行,无需端侧任何代码;
+- **播放**:配合「播放优选」插件(\`playPreference\`),所有播放入口自动落组内 local / SMB / WebDAV 主源(Local > SMB > WebDAV),均不可用时自动回退平台源;
 - **关闭**:不再分组、序列化不输出组字段,各端自动回到平铺展示与按原源播放;
 - **存量数据**:关闭再开启不会自动重算历史分组,需触发全量重算(重算脚本见发布记录)。
 

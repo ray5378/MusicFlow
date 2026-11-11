@@ -1,6 +1,5 @@
 // 自动生成 —— 由 index.ts 物理拆分而来（sources 域，8 条路由）。零逻辑改动。
 import type { Hono } from "hono";
-import { sqlite } from "../../db/index.js";
 import {
   BusinessErrorCode,
   SCRAPE_JOB_ID,
@@ -27,6 +26,8 @@ import {
   uuidv4,
 } from "./shared.js";
 import { isSourceScanRunning, listScanJobs, scanJobs, startSourceScan } from "../../services/source/scanRunner.js";
+import { closeSmbSource, testSmbConnection } from "../../services/source/smbClient.js";
+import { recomputeSourceSongCount } from "../../services/source/songCount.js";
 
 /**
  * 归一化媒体源开关。
@@ -64,17 +65,10 @@ function sanitizeScanAuto(config: Record<string, unknown>): Record<string, unkno
   return out;
 }
 
-/** 每源歌曲数（songs.path 前缀 l:<id>: / w:<id>: 两段并集）。 */
-export function countSourceSongs(id: string): number {
-  const r = sqlite
-    .prepare("SELECT COUNT(*) AS n FROM songs WHERE path LIKE ? OR path LIKE ?")
-    .get(`l:${id}:%`, `w:${id}:%`) as { n?: number } | undefined;
-  return Number(r?.n ?? 0);
-}
-
 export function registerSources(app: Hono): void {
-app.get("/v1/sources", adminMiddleware, (c) => c.json(db.select().from(mediaSources).all().map(s => ({ ...s, songCount: countSourceSongs(s.id), config: JSON.parse(s.config || "{}") }))));
-
+// 歌曲数读存字段（扫描结束/单曲删除/换源后由 songCount.ts 重算写回）：
+// 打开音源页不再按源各扫一遍索引。NULL = 老库升级或新建源尚未统计 → 惰性算一次并回填。
+app.get("/v1/sources", adminMiddleware, (c) => c.json(db.select().from(mediaSources).all().map(s => ({ ...s, songCount: s.songCount ?? recomputeSourceSongCount(s.id), config: JSON.parse(s.config || "{}") }))));
 app.post("/v1/sources", adminMiddleware, async (c) => {
   const body = await c.req.json();
   const id = uuidv4();
@@ -106,8 +100,8 @@ app.put("/v1/sources/:id", adminMiddleware, async (c) => {
 
 app.delete("/v1/sources/:id", adminMiddleware, (c) => {
   const id = c.req.param("id")!;
-  // Find all songs belonging to this source (webdav: w:<id>:, local: l:<id>:)
-  const sourceSongs = db.select().from(songs).all().filter(s => s.path.startsWith(`w:${id}:`) || s.path.startsWith(`l:${id}:`));
+  // Find all songs belonging to this source (webdav: w:<id>:, smb: s:<id>:, local: l:<id>:)
+  const sourceSongs = db.select().from(songs).all().filter(s => s.path.startsWith(`w:${id}:`) || s.path.startsWith(`s:${id}:`) || s.path.startsWith(`l:${id}:`));
   const songIds = sourceSongs.map(s => s.id);
   if (songIds.length > 0) {
     // Delete dependent rows first (FK constraints)
@@ -121,6 +115,8 @@ app.delete("/v1/sources/:id", adminMiddleware, (c) => {
     cleanupOrphans();
   }
   db.delete(mediaSources).where(eq(mediaSources.id, id)).run();
+  // SMB 连接池不留死连接（非 SMB 源无条目，调用无副作用）。
+  closeSmbSource(id);
   return c.json({ success: true, removedSongs: songIds.length });
 });
 
@@ -141,6 +137,19 @@ app.post("/v1/sources/:id/test", adminMiddleware, async (c) => {
       return c.json(result);
     } catch (e: any) {
       log.warn("[source-test] WebDAV 探测失败", { sourceId: id, err: e.message });
+      return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.source.connectFailed"), apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
+    }
+  } else if (source.type === "smb") {
+    try {
+      log.debug("[source-test] SMB 探测", { host: config.host, share: config.share, rootPath: config.root_path });
+      const result = await testSmbConnection(config);
+      log.debug("[source-test] SMB 探测结果", { result });
+      if (!result.success) {
+        return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, result.error || "errors.source.connectFailed"), apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
+      }
+      return c.json(result);
+    } catch (e: any) {
+      log.warn("[source-test] SMB 探测失败", { sourceId: id, err: e.message });
       return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.source.connectFailed"), apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR));
     }
   } else if (source.type === "local") {

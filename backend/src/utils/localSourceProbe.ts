@@ -1,25 +1,26 @@
-// ==================== local/WebDAV 源可用性探测(多源组跨源回退) ====================
+// ==================== local/WebDAV/SMB 源可用性探测(多源组跨源回退) ====================
 // 服务端统一承担「首选 Local,失败回退平台」:stream/play 拿到组内任意 id,
 // 先经 preferLocal 优选 local 主源,再探测主源可用性,不可用则切组内 web 源。
 // 本地文件用零成本 existsSync;WebDAV 每次流播一次 HEAD(失败记忆 5 分钟,
-// 避免文件缺失期间每次流播都重复探测)。
+// 避免文件缺失期间每次流播都重复探测);SMB 用一次 stat。
 //
-// 成功记忆(F 项):WebDAV 探测成功同样记 5 分钟 —— 「这个文件刚探测过、可播」
+// 成功记忆(F 项):WebDAV/SMB 探测成功同样记 5 分钟 —— 「这个文件刚探测过、可播」
 // 的结论在 seek/起播之间反复被用到,却每次都重探(240 实测单次 1.0~2.9s)。
-// 只缓存 webdav 分支:本地 l: 走 existsSync 零成本,缓存它零收益,反而会引入
+// 只缓存网络源分支:本地 l: 走 existsSync 零成本,缓存它零收益,反而会引入
 // 「文件已删却仍返回死行」的风险。
 import { db } from "../db/index.js";
 import { mediaSources } from "../db/schema.js";
 import { eq } from "drizzle-orm";
+import { loadSmbConfig, smbStat } from "../services/source/smbClient.js";
 
-export function parseSongPath(p: string): { type: "w" | "l"; sourceId: string; filePath: string } | null {
+export function parseSongPath(p: string): { type: "w" | "l" | "s"; sourceId: string; filePath: string } | null {
   const colon1 = p.indexOf(":");
   if (colon1 < 0) return null;
   const prefix = p.slice(0, colon1);
   const rest = p.slice(colon1 + 1);
   const colon2 = rest.indexOf(":");
   if (colon2 < 0) return null;
-  return { type: prefix as "w" | "l", sourceId: rest.slice(0, colon2), filePath: rest.slice(colon2 + 1) };
+  return { type: prefix as "w" | "l" | "s", sourceId: rest.slice(0, colon2), filePath: rest.slice(colon2 + 1) };
 }
 
 function getWebDAVUrl(sourceConfig: any, filePath: string): string {
@@ -45,7 +46,7 @@ function pruneCache(m: Map<string, number>): void {
   }
 }
 
-// songId -> 探测成功时间戳(仅 webdav 分支写入;本地分支零成本,不参与)
+// songId -> 探测成功时间戳(WebDAV/SMB 分支写入;本地分支零成本,不参与)
 const webdavOkCache = new Map<string, number>();
 
 /**
@@ -87,16 +88,37 @@ export async function probeWebDAV(
   }
 }
 
-/** 探测 local/WebDAV 歌曲源是否可播(带失败记忆 + WebDAV 成功记忆)。 */
+/** 探测 local/WebDAV/SMB 歌曲源是否可播(带失败记忆 + 网络源成功记忆)。 */
 export function probeLocalSourceOk(song: { id: string; path?: string | null }): Promise<boolean> {
   const cached = localFailCache.get(song.id);
   if (cached && Date.now() - cached < LOCAL_FAIL_TTL) return Promise.resolve(false);
-  // 成功记忆命中:零往返返回。只有 webdav 分支写过它,本地分支永远不会命中。
+  // 成功记忆命中:零往返返回。只有 WebDAV/SMB 分支写过它,本地分支永远不会命中。
   const okAt = webdavOkCache.get(song.id);
   if (okAt && Date.now() - okAt < WEBDAV_OK_TTL) return Promise.resolve(true);
   try {
     const parsed = parseSongPath(song.path || "");
     if (!parsed) return Promise.resolve(true); // 路径解析不出按可用处理,避免误回退
+    if (parsed.type === "s") {
+      return (async () => {
+        const cfg = loadSmbConfig(parsed.sourceId);
+        if (!cfg) {
+          webdavOkCache.delete(song.id);
+          localFailCache.set(song.id, Date.now());
+          return false;
+        }
+        try {
+          await smbStat(parsed.sourceId, cfg, parsed.filePath);
+          webdavOkCache.set(song.id, Date.now());
+          pruneCache(webdavOkCache);
+          return true;
+        } catch {
+          webdavOkCache.delete(song.id);
+          localFailCache.set(song.id, Date.now());
+          pruneCache(localFailCache);
+          return false;
+        }
+      })();
+    }
     if (parsed.type === "w") {
       return (async () => {
         const source = db.select().from(mediaSources).where(eq(mediaSources.id, parsed.sourceId)).get();

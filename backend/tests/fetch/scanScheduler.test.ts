@@ -12,7 +12,7 @@ import { sqlite } from "../../src/db/index.js";
 import { _resetSettingsCacheForTest, setSetting, getSetting } from "../../src/services/settings.js";
 import { runScanSchedulerOnce } from "../../src/services/source/scanScheduler.js";
 import { ensureDownloadSource } from "../../src/services/fetch/source.js";
-import { countSourceSongs } from "../../src/routes/api/sources.js";
+import { countSourceSongs, recomputeSourceSongCount, sourceIdOfSongPath } from "../../src/services/source/songCount.js";
 
 function insSource(id: string, name: string, type: string, config: Record<string, unknown>): void {
   sqlite
@@ -90,19 +90,38 @@ describe("ensureDownloadSource — 名字对齐", () => {
 });
 
 describe("countSourceSongs", () => {
-  it("按 l:/w: 前缀并集计数", () => {
+  it("按 l:/s:/w: 前缀并集计数，并重算写回 song_count", () => {
     const SID = "cnt-test-src";
-    sqlite.prepare("DELETE FROM songs WHERE path LIKE 'l:%' OR path LIKE 'w:%'").run();
+    const wipe = () =>
+      sqlite.prepare("DELETE FROM songs WHERE path LIKE 'l:%' OR path LIKE 's:%' OR path LIKE 'w:%'").run();
+    sqlite.prepare("DELETE FROM media_sources WHERE id = ?").run(SID);
+    wipe();
+    insSource(SID, "Cnt", "local", {});
     const ins = sqlite.prepare(
       "INSERT INTO songs (id, type, path, title, artist, album, suffix, bit_rate, duration, size) VALUES (?,?,?,?,?,?,?,?,?,?)",
     );
     ins.run("c1", "local", `l:${SID}:a.flac`, "t", "a", "al", "flac", 600, 200, 1000);
     ins.run("c2", "local", `l:${SID}:b.flac`, "t", "a", "al", "flac", 600, 200, 1000);
-    ins.run("c3", "webdav", `w:${SID}:c.mp3`, "t", "a", "al", "mp3", 128, 200, 1000);
-    ins.run("c4", "local", "l:other-src:d.flac", "t", "a", "al", "flac", 600, 200, 1000);
-    expect(countSourceSongs(SID)).toBe(3);
+    ins.run("c3", "smb", `s:${SID}:c.flac`, "t", "a", "al", "flac", 600, 200, 1000);
+    ins.run("c4", "webdav", `w:${SID}:d.mp3`, "t", "a", "al", "mp3", 128, 200, 1000);
+    ins.run("c5", "local", "l:other-src:e.flac", "t", "a", "al", "flac", 600, 200, 1000);
+    expect(countSourceSongs(SID)).toBe(4);
     expect(countSourceSongs("other-src")).toBe(1);
     expect(countSourceSongs("no-such")).toBe(0);
-    sqlite.prepare("DELETE FROM songs WHERE path LIKE 'l:%' OR path LIKE 'w:%'").run();
+
+    // 重算写回：新源 song_count 初始为 NULL，重算后才落库（幂等）。
+    expect(sqlite.prepare("SELECT song_count FROM media_sources WHERE id = ?").get(SID)).toEqual({ song_count: null });
+    expect(recomputeSourceSongCount(SID)).toBe(4);
+    expect(sqlite.prepare("SELECT song_count FROM media_sources WHERE id = ?").get(SID)).toEqual({ song_count: 4 });
+    expect(recomputeSourceSongCount(SID)).toBe(4);
+
+    // 从歌曲 path 反解源 id：只有 l:/s:/w: 三种前缀算源行。
+    expect(sourceIdOfSongPath(`s:${SID}:/x.flac`)).toBe(SID);
+    expect(sourceIdOfSongPath(`l:${SID}:/a/b.mp3`)).toBe(SID);
+    expect(sourceIdOfSongPath("web:plugin:track-1")).toBeNull();
+    expect(sourceIdOfSongPath(null)).toBeNull();
+
+    wipe();
+    sqlite.prepare("DELETE FROM media_sources WHERE id = ?").run(SID);
   });
 });

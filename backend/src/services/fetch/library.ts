@@ -1,9 +1,9 @@
 // ==================== MusicFetch 全库平台音乐下载（手动按钮）====================
 //
 // 语义：一键把「库里本地没有实体文件」的歌逐首交给平台音源下载到本地。
-//   - 范围（产品已确认 2026-10-10）：`songs.path NOT LIKE 'l:%' AND path NOT LIKE 'w:%'`
-//     —— 即「本地磁盘源」与「WebDAV 源」都没有实体文件的行（240 生产 134,500 行中占 82,256）。
-//     已有实体文件的歌会被 `skipIfInLibrary`（existing.ts 只认 l:/w: 物理行）自动挡掉，不重复下载。
+//   - 范围（产品已确认 2026-10-10，2026-11 补 SMB）：`songs.path NOT LIKE 'l:%' AND path NOT LIKE 's:%' AND path NOT LIKE 'w:%'`
+//     —— 即「本地磁盘源」「SMB 源」与「WebDAV 源」都没有实体文件的行（240 生产 134,500 行中占 82,256）。
+//     已有实体文件的歌会被 `skipIfInLibrary`（existing.ts 只认 l:/s:/w: 物理行）自动挡掉，不重复下载。
 //   - 触发：**直接开始**（无预览确认），单批上限 `libraryBatchLimit`（默认 500），可反复点。
 //   - 成功后：把原 `web` 行「迁移」成指向新本地文件的行（保住旧行 id，歌单/收藏不失效），
 //     由 orchestrator 的 `migrateRowOnly` 模式驱动 —— **只迁移库行，绝不删任何文件**。
@@ -79,7 +79,7 @@ export function collectLibrarySongs(): LibraryPlanItem[] {
       `SELECT id, path, title, COALESCE(artist,'') AS artist, COALESCE(album,'') AS album,
               COALESCE(duration,0) AS duration, COALESCE(suffix,'') AS suffix, COALESCE(bit_rate,0) AS bit_rate
          FROM songs
-        WHERE path NOT LIKE 'l:%' AND path NOT LIKE 'w:%'
+        WHERE path NOT LIKE 'l:%' AND path NOT LIKE 's:%' AND path NOT LIKE 'w:%'
         ORDER BY rowid ASC`,
     )
     .all() as Array<Record<string, unknown>>;
@@ -172,7 +172,7 @@ export function countLibraryPlanStats(cfg: FetchConfig): {
   const total = Number(
     (
       sqlite
-        .prepare("SELECT COUNT(*) AS n FROM songs WHERE path NOT LIKE 'l:%' AND path NOT LIKE 'w:%'")
+        .prepare("SELECT COUNT(*) AS n FROM songs WHERE path NOT LIKE 'l:%' AND path NOT LIKE 's:%' AND path NOT LIKE 'w:%'")
         .get() as any
     )?.n ?? 0,
   );
@@ -188,7 +188,7 @@ export function countLibraryPlanStats(cfg: FetchConfig): {
               COALESCE(SUM(CASE WHEN a.attempted_at > ? THEN 1 ELSE 0 END), 0) AS cooled
          FROM fetch_library_attempts a
          JOIN songs s ON s.id = a.song_id
-        WHERE s.path NOT LIKE 'l:%' AND s.path NOT LIKE 'w:%'`,
+        WHERE s.path NOT LIKE 'l:%' AND s.path NOT LIKE 's:%' AND s.path NOT LIKE 'w:%'`,
     )
     .get(cutoff) as any;
   const attempted = Number(row?.attempted ?? 0);

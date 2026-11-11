@@ -18,6 +18,8 @@ import {
 } from "./online/streamFallback.js";
 import { resolvePreferredSong } from "./preferredSource.js";
 import { probeLocalSourceOk, parseSongPath, evictProbeOk } from "../../utils/localSourceProbe.js";
+import { loadSmbConfig, smbReadFile } from "./smbClient.js";
+import { mintSmbStreamUrl } from "./smbStream.js";
 import { existsSync } from "node:fs";
 import { createLogger } from "../../utils/logger.js";
 
@@ -101,6 +103,17 @@ async function verifyRow(row: SongRow): Promise<boolean> {
       if (!res.ok) { evictProbeOk(row.id); return null; }
       return Buffer.from(await res.arrayBuffer());
     }
+    // SMB 行：库没有 HTTP，直接读整文件（100MB 上限，与网络源内存缓冲同口径）。
+    if (parsed.type === "s") {
+      const cfg = loadSmbConfig(parsed.sourceId);
+      if (!cfg) { evictProbeOk(row.id); return null; }
+      try {
+        return await smbReadFile(parsed.sourceId, cfg, parsed.filePath);
+      } catch {
+        evictProbeOk(row.id);
+        return null;
+      }
+    }
     const fs = await import("fs");
     if (!fs.existsSync(parsed.filePath)) return null;
     return fs.readFileSync(parsed.filePath);
@@ -139,6 +152,12 @@ export function resolveRowInput(row: SongRow): { input: string; headers?: Record
         headers["Authorization"] = "Basic " + Buffer.from(`${config.username}:${config.password}`).toString("base64");
       }
       return { input: origin + parsed.filePath, headers };
+    }
+    // SMB 行：走本机回环 token 通道，ffmpeg 按普通 HTTP 输入处理（支持 Range/seek）。
+    if (parsed.type === "s") {
+      const cfg = loadSmbConfig(parsed.sourceId);
+      if (!cfg) return null;
+      return { input: mintSmbStreamUrl(parsed.sourceId, cfg, parsed.filePath) };
     }
     return { input: parsed.filePath };
   } catch {

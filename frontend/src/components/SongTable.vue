@@ -253,24 +253,26 @@ function sourceTooltip(song: any): string {
   return meta.pluginName ? `${meta.pluginName} · ${meta.label}` : meta.label;
 }
 
-// 行来源标签:本地/WebDAV 用固定标签,web 走平台徽标(sourceMeta)。
-// 合并主行/子行与单源行的来源列统一走这里(行类型 local | webdav | web)。
+// 行来源标签:本地/SMB/WebDAV 用固定标签,web 走平台徽标(sourceMeta)。
+// 合并主行/子行与单源行的来源列统一走这里(行类型 local | smb | webdav | web)。
 function sourceLabelFor(song: any): { label: string; color: string } | null {
   const st = song?.type || song?.rowType || "local";
   if (st === "local") return { label: t("songTable.localSource"), color: "#3f7ef0" };
+  if (st === "smb") return { label: "SMB", color: "#8b5cf6" };
   if (st === "webdav") return { label: "WebDAV", color: "#2ea46c" };
   return sourceMeta(song);
 }
-// 展开子行标题前缀的短标签(仅本地/WebDAV 显示,web 子行徽标已在其来源列)
+// 展开子行标题前缀的短标签(仅本地/SMB/WebDAV 显示,web 子行徽标已在其来源列)
 function sourceShortLabel(song: any): string {
   const st = song?.type || song?.rowType || "local";
   if (st === "local") return t("songTable.localSource");
+  if (st === "smb") return "SMB";
   if (st === "webdav") return "WebDAV";
   return "";
 }
 
 // ==================== 同曲多源合并展示 ====================
-// 后端序列化时组内成员行都带 sources(组内全部源,local > webdav > web)。
+// 后端序列化时组内成员行都带 sources(组内全部源,local > smb > webdav > web)。
 // 组内多源(>1)时合并为一行主行(主行 = sources[0],核心曲库优先),来源标签
 // 显示「主源 +N」,点击展开/收起子行(每行可单独播放/删除)。单源行保持原样。
 // 仅 showSource 且非移动端启用;虚拟滚动模式在窗口切片内合并(组内成员行可能

@@ -379,7 +379,7 @@ function libraryOrphanDone(t: FetchTarget | undefined, akey: string, deps: Fetch
   try {
     const row = db.select({ path: songs.path }).from(songs).where(eq(songs.id, songId)).get();
     const p = row?.path ?? "";
-    return !!p && !p.startsWith("l:") && !p.startsWith("w:");
+    return !!p && !p.startsWith("l:") && !p.startsWith("s:") && !p.startsWith("w:");
   } catch {
     return false;
   }

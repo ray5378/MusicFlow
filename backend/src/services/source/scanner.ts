@@ -12,6 +12,7 @@ import { invalidateArtistList } from "../../utils/artistListCache.js";
 import { createLogger } from "../../utils/logger.js";
 import { songGroupEnabled, groupKeyForConfig, findGroupForSongConfig } from "../plugin/core/songGroup.js";
 import { newGroupId, normalizeGroupText } from "../../utils/songGroup.js";
+import { buildSmbConfig, normalizeSmbPath, smbReaddir, smbReadRange, type SmbEntry } from "./smbClient.js";
 
 const AUDIO_EXTENSIONS = new Set([".mp3", ".flac", ".wav", ".aac", ".ogg", ".m4a", ".wma", ".ape", ".aiff", ".opus"]);
 const HEADER_SIZE = 4 * 1024 * 1024; // 4MB - enough for ID3v2 + embedded cover art
@@ -376,6 +377,207 @@ export async function scanWebDAVSource(sourceId: string, config: any, mode: Scan
   return { added, updated, removed, skipped, failed };
 }
 
+// ==================== SMB ====================
+//
+// 与 WebDAV 完全同构(目录队列 + 文件队列 + 分级取头 + 增量指纹 + 清理消失行)，
+// 差别只在“怎么读”：
+//   - 列目录用 SMB readdir(stats) 一次拿到 size/mtime/是否目录(WebDAV 要解析 XML)；
+//   - 取头用 SMB 文件流读区间(WebDAV 用 HTTP Range)；
+//   - 没有 etag，增量指纹用 size|mtime。
+// 并发刻意压低(SMB 服务器常限制同账号并发连接/句柄，不能照抄 WebDAV 的 10/8)。
+const SMB_DIR_CONCURRENCY = 4;
+const SMB_FILE_CONCURRENCY = 3;
+
+export async function scanSmbSource(
+  sourceId: string,
+  config: any,
+  mode: ScanMode,
+  onProgress?: (p: ScanProgress) => void,
+  signal?: AbortSignal,
+) {
+  const cfg = buildSmbConfig(config);
+  if (!cfg) throw new Error("SMB 配置不完整(缺少 host/share)");
+
+  const progress: ScanProgress = {
+    phase: "traverse", totalDirs: 0, processedDirs: 0,
+    totalFiles: 0, processedFiles: 0, added: 0, updated: 0, skipped: 0, failed: 0, currentTrack: "", mode,
+  };
+  if (onProgress) onProgress(progress);
+
+  const dirQueue: { path: string; attempts: number }[] = [{ path: normalizeSmbPath(cfg.root_path), attempts: 0 }];
+  const fileQueue: SmbEntry[] = [];
+  const visited = new Set<string>();
+  const seenPaths = new Set<string>();
+  const MAX_DIR_ATTEMPTS = 3;
+
+  let added = 0, updated = 0, skipped = 0, failed = 0;
+  let activeDirs = 0, activeFiles = 0;
+  let discoveredFiles = 0;
+  let doneResolve: () => void;
+  const done = new Promise<void>((r) => (doneResolve = r));
+  let finished = false;
+
+  const emitProgress = () => { if (onProgress) onProgress({ ...progress }); };
+
+  const maybeDone = () => {
+    if (finished) return;
+    if (dirQueue.length === 0 && fileQueue.length === 0 && activeDirs === 0 && activeFiles === 0) {
+      finished = true;
+      progress.phase = "done";
+      progress.currentTrack = "";
+      progress.totalFiles = discoveredFiles;
+      emitProgress();
+      log.info(`[SCANNER] SMB scan complete: +${added} ~${updated} -${skipped} fail=${failed} (mode=${mode})`);
+      doneResolve();
+    }
+  };
+
+  const abortScan = () => {
+    if (finished) return;
+    finished = true;
+    progress.phase = "done";
+    progress.currentTrack = "";
+    progress.totalFiles = discoveredFiles;
+    emitProgress();
+    log.info(`[SCANNER] SMB scan aborted: +${added} ~${updated} -${skipped} fail=${failed} (mode=${mode})`);
+    doneResolve();
+  };
+  if (signal) {
+    if (signal.aborted) { abortScan(); return { added: 0, updated: 0, removed: 0, skipped: 0, failed: 0, aborted: true }; }
+    signal.addEventListener("abort", abortScan, { once: true });
+  }
+
+  const processFile = async (entry: SmbEntry) => {
+    const songPath = `s:${sourceId}:${entry.path}`;
+    seenPaths.add(songPath);
+
+    // 增量：size+mtime 未变就跳过(SMB 没有 etag)。
+    const fp = `${entry.size}|${entry.mtimeMs}`;
+    if (mode === "incremental") {
+      const existing = db.select().from(songs).where(eq(songs.path, songPath)).get();
+      if (existing) {
+        const storedFp = existing.fingerprint || "";
+        const matches = storedFp ? storedFp === fp : (existing.size || 0) === entry.size;
+        if (matches) { skipped++; return; }
+      }
+    }
+
+    progress.currentTrack = entry.name;
+    emitProgress();
+    try {
+      if (entry.size <= 0) { skipped++; return; }
+      let meta: MusicMetadata | null = null;
+      for (let i = 0; i < HEADER_LADDER.length && !meta; i++) {
+        const end = Math.min(HEADER_LADDER[i], entry.size) - 1;
+        if (end < 0) break;
+        const headerBuf = await smbReadRange(sourceId, cfg, entry.path, 0, end);
+        const parsed = await extractMetadataHeader(headerBuf, entry.name, entry.size);
+        if (!parsed.incomplete || i === HEADER_LADDER.length - 1) meta = parsed;
+      }
+      if (!meta) { skipped++; return; }
+      if (meta.incomplete) {
+        log.warn(`[SCANNER] ${entry.name} 取头升到 ${HEADER_LADDER[HEADER_LADDER.length - 1] / 1024 / 1024}MB 仍解析不出标签,元数据回落文件名推断`);
+      }
+      const result = upsertSong(songPath, meta, sourceId, mode === "incremental" ? fp : undefined);
+      if (result === "added") added++;
+      else updated++;
+    } catch (e: any) {
+      failed++;
+      log.warn(`[SCANNER] SMB 入库失败 ${entry.path}`, { err: e?.message || String(e) });
+    }
+  };
+
+  const processDir = async (item: { path: string; attempts: number }) => {
+    const dirPath = normalizeSmbPath(item.path);
+    if (visited.has(dirPath)) return;
+    try {
+      const list = await smbReaddir(sourceId, cfg, dirPath);
+      visited.add(dirPath);
+      for (const e of list) {
+        if (e.isDirectory) {
+          if (!visited.has(e.path)) dirQueue.push({ path: e.path, attempts: 0 });
+        } else if (AUDIO_EXTENSIONS.has(path.extname(e.name).toLowerCase())) {
+          fileQueue.push(e);
+          discoveredFiles++;
+        }
+      }
+    } catch (e: any) {
+      if (item.attempts < MAX_DIR_ATTEMPTS) {
+        await sleep(400 * (item.attempts + 1) + Math.floor(Math.random() * 200));
+        dirQueue.push({ path: item.path, attempts: item.attempts + 1 });
+      } else {
+        log.warn(`[SCANNER] SMB 列目录失败 ${item.path}`, { err: e?.message || String(e) });
+      }
+    }
+  };
+
+  const pumpDirs = () => {
+    while (activeDirs < SMB_DIR_CONCURRENCY && dirQueue.length > 0) {
+      if (signal?.aborted) break;
+      const item = dirQueue.shift()!;
+      if (visited.has(normalizeSmbPath(item.path))) continue;
+      activeDirs++;
+      processDir(item).finally(() => {
+        activeDirs--;
+        progress.processedDirs = visited.size;
+        progress.totalDirs = visited.size + dirQueue.length;
+        progress.totalFiles = discoveredFiles;
+        emitProgress();
+        pumpDirs();
+        pumpFiles();
+        maybeDone();
+      });
+    }
+  };
+
+  const pumpFiles = () => {
+    while (activeFiles < SMB_FILE_CONCURRENCY && fileQueue.length > 0) {
+      if (signal?.aborted) break;
+      const entry = fileQueue.shift()!;
+      activeFiles++;
+      processFile(entry).finally(() => {
+        activeFiles--;
+        progress.processedFiles++;
+        progress.added = added;
+        progress.updated = updated;
+        progress.skipped = skipped;
+        progress.failed = failed;
+        if (progress.phase === "traverse") progress.phase = "scanning";
+        emitProgress();
+        pumpFiles();
+        maybeDone();
+      });
+    }
+  };
+
+  pumpDirs();
+  pumpFiles();
+  await done;
+
+  if (signal?.aborted) return { added, updated, removed: 0, skipped, failed, aborted: true };
+
+  // 清理：本次没再出现的行 = 源里已删。零目录可达时判定源整体不可达，不删(与 WebDAV 同口径)。
+  const existingSongs = db.select().from(songs).all().filter((s) => s.path.startsWith(`s:${sourceId}:`));
+  const removedIds: string[] = [];
+  for (const s of existingSongs) {
+    if (!seenPaths.has(s.path)) removedIds.push(s.id);
+  }
+  let removed = 0;
+  if (removedIds.length > 0) {
+    if (visited.size > 0) {
+      deleteAnalysisMany(removedIds);
+      for (const id of removedIds) db.delete(songs).where(eq(songs.id, id)).run();
+      removed = removedIds.length;
+    } else {
+      log.warn(`[SCANNER] SMB ${mode} scan: 源 ${sourceId} 本次零目录可达 -> 判定源整体不可达,不删除任何行(保留 ${removedIds.length} 首待下次成功扫描核对)`);
+    }
+  }
+  if (removed > 0) cleanupOrphans();
+
+  log.info(`[SCANNER] SMB ${mode} scan: +${added} ~${updated} -${removed} skip=${skipped} fail=${failed}`);
+  return { added, updated, removed, skipped, failed };
+}
+
 // Extract metadata from header chunk using music-metadata
 /**
  * 无损容器的码率不信任 format.bitrate：music-metadata 对「截断头部 buffer」解析出的
@@ -708,10 +910,10 @@ export function resolveLocalGroup(meta: MusicMetadata): { groupId: string; group
 
 export function upsertSong(songPath: string, meta: MusicMetadata, sourceId: string, fingerprint?: string): "added" | "updated" {
   // 行类型以路径前缀为唯一真相:WebDAV 扫描写 `w:<sourceId>:<href>`,本地写
-  // `l:<sourceId>:<绝对路径>`。此前 insert/update 都不写 type,WebDAV 行全落
-  // 建表默认 'local' —— 前端来源列因此把两类都显示成「本地」,播放优选的
-  // local 优先排序也退化成并列(谁先入库谁在前)。
-  const rowType = songPath.startsWith("w:") ? "webdav" : "local";
+  // `l:<sourceId>:<绝对路径>`,SMB 写 `s:<sourceId>:<共享内路径>`。此前 insert/update
+  // 都不写 type,WebDAV 行全落建表默认 'local' —— 前端来源列因此把两类都显示成
+  // 「本地」,播放优选的 local 优先排序也退化成并列(谁先入库谁在前)。
+  const rowType = songPath.startsWith("w:") ? "webdav" : songPath.startsWith("s:") ? "smb" : "local";
   const existing = db.select().from(songs).where(eq(songs.path, songPath)).get();
   const artistId = findOrCreateArtist(meta.artist) || null;
   const albumId = findOrCreateAlbum(meta.album, artistId || "", meta.artist, meta.year, meta.picture, meta.genre) || null;

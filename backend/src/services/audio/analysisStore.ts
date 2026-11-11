@@ -2,18 +2,18 @@
 // 与同目录 loudness.ts 的分工：**那边是纯函数不碰 DB，这边才落库**。
 //
 // D8 纪律 —— 只有「自持源」的测量值才写库：
-//   local / webdav 的行背后是同一个文件，今天测的值明天还成立；
+//   local / smb / webdav 的行背后是同一个文件，今天测的值明天还成立；
 //   web（网络源）每次取到的字节都不保证一致（可能换了 CDN 转码版本），
 //   写下来下次播放时会被当成「这首已经测过」而误用，反而是错的。
 //   所以网络源一律解析完就丢 —— 永远走实时 loudnorm（见 plan §4 / D8）。
 // 「自持源」的口径与 services/source/preferredSource.ts 完全一致：
-//   inArray(songs.type, ["local", "webdav"])。
+//   inArray(songs.type, ["local", "smb", "webdav"])。
 import { sqlite } from "../../db/index.js";
 import type { Statement } from "better-sqlite3";
 import { parseLoudnorm } from "./loudness.js";
 
 /** 允许回写的源类型。与播放优选同一把尺子，别在两处维护两套名单。 */
-export const ANALYSIS_PERSIST_TYPES = ["local", "webdav"] as const;
+export const ANALYSIS_PERSIST_TYPES = ["local", "smb", "webdav"] as const;
 
 /** 默认按 local 处理（项目惯例：`song.type || "local"`，见 preferredSource.ts:37）。 */
 export function shouldPersistAnalysis(rowType: string | null | undefined): boolean {

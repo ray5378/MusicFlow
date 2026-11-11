@@ -8,7 +8,7 @@
 //
 // 这里把推导收敛成两个纯函数，**出流与预取共用同一份**：
 //   - `resolveLocalFilePath` —— 本地直读路径（本地磁盘行 / web 行已缓存到本地的文件）；没有 → null
-//   - `resolveNetworkInput`  —— 网络源（web 插件直链 / WebDAV）；本地行 → null
+//   - `resolveNetworkInput`  —— 网络源（web 插件直链 / WebDAV / SMB 回环通道）；本地行 → null
 // 两者**互斥**：对同一行最多一个返回非 null（互斥性由 tests/source/networkInput.test.ts 断言）。
 // 出流侧的分支语义与抽离前逐条一致（本地直读 → 缓冲 → 回退直通），见 resolveTranscodeInput。
 //
@@ -19,6 +19,8 @@ import { eq } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { mediaSources } from "../../db/schema.js";
 import { parseSongPath } from "../../utils/localSourceProbe.js";
+import { loadSmbConfig } from "./smbClient.js";
+import { mintSmbStreamUrl } from "./smbStream.js";
 
 /** 只需要被读取的那几个字段；出流行与任意 partial 行都满足。 */
 export interface SongLike {
@@ -43,7 +45,7 @@ export function getWebDAVUrl(sourceConfig: any, filePath: string): string {
  * 覆盖两类：
  *   - web 行的 `cachePath` 且文件确实在盘上（插件源已缓存，零网络成本）；
  *   - `path` 前缀 `l:` 的本地曲库行。
- * `w:`（WebDAV）行一律返回 null —— 它是网络源。
+ * `w:`（WebDAV）/ `s:`（SMB）行一律返回 null —— 它们都是网络源。
  */
 export async function resolveLocalFilePath(song: SongLike | null | undefined): Promise<string | null> {
   if (!song) return null;
@@ -55,6 +57,7 @@ export async function resolveLocalFilePath(song: SongLike | null | undefined): P
   const parsed = parseSongPath(song.path || "");
   if (!parsed) return null;
   if (parsed.type === "w") return null; // WebDAV → 网络源
+  if (parsed.type === "s") return null; // SMB → 网络源(经回环通道出流)
   return parsed.filePath;
 }
 
@@ -93,7 +96,17 @@ export async function resolveNetworkInput(song: SongLike | null | undefined): Pr
 
   // ---- 分支 B：WebDAV 行（path 前缀 `w:`）----
   const parsed = parseSongPath(song.path || "");
-  if (!parsed || parsed.type !== "w") return null;
+  if (!parsed) return null;
+
+  // ---- 分支 C：SMB 行（path 前缀 `s:`）----
+  // SMB 不是 HTTP，交给本机回环 token 通道；下游(缓冲/预取/DLNA)按普通 HTTP 处理。
+  if (parsed.type === "s") {
+    const cfg = loadSmbConfig(parsed.sourceId);
+    if (!cfg) return null;
+    return { url: mintSmbStreamUrl(parsed.sourceId, cfg, parsed.filePath), headers: {} };
+  }
+
+  if (parsed.type !== "w") return null;
   const source = db.select().from(mediaSources).where(eq(mediaSources.id, parsed.sourceId)).get();
   if (!source) return null;
   const config = JSON.parse(source.config || "{}");
@@ -113,5 +126,5 @@ export async function isNetworkSong(song: SongLike | null | undefined): Promise<
     return true;
   }
   const parsed = parseSongPath(song.path || "");
-  return !!parsed && parsed.type === "w";
+  return !!parsed && (parsed.type === "w" || parsed.type === "s");
 }

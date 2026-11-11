@@ -75,7 +75,7 @@ export interface ClientSongRow {
   /** 是否有歌词(库内只标注存在性,不存正文;true 表示内嵌标签有词或已落歌词文件) */
   hasLyrics: boolean;
   coverArt?: string;
-  /** 行类型:local | webdav | web(前端据此区分本地源与平台源) */
+  /** 行类型:local | smb | webdav | web(前端据此区分核心曲库源与平台源) */
   type: string;
   sourcePlatform: string;
   sourcePluginId: string;
@@ -122,8 +122,8 @@ export function serializeSongRow(s: any, coverRef?: string): ClientSongRow {
   };
 }
 
-// 组内优先级:核心曲库(local) > WebDAV > 插件平台(web)
-const GROUP_TYPE_ORDER: Record<string, number> = { local: 0, webdav: 1, web: 2 };
+// 组内优先级:本地(0) > SMB(1) > WebDAV(2) > 插件平台 web(3)
+const GROUP_TYPE_ORDER: Record<string, number> = { local: 0, smb: 1, webdav: 2, web: 3 };
 
 /** 组内成员排序:核心曲库优先,同类型按标题。主行 = 排序后第一项。 */
 export function groupMemberSort(a: { type?: string | null; title?: string | null }, b: { type?: string | null; title?: string | null }): number {
@@ -145,7 +145,7 @@ export function resolveSongCover(song: any): string | undefined {
 
 /**
  * 给已序列化的行附加组内多源。调用方负责一次批量查组成员行(rows,含
- * groupId 列),这里按组合并、排序(local > webdav > web)后填入 item.sources。
+ * groupId 列),这里按组合并、排序(local > smb > webdav > web)后填入 item.sources。
  * 单成员组也会填(长度 1),前端统一按「有无多源」判断合并展示。
  * resolveCover 可选:成员行封面解析(缺省回退自身 cover_art)。不传时 local
  * 成员(无自带封面)会输出空 coverArt → 前端合并主行占位,故调用方务必传入。

@@ -29,7 +29,7 @@ export function runScanSchedulerOnce(nowMs = Date.now()): string[] {
   const d = new Date(nowMs);
   const dayStart = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
   for (const s of rows) {
-    if (s.type !== "local" && s.type !== "webdav") continue;
+    if (s.type !== "local" && s.type !== "webdav" && s.type !== "smb") continue;
     let cfg: { scanAutoEnabled?: boolean; scanAutoTimeOfDay?: string } = {};
     try {
       cfg = JSON.parse(s.config || "{}");

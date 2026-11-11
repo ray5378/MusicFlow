@@ -83,7 +83,7 @@ export const songs = sqliteTable("songs", {
   comment: text("comment").default(""),
   tags: text("tags"),
   // 同曲多源归组:规范化标题+歌手+专辑相同且时长差 ≤1s(秒级)的行共享同一
-  // group_id;组内优先级 local > webdav > web,播放优选/展示合并基于它。
+  // group_id;组内优先级 local > smb > webdav > web,播放优选/展示合并基于它。
   // 分组只附加列,不删行。
   groupId: text("group_id"),
   groupKey: text("group_key"),
@@ -203,9 +203,13 @@ export const userPlayQueues = sqliteTable("user_play_queues", {
 export const mediaSources = sqliteTable("media_sources", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
+  /** 源类型：local | webdav | smb（config 结构按类型不同，无 DDL 约束）。 */
   type: text("type").notNull().default("local"),
   enabled: integer("enabled").default(1),
   config: text("config").default("{}"),
+  /** 该源已入库曲目数（l:/s:/w: 三段并集）。扫描结束后重算写回，非逐条增减；
+   *  NULL = 尚未统计（老库升级/新建源），列表接口会惰性算一次并回填。 */
+  songCount: integer("song_count"),
   createdAt: text("created_at").default(""),
   updatedAt: text("updated_at").default(""),
 });

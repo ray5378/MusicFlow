@@ -2498,7 +2498,9 @@ restRoutes.get("/stream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
     if ((song.type || "local") !== "web") {
       const parsedLocal = parseSongPath(song.path);
       if (!parsedLocal) return c.json(fail(0, "Invalid song path"));
-      if (parsedLocal.type !== "w") {
+      // 只有本地 l: 行才做 fs 探测；WebDAV(w:)/SMB(s:) 是网络源，本地文件系统
+      // 上当然不存在，误判会导致 SMB 行直接 404。
+      if (parsedLocal.type === "l") {
         const fs = await import("fs");
         if (!fs.existsSync(parsedLocal.filePath)) return c.json(fail(70, "File not found"));
       }
@@ -2709,7 +2711,8 @@ async function serveCastStream(
     if ((resolvedSong.type || "local") !== "web") {
       const parsedLocal = parseSongPath(resolvedSong.path);
       if (!parsedLocal) return c.text("Invalid song path", 400);
-      if (parsedLocal.type !== "w") {
+      // 同上：WebDAV/SMB 是网络源，不做本地 fs 探测。
+      if (parsedLocal.type === "l") {
         const fs = await import("fs");
         if (!fs.existsSync(parsedLocal.filePath)) return c.text("File not found", 404);
       }
@@ -2867,6 +2870,62 @@ restRoutes.get("/membuf/:token", async (c) => {
     });
   }
   return new Response(new Uint8Array(entry.buf), { status: 200, headers: { ...base, "Content-Length": String(total) } });
+});
+
+// ==================== SMB 回环出流 ====================
+// SMB 不是 HTTP，ffmpeg/预取/DLNA 代理都读不了；这里把「源 + 文件路径」兑换成
+// 一次性随机 token，用本机回环 HTTP 出字节（支持 Range）——下游按普通网络源处理。
+// 无鉴权：token 32 位随机串，信任模型与 membuf / dlna raw 分支一致（仅本机回环消费）。
+restRoutes.get("/smbstream/:token", async (c) => {
+  const { resolveSmbStream } = await import("../../services/source/smbStream.js");
+  const { smbStat, smbOpenStream } = await import("../../services/source/smbClient.js");
+  const { parseRangeHeader } = await import("../../services/dlna/rawStreamCache.js");
+  const entry = resolveSmbStream(c.req.param("token"));
+  if (!entry) return c.text("Invalid or expired SMB token", 403);
+
+  let total = 0;
+  try {
+    total = (await smbStat(entry.sourceId, entry.config, entry.filePath)).size;
+  } catch {
+    return c.text("SMB file unavailable", 404);
+  }
+  const base: Record<string, string> = {
+    "Accept-Ranges": "bytes",
+    "Cache-Control": "no-cache",
+    "X-MusicFlow-SMB": "1",
+    "Content-Type": "application/octet-stream",
+  };
+  if (c.req.method === "HEAD") {
+    return new Response(null, { status: 200, headers: { ...base, "Content-Length": String(total) } });
+  }
+
+  const range = parseRangeHeader(c.req.header("range"));
+  let start = 0;
+  let end = total - 1;
+  let status = 200;
+  if (range) {
+    if (range.start < 0) {
+      // suffix 形态 bytes=-N：取末尾 N 字节
+      start = Math.max(0, total + range.start);
+    } else {
+      start = range.start;
+    }
+    end = range.end === null || range.end === undefined ? total - 1 : Math.min(range.end, total - 1);
+    if (start >= total || start > end) {
+      return new Response(null, { status: 416, headers: { "Content-Range": `bytes */${total}` } });
+    }
+    status = 206;
+  }
+
+  try {
+    const { stream } = await smbOpenStream(entry.sourceId, entry.config, entry.filePath, { start, end });
+    const { Readable } = await import("node:stream");
+    const headers: Record<string, string> = { ...base, "Content-Length": String(end - start + 1) };
+    if (status === 206) headers["Content-Range"] = `bytes ${start}-${end}/${total}`;
+    return new Response(Readable.toWeb(stream) as any, { status, headers });
+  } catch (e: any) {
+    return c.text(`SMB read failed: ${e?.message || String(e)}`, 502);
+  }
 });
 
 restRoutes.get("/getCoverArt", permMiddleware(PERM.COVER_VIEW), async (c) => {

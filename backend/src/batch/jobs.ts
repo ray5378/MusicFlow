@@ -22,7 +22,7 @@ import { matchUnmatchedPlaylistEntries, crossVerifySongs } from "../services/sou
 import { syncAllRecommendPlaylists } from "../services/source/online/recommendImport.js";
 import { purgeExpiredWebSongs } from "../services/source/online/purge.js";
 import { systemOwnerId } from "../services/plugin/shared.js";
-import { scanLocalSource, scanWebDAVSource } from "../services/source/scanner.js";
+import { scanLocalSource, scanSmbSource, scanWebDAVSource } from "../services/source/scanner.js";
 import { scrapeArtistList } from "../services/scraper/artist.js";
 import { collectCandidates, runBackfillLoop, runBackfillChunked } from "../services/backfill.js";
 import { dailyRecommendApi, localRecommendApi, comboPlaylistApi } from "../services/pluginAccess.js";
@@ -249,6 +249,8 @@ async function scanHandler(args: Record<string, any>, ctx: BatchJobContext): Pro
   let result: any;
   if (source.type === "webdav") {
     result = await scanWebDAVSource(sourceId, config, mode, onScan, ctx.signal);
+  } else if (source.type === "smb") {
+    result = await scanSmbSource(sourceId, config, mode, onScan, ctx.signal);
   } else if (source.type === "local") {
     result = await scanLocalSource(sourceId, config, mode, onScan, ctx.signal);
   } else {

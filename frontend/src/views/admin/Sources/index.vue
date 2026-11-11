@@ -25,6 +25,9 @@
           </el-dropdown>
         </div>
         <div class="source-config">
+          <!-- 每源已入库曲目数：读后端存字段(扫描结束后重算写回)，不再每次打开页面各算一遍。 -->
+          <p><strong>{{ t('admin.sources.songCount') }}:</strong> {{ songCountOf(source) }} {{ t('admin.sources.songUnit') }}</p>
+          <p v-if="source.type === 'smb' && source.config?.host"><strong>SMB:</strong> \\{{ source.config.host }}\{{ source.config.share }}{{ source.config.root_path }}</p>
           <p v-if="source.config?.url"><strong>URL:</strong> {{ source.config.url }}</p>
           <p v-if="source.config?.root_path"><strong>{{ t('admin.sources.rootPath') }}:</strong> {{ source.config.root_path }}</p>
           <p v-if="source.config?.username"><strong>{{ t('common.username') }}:</strong> {{ source.config.username }}</p>
@@ -103,6 +106,7 @@
         <el-form-item :label="t('common.type')">
           <el-select v-model="newSource.type">
             <el-option label="WebDAV" value="webdav" />
+            <el-option label="SMB" value="smb" />
             <el-option :label="t('admin.sources.localDir')" value="local" />
           </el-select>
         </el-form-item>
@@ -111,6 +115,15 @@
           <el-form-item :label="t('common.username')"><el-input v-model="newSource.config.username" :placeholder="t('common.optional')" /></el-form-item>
           <el-form-item :label="t('common.password')"><el-input v-model="newSource.config.password" type="password" :placeholder="t('common.optional')" show-password /></el-form-item>
           <el-form-item :label="t('admin.sources.rootPath')"><el-input v-model="newSource.config.root_path" placeholder="/music" /></el-form-item>
+        </template>
+        <template v-else-if="newSource.type === 'smb'">
+          <el-form-item :label="t('admin.sources.smbHost')"><el-input v-model="newSource.config.host" placeholder="192.168.1.100" /></el-form-item>
+          <el-form-item :label="t('admin.sources.smbShare')"><el-input v-model="newSource.config.share" placeholder="Music" /></el-form-item>
+          <el-form-item :label="t('admin.sources.smbPort')"><el-input-number v-model="newSource.config.port" :min="1" :max="65535" controls-position="right" /></el-form-item>
+          <el-form-item :label="t('common.username')"><el-input v-model="newSource.config.username" :placeholder="t('common.optional')" /></el-form-item>
+          <el-form-item :label="t('common.password')"><el-input v-model="newSource.config.password" type="password" :placeholder="t('common.optional')" show-password /></el-form-item>
+          <el-form-item :label="t('admin.sources.smbDomain')"><el-input v-model="newSource.config.domain" placeholder="WORKGROUP" /></el-form-item>
+          <el-form-item :label="t('admin.sources.rootPath')"><el-input v-model="newSource.config.root_path" placeholder="/" /></el-form-item>
         </template>
         <template v-else>
           <el-form-item :label="t('admin.sources.localPath')" :description="t('admin.sources.localPathDesc')">
@@ -140,6 +153,15 @@
           <el-form-item label="WebDAV URL"><el-input v-model="editSource.config.url" /></el-form-item>
           <el-form-item :label="t('common.username')"><el-input v-model="editSource.config.username" /></el-form-item>
           <el-form-item :label="t('common.password')"><el-input v-model="editSource.config.password" type="password" show-password /></el-form-item>
+          <el-form-item :label="t('admin.sources.rootPath')"><el-input v-model="editSource.config.root_path" /></el-form-item>
+        </template>
+        <template v-else-if="editSource.type === 'smb'">
+          <el-form-item :label="t('admin.sources.smbHost')"><el-input v-model="editSource.config.host" /></el-form-item>
+          <el-form-item :label="t('admin.sources.smbShare')"><el-input v-model="editSource.config.share" /></el-form-item>
+          <el-form-item :label="t('admin.sources.smbPort')"><el-input-number v-model="editSource.config.port" :min="1" :max="65535" controls-position="right" /></el-form-item>
+          <el-form-item :label="t('common.username')"><el-input v-model="editSource.config.username" /></el-form-item>
+          <el-form-item :label="t('common.password')"><el-input v-model="editSource.config.password" type="password" show-password /></el-form-item>
+          <el-form-item :label="t('admin.sources.smbDomain')"><el-input v-model="editSource.config.domain" placeholder="WORKGROUP" /></el-form-item>
           <el-form-item :label="t('admin.sources.rootPath')"><el-input v-model="editSource.config.root_path" /></el-form-item>
         </template>
         <template v-else>
@@ -178,8 +200,8 @@ const { t } = useI18n();
 const sources = ref<any[]>([]);
 const showAddDialog = ref(false);
 const showEditDialog = ref(false);
-const newSource = reactive({ name: "", type: "webdav", autoEnabled: false, autoTime: "03:00", config: { url: "", username: "", password: "", root_path: "", path: "" } });
-const editSource = reactive({ id: "", name: "", type: "webdav", enabled: 1, config: { url: "", username: "", password: "", root_path: "", path: "", scanAutoEnabled: false, scanAutoTimeOfDay: "03:00" } });
+const newSource = reactive({ name: "", type: "webdav", autoEnabled: false, autoTime: "03:00", config: { url: "", username: "", password: "", root_path: "", path: "", host: "", share: "", port: 445, domain: "WORKGROUP" } });
+const editSource = reactive({ id: "", name: "", type: "webdav", enabled: 1, config: { url: "", username: "", password: "", root_path: "", path: "", host: "", share: "", port: 445, domain: "WORKGROUP", scanAutoEnabled: false, scanAutoTimeOfDay: "03:00" } });
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 
 async function loadSources() {
@@ -205,16 +227,25 @@ async function addSource() {
   try {
     const config: Record<string, any> = newSource.type === "webdav"
       ? { url: newSource.config.url, username: newSource.config.username, password: newSource.config.password, root_path: newSource.config.root_path }
-      : { path: newSource.config.path };
+      : newSource.type === "smb"
+        ? { host: newSource.config.host, share: newSource.config.share, port: newSource.config.port || 445, username: newSource.config.username, password: newSource.config.password, domain: newSource.config.domain || "WORKGROUP", root_path: newSource.config.root_path || "/" }
+        : { path: newSource.config.path };
     config.scanAutoEnabled = newSource.autoEnabled;
     config.scanAutoTimeOfDay = newSource.autoTime;
     await api.post("/rest/api/v1/sources", { name: newSource.name, type: newSource.type, config });
     showAddDialog.value = false;
     newSource.name = ""; newSource.autoEnabled = false; newSource.autoTime = "03:00";
-    newSource.config = { url: "", username: "", password: "", root_path: "", path: "" };
+    newSource.config = { url: "", username: "", password: "", root_path: "", path: "", host: "", share: "", port: 445, domain: "WORKGROUP" };
     ElMessage.success(t("common.addSuccess"));
     loadSources();
   } catch (e: any) { ElMessage.error(e.response?.data?.error || t("common.addFailed")); }
+}
+
+// 卡片显示的曲目数：存字段是「上次扫描结束」时的值；扫描进行中把本次新增叠加上去，
+// 数字随扫描实时上涨，且不额外请求、不额外查库（扫描结束时列表会自动重拉校正）。
+function songCountOf(source: any): number {
+  const base = Number(source.songCount ?? 0);
+  return base + (source._scanProgress ? Number(source._scanProgress.added ?? 0) : 0);
 }
 
 function handleCommand(cmd: string, source: any) {
@@ -311,6 +342,10 @@ function openEdit(source: any) {
   // 定时增量扫描两键回填：缺省时归一成「关 + 03:00」，避免开关/时间选择器拿到 undefined。
   editSource.config = {
     ...source.config,
+    host: source.config?.host || "",
+    share: source.config?.share || "",
+    port: source.config?.port || 445,
+    domain: source.config?.domain || "WORKGROUP",
     scanAutoEnabled: !!source.config?.scanAutoEnabled,
     scanAutoTimeOfDay: source.config?.scanAutoTimeOfDay || "03:00",
   };

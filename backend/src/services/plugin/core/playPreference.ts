@@ -1,7 +1,7 @@
 // ==================== Core plugin: 播放优选(play-preference) ====================
 // 服务端内置行为插件(端侧零改动,可随时开关):
-// - 开启:「首选 Local,失败回退平台」——web 歌曲组内有 local/WebDAV 主源时
-//   自动切主源流播;主源(local/WebDAV)不可用时自动回退组内 web 源;
+// - 开启:「首选 Local,失败回退平台」——web 歌曲组内有 local/SMB/WebDAV 主源时
+//   自动切主源流播(优先级 Local > SMB > WebDAV);主源不可用时自动回退组内 web 源;
 // - 关闭:按原源播放(不优选、不回退)。
 // 同时作为 /v1/play(投屏/队列)与 /rest/stream(流播)两条路径的统一策略源。
 import type { PluginManifest } from "../../../plugins/types.js";
@@ -16,34 +16,34 @@ export const playPreferenceManifest: PluginManifest = {
   version: "1.0.0",
   type: "core",
   description:
-    "「首选 Local,失败回退平台」:多源组歌曲播放时自动选组内 local/WebDAV 核心曲库源(无损优先);核心曲库源不可用(文件缺失/WebDAV 拉不到)时自动回退组内平台源。关闭后按原源播放。",
+    "「首选 Local,失败回退平台」:多源组歌曲播放时自动选组内 local/SMB/WebDAV 核心曲库源(优先级 Local > SMB > WebDAV,无损优先);核心曲库源不可用(文件缺失/拉不到)时自动回退组内平台源。关闭后按原源播放。",
   capabilities: ["playPreference"],
   defaultEnabled: true,
   configSchema: [
-    { key: "preferLocal", label: "首选 Local", type: "switch", default: true, help: "web 歌曲所在组有 local/WebDAV 源时自动切主源流播" },
-    { key: "fallbackToWeb", label: "Local 失败回退平台", type: "switch", default: true, help: "local/WebDAV 主源不可用(文件缺失等)时自动回退组内 web 源,保证可播" },
+    { key: "preferLocal", label: "首选 Local", type: "switch", default: true, help: "web 歌曲所在组有 local/SMB/WebDAV 源时自动切主源流播(Local > SMB > WebDAV)" },
+    { key: "fallbackToWeb", label: "Local 失败回退平台", type: "switch", default: true, help: "local/SMB/WebDAV 主源不可用(文件缺失等)时自动回退组内 web 源,保证可播" },
   ],
   // 插件侧 i18n 字典:默认文案即中文,故 zh 省略、只补 en。前端按当前界面语言取用。
   i18n: {
     en: {
       name: "Play Preference (prefer Local)",
       description:
-        "When streaming a multi-source song group, auto-select the local/WebDAV source (lossless first); fall back to the platform source when the local source is unavailable. Disable to stream from the original source.",
+        "When streaming a multi-source song group, auto-select the local/SMB/WebDAV source (priority Local > SMB > WebDAV, lossless first); fall back to the platform source when the core source is unavailable. Disable to stream from the original source.",
       documentation: `### Play Preference (built-in)
 Playback strategy for multi-source song groups, with zero client changes:
 
-- **Prefer Local**: when a web song's group has a local/WebDAV core-library source, streaming automatically switches to the core-library source (local lossless first);
-- **Fallback to platform**: when the core-library source is unavailable (missing local file / WebDAV fetch failure, failure remembered for 5 minutes), automatically falls back to the group's platform (web) source so the song always plays;
+- **Prefer Local**: when a web song's group has a local/SMB/WebDAV core-library source, streaming automatically switches to it (priority Local > SMB > WebDAV, local lossless first);
+- **Fallback to platform**: when the core-library source is unavailable (missing file / source unreachable, failure remembered for 5 minutes), automatically falls back to the group's platform (web) source so the song always plays;
 - Applies to both \`/rest/stream\` (client / media-panel streaming) and \`/v1/play\` (HA integration / cast / queue);
 - When off, streams from the original source (no preference, no fallback).`,
       fields: {
         preferLocal: {
           label: "Prefer Local",
-          help: "Automatically switch to the local/WebDAV source for streaming when the song's group has one",
+          help: "Automatically switch to the local/SMB/WebDAV source for streaming when the song's group has one (Local > SMB > WebDAV)",
         },
         fallbackToWeb: {
           label: "Fallback to platform on Local failure",
-          help: "Automatically fall back to the group's web source when the local/WebDAV source is unavailable (e.g. missing file)",
+          help: "Automatically fall back to the group's web source when the local/SMB/WebDAV source is unavailable (e.g. missing file)",
         },
       },
     },
@@ -51,8 +51,8 @@ Playback strategy for multi-source song groups, with zero client changes:
   documentation: `### 播放优选(服务端内置)
 多源组歌曲的播放策略,端侧零改动:
 
-- **首选 Local**:web 歌曲所在组有 local / WebDAV 核心曲库源时,流播自动切换到核心曲库源(本地无损优先);
-- **失败回退平台**:核心曲库源不可用(本地文件缺失 / WebDAV 拉取失败,失败记忆 5 分钟)时,自动回退组内平台(web)源,保证歌曲始终可播;
+- **首选 Local**:web 歌曲所在组有 local / SMB / WebDAV 核心曲库源时,流播自动切换到核心曲库源(优先级 Local > SMB > WebDAV,本地无损优先);
+- **失败回退平台**:核心曲库源不可用(本地文件缺失 / SMB / WebDAV 拉取失败,失败记忆 5 分钟)时,自动回退组内平台(web)源,保证歌曲始终可播;
 - 作用于 \`/rest/stream\`(客户端 / 媒体面板流播)与 \`/v1/play\`(HA 集成 / 投屏 / 队列)两条路径;
 - 关闭后按原源播放(不优选、不回退)。`,
 };

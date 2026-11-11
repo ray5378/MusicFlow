@@ -745,9 +745,14 @@ async function listPrefetchCandidates(resolved: any, resolvedId: string): Promis
   return out;
 }
 
-/** WebDAV 行排在前（0），平台 web 行排后（1）。 */
+/** 候选排序：本地(0) > SMB(1) > WebDAV(2) > 平台 web(3)。
+ *  本地行不会进候选(非网络源)，保留 0 档只为口径统一。 */
 function webdavRank(s: any): number {
-  return String(s?.path || "").startsWith("w:") ? 0 : 1;
+  const p = String(s?.path || "");
+  if (p.startsWith("l:")) return 0;
+  if (p.startsWith("s:")) return 1;
+  if (p.startsWith("w:")) return 2;
+  return 3;
 }
 
 /** 候选行的时长基准：候选自身 duration 优先，缺省回退队列行（同曲多源组两行时长应一致）。 */

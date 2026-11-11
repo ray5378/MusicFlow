@@ -281,6 +281,11 @@ describe("sources 域", () => {
     const list = await call("GET", "/v1/sources");
     expect(list.status).toBe(200);
     expect(list.body.find((s: any) => s.id === "src").config).toEqual({ path: "/" });
+    // 每源曲目数：读 media_sources.song_count；NULL（老库升级/新建源）时惰性算一次并回填。
+    const srcRow = list.body.find((s: any) => s.id === "src");
+    const expected = db.select().from(songs).all().filter((x: any) => x.path.startsWith("l:src:")).length;
+    expect(srcRow.songCount).toBe(expected);
+    expect(db.select().from(mediaSources).where(eq(mediaSources.id, "src")).get()!.songCount).toBe(expected);
     const created = await call("POST", "/v1/sources", { name: "New", type: "webdav", config: { url: "http://x" } });
     expect(created.body.id).toBeTruthy();
     const row = db.select().from(mediaSources).where(eq(mediaSources.id, created.body.id)).get()!;

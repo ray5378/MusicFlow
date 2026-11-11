@@ -16,7 +16,7 @@ import { songs } from "../../db/schema.js";
 import { DEFAULT_QUALITY_CONFIG } from "./types.js";
 import { effectiveBitrateKbps } from "./quality.js";
 
-export type ExistingKind = "local" | "webdav";
+export type ExistingKind = "local" | "smb" | "webdav";
 
 export interface ExistingHit {
   songId: string;
@@ -148,6 +148,7 @@ export function escapeLikePattern(s: string): string {
 function kindOf(path: string | null | undefined): ExistingKind | null {
   if (typeof path !== "string") return null;
   if (path.startsWith("l:")) return "local";
+  if (path.startsWith("s:")) return "smb";
   if (path.startsWith("w:")) return "webdav";
   return null;
 }
@@ -193,16 +194,16 @@ function fetchCandidates(queries: ExistingQuery[]): ExistingRow[] {
     .from(songs)
     .where(
       and(
-        sql`(${songs.path} LIKE 'l:%' OR ${songs.path} LIKE 'w:%')`,
+        sql`(${songs.path} LIKE 'l:%' OR ${songs.path} LIKE 's:%' OR ${songs.path} LIKE 'w:%')`,
         or(...titleConds),
       ),
     )
     .orderBy(
-      // 本地行优先 + 新行优先（2026-10-12，240 实证修复）：粗筛 LIMIT 会截断候选，
+      // 核心曲库行优先(本机 > SMB > WebDAV) + 新行优先(2026-10-12，240 实证修复)：粗筛 LIMIT 会截断候选，
       // 无排序时 rowid 最大的新建本地行首当其冲被切掉——实测标题「是你」271 行候选、
       // 两条刚入库的 l: 行排在 200 名外 → 查重 miss → 冷却秒跳 → 池子卡死 26 首。
       // 精筛口径不变，排序只决定「谁有资格进精筛」。
-      sql`CASE WHEN ${songs.path} LIKE 'l:%' THEN 0 ELSE 1 END`,
+      sql`CASE WHEN ${songs.path} LIKE 'l:%' THEN 0 WHEN ${songs.path} LIKE 's:%' THEN 1 ELSE 2 END`,
       sql`rowid DESC`,
     )
     .limit(limit)
@@ -253,10 +254,11 @@ function effectiveKbpsOf(h: { size?: number; durationSec?: number; bitRate?: num
   return br > 0 ? br : 0;
 }
 
-/** a 是否优于 b：local > webdav，再比有效码率大（size/duration 换算优先，bit_rate 回落）。 */
+/** a 是否优于 b：local > smb > webdav，再比有效码率大（size/duration 换算优先，bit_rate 回落）。 */
 function better(a: ExistingHit, b: ExistingHit): boolean {
-  const ka = a.kind === "local" ? 0 : 1;
-  const kb = b.kind === "local" ? 0 : 1;
+  const rank = (k: ExistingKind) => (k === "local" ? 0 : k === "smb" ? 1 : 2);
+  const ka = rank(a.kind);
+  const kb = rank(b.kind);
   if (ka !== kb) return ka < kb;
   return effectiveKbpsOf(a) > effectiveKbpsOf(b);
 }

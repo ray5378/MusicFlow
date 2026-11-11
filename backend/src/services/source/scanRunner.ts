@@ -15,6 +15,7 @@
 import { runBatchJob } from "../../batch/runner.js";
 import { translate } from "../../i18n.js";
 import { createLogger } from "../../utils/logger.js";
+import { recomputeSourceSongCount } from "./songCount.js";
 import type { ScanProgress } from "./scanner.js";
 
 const log = createLogger("scan-runner");
@@ -108,6 +109,13 @@ export function startSourceScan(o: StartScanOptions): { started: boolean; busy?:
   };
 
   const finalize = (status: ScanJobState["status"], extra: Partial<ScanJobState>): void => {
+    // 扫描是曲目数最大的变更来源：结束时(含 stopped / failed)按源重算一次写回。
+    // 重算而非 ±1 增量 —— 中断、清理消失行、增量跳过的组合下增量口径极易漂移。
+    try {
+      recomputeSourceSongCount(o.sourceId);
+    } catch (e) {
+      log.warn("[SCANNER] 重算源曲目数失败: " + (e instanceof Error ? e.message : String(e)));
+    }
     scanJobs.set(o.sourceId, {
       ...job,
       ...extra,

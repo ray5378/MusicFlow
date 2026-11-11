@@ -29,6 +29,7 @@ import {
   replaceUserPermissions, replaceRendererGrants, grantRenderer, revokeRenderer, invalidateAccessCaches,
 } from "../../services/access.js";
 import { testWebDAVConnection, cleanupOrphans, ScanProgress } from "../../services/source/scanner.js";
+import { recomputeSourceSongCount, sourceIdOfSongPath } from "../../services/source/songCount.js";
 import { encryptPassword } from "../../db/index.js";
 import { ImportedPlaylist, ImportedTrack, parsePlaylistFile, NATIVE_APP } from "../../services/plugin/playlistImport.js";
 import { clearLibraryIndex, getLibraryIndexStats } from "../../services/plugin/libraryIndex.js";
@@ -296,6 +297,9 @@ export function deleteSongDb(id: string): boolean {
   deleteAnalysis(id);
   db.delete(songs).where(eq(songs.id, id)).run();
   cleanupOrphans();
+  // 单曲删除不经过扫描 → 立即重算它所属源的曲目数（否则要等下次扫描才校正）。
+  const sourceId = sourceIdOfSongPath(song.path);
+  if (sourceId) recomputeSourceSongCount(sourceId);
   return true;
 }
 
