@@ -2,6 +2,19 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.12.24] - 2026-11-11
+
+### Fix / 内存:空闲驱逐的「在途调用」改为按插件 id 统计
+
+4.12.23 把 `inflight` / `lastUsedAt` 记在外置插件 record 上,但热重载会替换
+record,而服务里缓存的旧门面仍持有旧 record:此时旧记录计数为 0、新记录计数
+也不对,可能出现「插件正在用却被判定空闲并驱逐」。
+
+- 新增模块级 `inflightById`,门面按固定 id 增减计数;调用结束用
+  `externalPlugins.get(id) ?? rec` 更新当前 record 的 `lastUsedAt`。
+- 驱逐判定改用 `inflightById`,热重载/换记录后不再误判空闲。
+- `forgetExternalPlugin` 同步清理该 id 的计数。
+
 ## [4.12.23] - 2026-11-11
 
 ### Perf / 内存:外置插件空闲驱逐(用完即回收)

@@ -160,8 +160,6 @@ interface ExternalPluginRecord {
   sandbox?: SandboxedPlugin;
   /** 最近一次能力调用结束时间(空闲驱逐判定)。 */
   lastUsedAt: number;
-  /** 在途调用数(>0 时绝不驱逐)。 */
-  inflight: number;
 }
 
 /** 外置插件登记表(manifest.id → 记录);ensurePluginLoaded / 删除插件都要用。 */
@@ -170,6 +168,10 @@ const externalPlugins = new Map<string, ExternalPluginRecord>();
 /** 曾经由外置插件占用的 id(含懒加载门面)。用来区分「注册表里的是自己的门面」
  *  与「内置插件」——前者允许在首次加载/热重载时被真实 impl 替换,后者永远不可遮蔽。 */
 const externalOwnedIds = new Set<string>();
+
+/** 按插件 id 统计在途调用数。不能记在 record 上:热重载会换 record,而服务里缓存
+ *  的旧门面仍然持有旧 record,计数会错位(旧门面在用、新 record 却是 0 → 被误驱逐)。 */
+const inflightById = new Map<string, number>();
 
 /** 删除插件时同步清掉登记表(否则同 id 重装后 ensure 会命中已删除目录的旧记录)。 */
 export function forgetExternalPlugin(id: string): void {
@@ -181,6 +183,7 @@ export function forgetExternalPlugin(id: string): void {
   }
   externalPlugins.delete(String(id));
   externalOwnedIds.delete(String(id));
+  inflightById.delete(String(id));
 }
 
 /** 懒加载门面:方法被调用时才建沙箱,再转给真实 impl。
@@ -194,16 +197,20 @@ export function forgetExternalPlugin(id: string): void {
  *  之前被各处缓存的 impl 引用依然有效,下次调用会自动重建沙箱(见 ensurePluginLoaded)。
  *  每次调用都会累计 inflight / lastUsedAt,空闲驱逐只在 inflight=0 且闲置超阈值时生效。 */
 function makeFacadeMethod(rec: ExternalPluginRecord, m: string): (...args: any[]) => Promise<any> {
+  // 固定 id:门面可能在热重载后成为「旧门面」,但 id 不变,计数与时间戳始终记在 id 上。
+  const id = rec.id;
   return async (...args: any[]) => {
-    rec.inflight++;
+    inflightById.set(id, (inflightById.get(id) ?? 0) + 1);
     try {
-      const real = await ensurePluginLoaded(rec.id);
+      const real = await ensurePluginLoaded(id);
       const fn = real?.[m];
       if (typeof fn !== "function") return undefined;
       return await fn(...args);
     } finally {
-      rec.inflight--;
-      rec.lastUsedAt = Date.now();
+      const left = (inflightById.get(id) ?? 1) - 1;
+      if (left > 0) inflightById.set(id, left); else inflightById.delete(id);
+      const cur = externalPlugins.get(id) ?? rec;
+      cur.lastUsedAt = Date.now();
     }
   };
 }
@@ -253,7 +260,8 @@ export const PLUGIN_IDLE_EVICT_MS = Math.max(
 export function sweepIdlePlugins(now = Date.now()): string[] {
   const evicted: string[] = [];
   for (const rec of externalPlugins.values()) {
-    if (!rec.lazy || !rec.loaded || rec.loading || rec.inflight > 0) continue;
+    if (!rec.lazy || !rec.loaded || rec.loading) continue;
+    if ((inflightById.get(rec.id) ?? 0) > 0) continue;
     if (now - rec.lastUsedAt < PLUGIN_IDLE_EVICT_MS) continue;
     const sb = rec.sandbox ?? pluginSandboxes.get(rec.id);
     try { sb?.dispose(); } catch { /* ignore */ }
@@ -1198,7 +1206,6 @@ export async function discoverExternalPlugins(
           loading: null,
           methods: pluginMethodNames(expectedManifest!).filter((m) => !isSyncPluginMethod(m)),
           lastUsedAt: Date.now(),
-          inflight: 0,
         };
         externalPlugins.set(mid, rec);
         externalOwnedIds.add(mid);
@@ -1226,7 +1233,6 @@ export async function discoverExternalPlugins(
         loading: null,
         methods: [],
         lastUsedAt: Date.now(),
-        inflight: 0,
       };
       const { sandbox, impl } = await loadSandboxedPlugin(id, code, env, expectedManifest);
       if (await finishExternalLoad(rec, sandbox, impl, reload)) loaded++;
