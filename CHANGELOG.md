@@ -2,6 +2,26 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.12.23] - 2026-11-11
+
+### Perf / 内存:外置插件空闲驱逐(用完即回收)
+
+4.12.22 的懒加载只解决「首次使用前不建沙箱」:插件一旦被调用,QuickJS 上下文
+与 longRunning worker 就常驻到进程重启。本版把生命周期补全为「按需建 → 闲置
+回收 → 再用再建」。
+
+- 注册表里对外置懒加载插件固定保存**稳定门面**(而不是真实 impl):门面每次
+  调用累计 `inflight` / `lastUsedAt`;空闲驱逐 dispose 沙箱后各服务缓存的 impl
+  引用仍然有效,下次调用自动重建,冷启动成本只落在闲置后的首次调用。
+- `startPluginIdleSweeper()` 每分钟扫描:懒加载插件闲置超过 10 分钟且无在途
+  调用时 `sandbox.dispose()`(longRunning worker 一并销毁)并回退到门面;
+  阈值可用 `MF_PLUGIN_IDLE_EVICT_MS` 覆盖(最小 60s)。
+- 同步契约插件(streamUrl / lyricUrl / canHandle / canHandleFile)永不驱逐,
+  核心同步取值语义不变。
+- 首载后把 `index.js` 实现但 manifest 未声明的方法并入门面,避免能力缺角。
+- 测试:tests/plugins/lazyIdleEvict.test.ts 覆盖「发现不建沙箱 → 首调建 →
+  未到阈值不驱逐 → 超阈值驱逐 → 旧引用自动重建」与同步插件免疫。
+
 ## [4.12.22] - 2026-11-11
 
 ### Perf / 内存:外置插件懒加载 + V8 堆上限 + 手动回收节流
