@@ -26,7 +26,7 @@ import { applyLogLevelFromSettings } from "./services/logSettings.js";
 import { authMiddleware } from "./middleware/auth.js";
 import { isRestAuthExemptPath } from "./middleware/restExempt.js";
 import { registerBuiltinPlugins } from "./plugins/builtins.js";
-import { discoverExternalPlugins } from "./plugins/discovery.js";
+import { discoverExternalPlugins, startPluginIdleSweeper } from "./plugins/discovery.js";
 import { startPluginHotReload } from "./plugins/hotReload.js";
 import { seedDefaultRegistry } from "./plugins/registryCatalog.js";
 import { refreshDevices, getEffectiveBaseUrl, wireSsdpRealtime, loadPersistedDevices, setRuntimePort } from "./services/dlna/control.js";
@@ -283,6 +283,9 @@ seedDefaultRegistry();
 // Phase 3: scan data/plugins for drop-in plugins, validate + register them, and
 // seed their rows (DB is already ready, so the re-seed only adds the new ids).
 await discoverExternalPlugins(APP_VERSION, undefined, { lazy: true });
+// 空闲驱逐:懒加载插件闲置 10 分钟且无在途调用时释放沙箱(同步契约插件不受影响),
+// 下次调用由门面自动重建。只在主进程启动,子进程生命周期短/无需回收。
+startPluginIdleSweeper();
 
 // Phase 6: watch data/plugins for file changes and hot-reload external plugins
 // (no restart needed when an admin edits a drop-in plugin).

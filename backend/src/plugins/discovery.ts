@@ -152,7 +152,16 @@ interface ExternalPluginRecord {
   loading: Promise<void> | null;
   /** 懒加载门面要暴露的方法名(已剔除同步方法)。 */
   methods: string[];
+  /** 稳定门面:注册表里始终是它,方法内部再取真实 impl。 */
+  facade?: any;
+  /** 真实实现(未加载/空闲驱逐后为 undefined)。 */
   impl?: any;
+  /** 真实沙箱实例(空闲驱逐时 dispose)。 */
+  sandbox?: SandboxedPlugin;
+  /** 最近一次能力调用结束时间(空闲驱逐判定)。 */
+  lastUsedAt: number;
+  /** 在途调用数(>0 时绝不驱逐)。 */
+  inflight: number;
 }
 
 /** 外置插件登记表(manifest.id → 记录);ensurePluginLoaded / 删除插件都要用。 */
@@ -179,17 +188,29 @@ export function forgetExternalPlugin(id: string): void {
  *  这也与 makeImpl 不暴露该方法时的可观测行为一致)。
  *  注意:这里**不挂 health**。health 只由插件页主动 ping,若门面暴露它,
  *  一次打开插件页就会把全部懒插件拉起来,懒加载等于白做;未加载插件的健康度
- *  回落到 plugin_health 表的被动观测记录(首次真实调用后即有)。 */
-function makeLazyImpl(rec: ExternalPluginRecord): any {
-  const impl: any = {};
-  for (const m of rec.methods) {
-    impl[m] = async (...args: any[]) => {
+ *  回落到 plugin_health 表的被动观测记录(首次真实调用后即有)。
+ *
+ *  门面是**稳定对象**:注册表里始终保存它,所以空闲驱逐把沙箱 dispose 掉之后,
+ *  之前被各处缓存的 impl 引用依然有效,下次调用会自动重建沙箱(见 ensurePluginLoaded)。
+ *  每次调用都会累计 inflight / lastUsedAt,空闲驱逐只在 inflight=0 且闲置超阈值时生效。 */
+function makeFacadeMethod(rec: ExternalPluginRecord, m: string): (...args: any[]) => Promise<any> {
+  return async (...args: any[]) => {
+    rec.inflight++;
+    try {
       const real = await ensurePluginLoaded(rec.id);
       const fn = real?.[m];
       if (typeof fn !== "function") return undefined;
-      return fn(...args);
-    };
-  }
+      return await fn(...args);
+    } finally {
+      rec.inflight--;
+      rec.lastUsedAt = Date.now();
+    }
+  };
+}
+
+function makeLazyImpl(rec: ExternalPluginRecord): any {
+  const impl: any = {};
+  for (const m of rec.methods) impl[m] = makeFacadeMethod(rec, m);
   return impl;
 }
 
@@ -217,6 +238,47 @@ export async function ensurePluginLoaded(id: string): Promise<any> {
   const p = rec.loading;
   await p;
   return rec.impl;
+}
+
+/** 外置插件空闲驱逐阈值:闲置超过该时长且无在途调用 → dispose 沙箱、回退到门面,
+ *  下次调用自动重建。只作用于懒加载插件:同步契约插件(streamUrl 等)必须常驻,
+ *  否则核心同步取值会拿到 undefined。可用 MF_PLUGIN_IDLE_EVICT_MS 覆盖(最小 60s)。 */
+export const PLUGIN_IDLE_EVICT_MS = Math.max(
+  60_000,
+  Number(process.env.MF_PLUGIN_IDLE_EVICT_MS) || 10 * 60 * 1000,
+);
+
+/** 扫描并驱逐空闲插件,返回本次被驱逐的 id(供运维观测与测试)。
+ *  三条保护:只在懒加载插件上生效、加载中/有在途调用一律跳过、dispose 失败不影响其它插件。 */
+export function sweepIdlePlugins(now = Date.now()): string[] {
+  const evicted: string[] = [];
+  for (const rec of externalPlugins.values()) {
+    if (!rec.lazy || !rec.loaded || rec.loading || rec.inflight > 0) continue;
+    if (now - rec.lastUsedAt < PLUGIN_IDLE_EVICT_MS) continue;
+    const sb = rec.sandbox ?? pluginSandboxes.get(rec.id);
+    try { sb?.dispose(); } catch { /* ignore */ }
+    pluginSandboxes.delete(rec.id);
+    rec.sandbox = undefined;
+    rec.impl = undefined;
+    rec.loaded = false;
+    evicted.push(rec.id);
+    log.info(`[PLUGIN] 空闲驱逐 ${rec.id}: 已释放沙箱(闲置 ${Math.round((now - rec.lastUsedAt) / 1000)}s)`);
+  }
+  return evicted;
+}
+
+let idleSweepTimer: ReturnType<typeof setInterval> | null = null;
+
+/** 启动空闲驱逐定时器(只在主进程调用;unref,不阻止进程退出)。 */
+export function startPluginIdleSweeper(intervalMs = 60_000): void {
+  if (idleSweepTimer) return;
+  idleSweepTimer = setInterval(() => {
+    try { sweepIdlePlugins(); } catch { /* ignore */ }
+  }, Math.max(5_000, intervalMs));
+  idleSweepTimer.unref?.();
+  log.info(
+    `[PLUGIN] 空闲驱逐已启用:闲置 > ${Math.round(PLUGIN_IDLE_EVICT_MS / 1000)}s 且无在途调用时释放沙箱`,
+  );
 }
 
 /** 沙箱创建成功后的收尾:manifest 合并/权限推导/校验/冲突处理/注册。
@@ -287,12 +349,26 @@ async function finishExternalLoad(
       log.warn(`[PLUGIN] 跳过外置插件 ${rec.id}: 需要 App >= ${manifest.minAppVersion}, 当前 ${appVersion}`);
       return false;
     }
-    registerPlugin(manifest, impl);
-    pluginSandboxes.set(manifest.id, sandbox);
     rec.id = manifest.id;
     rec.impl = impl;
+    rec.sandbox = sandbox;
     rec.loaded = true;
     rec.loading = null;
+    rec.lastUsedAt = Date.now();
+    // 懒加载插件:注册表里**始终**是稳定门面(而不是真实 impl),这样空闲驱逐
+    // dispose 沙箱后,各服务缓存的 impl 引用仍然有效,下次调用自动重建。
+    // index.js 里实现了但 manifest 未声明的方法也并入门面,避免首载后能力缺角。
+    if (rec.lazy) {
+      if (!rec.facade) rec.facade = makeLazyImpl(rec);
+      for (const m of Object.keys(impl)) {
+        if (typeof (impl as any)[m] !== "function") continue;
+        if (isSyncPluginMethod(m) || rec.methods.includes(m)) continue;
+        rec.methods.push(m);
+        rec.facade[m] = makeFacadeMethod(rec, m);
+      }
+    }
+    registerPlugin(manifest, rec.lazy ? rec.facade : impl);
+    pluginSandboxes.set(manifest.id, sandbox);
     externalOwnedIds.add(manifest.id);
     externalPlugins.set(manifest.id, rec);
     log.info(`[PLUGIN] 已加载外置插件 ${rec.id} (${manifest.type}, ${manifest.capabilities.join("/")}) [沙箱]`);
@@ -1121,10 +1197,13 @@ export async function discoverExternalPlugins(
           loaded: false,
           loading: null,
           methods: pluginMethodNames(expectedManifest!).filter((m) => !isSyncPluginMethod(m)),
+          lastUsedAt: Date.now(),
+          inflight: 0,
         };
         externalPlugins.set(mid, rec);
         externalOwnedIds.add(mid);
-        registerPlugin(expectedManifest!, makeLazyImpl(rec));
+        rec.facade = makeLazyImpl(rec);
+        registerPlugin(expectedManifest!, rec.facade);
         loaded++;
         log.info(
           `[PLUGIN] 已登记外置插件 ${mid} (${expectedManifest!.type}, ${expectedManifest!.capabilities.join("/")}) [懒加载,首次调用时建沙箱]`,
@@ -1146,6 +1225,8 @@ export async function discoverExternalPlugins(
         loaded: false,
         loading: null,
         methods: [],
+        lastUsedAt: Date.now(),
+        inflight: 0,
       };
       const { sandbox, impl } = await loadSandboxedPlugin(id, code, env, expectedManifest);
       if (await finishExternalLoad(rec, sandbox, impl, reload)) loaded++;
