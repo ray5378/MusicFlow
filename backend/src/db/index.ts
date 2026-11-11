@@ -9,6 +9,7 @@ import { v4 as uuidv4 } from "uuid";
 import md5 from "md5";
 import { JWT_SECRET, getDataDir } from "../utils/env.js";
 import { createLogger } from "../utils/logger.js";
+import { ensureSongCountColumn } from "./songCountColumn.js";
 
 const dataDir = getDataDir();
 if (!fs.existsSync(dataDir)) {
@@ -711,15 +712,10 @@ export function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_tag_repair_done_at ON tag_repair_done(at);
   `);
 
-  // media_sources.song_count：每源已入库曲目数（扫描结束后重算写回，见
-  // services/source/songCount.ts）。项目没有迁移框架，老库该列不存在 → 用 PRAGMA
-  // 探测后补列；新库由上面的 CREATE TABLE 直接建好。NULL = 尚未统计（老库升级 /
-  // 新建源），列表接口会惰性算一次并回填，不需要启动时全量算。
-  const sourceCols = sqlite.prepare("PRAGMA table_info(media_sources)").all() as Array<{ name?: string }>;
-  if (!sourceCols.some((c) => c.name === "song_count")) {
-    sqlite.exec("ALTER TABLE media_sources ADD COLUMN song_count INTEGER");
-    log.info("[DB] media_sources 补列 song_count");
-  }
+  // media_sources.song_count（每源已入库曲目数）：新库由上面的 CREATE TABLE 建好，
+  // 老库补列见 db/songCountColumn.ts。NULL = 尚未统计（老库升级 / 新建源），
+  // 列表接口会惰性算一次并回填，不需要启动时全量算。
+  ensureSongCountColumn(sqlite);
 
   // Plugins (built-in and external drop-ins) are seeded from the unified catalog
   // at boot via registerBuiltinPlugins() — see plugins/registry.ts.
