@@ -61,21 +61,29 @@ const CP1252_HIGH: Record<number, number> = {
  */
 export function unMojibake(value: string): string | null {
   const bytes: number[] = [];
+  let high = 0;
   for (const ch of value) {
     const code = ch.codePointAt(0) ?? 0;
     if (code <= 0xff) bytes.push(code);
     else if (CP1252_HIGH[code] !== undefined) bytes.push(CP1252_HIGH[code]);
     else return null;
+    if (code > 0x7f) high++;
   }
   // 少于 4 字节基本不可能是一段中文 GBK 双字节序列,直接放弃,避免误伤短标签。
   if (bytes.length < 4) return null;
+  // 🔴 高字节占比必须过半:中文 GBK 被逐字节解码后几乎每个字符都是非 ASCII;
+  // 而正常的西班牙语/法语/德语专辑(Habitación En Roma、Café del Mar)、
+  // 弯引号(I’m Not Cool、Here’s Your Perfect)只有零星几个重音字符。
+  // 没有这道闸,GBK 解码会把它们"成功"解成中文垃圾,把真专辑名洗掉(2026-11 实测 230 条误伤)。
+  if (high / value.length < 0.5) return null;
   const decoded = new TextDecoder("gbk").decode(Buffer.from(bytes));
   if (decoded.includes("\uFFFD") || decoded === value) return null;
   return decoded;
 }
 
 /** 占位词(空专辑的另一种写法)。 */
-const JUNK_ALBUM_RE = /^(空|未知|未知专辑|未知歌手|无|none|null|unknown(\s*album)?|n\/a|-+|\?+)$/i;
+// 注意不要收进 `?` / `…` / `♡` 这类:它们是真专辑名(陈奕迅《?》、Yee《♡》)。
+const JUNK_ALBUM_RE = /^(空|未知|未知专辑|未知歌手|无|none|null|unknown(\s*album)?|n\/a|-+)$/i;
 /**
  * 网址/域名识别(按结构,不枚举站点):
  *   - 协议头 http(s):// 或 www.
@@ -100,7 +108,9 @@ const CONTACT_RE = new RegExp(
 );
 
 /** 广告/下载站措辞(纯词语,命中即丢)。 */
-const AD_WORDS_RE = /(本站|官网|下载|歌库|音源|加群|关注|私信|领取|免费|网盘|论坛|音乐网|嗨嗨网|资源网|正版)/;
+// 只留几乎不可能出现在真专辑名里的词。`音乐网`(音乐网剧《少年有点酷》)、
+// `正版`(地铁等待（正版）)都会误伤真实专辑,已剔除,交给网址/联系方式判据覆盖。
+const AD_WORDS_RE = /(本站|官网|下载|歌库|音源|加群|关注|私信|领取|免费|网盘|论坛|嗨嗨网|资源网)/;
 
 /**
  * 乱码残余的通用判据:既没有 CJK、也没有空白、长度很短,却混排了两种以上文字系统
@@ -111,6 +121,11 @@ const AD_WORDS_RE = /(本站|官网|下载|歌库|音源|加群|关注|私信|�
 function looksLikeMojibakeResidue(s: string): boolean {
   if (s.length > 10 || /\s/.test(s)) return false;
   if (/[\u3040-\u30ff\u4e00-\u9fff\uac00-\ud7af]/.test(s)) return false;
+  // 非 ASCII 占比也要过半:否则 `π-volume.3` 这类「一个希腊字母 + 英文」的真专辑
+  // 会因为「希腊文 + 拉丁」被判成乱码残余。
+  let nonAscii = 0;
+  for (const ch of s) if ((ch.codePointAt(0) ?? 0) > 0x7f) nonAscii++;
+  if (nonAscii / s.length < 0.5) return false;
   const scripts = new Set<string>();
   for (const ch of s) {
     if (/\p{Script=Latin}/u.test(ch)) scripts.add("latin");
@@ -134,13 +149,18 @@ function looksLikeMojibakeResidue(s: string): boolean {
 export function cleanAlbumTag(value?: string): string {
   const raw = (value ?? "").trim();
   if (!raw) return "";
+  // 只有「还原结果确实含中文」才采信:GBK 解码对任意字节都会产出字符,
+  // 不含中文的"还原"只能是误解码,保留原值。
   const decoded = unMojibake(raw);
-  const cand = decoded ?? raw;
+  const cand = decoded && /[\u4e00-\u9fff]/.test(decoded) ? decoded : raw;
   if (JUNK_ALBUM_RE.test(cand)) return "";
-  if (URL_RE.test(cand)) return "";
+  // 裸域名只有「整串就是一个网址」时才算广告:否则 `MTV.com Live - Avril Lavigne`
+  // 这种把域名写进标题的真专辑会被误杀。带 www./协议头的仍然直接判脏。
+  const urlHit = URL_RE.test(cand) && (/https?:\/\/|www\./i.test(cand) || !/\s/.test(cand.trim()));
+  if (urlHit) return "";
   if (CONTACT_RE.test(cand)) return "";
   if (AD_WORDS_RE.test(cand)) return "";
-  if (!/[\p{L}\p{N}]/u.test(cand)) return "";
+  // 纯符号(♡ / ☻ / ⊙▽⊙ / …)不判脏:这类是真实专辑名,宁可保留也不要用歌名覆盖。
   if (looksLikeMojibakeResidue(cand)) return "";
   return cand;
 }
