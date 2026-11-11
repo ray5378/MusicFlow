@@ -2,6 +2,25 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.12.27] - 2026-11-11
+
+### Feat / 音源:新增 SMB;每源曲目数改为「扫描后重算写回」
+
+- SMB(v9u-smb2,仅 SMB2/3;不支持 SMB1 与来宾共享)接入扫描/播放/探测全链路:
+  路径前缀 `s:<sourceId>:<path>`,扫描并发与分级取头(256KB→1MB→4MB)同 WebDAV,
+  增量指纹 `size|mtime`;探测结果 5 分钟内成功/失败均有缓存。
+- 出流不直连 SMB:经本机回环 `/rest/smbstream/:token` 提供普通 HTTP Range
+  (HEAD/200/206/416/502),缓冲、预取、DLNA 代理与 seek 与 WebDAV 完全同构。
+- 播放优选改为 `local > smb > webdav > web`,同步到优选 SQL、分组排序、预取排序
+  与去重候选;SMB 不计入洗版候选与下载重试(SMB 是曲库源,不是洗版源)。
+- 修掉三处「不是 `w:` 就当本地文件」的隐式假设(`/rest/stream`、`serveCastStream`、
+  `resolveLocalFilePath`),否则 SMB 行会被当本地路径探测而直接 404。
+- 每源曲目数:`GET /v1/sources` 直接读 `media_sources.song_count`(l:/s:/w: 并集),
+  扫描结束(含中断/失败)、单曲删除、洗版换源后按源重算写回;老库启动时用
+  `PRAGMA table_info` 探测补列,新建源/升级前的行惰性算一次并回填。前端音源卡片
+  展示「歌曲数」,扫描进行中叠加本次新增实时上涨,不再每次打开页面按源各扫一遍索引。
+- 测试:新增 SMB 配置解析用例;`countSourceSongs` 覆盖 l:/s:/w: 并集与写回幂等。
+
 ## [4.12.26] - 2026-11-11
 
 ### Fix / 洗版:统计口径改为「本轮可洗」,前端随冷却时间自动刷新
