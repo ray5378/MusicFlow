@@ -9,6 +9,8 @@
 //   - `/airplay/stream/` 本机 ffmpeg 解码器回环拉流(services/airplay/control.ts
 //                        经 resolvePipelineInput 包装成回环 URL 后由 ffmpeg 拉取)
 //   - `/membuf/`         整曲内存缓冲的回环取流端(services/source/bufferedFetch.ts)
+//   - `/smbstream/`      SMB 回环出流端(services/source/smbStream.ts):ffmpeg/DLNA
+//                        读不了 SMB,只能拿到本机回环 URL,同样带不上请求头
 //
 // ⚠️ 这是一份**安全白名单**,不是性能开关:新增一项 = 让一条真实路径绕过全局鉴权。
 // 准入必须同时满足两条 —— ①调用方结构上无法携带凭据;②该路由 handler 内自带
@@ -24,6 +26,7 @@ export const REST_AUTH_EXEMPT_MARKERS = [
   "/dlna/stream/",
   "/airplay/stream/",
   "/membuf/",
+  "/smbstream/",
 ] as const;
 
 /** `/rest/*` 全局鉴权是否对该请求路径放行。入参是 `c.req.path`(含 `/rest` 前缀)。 */

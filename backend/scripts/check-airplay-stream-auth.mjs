@@ -29,7 +29,7 @@ const METRICS = "backend/src/middleware/metrics.ts";
 const EXEMPT = "backend/src/middleware/restExempt.ts";
 const REST_ROUTES = "backend/src/routes/rest/index.ts";
 
-const EXPECTED_MARKERS = ["/dlna/stream/", "/airplay/stream/", "/membuf/"];
+const EXPECTED_MARKERS = ["/dlna/stream/", "/airplay/stream/", "/membuf/", "/smbstream/"];
 
 const failures = [];
 function check(name, ok, detail) {

@@ -21,6 +21,7 @@ describe("isRestAuthExemptPath —— `/rest/*` 鉴权豁免清单", () => {
       "/dlna/stream/",
       "/airplay/stream/",
       "/membuf/",
+      "/smbstream/",
     ]);
   });
 
@@ -28,6 +29,7 @@ describe("isRestAuthExemptPath —— `/rest/*` 鉴权豁免清单", () => {
     expect(isRestAuthExemptPath(`/rest/dlna/stream/${PATH_SLUG}`)).toBe(true);
     expect(isRestAuthExemptPath(`/rest/airplay/stream/${PATH_SLUG}`)).toBe(true);
     expect(isRestAuthExemptPath(`/rest/membuf/${PATH_SLUG}`)).toBe(true);
+    expect(isRestAuthExemptPath(`/rest/smbstream/${PATH_SLUG}`)).toBe(true);
   });
 
   it("回归锚点:AirPlay 取流端必须放行 —— 漏了它 = 401 = 设备收不到 RTP(HiVi H5MKII 实测)", () => {
@@ -67,5 +69,6 @@ describe("isRestAuthExemptPath —— `/rest/*` 鉴权豁免清单", () => {
     expect(isRestAuthExemptPath("/rest/airplay/streams/abc")).toBe(false);
     expect(isRestAuthExemptPath("/rest/dlna/streams/abc")).toBe(false);
     expect(isRestAuthExemptPath("/rest/membufs/abc")).toBe(false);
+    expect(isRestAuthExemptPath("/rest/smbstreams/abc")).toBe(false);
   });
 });

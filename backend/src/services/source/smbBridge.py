@@ -164,11 +164,12 @@ def do_open(req):
     f = smbclient.open_file(path, mode="rb")
     try:
         try:
+            # 取大小会把游标推到文件尾,必须无条件回卷到 start —— start=0 时漏掉
+            # 这一步会让「从 0 读」永远读到空(扫描取头拿不到标签、播放拿不到流)。
             size = int(f.seek(0, os.SEEK_END) or 0)
         except Exception:
             size = int(smbclient.stat(path).st_size or 0)
-        if start:
-            f.seek(start)
+        f.seek(start)
     except Exception:
         try:
             f.close()
