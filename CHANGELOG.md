@@ -2,6 +2,29 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.12.29] - 2026-11-11
+
+### Fix / 音源:SMB 改为 smbprotocol 桥接,支持 SMB3 加密共享
+
+- 根因:`v9u-smb2` 只实现 SMB2,服务端 `smb encrypt = required`(飞牛 FNOS 默认策略)
+  时 tree connect 返回 `STATUS_ACCESS_DENIED`;容器非特权,`mount.cifs` 与系统
+  `smbclient` 都不可用,协议层无法在客户端绕过。
+- 新增 `services/source/smbBridge.py`:纯 Python SMB2/3(smbprotocol)常驻子进程,
+  stdin/stdout JSON 协议(hello/stat/readdir/open/read/closeFile),自带 AES-CCM
+  加密协商,`open_file` 支持按偏移 seek/read;stdout 只走 JSON,日志走 stderr。
+- `smbClient.ts` 改为子进程桥接:**对外接口完全不变**,扫描、出流、预取、探测、
+  洗版判断等下游零改动;每源一条进程(配置指纹变化即重建),空闲 10 分钟关闭,
+  操作 30 秒超时即杀进程;连接级错误在 Python 侧重连重试一次,文件不存在等
+  业务错误不影响会话。
+- 读流按 256KB 分块 + Node backpressure;区间读保持闭区间语义,seek 由 SMB 侧
+  定位,不再是「从头丢弃」。
+- 运行镜像增加 `python3` + `smbprotocol`(`cryptography` 用 apk 预编译包,避免
+  musl 上现编 Rust),构建期 `import smbclient` 自检;`npm run build` 追加
+  `scripts/copy-assets.mjs` 把桥接脚本一并拷入 `dist`。
+- 移除 `v9u-smb2` 依赖与 `utils/md4.ts` 兜底:NTLMv2 的 MD4 完全在 Python 侧
+  完成,不再需要接管 Node 的 hash。
+- 前端音源卡片 SMB 路径改为统一的 UNC 拼接(`\\host\share\root`),不再出现
+  `HDDdocker/musicflow` 这类缺分隔符的显示。
 ## [4.12.28] - 2026-11-11
 
 ### Fix / CI:豁免 AP2/HAP 测试向量与 vendored 前端的 generic-api-key 误报
