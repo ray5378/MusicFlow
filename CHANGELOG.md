@@ -2,6 +2,22 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.12.28] - 2026-11-11
+
+### Fix / CI:豁免 AP2/HAP 测试向量的 generic-api-key 误报
+
+定时 `security` 工作流的 gitleaks 全历史扫描每天失败,6 处命中全部落在
+`backend/tests/fixtures/ap2/{transport,hap}_vectors.json`:内容是 AP2/HAP 协议的
+公开测试向量(RFC 5869 HKDF 标准 IKM、HAP 规范示例的公钥与证明值),用于校验
+对端实现,不是任何真实凭据。
+
+- 新增 `.gitleaks.toml`:`[extend] useDefault = true` 保持默认规则集与阈值不变,
+  仅对 `backend/tests/fixtures/ap2/` 追加路径豁免。
+- 未改用 `.gitleaksignore` 指纹豁免:指纹绑定「引入提交 + 行号」,fixture 改一次
+  行号即失效、需反复追;路径豁免对同目录后续新增的向量同样生效。
+- 验证:用与 CI 同版本的 gitleaks(8.30.1)复跑全历史,豁免前 `leaks found: 6`,
+  豁免后 `no leaks found`。
+
 ## [4.12.27] - 2026-11-11
 
 ### Feat / 音源:新增 SMB;每源曲目数改为「扫描后重算写回」
