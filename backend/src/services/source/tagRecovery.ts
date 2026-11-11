@@ -76,14 +76,58 @@ export function unMojibake(value: string): string | null {
 
 /** 占位词(空专辑的另一种写法)。 */
 const JUNK_ALBUM_RE = /^(空|未知|未知专辑|未知歌手|无|none|null|unknown(\s*album)?|n\/a|-+|\?+)$/i;
-/** 网址 / 广告 / 下载站水印。 */
-const AD_ALBUM_RE = /(www\.|\.com|\.cc|\.net|微信|公众号|QQ\d{5,}|博客|歌库|下载|音源|加群|关注|嗨嗨网|音乐网|本站|网站)/i;
+/**
+ * 网址/域名识别(按结构,不枚举站点):
+ *   - 协议头 http(s):// 或 www.
+ *   - 「域名 + 常见 TLD」,允许前后带路径/文字
+ * TLD 白名单是必需的:没有它 `Part.6`、`Op. 46` 这类正常专辑会被误伤
+ * (数字结尾的 `6`/`46` 不在白名单里,所以安全)。
+ */
+const URL_RE = new RegExp(
+  String.raw`(https?:\/\/|www\.)` +
+    String.raw`|\b[\w-]+(?:\.[\w-]+)*\.(?:com|cn|net|org|cc|top|xyz|vip|info|me|tv|io|co|link|club|site|online|shop|wang|ink|biz|pw|ws|ltd|store|fun|pro|mobi|asia|la)\b`,
+  "i",
+);
+
+/**
+ * 联系方式/导流:平台名后跟账号(微信/公众号/QQ/抖音/快手/微博/小红书…),或独立 11 位手机号。
+ * 与站点名单解耦 —— 以后多一个平台不用改正则。
+ */
+const CONTACT_RE = new RegExp(
+  String.raw`(微信|weixin|wechat|公众号|qq|扣扣|抖音|快手|微博|小红书|b站|bilibili|telegram|whatsapp|加\s*[vV微]|vx|v[信X]|威信)\s*(号|id)?\s*[:：]?\s*[\w\d_-]{3,}` +
+    String.raw`|(?<!\d)1[3-9]\d{9}(?!\d)`,
+  "i",
+);
+
+/** 广告/下载站措辞(纯词语,命中即丢)。 */
+const AD_WORDS_RE = /(本站|官网|下载|歌库|音源|加群|关注|私信|领取|免费|网盘|论坛|音乐网|嗨嗨网|资源网|正版)/;
+
+/**
+ * 乱码残余的通用判据:既没有 CJK、也没有空白、长度很短,却混排了两种以上文字系统
+ * —— 这正是「GBK 字节被逐字解码」的形态(如 Ҫôſ:西里尔 + 拉丁)。
+ * 正常外文专辑要么有空白(Грезами Ночи, Печалью Дней),要么只有一种文字(Душа),
+ * 都不会命中。
+ */
+function looksLikeMojibakeResidue(s: string): boolean {
+  if (s.length > 10 || /\s/.test(s)) return false;
+  if (/[\u3040-\u30ff\u4e00-\u9fff\uac00-\ud7af]/.test(s)) return false;
+  const scripts = new Set<string>();
+  for (const ch of s) {
+    if (/\p{Script=Latin}/u.test(ch)) scripts.add("latin");
+    else if (/\p{Script=Cyrillic}/u.test(ch)) scripts.add("cyrillic");
+    else if (/\p{Script=Greek}/u.test(ch)) scripts.add("greek");
+    else if (/\p{Script=Hangul}/u.test(ch)) scripts.add("hangul");
+    else if (/\p{Script=Arabic}/u.test(ch)) scripts.add("arabic");
+  }
+  return scripts.size >= 2;
+}
 
 /**
  * 清洗专辑标签,返回「可以写进文件/库」的值:
  *   - 空 / 「空」/「未知专辑」等占位 → ""(交给调用方用歌名兜底)
- *   - 网址 / 广告文本 → ""
- *   - 不可还原的纯符号乱码(既无中日韩字也无字母数字) → ""
+ *   - 网址/域名、联系方式、广告措辞 → ""
+ *   - 乱码残余(无 CJK/无空白/多文字系统混排) → ""
+ *   - 不含任何字母或数字 → ""
  *   - GBK 乱码 → 还原后的原文
  *   - 其余正常专辑名 → 原样返回(仅去首尾空白)
  */
@@ -93,8 +137,11 @@ export function cleanAlbumTag(value?: string): string {
   const decoded = unMojibake(raw);
   const cand = decoded ?? raw;
   if (JUNK_ALBUM_RE.test(cand)) return "";
-  if (AD_ALBUM_RE.test(cand)) return "";
-  if (!/[A-Za-z0-9\u4e00-\u9fff]/.test(cand)) return "";
+  if (URL_RE.test(cand)) return "";
+  if (CONTACT_RE.test(cand)) return "";
+  if (AD_WORDS_RE.test(cand)) return "";
+  if (!/[\p{L}\p{N}]/u.test(cand)) return "";
+  if (looksLikeMojibakeResidue(cand)) return "";
   return cand;
 }
 
