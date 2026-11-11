@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc",
+    "build": "tsc && node scripts/copy-assets.mjs",
     "start": "NODE_OPTIONS=--max-old-space-size=256 node dist/index.js",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
@@ -39,7 +39,6 @@
     "sharp": "^0.35.4",
     "undici": "^8.12.3",
     "uuid": "^11.1.1",
-    "v9u-smb2": "^1.0.6",
     "ws": "^8.18.0"
   },
   "devDependencies": {

@@ -27,7 +27,7 @@
         <div class="source-config">
           <!-- 每源已入库曲目数：读后端存字段(扫描结束后重算写回)，不再每次打开页面各算一遍。 -->
           <p><strong>{{ t('admin.sources.songCount') }}:</strong> {{ songCountOf(source) }} {{ t('admin.sources.songUnit') }}</p>
-          <p v-if="source.type === 'smb' && source.config?.host"><strong>SMB:</strong> \\{{ source.config.host }}\{{ source.config.share }}{{ source.config.root_path }}</p>
+          <p v-if="source.type === 'smb' && source.config?.host"><strong>SMB:</strong> {{ smbUncPath(source.config) }}</p>
           <p v-if="source.config?.url"><strong>URL:</strong> {{ source.config.url }}</p>
           <p v-if="source.config?.root_path"><strong>{{ t('admin.sources.rootPath') }}:</strong> {{ source.config.root_path }}</p>
           <p v-if="source.config?.username"><strong>{{ t('common.username') }}:</strong> {{ source.config.username }}</p>
@@ -246,6 +246,17 @@ async function addSource() {
 function songCountOf(source: any): number {
   const base = Number(source.songCount ?? 0);
   return base + (source._scanProgress ? Number(source._scanProgress.added ?? 0) : 0);
+}
+
+// 卡片上的 UNC 路径：分享名与 root_path 之间必须有 \ 分隔。root_path 允许以 / 或 \ 开头
+// （用户手填两种都常见），这里统一归一成 \a\b 形式，避免拼成 HDDdocker/musicflow 这种。
+function smbUncPath(cfg: any): string {
+  const root = String(cfg?.root_path || "")
+    .trim()
+    .replace(/^[\\/]+/, "")
+    .replace(/\//g, "\\")
+    .replace(/\\+$/, "");
+  return `\\\\${cfg?.host ?? ""}\\${cfg?.share ?? ""}${root ? `\\${root}` : ""}`;
 }
 
 function handleCommand(cmd: string, source: any) {

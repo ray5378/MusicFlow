@@ -17,6 +17,7 @@ RUN apk add --no-cache python3 make g++
 COPY backend/package.json backend/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY backend/src ./src
+COPY backend/scripts ./scripts
 COPY backend/tsconfig.json ./
 RUN npm run build && npm prune --omit=dev --no-audit --no-fund && npm cache clean --force
 
@@ -99,11 +100,19 @@ ENV NODE_ENV=production \
     TZ=Asia/Shanghai \
     UV_USE_IO_URING=0 \
     NODE_OPTIONS=--max-old-space-size=160 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
     APP_VERSION=${APP_VERSION} \
     APP_COMMIT=${GIT_COMMIT}
 WORKDIR /app/backend
 # gcompat/libstdc++ 供 bin/cliairplay 使用(它是 glibc 动态链接的;见 stage 4 注释)。
-RUN apk add --no-cache su-exec gcompat libstdc++ \
+# python3 + smbprotocol：SMB 传输层走子进程桥接(services/source/smbBridge.py)，
+# 因为 v9u-smb2 不支持 SMB3 加密，而服务端 `smb encrypt = required` 时无法降级。
+# cryptography 用 apk 预编译包，避免在 musl 上现编 Rust。装完立刻 import 自检，
+# 依赖缺了要当场构建失败，而不是发出去后在用户机器上表现为「连接 SMB 失败」。
+RUN apk add --no-cache su-exec gcompat libstdc++ python3 py3-pip py3-cryptography \
+ && pip install --no-cache-dir --break-system-packages "smbprotocol==1.17.0" \
+ && python3 -c "import importlib.metadata as m, smbclient; print('smbprotocol', m.version('smbprotocol'))" \
  && addgroup -S musicflow && adduser -S musicflow -G musicflow
 COPY --from=backend-build /app/backend/package.json /app/backend/package-lock.json ./
 COPY --from=backend-build /app/backend/node_modules ./node_modules
