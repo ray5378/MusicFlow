@@ -21,7 +21,7 @@
 //   8. **简繁字形归一**（同上）：匹配比较侧统一折算到简体，避免「平台繁体登记 vs DB 简体」
 //      造成的恒不匹配；写入侧字形不受影响（仍由 tagWriter 的 applyTagsVariant 决定）。
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { __resetTagProviderMemo, __resetTagProviderQueue, tagProviderPlugin } from "../../src/services/plugin/tagProvider.js";
+import { __resetTagProviderMemo, __resetTagProviderQueue, scoreTagCandidate, tagProviderPlugin } from "../../src/services/plugin/tagProvider.js";
 import type { LyricSongInput } from "../../src/plugins/types.js";
 
 // QQ 侧默认限流为「1.2s + 300~800ms 抖动」；测试置 0，避免 14 个用例被逐次拖延
@@ -193,7 +193,7 @@ const SEARCH_EMPTY = { code: 0, data: { song: { list: [] } } };
 /** 假 host：按 URL 分派 canned JSON（与插件实际调用的各端点一一对应），并记录全部请求 URL。
  *  `qqEmpty`：让 QQ 搜索回空列表，用于验证「QQ 拿不到 → 网易云兜底」的两段式；
  *  `detail`：覆盖 musicu 详情响应（默认即「告白气球」，供繁体样本等断言匹配结果用）。 */
-function makeHost(opts: { withInfoGenre?: boolean; search?: unknown; qqEmpty?: boolean; detail?: unknown } = {}): any {
+function makeHost(opts: { withInfoGenre?: boolean; search?: unknown; qqEmpty?: boolean; detail?: unknown; nsEmpty?: boolean } = {}): any {
   const calls: string[] = [];
   const times: number[] = [];
   return {
@@ -206,7 +206,9 @@ function makeHost(opts: { withInfoGenre?: boolean; search?: unknown; qqEmpty?: b
         ok: true,
         text: async () => {
           // 网易云端点必须先于 QQ 的 `lyric` 泛匹配判定（`api/song/lyric` 也含 "lyric"）。
-          if (url.includes("music.163.com/api/search/get")) return JSON.stringify(NS_SEARCH);
+          if (url.includes("music.163.com/api/cloudsearch/pc")) {
+            return JSON.stringify(opts.nsEmpty ? { code: 200, result: { songs: [] } } : NS_SEARCH);
+          }
           if (url.includes("music.163.com/api/song/detail")) return JSON.stringify(NS_DETAIL);
           if (url.includes("music.163.com/api/song/lyric")) return JSON.stringify(NS_LYRIC);
           if (url.includes("search_for_qq_cp")) {
@@ -341,7 +343,7 @@ describe("tag-provider — 网易云音乐兜底链路", () => {
     expect(meta?.genre).toBeUndefined(); // 网易云无可读风格名 → 绝不臆造
     // 先 QQ 搜索后网易云搜索，顺序即「默认优先 + 兜底」
     expect(host.calls[0]).toContain("search_for_qq_cp");
-    expect(host.calls[1]).toContain("music.163.com/api/search/get");
+    expect(host.calls[1]).toContain("music.163.com/api/cloudsearch/pc");
   });
 
   it("QQ 零候选 → 网易云兜底取封面：必须**二次调详情接口**拿 album.picUrl", async () => {
@@ -377,7 +379,7 @@ describe("tag-provider — 网易云音乐兜底链路", () => {
       artist: "Unknown Artist",
       duration: 215,
     });
-    const nsUrl = host.calls.find((u: string) => u.includes("music.163.com/api/search/get"))!;
+    const nsUrl = host.calls.find((u: string) => u.includes("music.163.com/api/cloudsearch/pc"))!;
     expect(nsUrl).not.toContain("Unknown");
     expect(nsUrl).not.toContain("Artist");
     expect(meta?.platform).toBe("netease");
@@ -440,7 +442,7 @@ describe("tag-provider — QQ 侧请求限流", () => {
       const host = makeHost({ qqEmpty: true });
       await tagProviderPlugin.searchMetadata(host, SONG);
       const qqIdx = host.calls.findIndex((u: string) => u.includes("search_for_qq_cp"));
-      const nsIdx = host.calls.findIndex((u: string) => u.includes("music.163.com/api/search/get"));
+      const nsIdx = host.calls.findIndex((u: string) => u.includes("music.163.com/api/cloudsearch/pc"));
       expect(qqIdx).toBe(0);
       expect(nsIdx).toBeGreaterThan(0);
       expect(host.times[nsIdx] - host.times[qqIdx]).toBeLessThan(1200);
@@ -513,7 +515,7 @@ describe("tag-provider — 端点被挡 / 闸门误杀修复", () => {
 // 覆盖命中 / 网易云二次调详情 等分支逐一锁死，并断言既有不变量（QQ 默认优先、秒级时长等）。
 
 /** 端点片段常量（顺序敏感：网易云歌词与 QQ 歌词都含 "lyric"，须先判网易云）。 */
-const F_NS_SEARCH = "music.163.com/api/search/get";
+const F_NS_SEARCH = "music.163.com/api/cloudsearch/pc";
 const F_NS_DETAIL = "music.163.com/api/song/detail";
 const F_NS_LYRIC = "music.163.com/api/song/lyric";
 const F_QQ_SEARCH = "search_for_qq_cp";
@@ -586,8 +588,9 @@ describe("tag-provider — HTTP 边界(requestJson)", () => {
     const host = {
       calls: [] as string[],
       http: (url: string, init: any) => {
-        if (url.includes("music.163.com")) {
-          return Promise.resolve({ ok: true, text: async () => JSON.stringify({ result: { songs: [] } }) });
+        // 四平台并发搜索:仅 QQ 挂起(超时),其余平台立即返回空,断言 QQ 超时被软失败吞掉。
+        if (!url.includes("search_for_qq_cp")) {
+          return Promise.resolve({ ok: true, text: async () => JSON.stringify({}) });
         }
         return new Promise((_res, rej) => {
           init.signal.addEventListener("abort", () => rej(new Error("aborted")));
@@ -1092,4 +1095,249 @@ describe("tag-provider — memo 容量上限", () => {
     }
     expect(host.calls.length).toBeGreaterThan(2000);
   }, 60000);
+});
+
+// ==================== 酷狗 / 酷我 / 评分逻辑（2026-11-12 扩源） ====================
+
+const F_KG_SEARCH = "complexsearch.kugou.com";
+const F_KW_SEARCH = "search.kuwo.cn/r.s";
+const F_KW_INFO = "m.kuwo.cn/newh5/singles/songinfoandlrc";
+
+/** 酷狗搜索（真实字段裁剪）：两条候选 —— 正曲 + Live 版。 */
+const KG_SEARCH = {
+  data: {
+    lists: [
+      {
+        FileHash: "HASH_STUDIO",
+        SongName: "告白气球",
+        SingerName: "周杰伦",
+        AlbumName: "周杰伦的床边故事",
+        Duration: 215,
+        PublishDate: "2016-06-24",
+        Image: "http://imge.kugou.com/stdmusic/{size}/cover.jpg",
+      },
+      {
+        FileHash: "HASH_LIVE",
+        SongName: "告白气球 (Live)",
+        SingerName: "周杰伦",
+        AlbumName: "地表最强演唱会",
+        Duration: 215,
+        PublishDate: "2017-01-01",
+        Image: "http://imge.kugou.com/stdmusic/{size}/live.jpg",
+      },
+    ],
+  },
+};
+
+/** 酷我搜索（真实结构：**单引号 JSON + &nbsp;**）。 */
+const KW_TEXT =
+  "{'abslist':[{'MUSICRID':'MUSIC_118980','NAME':'告白气球','ARTIST':'周杰伦','ALBUM':'周杰伦&nbsp;的床边故事','DURATION':'215','web_albumpic_short':'120/s4s11/89/1.jpg'}]}";
+
+/** 网易云 cloudsearch 新结构（带 al.picUrl / no / dt / publishTime）。 */
+const NS_CLOUD = {
+  result: {
+    songs: [
+      {
+        id: 186016,
+        name: "告白气球",
+        ar: [{ name: "周杰伦" }],
+        al: { name: "周杰伦的床边故事", picUrl: "http://p1.music.126.net/abc==/109951174108738240.jpg" },
+        dt: 215000,
+        publishTime: 1466697600000,
+        no: 8,
+      },
+    ],
+  },
+};
+
+const emptySong = (extra: Partial<LyricSongInput>): LyricSongInput => ({ title: "告白气球", artist: "周杰伦", duration: 215, ...extra });
+
+describe("tag-provider — 酷狗 / 酷我 扩源", () => {
+  it("QQ/网易云均无候选 → 酷狗命中（年份/专辑/封面齐全，轨号不臆造）", async () => {
+    const host = routeHost({ map: { [F_QQ_SEARCH]: SEARCH_EMPTY, [F_KG_SEARCH]: KG_SEARCH } });
+    const meta = await tagProviderPlugin.searchMetadata(host, SONG);
+    expect(meta?.platform).toBe("kugou");
+    expect(meta?.album).toBe("周杰伦的床边故事");
+    expect(meta?.year).toBe(2016);
+    expect(meta?.duration).toBe(215);
+    expect(meta?.track).toBeUndefined();
+    const cover = await tagProviderPlugin.searchCover(host, SONG);
+    expect(cover?.url).toBe("http://imge.kugou.com/stdmusic/480/cover.jpg");
+  });
+
+  it("酷狗 Live 版被版本标记闸门否决（不会把演唱会版当正曲）", async () => {
+    const onlyLive = { data: { lists: [KG_SEARCH.data.lists[1]] } };
+    const host = routeHost({ map: { [F_QQ_SEARCH]: SEARCH_EMPTY, [F_KG_SEARCH]: onlyLive } });
+    expect(await tagProviderPlugin.searchMetadata(host, SONG)).toBeNull();
+  });
+
+  it("酷我单引号 JSON + &nbsp; 可解析；封面按 img1 前缀拼接", async () => {
+    const host = routeHost({ rawFor: { [F_KW_SEARCH]: KW_TEXT }, map: { [F_QQ_SEARCH]: SEARCH_EMPTY } });
+    const meta = await tagProviderPlugin.searchMetadata(host, SONG);
+    expect(meta?.platform).toBe("kuwo");
+    expect(meta?.artist).toBe("周杰伦");
+    expect(meta?.album).toBe("周杰伦 的床边故事");
+    const cover = await tagProviderPlugin.searchCover(host, SONG);
+    expect(cover?.url).toBe("http://img1.kuwo.cn/star/albumcover/120/s4s11/89/1.jpg");
+  });
+
+  it("酷我专辑缺失 → 用 songinfo 补专辑；歌词按 lrclist 拼成标准 LRC", async () => {
+    const kwNoAlbum =
+      "{'abslist':[{'MUSICRID':'MUSIC_118980','NAME':'告白气球','ARTIST':'周杰伦','ALBUM':'','DURATION':'215'}]}";
+    const songInfo = {
+      data: {
+        songinfo: { album: "周杰伦的床边故事", duration: 215 },
+        lrclist: [
+          { time: "1.5", lineLyric: "第一句" },
+          { time: "61.25", lineLyric: "第二句" },
+        ],
+      },
+    };
+    const host = routeHost({
+      rawFor: { [F_KW_SEARCH]: kwNoAlbum },
+      map: { [F_QQ_SEARCH]: SEARCH_EMPTY, [F_KW_INFO]: songInfo },
+    });
+    const meta = await tagProviderPlugin.searchMetadata(host, SONG);
+    expect(meta?.platform).toBe("kuwo");
+    expect(meta?.album).toBe("周杰伦的床边故事");
+    const lrc = (await tagProviderPlugin.searchLyrics(host, SONG))?.lrc;
+    expect(lrc).toBe("[00:01.50]第一句\n[01:01.25]第二句");
+  });
+
+  it("四平台同曲时评分择优：专辑+封面更全的酷狗胜出（QQ 仅弱命中时）", async () => {
+    // QQ 候选缺歌手 → 弱命中，触发四平台并发评分；酷狗专辑/年份齐全且时长贴近 → 分更高
+    const qqWeak = { code: 0, data: { song: { list: [{ mid: "mweak", title: "告白气球", interval: 215 }] } } };
+    const host = routeHost({
+      map: { [F_QQ_SEARCH]: qqWeak, [F_KG_SEARCH]: KG_SEARCH, [F_NS_SEARCH]: NS_CLOUD },
+    });
+    const meta = await tagProviderPlugin.searchMetadata(host, emptySong({ artist: "" }));
+    // QQ 弱候选(歌手 0 分) vs 酷狗/网易云(歌手 2 分 + 专辑 2 分) → 后者胜；同分按平台序取网易云
+    expect(meta?.platform).toBe("netease");
+    expect(meta?.track).toBe(8);
+  });
+});
+
+describe("tag-provider — 网易云 cloudsearch 新接口", () => {
+  it("搜索响应直出封面/轨号/年份，封面不再二次调详情", async () => {
+    const host = routeHost({ nullFor: [F_QQ_SEARCH], map: { [F_NS_SEARCH]: NS_CLOUD } });
+    const meta = await tagProviderPlugin.searchMetadata(host, SONG);
+    expect(meta?.platform).toBe("netease");
+    expect(meta?.track).toBe(8);
+    expect(meta?.year).toBe(2016);
+    const cover = await tagProviderPlugin.searchCover(host, SONG);
+    expect(cover?.url).toBe("https://p1.music.126.net/abc==/109951174108738240.jpg");
+    expect(host.calls.filter((u: string) => u.includes("api/song/detail")).length).toBe(0);
+  });
+});
+
+describe("tag-provider — 评分函数口径", () => {
+  const cand = (over: Record<string, unknown> = {}) => ({
+    platform: "kugou" as const,
+    id: "h",
+    name: "告白气球",
+    singerName: "周杰伦",
+    albumName: "周杰伦的床边故事",
+    durationSec: 215,
+    ...over,
+  });
+
+  it("精确标题 + 歌手 + 专辑 + 时长贴近 → 命中且分数最高", () => {
+    const s = scoreTagCandidate(cand(), emptySong({ album: "周杰伦的床边故事" }));
+    expect(s.reject).toBeUndefined();
+    expect(s.total).toBe(2 * 3 + 2 * 2 + 2 + 1);
+  });
+
+  it("歌手完全不匹配 / 时长超差 / 版本标记不一致 → 各自否决", () => {
+    expect(scoreTagCandidate(cand({ singerName: "群星" }), SONG).reject).toBe("歌手不匹配");
+    expect(scoreTagCandidate(cand({ durationSec: 100 }), SONG).reject).toBe("时长超差");
+    expect(scoreTagCandidate(cand({ name: "告白气球 (Live)" }), SONG).reject).toContain("版本标记");
+  });
+
+  it("本地无歌手 → 歌手按中性 0 分，标题命中仍可用", () => {
+    const s = scoreTagCandidate(cand(), emptySong({ artist: "" }));
+    expect(s.reject).toBeUndefined();
+    expect(s.artist).toBe(0);
+  });
+});
+
+// ---------- 2026-11-12 曲库实测(40 首真实歌曲)后的两处修正 ----------
+// 实测结论(严格层 ±5s):39/40 命中、错配 0、假阳性 0;唯一 miss 是
+// 「最寂寞的时候 (忧郁版)」本地 217s / 平台 208s(Δ9s,前奏尾奏裁剪),
+// 以及「老公天下第一」QQ 详情只回标题+歌手+时长、把搜索候选已拿到的专辑丢掉。
+describe("tag-provider — 时长放宽层与 QQ 字段回退(2026-11-12 实测)", () => {
+  /** 平台声明 224s,本地 215s → Δ9s:严格层否决,放宽层可救。 */
+  const SEARCH_224 = {
+    code: 0,
+    data: {
+      song: {
+        list: [
+          {
+            mid: "003OUlho2HcRHC",
+            title: "告白气球",
+            singer: [{ mid: "0025NhlN2yWrP4", name: "周杰伦" }],
+            album: { mid: "000MkMni19ClKG", name: "周杰伦的床边故事" },
+            interval: 224,
+          },
+        ],
+      },
+    },
+  };
+  const DETAIL_224 = {
+    code: 0,
+    req: {
+      code: 0,
+      data: {
+        info: {},
+        track_info: {
+          mid: "003OUlho2HcRHC",
+          name: "告白气球",
+          singer: [{ name: "周杰伦" }],
+          album: { mid: "000MkMni19ClKG", name: "周杰伦的床边故事", time_public: "2016-06-24" },
+          interval: 224,
+        },
+      },
+    },
+  };
+
+  it("严格层(±5s)否决、标题+歌手都精确 → 放宽层(±15s)仍命中", async () => {
+    const host = makeHost({ search: SEARCH_224, detail: DETAIL_224, nsEmpty: true });
+    const meta = await tagProviderPlugin.searchMetadata(host, SONG); // 215 vs 224 → Δ9s
+    expect(meta?.platform).toBe("qq");
+    expect(meta?.title).toBe("告白气球");
+    expect(meta?.artist).toBe("周杰伦");
+  });
+
+  it("放宽层不放宽歌手：Δ9s 但歌手不同 → 仍 null(避免配到翻唱)", async () => {
+    const host = makeHost({
+      nsEmpty: true,
+      search: {
+        code: 0,
+        data: {
+          song: {
+            list: [{ mid: "003other000001", title: "告白气球", singer: [{ name: "群星" }], album: { name: "大合辑" }, interval: 224 }],
+          },
+        },
+      },
+    });
+    const meta = await tagProviderPlugin.searchMetadata(host, SONG);
+    expect(meta).toBeNull();
+  });
+
+  it("QQ 详情缺 album → 用搜索候选的专辑补齐，不再返回半空元数据", async () => {
+    const host = makeHost({
+      detail: {
+        code: 0,
+        req: {
+          code: 0,
+          data: {
+            info: {},
+            track_info: { mid: "003OUlho2HcRHC", name: "告白气球", singer: [{ name: "周杰伦" }], interval: 215 },
+          },
+        },
+      },
+    });
+    const meta = await tagProviderPlugin.searchMetadata(host, SONG);
+    expect(meta?.album).toBe("周杰伦的床边故事");
+    expect(meta?.duration).toBe(215);
+  });
 });

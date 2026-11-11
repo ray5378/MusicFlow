@@ -2,59 +2,63 @@
 //
 // 能力:metadataProvider / coverProvider / lyricProvider —— 核心按能力遍历调用
 // searchMetadata(host, song) / searchCover(host, song) / searchLyrics(host, song),
-// 首个返回可用匹配的 provider 胜出。本插件一次性覆盖「标签 + 封面 + 歌词」三类能力。
+// 首个返回可用结果的 provider 胜出;本插件一次覆盖「标签 + 封面 + 歌词」三类能力。
 //
-// 数据源:**QQ 音乐(默认) + 网易云音乐(兜底)**。每个能力方法（searchMetadata/searchCover/
-// searchLyrics）内部都是「先跑 QQ 循环，QQ 拿不到再跑网易云循环」的两段式——产品定调
-//   2026-10-17：QQ 音乐是默认获取标签的选择，网易云音乐只作 QQ 拿不到的**补充链路**。
-//   - QQ：用**真搜索接口** search_for_qq_cp(关键词 = 标题 [+空格+歌手])拿候选(自带秒级时长)
-//     → 过标题/歌手/时长三闸门 → 再用 musicu 详情取轨号/年份/专辑/风格，封面由 album.mid
-//     拼 CDN，歌词走 lyric 接口；
-//   - 网易云：POST /api/search/get 拿候选（时长字段是**毫秒**，必须换算成秒才能过 ±5s 闸门）
-//     → 同样过标题/歌手/时长三闸门 → 封面须**二次调** /api/song/detail/?ids=[id] 取
-//     album.picUrl 直链（搜索响应的 album 只有 picId、没有 picUrl），歌词取 /api/song/lyric
-//     的 lrc.lyric；该平台不提供可读风格名，故 genre 一律不填（绝不臆造）。
-//   - 所有 HTTP 均走 host.http(尊重系统代理),带 UA + 平台 Referer;
-//   - 每个请求 try/catch + AbortController 超时(10s),单次尝试、绝不重试循环;
-//   - **QQ 侧全局限流**（2026-10-17 产品要求）：相邻两次 QQ 请求至少间隔 1.2s，再叠加
-//     300~800ms 随机抖动（实际间隔 1.5~2.0s），防止同一出口 IP 高频访问被风控封禁；
-//     三处 QQ 调用（搜索/详情/歌词）共用同一条串行队列，故一次修复内的多次 QQ 往返也按序限速。
-//     网易云链路不受此限（产品只要求限制 QQ）。
-//   - **同曲多能力往返去重**（2026-10-17 提速·修正 6）：核心对同一首歌是**分别**调用
-//     searchMetadata / searchCover / searchLyrics 的；若三个能力各自独立跑「搜索 → 详情」，
-//     同一首要打 6 次 QQ 往返。实测 240 生产单首稳定 10.6~10.9s ≈ 6 × 1.8s，本地耗时≈0
-//     —— 瓶颈是**重复往返**，而不是限速值本身（限速并未被逼近）。故对纯查询结果加短 TTL
-//     内存 memo，收敛为 1×搜索 + 1×详情 + 1×歌词：请求数与耗时都近乎减半，且不增加 CPU/网络。
-//   - 任何情况都不抛异常,拿不到就返回 null;
-//   - 拿不到的字段一律不填(绝不臆造 —— 例如风格只在详情接口的**同级 info 块**
-//     `info.genre.content[].value` 给出可读名时才用;`track_info.genre` 只是数字码、
-//     与分类 id 对不上,不可靠,一律忽略)。
+// 数据源(2026-11-12 对齐 Music Tag Web 扩为四平台):
+//   QQ 音乐 / 网易云音乐 / 酷狗音乐 / 酷我音乐。
 //
-// 【2026-10-17 修正·命中率】原先打 smartbox 联想接口(splcloud/fcgi-bin/smartbox_new.fcg),
-// 它只回热门联想词 —— 实测 240 生产库抽样 30 首有 22 首零候选(整体命中率仅约 11.6%);
-// 换真搜索接口后 12/12 都找到目标曲、9/12 时长吻合。另:scanner 对「无
-// 歌手标签文件」写入的占位值(Unknown Artist 等)会被拼进关键词导致恒 0 结果,故占位值一律当空歌手。
+// 【选源纪律】**QQ 音乐是默认来源**:先只跑 QQ,若 QQ 有「标题精确 + 歌手精确」的强命中,
+// 直接采用(零额外请求、零额外延迟)。只有 QQ 无候选 / 只拿到弱候选(缺歌手、标题只是变体、
+// 详情或封面/歌词拿不到)时,才把网易云 / 酷狗 / 酷我**并发**跑一遍,把四家候选放在一起
+// 用统一评分选最优 —— 这样既保住「QQ 默认」的产品定调,又能在 QQ 覆盖不到时用其它平台补齐,
+// 而不是像旧实现那样按固定顺序「谁先有结果用谁」。
 //
-// 【2026-10-17 修正·端点被挡（本文件本轮改动主线）】240 生产实测:同关键词、同 proxyFetch
-// 出网通道、同样带 y.qq.com Referer 下，`soso/fcgi-bin/client_search_cp` **恒返回 HTTP 500、
-// 响应体 0 字节(text/html)**（代理/直连、带/不带 Referer、带/不带 Cookie 四种变体全部 500），
-// 而同家族的 `soso/fcgi-bin/search_for_qq_cp` **HTTP 200、10 条候选、字段同构**
-// （`data.song.list[]` 的 `mid/title/singer[].name/interval` 完全一致）。
-// 后果：QQ 侧恒 0 候选 → 所有歌被迫压到网易云兜底 → 网易云对中文冷门/长标题覆盖差 →
-// 「未获取到」占比虚高（实测抽样 6 首里 4 首三个能力全 null，而换端点后 6/6 都能拿到候选）。
-// 故本插件换用 search_for_qq_cp。**这不是元数据解析问题**——详情/歌词接口仍 200，解析口径未变。
+// 【评分逻辑】(参考 xhongc/music-tag-web 的 match_score,并补上本地场景的硬闸门)
+//   - 标题 2 分:归一化后精确相等(含「去尾部 ` - 歌手`」变体);不做前缀/包含模糊匹配,
+//     避免把「告白气球remix」配到「告白气球」;
+//   - 歌手 2 分:归一化后分词交集;本地无歌手 → 0 分(中性);本地有歌手却完全不匹配 → **直接否决**;
+//   - 专辑 2 分:精确相等 / 1 分:互相包含 / 0 分:未知或不符(专辑不符很常见,不否决);
+//   - 时长:两侧都有且 |Δ|>5s → **直接否决**;|Δ|≤2s 额外 +1 分(同样标题下选对版本);
+//     严格层全被否时,仅对「标题精确 + 歌手精确」的候选放宽到 ±15s —— 2026-11-12 曲库
+//     40 首实测:5~10s 差异多来自前奏/尾奏裁剪,放宽后救回「最寂寞的时候 (忧郁版)」,
+//     且歌手不精确的一律不放宽(避免配到翻唱);
+//   - 版本标记:候选名与本地名的「现场/Live/Remix/伴奏/纯音乐/翻唱/电台版…」集合必须一致,
+//     不一致直接否决 —— 否则 `晴天 (KTV版伴奏)` 归一化后与 `晴天` 相等,会把伴奏当正曲;
+//   - 总分红线:total >= 3(即标题必须命中)才可作为候选。
 //
-// 【2026-10-17 修正·闸门误杀】上述端点恢复后，抽样 40 首仍有两类恒被拒的真同一首：
-//   1. DB 标题带「主标题 - 歌手」后缀(scanner 落库形态，全库 391/3506=11%)，
-//      旧闸门要求归一化后**精确相等** → 恒拒；本轮加「去尾部 ` - xxx`」的标题变体(仍精确相等，不模糊匹配)；
-//   2. 平台常用繁体登记、DB 简体（或反之），字形差异导致标题/歌手恒不匹配（实测 `純白P`↔`纯白P`、
-//      `緋色の雪`↔`绯色の雪`）；本轮在**匹配比较**侧统一折算到简体（`applyVariant(t,"simplified")`），
-//      写入侧仍按用户所选字形由 applyTagsVariant 输出，不影响成品字形。
+// 【各平台字段来源】(2026-11-12 在 240 生产容器实测)
+//   - QQ:真搜索 `search_for_qq_cp`(client_search_cp 生产恒 500,勿回退)→ 候选自带秒级时长;
+//     轨号 / 年份 / 风格 / 专辑 mid 取自 musicu 详情(风格在**同级 info 块**的
+//     `info.genre.content[].value`,track_info.genre 只是数字码,一律忽略);歌词走 lyric 接口。
+//     全局限流:相邻两次 QQ 请求 ≥1.2s + 300~800ms 抖动(防封 IP)。
+//   - 网易云:POST /api/cloudsearch/pc(dt 是**毫秒**,换算成秒;无加密、与旧 search/get 同速),
+//     搜索响应直接带 `al.picUrl`(封面直链,无需二次详情)、`no`(轨号)、`publishTime`(年份);
+//     歌词取 /api/song/lyric 的 lrc.lyric;无可读风格名 → genre 不填。
+//   - 酷狗:complexsearch.kugou.com 搜索(signature = MD5(固定 KEY + 参数串 + 固定 KEY) 大写;
+//     实测 240 直连 200、~0.14s);候选自带 SongName/SingerName/AlbumName/Duration/PublishDate/
+//     Image(封面,{size} 替换为 480,歌手头像 singerimg 视为无封面);歌词走
+//     m.kugou.com/app/i/krc.php(返回带 BOM 的 LRC);无轨号/风格 → 不填。
+//   - 酷我:search.kuwo.cn/r.s(web 版 /api/www/* 在本网络恒 "request is illegal",勿用);
+//     响应是**单引号 JSON + &nbsp; 实体**,需容错解析;候选自带 NAME/ARTIST/ALBUM/DURATION/
+//     MUSICRID/web_albumpic_short(封面前缀 http://img1.kuwo.cn/star/albumcover/);
+//     专辑/时长缺失时用 m.kuwo.cn/newh5/singles/songinfoandlrc 的 songinfo 补;歌词也取自该接口
+//     的 lrclist;无年份/轨号/风格 → 不填。
 //
-// 【2026-10-17 修正】原先只读 `req.data.track_info`，于是误判「QQ 无风格名」而省略 genre；
-// 实测 `req.data.info.genre.content[].value` 直接给可读风格（如「告白气球」= "R&B"、
-// 「晴天」= "Pop"），故本插件改为从 info 块取风格并写入。
+// 【匹配比较口径】标题/歌手/专辑比较前统一:小写 → 简繁折叠到简体 → 去括号装饰(【】()《》等)
+// →去 feat./ft. 及之后 → 去标点空白。**简繁折叠只用于比较**,写入字形仍由核心
+// applyTagsVariant 按用户所选字形输出。scanner 写入的 `Unknown Artist` 等占位值当空歌手。
+//
+// 【(2026-10-17) 历史坑,勿回退】
+//   1. 搜索接口固定 `search_for_qq_cp` —— `client_search_cp` 生产恒 HTTP 500、0 字节;
+//   2. 时长为**秒**,网易云搜索给的是毫秒,必须换算;
+//   3. `track_info.genre` 是数字码,风格只能取 `info.genre.content[].value`;
+//   4. 标题变体仅「去尾部 ` - 歌手`」,不做包含匹配;
+//   5. 同一首歌的三个能力共享搜索/详情往返(memo),否则单首 QQ 往返 6 次 ≈ 10.8s;
+//   6. 只缓存**成功**响应,瞬时失败绝不固化成「无候选」。
+//
+// 铁律:任何情况都不抛异常,拿不到就返回 null;拿不到的字段一律不填(绝不臆造)。
 
+import { createHash } from "node:crypto";
 import type {
   CoverProviderPlugin,
   LyricProviderPlugin,
@@ -64,18 +68,26 @@ import type {
   SongMetadata,
 } from "../../plugins/types.js";
 import type { PluginHost } from "../../plugins/host.js";
-// 中文简繁字形表(200KB+ 词表，与 tagWriter 写入侧共用同一份)：仅用于**匹配比较**把两侧
-// 折算到简体，避免「平台繁体登记 vs DB 简体」造成的恒不匹配。**不参与写入**——成品字形
-// 仍由 applyTagsVariant 按用户所选字形输出。
+// 中文简繁字形表(200KB+ 词表,与 tagWriter 写入侧共用同一份):仅用于**匹配比较**。
 import { applyVariant } from "../../utils/chineseConv.js";
 
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36";
-/** 单次请求超时(毫秒),落在任务要求的 8–12s 区间。 */
+/** 单次请求超时(毫秒)。 */
 const REQUEST_TIMEOUT_MS = 10000;
 /** 时长一致性容差(秒):本地时长与平台声明时长之差超过它即判定为不同版本。 */
 const DURATION_TOLERANCE_SEC = 5;
+/** 时长「更优」加分阈值(秒):同样标题/歌手/专辑时,时长更贴近的候选优先。 */
+const DURATION_BONUS_SEC = 2;
+/** 放宽层时长容差(秒):严格层无候选时,仅对「标题+歌手都精确」的候选启用。
+ *  实测(2026-11-12 曲库 40 首):平台/文件时长差 5~10s 多来自前奏/尾奏裁剪,
+ *  仍属同一录音;放宽到 15s 可救回「最寂寞的时候 (忧郁版)」这类严格层误杀。 */
+const DURATION_RELAXED_SEC = 15;
+/** 评分接受红线:标题 2 分 × 3 = 6;总分 < 3 视为无效匹配。 */
+const MIN_ACCEPT_SCORE = 3;
+/** 单曲最多参与封面/歌词/详情兜底的候选数(防请求放大)。 */
+const MAX_MATCH_TRIES = 3;
 
-// ---------- HTTP(全部经 host.http,尊重系统代理;绝不抛异常) ----------
+// ==================== HTTP(全部经 host.http,尊重系统代理;绝不抛异常) ====================
 
 async function requestJson(host: PluginHost, url: string, init: any = {}): Promise<any> {
   const controller = new AbortController();
@@ -100,13 +112,30 @@ async function requestJson(host: PluginHost, url: string, init: any = {}): Promi
   }
 }
 
-// ---------- QQ 音乐请求节流（防封 IP）----------
+/** 取纯文本响应(酷狗歌词 / 酷我搜索这类非标准 JSON 用)。 */
+async function requestText(host: PluginHost, url: string, init: any = {}): Promise<string | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const res = await host.http(url, {
+      ...init,
+      headers: { "User-Agent": UA, ...(init.headers || {}) },
+      signal: controller.signal,
+    });
+    if (!res || !res.ok) return null;
+    return await res.text();
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ==================== QQ 音乐请求节流(防封 IP) ====================
 //
-// 【2026-10-17 产品要求】访问 QQ 音乐 API 的频率必须限流：相邻两次请求的**发起时刻**
-// 至少间隔 QQ_MIN_GAP_MS(默认 1.2s)，再叠加 300~800ms 随机抖动（取不到抖动则退化为固定间隔），
-// 使实际间隔落在约 1.5~2.0s。所有 QQ 请求共用**同一条串行队列**（全局单实例），因此
-// 「搜索 → 详情 → 歌词」这类一次修复内的多次往返也按序限速，避免同一出口 IP 被风控封禁。
-// 环境变量 MF_QQ_MIN_GAP_MS 可覆盖最小间隔（测试置 0 时抖动一并归零，以免拖慢用例）。
+// 相邻两次请求的**发起时刻**至少间隔 QQ_MIN_GAP_MS(默认 1.2s),再叠加 300~800ms 随机抖动,
+// 使实际间隔落在约 1.5~2.0s。所有 QQ 请求共用同一条串行队列(搜索/详情/歌词都排队)。
+// 环境变量 MF_QQ_MIN_GAP_MS 可覆盖最小间隔(测试置 0 时抖动一并归零)。
 function qqGapMs(): { min: number; jitter: number } {
   const min = Math.max(0, Number(process.env.MF_QQ_MIN_GAP_MS ?? 1200) || 0);
   return { min, jitter: min > 0 ? 300 + Math.random() * 500 : 0 };
@@ -115,7 +144,6 @@ function qqGapMs(): { min: number; jitter: number } {
 let qqNextAt = 0;
 let qqTail: Promise<unknown> = Promise.resolve();
 
-/** 把一次 QQ 请求串进全局节流队列：等足「上次请求之后的最小间隔 + 随机抖动」再发起。 */
 function qqThrottled<T>(fn: () => Promise<T>): Promise<T> {
   const run = qqTail.then(async () => {
     const wait = qqNextAt - Date.now();
@@ -124,7 +152,6 @@ function qqThrottled<T>(fn: () => Promise<T>): Promise<T> {
     qqNextAt = Date.now() + g.min + g.jitter;
     return fn();
   });
-  // 队列不许被单次失败掐断（requestJson 本身不抛，这里只是兜底）。
   qqTail = run.then(
     () => undefined,
     () => undefined,
@@ -132,32 +159,17 @@ function qqThrottled<T>(fn: () => Promise<T>): Promise<T> {
   return run;
 }
 
-/** QQ 侧 JSON 请求：与 requestJson 同语义，但受全局节流约束。 */
 function qqRequestJson(host: PluginHost, url: string, init: any = {}): Promise<any> {
   return qqThrottled(() => requestJson(host, url, init));
 }
 
-// ---------- 同一首歌多能力调用的往返去重（memo）----------
+// ==================== 短 TTL memo(同曲多能力往返去重) ====================
 //
-// 【2026-10-17 提速·修正 6】核心对**同一首歌**是分别调用 searchMetadata / searchCover /
-// searchLyrics 的，而这三个能力此前各自独立跑一遍「搜索 →（详情 / 歌词）」：同一首歌要打
-// 6 次 QQ 往返（2×搜索 + 2×详情 + 1×歌词 + 视需要再 1 次详情）。
-// 实测 240 生产：`+歌词+元数据` 的歌耗时稳定落在 10.6~10.9s ≈ 6 × 1.8s
-//（QQ 全局限流 1.2s + 300~800ms 抖动），而本地耗时≈0 —— 时间**全部花在重复往返**上，
-// 并非被「API 限速」本身卡住（限速值并未被逼近）。
-//
-// 这里给「纯查询」结果加一层**短 TTL + 有容量上限**的内存 memo，把同一首歌的三次能力调用
-// 收敛为 1×搜索 + 1×详情 + 1×歌词：QQ 往返 6 → 3、单首 10.8s → ~5.4s（≈2x），
-// 且**请求数与 CPU 消耗只减不增**（少两轮限速等待、少解析两次 JSON）。
-//
-// 安全性（标签必须求稳）：
-//   - 键 = 归一化后的搜索关键词（标题 [+空格+歌手]）或曲 mid → 同一键必指同一批候选 / 同一首曲；
-//   - 时长 ±5s 闸门、标题/歌手闸门全部由**调用方**在拿到候选后自行判定，本层只缓存平台的
-//     原始响应，不参与任何匹配决策，故不会改变命中判定；
-//   - **只缓存成功响应**：HTTP 失败 / 超时 / 非 JSON（requestJson 返回 null）一律不写缓存，
-//     瞬时网络抖动不会被固化，后续调用仍会重新请求，命中率与改动前完全一致；
-//   - TTL 仅 180s：只覆盖同一首歌相邻的几次能力调用，绝不跨修复轮次复用；
-//   - 容量上限 2000 条，超出即整体清空 → 内存有界。
+// 核心对**同一首歌**分别调用 searchMetadata / searchCover / searchLyrics;若每个能力都独立
+// 搜索+详情,同一首要打 6 次 QQ 往返(实测单首 10.6~10.9s ≈ 6×1.8s)。故:
+//   - 平台原始响应按「关键词 / 曲 ID」缓存;
+//   - 「最优匹配」按归一化后的歌曲键缓存一次。
+// 只缓存成功响应(TTL 180s、容量 2000),网络抖动不会被固化。
 const MEMO_TTL_MS = 180_000;
 const MEMO_MAX = 2000;
 const memo = new Map<string, { at: number; val: unknown }>();
@@ -173,73 +185,311 @@ function memoSet(key: string, val: unknown): void {
   memo.set(key, { at: Date.now(), val });
 }
 
-/** 仅供测试：清空 memo，避免用例之间串味。 */
+/** 仅供测试:清空 memo,避免用例之间串味。 */
 export function __resetTagProviderMemo(): void {
   memo.clear();
 }
 
-/** 仅供测试：把全局 QQ 节流队列复位（排队链置空 + 下次可发起时刻清零）。
+/** 仅供测试:把全局 QQ 节流队列复位(排队链置空 + 下次可发起时刻清零)。
  *
- * 【2026-10-19 CI 稳定】用例若切假时钟（`vi.useFakeTimers()` 再 `vi.useRealTimers()`），
- * 队列里排队中的 `setTimeout` 会**随假时钟一起被丢弃** → `qqTail` 永不 settle →
- * 该测试文件后续**所有** QQ 请求全部卡死（实测 CI：单文件 66 个用例中 38 个各超时 20s，
- * 文件累计耗时 805s，把 15 分钟的覆盖率门禁作业拖红）。
- * 每个用例前复位队列即可彻底消除用例之间的共享队列状态依赖（与 memo 复位同理）。 */
+ *  用例若切假时钟,队列里排队中的 setTimeout 会随假时钟丢弃 → qqTail 永不 settle,
+ *  后续所有 QQ 请求卡死(CI 实测单文件 805s)。每个用例前复位即可。 */
 export function __resetTagProviderQueue(): void {
   qqNextAt = 0;
   qqTail = Promise.resolve();
 }
 
-// ---------- 平台请求 ----------
+// ==================== 统一候选结构 ====================
 
-/** 搜索候选(归一化后的统一形状)。 */
-interface QqCandidate {
-  mid: string;
+/** 平台 slug。 */
+export type TagPlatform = "qq" | "netease" | "kugou" | "kuwo";
+
+/** 平台优先级:同分时按此顺序(QQ 默认优先)。 */
+const PLATFORM_ORDER: TagPlatform[] = ["qq", "netease", "kugou", "kuwo"];
+
+export interface PlatformCandidate {
+  platform: TagPlatform;
+  /** 平台原生 ID:QQ mid / 网易云 id / 酷狗 FileHash / 酷我 rid。 */
+  id: string;
+  /** 曲名(已去掉酷狗 <em>、酷我 &nbsp;)。 */
   name: string;
-  /** 平台声明的歌手名串(多歌手以 `/` 连接);可能为空。 */
+  /** 歌手名串(多歌手以 `/` 连接)。 */
   singerName: string;
-  /** 平台声明时长(秒);取不到为 0。搜索结果自带,用于进详情调用前的时长预筛。 */
-  interval: number;
+  albumName: string;
+  /** 平台声明时长(秒);取不到为 0。 */
+  durationSec: number;
+  /** 轨号(专辑内序号);平台不提供时 undefined(不臆造)。 */
+  track?: number;
+  /** 发行年份;取不到为 undefined。 */
+  year?: number;
+  /** 封面直链;取不到为 undefined(不臆造)。 */
+  coverUrl?: string;
+}
+
+/** 评分明细(可单测锁定口径)。 */
+export interface CandidateScore {
+  /** 标题 2 / 0 */
+  title: number;
+  /** 歌手 2 / 1 / 0 */
+  artist: number;
+  /** 专辑 2 / 1 / 0 */
+  album: number;
+  /** 时长加分 1 / 0 */
+  duration: number;
+  total: number;
+  /** 被否决的原因(存在即不可用) */
+  reject?: string;
+}
+
+// ==================== 归一化与匹配 ====================
+
+/** HTML 实体 / 酷狗高亮标签清洗。 */
+function cleanPlatformText(v: unknown): string {
+  return String(v ?? "")
+    .replace(/<\/?em>/gi, "")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&#39;/g, "'")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 /**
- * 搜索:关键词(标题 [+ 空格 + 歌手])→ 候选。
- *
- * 【2026-10-17 换接口】原打 smartbox 联想接口,它只回热门联想词,实测生产库抽样 73% 的歌
- * 零候选(整体命中率仅 11.6%);后改用**真搜索** client_search_cp。但 2026-10-17 生产实测发现
- * `client_search_cp` **恒 HTTP 500、响应体 0 字节**（代理/直连/Referer/Cookie 四种变体全 500），
- * 导致 QQ 侧恒 0 候选、所有歌被压到网易云兜底；同家族的 `search_for_qq_cp` 则 **200、10 条候选、
- * 字段同构**（实测 40 首零候选 0 首）。故本函数固定使用 `search_for_qq_cp`。
- * 候选归一化为 `{mid,name,singerName,interval}`;搜索结果自带 interval(秒),故时长预筛在搜索阶段
- * 即可完成,只有通过者才进详情调用(省一次网络往返)。
+ * 标题/歌手/专辑归一化:去大小写、**简繁字形归一到简体**、去括号装饰段((Live)/【】/《》)
+ * 与 feat.、去标点空白。简繁归一仅用于匹配比较,不改写任何写入内容。
  */
+function normalizeText(s: any): string {
+  if (s === undefined || s === null) return "";
+  let t = cleanPlatformText(s).toLowerCase();
+  t = applyVariant(t, "simplified");
+  for (let i = 0; i < 3; i++) {
+    t = t.replace(/[(\[【《〈「『（〔｛][^)\]】》〉」』）〕｝]*[)\]】》〉」』）〕｝]/g, " ");
+  }
+  t = t.replace(/\b(?:feat|ft)\.?.*$/g, " ");
+  t = t.replace(/[\s.\-_'"`~!@#$%^&*()\[\]{}<>?/\\|,;:，。；：、！？…—“”‘’《》〈〉【】「」『』·（）〔〕｛｝]/g, "");
+  return t;
+}
+
+/** 把「A/B、A&B、A, B」等歌手串拆成归一化后的集合。 */
+function splitArtists(s: any): string[] {
+  return cleanPlatformText(s)
+    .split(/[/&,，、;；·|]+/)
+    .map((x) => normalizeText(x))
+    .filter(Boolean);
+}
+
+/** scanner 对「无歌手标签」写入的占位值;拼进关键词会恒 0 结果,匹配时也不参与交集。 */
+const ARTIST_PLACEHOLDERS = new Set(["unknown artist", "未知歌手", "未知艺术家"]);
+function isArtistPlaceholder(s: any): boolean {
+  return ARTIST_PLACEHOLDERS.has(String(s ?? "").trim().toLowerCase());
+}
+
+/**
+ * 标题变体:完整标题 + 「去掉尾部 ` - xxx`」的主标题。scanner 会把「无标题标签」的落库标题
+ * 写成「主标题 - 歌手」(全库约 11%),变体仍是**精确相等**语义(不做包含/前缀匹配)。
+ */
+function titleForms(wantTitle: string): string[] {
+  const forms = [wantTitle];
+  const m = String(wantTitle).match(/^(.*?)\s+-\s+(.+)$/);
+  const head = m?.[1]?.trim();
+  if (head) forms.push(head);
+  return forms;
+}
+
+function titleMatches(candName: any, wantTitle: string): boolean {
+  const a = normalizeText(candName);
+  if (!a) return false;
+  return titleForms(wantTitle).some((f) => normalizeText(f) === a);
+}
+
+function artistMatches(candSinger: any, wantArtist: string): boolean {
+  const want = splitArtists(wantArtist);
+  if (want.length === 0) return true;
+  const have = splitArtists(candSinger);
+  return want.some((w) => have.includes(w));
+}
+
+/** 歌手打分:2 精确 / 1 包含 / 0 本地无歌手 / -1 本地有歌手但完全不匹配(否决)。 */
+function scoreArtist(candSinger: any, wantArtist: string): number {
+  const want = splitArtists(wantArtist);
+  if (want.length === 0) return 0;
+  const have = splitArtists(candSinger);
+  if (have.length === 0) return -1;
+  if (want.some((w) => have.includes(w))) return 2;
+  if (want.some((w) => have.some((h) => h.includes(w) || w.includes(h)))) return 1;
+  return -1;
+}
+
+/** scanner 对「无专辑标签」写入的占位值,视同空(不参与专辑评分)。 */
+const ALBUM_PLACEHOLDERS = new Set(["unknown album", "未知专辑"]);
+
+/** 专辑打分:2 精确 / 1 包含 / 0 未知或不符(专辑不符很常见,不否决)。 */
+function scoreAlbum(candAlbum: any, wantAlbum: string | null | undefined): number {
+  const raw = String(wantAlbum ?? "").trim();
+  const a = normalizeText(candAlbum);
+  const w = ALBUM_PLACEHOLDERS.has(raw.toLowerCase()) ? "" : normalizeText(raw);
+  if (!a || !w) return 0;
+  if (a === w) return 2;
+  if (a.includes(w) || w.includes(a)) return 1;
+  return 0;
+}
+
+/** 本地/平台任一时长缺失则不校验;都有一致到 ±tolSec 内才通过。 */
+function durationOk(songDurationSec: number | null | undefined, intervalSec: any, tolSec = DURATION_TOLERANCE_SEC): boolean {
+  const local = Number(songDurationSec) || 0;
+  const plat = Number(intervalSec) || 0;
+  if (local <= 0 || plat <= 0) return true;
+  return Math.abs(local - plat) <= tolSec;
+}
+
+/** 版本标记:现场 / 伴奏 / Remix 等。候选与本地必须一致(详见文件头【评分逻辑】)。
+ *  拉丁字母标记要求词边界(避免 discover / recover 被误判成 cover)。 */
+const VERSION_MARKER_RE =
+  /(?:^|[^a-z])(live|remix|acoustic|cover|instrumental|karaoke)(?![a-z])|(伴奏|纯音乐|翻唱|现场|电台版|dj版|铃声|片段|加速版|慢速版|抖音)/gi;
+
+function versionMarkers(s: any): Set<string> {
+  const out = new Set<string>();
+  const t = applyVariant(cleanPlatformText(s).toLowerCase(), "simplified");
+  for (const m of t.matchAll(VERSION_MARKER_RE)) out.add((m[1] ?? m[2] ?? "").toLowerCase());
+  return out;
+}
+
+/**
+ * 单候选评分(纯函数,导出供单测锁定口径)。
+ * @returns reject 非空 → 该候选不可用(已含硬闸门:标题不符 / 歌手不符 / 时长超差 / 版本不符)
+ */
+export function scoreTagCandidate(c: PlatformCandidate, song: LyricSongInput): CandidateScore {
+  return scoreTagCandidateWith(c, song, DURATION_TOLERANCE_SEC);
+}
+
+/** 可按容差放宽的评分实现(严格层 ±5s;仅「标题+歌手都精确」的放宽层用 ±15s)。 */
+function scoreTagCandidateWith(c: PlatformCandidate, song: LyricSongInput, tolSec: number): CandidateScore {
+  const wantTitle = String(song?.title ?? "").trim();
+  const wantArtist = isArtistPlaceholder(song?.artist) ? "" : String(song?.artist ?? "").trim();
+
+  // 1) 版本标记必须一致(归一化会去掉括号,故必须在原始名上判)
+  const localMarkers = versionMarkers(wantTitle);
+  const candMarkers = versionMarkers(c.name);
+  for (const m of candMarkers) {
+    if (!localMarkers.has(m)) {
+      return { title: 0, artist: 0, album: 0, duration: 0, total: 0, reject: `版本标记不一致「${m}」` };
+    }
+  }
+  for (const m of localMarkers) {
+    if (!candMarkers.has(m)) {
+      return { title: 0, artist: 0, album: 0, duration: 0, total: 0, reject: `缺少本地版本标记「${m}」` };
+    }
+  }
+
+  // 2) 标题:只认归一化后精确相等(含「 - 歌手」变体)
+  if (!titleMatches(c.name, wantTitle)) {
+    return { title: 0, artist: 0, album: 0, duration: 0, total: 0, reject: "标题不匹配" };
+  }
+
+  // 3) 歌手:本地有歌手却完全不匹配 → 否决
+  const artist = scoreArtist(c.singerName, wantArtist);
+  if (artist < 0) {
+    return { title: 0, artist: 0, album: 0, duration: 0, total: 0, reject: "歌手不匹配" };
+  }
+
+  // 4) 时长:超差 → 否决;贴近(±2s)加分
+  if (!durationOk(song?.duration, c.durationSec, tolSec)) {
+    return { title: 0, artist: 0, album: 0, duration: 0, total: 0, reject: "时长超差" };
+  }
+  const localDur = Number(song?.duration) || 0;
+  const platDur = Number(c.durationSec) || 0;
+  const durationScore = localDur > 0 && platDur > 0 && Math.abs(localDur - platDur) <= DURATION_BONUS_SEC ? 1 : 0;
+
+  const album = scoreAlbum(c.albumName, song?.album);
+  const total = 2 * 3 + artist * 2 + album + durationScore;
+  if (total < MIN_ACCEPT_SCORE) {
+    return { title: 2, artist, album, duration: durationScore, total, reject: "总分不足" };
+  }
+  return { title: 2, artist, album, duration: durationScore, total };
+}
+
+/** 强命中(用于「QQ 默认优先」的提前收口):标题精确 + 歌手精确 + 时长通过 + 版本一致。 */
+function isStrongMatch(s: CandidateScore): boolean {
+  return !s.reject && s.title === 2 && s.artist === 2;
+}
+
+/** 候选排序:按总分降序 → 平台优先级 → 入池顺序(稳定)。
+ *  `tolSec` 仅用于放宽层(严格层用默认 ±5s)。 */
+function rankByScore(
+  cands: PlatformCandidate[],
+  song: LyricSongInput,
+  tolSec = DURATION_TOLERANCE_SEC,
+): Array<PlatformCandidate & { score: CandidateScore }> {
+  const scored: Array<PlatformCandidate & { score: CandidateScore }> = [];
+  for (const c of cands) {
+    const score = scoreTagCandidateWith(c, song, tolSec);
+    if (score.reject) continue;
+    scored.push({ ...c, score });
+  }
+  const orderOf = (p: TagPlatform): number => {
+    const i = PLATFORM_ORDER.indexOf(p);
+    return i < 0 ? PLATFORM_ORDER.length : i;
+  };
+  scored.sort((a, b) => b.score.total - a.score.total || orderOf(a.platform) - orderOf(b.platform));
+  return scored;
+}
+
+/** 解析年份(取首个 19xx/20xx)。 */
+function parseYear(v: any): number | undefined {
+  const m = String(v ?? "").match(/(19|20)\d{2}/);
+  if (!m) return undefined;
+  const y = Number(m[0]);
+  return Number.isFinite(y) && y >= 1900 && y <= 2100 ? y : undefined;
+}
+
+/** 从毫秒时间戳取年份;非法/缺失返回 undefined。 */
+function yearFromMs(ms: number): number | undefined {
+  if (!Number.isFinite(ms) || ms <= 0) return undefined;
+  const y = new Date(ms).getUTCFullYear();
+  return Number.isFinite(y) && y >= 1900 && y <= 2100 ? y : undefined;
+}
+
+// ==================== QQ 音乐 ====================
+
+interface QqCandidate extends PlatformCandidate {
+  platform: "qq";
+}
+
 async function qqSearch(host: PluginHost, title: string, artist: string): Promise<QqCandidate[]> {
   const kw = artist ? `${title} ${artist}` : title;
-  // 去重：同一首歌的三个能力都走同一个关键词 → 三次搜索收敛成一次。
   const memoKey = `qq:s:${kw}`;
   const cached = memoGet<QqCandidate[]>(memoKey);
   if (cached) return cached;
 
+  // 端点固定 search_for_qq_cp:client_search_cp 生产恒 500(见文件头)。
   const url = "https://c.y.qq.com/soso/fcgi-bin/search_for_qq_cp?w=" + encodeURIComponent(kw)
     + "&format=json&p=1&n=10&cr=1&new_json=1";
   const data = await qqRequestJson(host, url, { headers: { Referer: "https://y.qq.com/" } });
-  // 请求失败（null）不写缓存：宁可下次多打一次，也不把瞬时抖动固化成「无候选」。
-  if (data === null) return [];
+  if (data === null) return []; // 请求失败不写缓存
   const list = data?.data?.song?.list;
   const out: QqCandidate[] = [];
   if (Array.isArray(list)) {
     for (const s of list) {
       const mid = String(s?.mid ?? s?.songmid ?? "");
-      const name = String(s?.title ?? s?.songname ?? "");
+      const name = cleanPlatformText(s?.title ?? s?.songname ?? "");
       if (!mid || !name) continue;
-      out.push({ mid, name, singerName: pickSingerName(s), interval: Number(s?.interval) || 0 });
+      out.push({
+        platform: "qq",
+        id: mid,
+        name,
+        singerName: pickSingerName(s),
+        albumName: cleanPlatformText(s?.album?.name ?? ""),
+        durationSec: Number(s?.interval) || 0,
+      });
     }
   }
   memoSet(memoKey, out);
   return out;
 }
 
-/** 取候选的歌手名串:new_json=1 时 `singer` 是对象数组(取 `.name`),旧结构是 `singername` 字符串。 */
+/** 歌手名串:new_json=1 时 `singer` 是对象数组,旧结构是 `singername` 字符串。 */
 function pickSingerName(s: any): string {
   if (Array.isArray(s?.singer)) {
     return s.singer
@@ -250,14 +500,7 @@ function pickSingerName(s: any): string {
   return typeof s?.singername === "string" ? s.singername : "";
 }
 
-/**
- * 歌曲详情(musicu.fcg)：返回 `{ track, info }`。
- *   - `track` = `req.data.track_info`：专辑 mid / 时长 / 轨号 / 年份等；
- *   - `info`  = `req.data.info`：**与 track_info 同级的分类信息块**，其中
- *     `info.genre.content[].value` 是**可读风格名**（如 "R&B"、"Pop"、"民谣"）。
- */
 async function qqSongDetail(host: PluginHost, mid: string): Promise<{ track: any; info: any } | null> {
-  // 去重：封面与元数据两个能力都会对同一个 mid 取详情 → 收敛成一次。
   const memoKey = `qq:d:${mid}`;
   const cached = memoGet<{ track: any; info: any }>(memoKey);
   if (cached) return cached;
@@ -276,13 +519,13 @@ async function qqSongDetail(host: PluginHost, mid: string): Promise<{ track: any
     body,
   });
   const d = data?.req?.data;
-  if (!d?.track_info) return null; // 未命中 / 失败：不写缓存
+  if (!d?.track_info) return null; // 未命中/失败:不写缓存
   const out = { track: d.track_info, info: d.info || {} };
   memoSet(memoKey, out);
   return out;
 }
 
-/** 从 `req.data.info.genre.content[].value` 取**可读**风格名（多个用 `/` 连接）；取不到返回 undefined。 */
+/** 从 `req.data.info.genre.content[].value` 取**可读**风格名;取不到返回 undefined。 */
 function pickGenre(info: any): string | undefined {
   const arr = info?.genre?.content;
   if (!Array.isArray(arr)) return undefined;
@@ -292,7 +535,6 @@ function pickGenre(info: any): string | undefined {
   return names.length ? names.join("/") : undefined;
 }
 
-/** 歌词:返回 LRC 文本(某些情况下可能仍是 base64,做一次解码兜底)。 */
 async function qqLyric(host: PluginHost, mid: string): Promise<string | null> {
   const url = "https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid="
     + encodeURIComponent(mid) + "&format=json&nobase64=1";
@@ -304,7 +546,7 @@ async function qqLyric(host: PluginHost, mid: string): Promise<string | null> {
   return maybeDecodeLyric(raw);
 }
 
-/** 有的响应即使带 nobase64=1 仍是 base64,这里在「看起来不像 LRC」时尝试解码。 */
+/** 有的响应即使带 nobase64=1 仍是 base64,在「看起来不像 LRC」时尝试解码。 */
 function maybeDecodeLyric(s: string): string {
   if (!s) return s;
   if (s.includes("[ti:") || s.includes("[ar:") || /\[\d{1,3}:\d{2}/.test(s)) return s;
@@ -319,65 +561,60 @@ function maybeDecodeLyric(s: string): string {
   return s;
 }
 
-// ---------- 网易云音乐（QQ 未命中时的补充链路） ----------
-//
-// 探针实测（2026-10-17，在 240 生产容器内经系统代理真机验证）：
-//   - POST https://music.163.com/api/search/get（body `s=<kw>&type=1&limit=10&offset=0`，
-//     带 Referer music.163.com）→ code 200，候选在 `result.songs[]`；
-//   - `duration` 是**毫秒**（实测 215666 → 216s），必须 Math.round(/1000) 才能过 ±5s 秒级闸门；
-//   - 歌手在 `artists[].name`；专辑名 `album.name`；年份可由 `album.publishTime`（毫秒时间戳）取年；
-//   - **搜索响应的 album 只有 picId、没有 picUrl** → 封面必须二次调
-//     `/api/song/detail/?ids=[id]` 取 `songs[0].album.picUrl`（实测 200，直链无需拼 CDN）；
-//   - 歌词 GET `/api/song/lyric?os=pc&id=<id>&lv=-1&kv=-1&tv=-1` → `lrc.lyric`（带时间戳）；
-//   - 该平台不提供风格的**可读名**，故 genre 不填。
+// ==================== 网易云音乐 ====================
 
-/** 网易云候选（归一化后的统一形状；与 QqCandidate 同构，另带专辑名与发行时间）。 */
-interface NsCandidate {
-  id: string;
-  name: string;
-  /** 平台声明的歌手名串（多歌手以 `/` 连接）；可能为空。 */
-  singerName: string;
-  /** 平台声明时长（秒）；搜索响应给的是毫秒，此处已换算。 */
-  interval: number;
-  albumName: string;
-  /** 专辑发行时间（毫秒时间戳）；取不到为 0。 */
+interface NsCandidate extends PlatformCandidate {
+  platform: "netease";
   publishTimeMs: number;
 }
 
-/** 搜索（关键词 = 标题 [+空格+歌手]）→ 候选。 */
+// 【2026-11-12 网易云换接口】旧的 POST /api/search/get 只返回 `album.picId`(无 picUrl),
+// 封面必须再打一次 /api/song/detail;且不返回轨号。实测同网络下 POST /api/cloudsearch/pc
+// (无加密、200、≈0.25s,与旧接口同速)直接返回 `al.picUrl` / `no`(轨号) / `dt`(毫秒) /
+// `publishTime`,故改用该端点:单首少一次往返 + 多拿轨号。响应同时兼容旧结构(artists/album/
+// duration),避免上游字段漂移时直接变空。
 async function nsSearch(host: PluginHost, title: string, artist: string): Promise<NsCandidate[]> {
   const kw = artist ? `${title} ${artist}` : title;
-  // 去重：QQ 未命中时是**逐个能力**走兜底链路 → 同一首歌会搜三次网易云，这里收敛成一次。
   const memoKey = `ns:s:${kw}`;
   const cached = memoGet<NsCandidate[]>(memoKey);
   if (cached) return cached;
 
-  const data = await requestJson(host, "https://music.163.com/api/search/get", {
+  const data = await requestJson(host, "https://music.163.com/api/cloudsearch/pc", {
     method: "POST",
     headers: { Referer: "https://music.163.com/", "Content-Type": "application/x-www-form-urlencoded" },
     body: "s=" + encodeURIComponent(kw) + "&type=1&limit=10&offset=0",
   });
-  if (data === null) return []; // 请求失败：不缓存
+  if (data === null) return [];
   const list = data?.result?.songs;
   const out: NsCandidate[] = [];
   if (Array.isArray(list)) {
     for (const s of list) {
       const id = String(s?.id ?? "");
-      const name = String(s?.name ?? "");
+      const name = cleanPlatformText(s?.name ?? "");
       if (!id || !name) continue;
+      // 新结构 ar[]/al{};旧结构 artists[]/album{}。两者都兼容。
+      const ar = Array.isArray(s?.ar) ? s.ar : (Array.isArray(s?.artists) ? s.artists : []);
+      const al = s?.al ?? s?.album ?? {};
+      const publishTimeMs = Number(s?.publishTime ?? al?.publishTime) || 0;
+      const dtMs = Number(s?.dt ?? s?.duration) || 0;
+      const pic = typeof al?.picUrl === "string" ? al.picUrl : "";
+      const track = Number(s?.no);
       out.push({
+        platform: "netease",
         id,
         name,
-        singerName: Array.isArray(s?.artists)
-          ? s.artists
-              .map((x: any) => (typeof x?.name === "string" ? x.name.trim() : ""))
-              .filter(Boolean)
-              .join("/")
-          : "",
-        // 单位纪律：网易云给**毫秒**，这里换算成秒，与核心契约（秒）对齐。
-        interval: Math.round((Number(s?.duration) || 0) / 1000),
-        albumName: String(s?.album?.name ?? ""),
-        publishTimeMs: Number(s?.album?.publishTime) || 0,
+        singerName: ar
+          .map((x: any) => (typeof x?.name === "string" ? x.name.trim() : ""))
+          .filter(Boolean)
+          .join("/"),
+        albumName: cleanPlatformText(al?.name ?? ""),
+        // 单位纪律:网易云给**毫秒**,换算成秒与核心契约(秒)对齐。
+        durationSec: Math.round(dtMs / 1000),
+        year: yearFromMs(publishTimeMs),
+        publishTimeMs,
+        // 封面直链(已带);http 升级为 https,避免下游下载/展示被降级。
+        coverUrl: pic ? pic.replace(/^http:/, "https:") : undefined,
+        track: Number.isFinite(track) && track > 0 ? track : undefined,
       });
     }
   }
@@ -385,9 +622,8 @@ async function nsSearch(host: PluginHost, title: string, artist: string): Promis
   return out;
 }
 
-/** 封面直链：搜索响应只有 picId，故二次调详情接口取 album.picUrl。 */
+/** 封面直链:搜索响应只有 picId,故二次调详情接口取 album.picUrl。 */
 async function nsCoverUrl(host: PluginHost, id: string): Promise<string | null> {
-  // 去重：同一位歌手若同时需封面与元数据，兜底链路会重复取同一条详情。
   const memoKey = `ns:c:${id}`;
   const cached = memoGet<string>(memoKey);
   if (cached) return cached;
@@ -398,12 +634,11 @@ async function nsCoverUrl(host: PluginHost, id: string): Promise<string | null> 
     { headers: { Referer: "https://music.163.com/" } },
   );
   const pic = data?.songs?.[0]?.album?.picUrl;
-  if (!(typeof pic === "string" && pic)) return null; // 未命中 / 失败：不写缓存
+  if (!(typeof pic === "string" && pic)) return null;
   memoSet(memoKey, pic);
   return pic;
 }
 
-/** 歌词：取 lrc.lyric（与 QQ 的 `{lyric}` 不同）。 */
 async function nsLyric(host: PluginHost, id: string): Promise<string | null> {
   const data = await requestJson(
     host,
@@ -414,150 +649,340 @@ async function nsLyric(host: PluginHost, id: string): Promise<string | null> {
   return typeof raw === "string" && raw.trim() ? raw : null;
 }
 
-/** 从毫秒时间戳取年份；非法/缺失返回 undefined。 */
-function yearFromMs(ms: number): number | undefined {
-  if (!Number.isFinite(ms) || ms <= 0) return undefined;
-  const y = new Date(ms).getUTCFullYear();
-  return Number.isFinite(y) && y >= 1900 && y <= 2100 ? y : undefined;
+// ==================== 酷狗音乐 ====================
+
+/** 酷狗搜索签名:固定 KEY + 参数串 + 固定 KEY 的 MD5(大写)。 */
+const KUGOU_SECRET = "NVPh5oo715z5DIWAeQlhMDsWXXQV4hwt";
+
+function kugouSignature(keyword: string, t: string): string {
+  const raw = `${KUGOU_SECRET}bitrate=0clienttime=${t}clientver=2000dfid=-inputtype=0iscorrection=1isfuzzy=0`
+    + `keyword=${keyword}mid=${t}page=1pagesize=10platform=WebFilterprivilege_filter=0srcappid=2919`
+    + `tag=emuserid=-1uuid=${t}${KUGOU_SECRET}`;
+  return createHash("md5").update(raw, "utf8").digest("hex").toUpperCase();
 }
 
-/** 从网易云候选组装 SongMetadata（只填真拿到的字段；风格无来源，不填）。 */
-function buildNsMetadata(c: NsCandidate): SongMetadata | null {
-  const meta: SongMetadata = { platform: "netease" };
-  if (c.name) meta.title = c.name;
-  if (c.singerName) meta.artist = c.singerName;
-  if (c.albumName) meta.album = c.albumName;
-  const y = yearFromMs(c.publishTimeMs);
-  if (y) meta.year = y;
-  if (Number.isFinite(c.interval) && c.interval > 0) meta.duration = c.interval;
-  // 除 platform 外没有任何有效字段时不返回空壳。
-  return Object.keys(meta).length > 1 ? meta : null;
-}
+async function kugouSearch(host: PluginHost, title: string, artist: string): Promise<PlatformCandidate[]> {
+  const kw = artist ? `${title} ${artist}` : title;
+  const memoKey = `kg:s:${kw}`;
+  const cached = memoGet<PlatformCandidate[]>(memoKey);
+  if (cached) return cached;
 
-// ---------- 归一化与匹配 ----------
-
-/**
- * 标题/歌手归一化:去大小写、**简繁字形归一到简体**、去括号装饰段((Live)/【】/《》)与 feat.、
- * 去标点空白。简繁归一仅用于匹配比较(见文件头【闸门误杀】第 2 条),不改写任何写入内容。
- */
-function normalizeText(s: any): string {
-  if (s === undefined || s === null) return "";
-  let t = String(s).toLowerCase();
-  // 简繁字形归一到简体:平台常用繁体登记、DB 简体(或反之),不归一则「純白P」与「纯白P」
-  // 恒不相等。applyVariant 幂等,且词表只覆盖异形一侧,不会反向漂移。
-  t = applyVariant(t, "simplified");
-  // 去掉成对的括号装饰段(中英文括号、方/书名号、全角括号),反复直至稳定
-  for (let i = 0; i < 3; i++) {
-    t = t.replace(/[(\[【《〈「『（〔｛][^)\]】》〉」』）〕｝]*[)\]】》〉」』）〕｝]/g, " ");
+  const t = String(Date.now());
+  const sig = kugouSignature(kw, t);
+  const url = "https://complexsearch.kugou.com/v2/search/song?keyword=" + encodeURIComponent(kw)
+    + `&page=1&pagesize=10&bitrate=0&isfuzzy=0&tag=em&inputtype=0&platform=WebFilter&userid=-1`
+    + `&clientver=2000&iscorrection=1&privilege_filter=0&srcappid=2919&clienttime=${t}&mid=${t}`
+    + `&uuid=${t}&dfid=-&signature=${sig}`;
+  const data = await requestJson(host, url, { headers: { Referer: "https://www.kugou.com/" } });
+  if (data === null) return [];
+  const list = data?.data?.lists;
+  const out: PlatformCandidate[] = [];
+  if (Array.isArray(list)) {
+    for (const s of list) {
+      const id = String(s?.FileHash ?? "");
+      const name = cleanPlatformText(s?.SongName ?? "");
+      if (!id || !name) continue;
+      out.push({
+        platform: "kugou",
+        id,
+        name,
+        // 酷狗多歌手以「、」分隔,统一成 `/` 与其它平台同形。
+        singerName: cleanPlatformText(s?.SingerName ?? "").split("、").join("/"),
+        albumName: cleanPlatformText(s?.AlbumName ?? ""),
+        durationSec: Number(s?.Duration) || 0,
+        year: parseYear(s?.PublishDate),
+        coverUrl: kugouCoverUrl(s?.Image),
+      });
+    }
   }
-  // 去掉 feat. / ft. 及其后内容
-  t = t.replace(/\b(?:feat|ft)\.?.*$/g, " ");
-  // 去掉所有标点/符号/空白(含全角标点)
-  t = t.replace(/[\s.\-_'"`~!@#$%^&*()\[\]{}<>?/\\|,;:，。；：、！？…—“”‘’《》〈〉【】「」『』·（）〔〕｛｝]/g, "");
-  return t;
+  memoSet(memoKey, out);
+  return out;
 }
 
-/** 把「A/B、A&B、A, B」等歌手串拆成归一化后的集合。 */
-function splitArtists(s: any): string[] {
-  return String(s ?? "")
-    .split(/[/&,，、;；·|]+/)
-    .map((x) => normalizeText(x))
-    .filter(Boolean);
+/** 酷狗封面:`http://imge.kugou.com/stdmusic/{size}/...`;歌手头像(singerimg)不是专辑封面,视为无。 */
+function kugouCoverUrl(raw: any): string | undefined {
+  const u = String(raw ?? "");
+  if (!u || !/^https?:\/\//i.test(u)) return undefined;
+  if (u.includes("singerimg.kugou.com")) return undefined;
+  return u.replace("{size}", "480");
 }
 
-/**
- * scanner 对「文件无歌手标签」写入的占位值(scanner.ts: `Unknown Artist`)。这些值不是真歌手:
- * 一旦被拼进搜索关键词或参与歌手匹配,会恒 0 结果/恒不匹配(实测多首因此零候选)。只精确匹配
- * 这几种占位;「群星」等是合法值,不处理。
- */
-const ARTIST_PLACEHOLDERS = new Set(["unknown artist", "未知歌手", "未知艺术家"]);
-function isArtistPlaceholder(s: any): boolean {
-  return ARTIST_PLACEHOLDERS.has(String(s ?? "").trim().toLowerCase());
+/** 酷狗歌词:krc.php 返回带 BOM 的 LRC;若拿到的是加密 KRC(非 [ 开头)则视为无。 */
+async function kugouLyric(host: PluginHost, hash: string): Promise<string | null> {
+  const text = await requestText(
+    host,
+    "http://m.kugou.com/app/i/krc.php?cmd=100&timelength=999999&hash=" + encodeURIComponent(hash),
+    { headers: { Referer: "https://www.kugou.com/" } },
+  );
+  if (!text) return null;
+  const s = text.replace(/^\uFEFF/, "").trim();
+  if (!s || !s.includes("[")) return null;
+  return s;
 }
 
-/**
- * 标题变体:完整标题 + 「去掉尾部 ` - xxx`」的主标题。
- *
- * scanner 会把「文件无标题标签」的落库标题写成「主标题 - 歌手」(全库 391/3506≈11%),若只按
- * 完整标题做精确相等,这类歌恒被闸门拒掉(实测「Fire Is Dead - SCARECROW」即为此形态,
- * 平台登记是「Fire Is Dead」)。变体仍是**精确相等**语义(不做前缀/包含等模糊匹配),只是多给
- * 一个合法形态;时长/歌手闸门不变,故不会放大错配风险。
- */
-function titleForms(wantTitle: string): string[] {
-  const forms = [wantTitle];
-  const m = String(wantTitle).match(/^(.*?)\s+-\s+(.+)$/);
-  const head = m?.[1]?.trim();
-  if (head) forms.push(head);
-  return forms;
-}
-
-function titleMatches(candName: any, wantTitle: string): boolean {
-  const a = normalizeText(candName);
-  if (!a) return false;
-  return titleForms(wantTitle).some((f) => normalizeText(f) === a);
-}
-
-function artistMatches(candSinger: any, wantArtist: string): boolean {
-  const want = splitArtists(wantArtist);
-  if (want.length === 0) return true; // 未提供歌手 → 只用标题匹配
-  const have = splitArtists(candSinger);
-  return want.some((w) => have.includes(w));
-}
+// ==================== 酷我音乐 ====================
 
 /**
- * 时长校验:本地/平台任一时长缺失则不校验;都有一致到 ±5s 内才通过。
- *
- * 单位纪律(core 契约,2026-10-16 修正):`song.duration` 由核心按 **秒** 传入
- * (LyricSongInput 的调用方一律给 `songs.duration` / `durationSec`,见
- * orchestrator.collectExtraTags、tagRepair.repairSongTags、covers.ts、lyrics.ts);
- * `detail.interval` 也是秒。旧实现把本地值当毫秒除以 1000 → 与平台秒值差两个数量级,
- * 恒判 false,导致 QQ 的 searchMetadata/searchCover **恒被时长闸门拒**(元数据补全恒空)。
+ * 酷我搜索响应是**单引号 JSON**(非标准),这里做引号感知的转换后 JSON.parse:
+ * 单引号字符串 → 双引号(内部 `"` 转义、`\'` 还原为 `'`);已带双引号的段落原样保留。
  */
-function durationOk(songDurationSec: number | null | undefined, intervalSec: any): boolean {
-  const local = Number(songDurationSec) || 0;
-  const plat = Number(intervalSec) || 0;
-  if (local <= 0 || plat <= 0) return true;
-  return Math.abs(local - plat) <= DURATION_TOLERANCE_SEC;
+function singleQuoteToJson(text: string): string {
+  let out = "";
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i]!;
+    if (ch === "'") {
+      out += '"';
+      i++;
+      while (i < text.length) {
+        const c = text[i]!;
+        if (c === "\\") {
+          const n = text[i + 1];
+          if (n === "'") { out += "'"; i += 2; continue; }
+          out += c + (n ?? "");
+          i += 2;
+          continue;
+        }
+        if (c === "'") { out += '"'; i++; break; }
+        if (c === '"') { out += '\\"'; i++; continue; }
+        out += c;
+        i++;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      out += ch;
+      i++;
+      while (i < text.length) {
+        const c = text[i]!;
+        out += c;
+        i++;
+        if (c === "\\") {
+          if (i < text.length) { out += text[i]!; i++; }
+          continue;
+        }
+        if (c === '"') break;
+      }
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
 }
 
-/**
- * 在两个平台共用的三闸门里挑出**首个**通过的候选：标题归一化相等 → 歌手归一化交集 →
- * 时长 ±5s（候选自带时长，先筛掉再决定是否进详情/歌词调用，省一次网络往返）。
- * QQ 与网易云的候选形状已统一（`name/singerName/interval`），故同一实现复用。
- */
-function firstMatch<T extends { name: string; singerName: string; interval: number }>(
-  cands: readonly T[],
+async function kuwoSearch(host: PluginHost, title: string, artist: string): Promise<PlatformCandidate[]> {
+  const kw = artist ? `${title} ${artist}` : title;
+  const memoKey = `kw:s:${kw}`;
+  const cached = memoGet<PlatformCandidate[]>(memoKey);
+  if (cached) return cached;
+
+  // web 版 /api/www/* 在本网络恒 "request is illegal";r.s 稳定可用(240 实测 200,~0.17s)。
+  const url = "http://search.kuwo.cn/r.s?all=" + encodeURIComponent(kw)
+    + "&ft=music&itemset=web_2013&client=kt&pn=0&rn=10&rformat=json&encoding=utf8"
+    + "&vipver=1&show_copyright_off=1&pcmp4=1&mobi=1";
+  const text = await requestText(host, url, { headers: { Referer: "http://www.kuwo.cn/" } });
+  if (!text) return [];
+  let data: any = null;
+  try {
+    data = JSON.parse(singleQuoteToJson(text));
+  } catch {
+    data = null; // 结构异常 → 当作无候选(不抛)
+  }
+  if (data === null) return [];
+  const list = data?.abslist;
+  const out: PlatformCandidate[] = [];
+  if (Array.isArray(list)) {
+    for (const s of list) {
+      const rid = cleanPlatformText(s?.MUSICRID).replace(/^MUSIC_/, "");
+      const name = cleanPlatformText(s?.NAME);
+      if (!rid || !name) continue;
+      out.push({
+        platform: "kuwo",
+        id: rid,
+        name,
+        singerName: cleanPlatformText(s?.ARTIST),
+        albumName: cleanPlatformText(s?.ALBUM),
+        durationSec: Number(s?.DURATION) || 0,
+        coverUrl: kuwoCoverUrl(s?.web_albumpic_short),
+      });
+    }
+  }
+  memoSet(memoKey, out);
+  return out;
+}
+
+/** 酷我封面:`http://img1.kuwo.cn/star/albumcover/<web_albumpic_short>`(240 实测 200 image/jpeg)。 */
+function kuwoCoverUrl(short: any): string | undefined {
+  const s = String(short ?? "").replace(/^\/+/, "").trim();
+  if (!s) return undefined;
+  return "http://img1.kuwo.cn/star/albumcover/" + s;
+}
+
+/** 酷我歌曲信息(专辑 / 时长缺失时补全):songinfo 里 artist 可能为空,只取 album/duration。 */
+async function kuwoSongInfo(host: PluginHost, rid: string): Promise<{ album?: string; durationSec?: number } | null> {
+  const memoKey = `kw:si:${rid}`;
+  const cached = memoGet<{ album?: string; durationSec?: number }>(memoKey);
+  if (cached) return cached;
+  const data = await requestJson(
+    host,
+    "https://m.kuwo.cn/newh5/singles/songinfoandlrc?musicId=" + encodeURIComponent(rid),
+    { headers: { Referer: "https://www.kuwo.cn/" } },
+  );
+  const si = data?.data?.songinfo;
+  if (!si) return null;
+  const out: { album?: string; durationSec?: number } = {};
+  const album = cleanPlatformText(si?.album);
+  if (album) out.album = album;
+  const dur = Number(si?.duration) || 0;
+  if (dur > 0) out.durationSec = dur;
+  memoSet(memoKey, out);
+  return out;
+}
+
+/** 酷我歌词:lrclist 的 time(秒,小数)+ lineLyric,拼成标准 LRC。 */
+async function kuwoLyric(host: PluginHost, rid: string): Promise<string | null> {
+  const memoKey = `kw:ly:${rid}`;
+  const cached = memoGet<string>(memoKey);
+  if (cached) return cached;
+  const data = await requestJson(
+    host,
+    "https://m.kuwo.cn/newh5/singles/songinfoandlrc?musicId=" + encodeURIComponent(rid),
+    { headers: { Referer: "https://www.kuwo.cn/" } },
+  );
+  const list = data?.data?.lrclist;
+  if (!Array.isArray(list) || list.length === 0) return null;
+  const lines: string[] = [];
+  for (const row of list) {
+    const t = Number(row?.time);
+    const text = String(row?.lineLyric ?? "").trim();
+    if (!Number.isFinite(t) || !text) continue;
+    const m = Math.floor(t / 60);
+    const s = (t - m * 60).toFixed(2).padStart(5, "0");
+    lines.push(`[${String(m).padStart(2, "0")}:${s}]${text}`);
+  }
+  const lrc = lines.join("\n");
+  if (!lrc) return null;
+  memoSet(memoKey, lrc);
+  return lrc;
+}
+
+// ==================== 匹配编排:QQ 优先 → 必要时四平台全局择优 ====================
+
+export interface MatchResult {
+  /** 按评分排好序的候选(最多 MAX_MATCH_TRIES 条,供详情/封面/歌词依次兜底)。 */
+  ranked: Array<PlatformCandidate & { score: CandidateScore }>;
+  /** 是否因 QQ 强命中而提前收口(此时其它平台尚未搜索)。 */
+  earlyExit: boolean;
+  /** 是否来自「放宽层」(时长容差 ±15s):后续详情/封面/歌词的时长复核必须沿用放宽容差。 */
+  relaxed?: boolean;
+}
+
+/** 搜索全部平台(QQ 结果可外部传入,避免重复请求),返回评分排序后的候选。 */
+async function searchAllRanked(
+  host: PluginHost,
+  song: LyricSongInput,
   title: string,
   artist: string,
-  songDuration: number | null | undefined,
-): T | null {
-  for (const c of cands) {
-    if (!titleMatches(c.name, title)) continue;
-    if (!artistMatches(c.singerName, artist)) continue;
-    if (!durationOk(songDuration, c.interval)) continue;
-    return c;
+  qqPrefetched?: PlatformCandidate[],
+  tolSec = DURATION_TOLERANCE_SEC,
+): Promise<Array<PlatformCandidate & { score: CandidateScore }>> {
+  // 四个平台**并发**发起(QQ 自带全局节流);已预取 QQ 时不再重复搜索。
+  const jobs: Array<Promise<PlatformCandidate[]>> = [
+    nsSearch(host, title, artist),
+    kugouSearch(host, title, artist),
+    kuwoSearch(host, title, artist),
+  ];
+  const all: PlatformCandidate[] = qqPrefetched ? [...qqPrefetched] : [];
+  if (!qqPrefetched) jobs.push(qqSearch(host, title, artist));
+  const settled = await Promise.allSettled(jobs);
+  for (const r of settled) {
+    if (r.status === "fulfilled") all.push(...r.value);
   }
-  return null;
+  // 同平台同 ID 去重(不同平台各自独立)。
+  const seen = new Set<string>();
+  const uniq: PlatformCandidate[] = [];
+  for (const c of all) {
+    const k = `${c.platform}:${c.id}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    uniq.push(c);
+  }
+  return rankByScore(uniq, song, tolSec);
 }
 
-/** 从 `{track,info}` 组装 SongMetadata(只填真的拿到的字段)。 */
-function buildMetadata(detail: { track: any; info: any }): SongMetadata | null {
+function resolveKey(song: LyricSongInput): string {
+  return `${normalizeText(song?.title)}|${normalizeText(song?.artist)}|${Number(song?.duration) || 0}`;
+}
+
+/** 最优匹配(缓存):QQ 强命中即收口;否则四平台并搜索后按评分取最优。 */
+async function resolveBest(host: PluginHost, song: LyricSongInput): Promise<MatchResult | null> {
+  const title = cleanPlatformText(song?.title);
+  if (!title) return null;
+  const artist = isArtistPlaceholder(song?.artist) ? "" : cleanPlatformText(song?.artist);
+
+  const key = `best:${resolveKey(song)}`;
+  const cached = memoGet<MatchResult>(key);
+  if (cached) return cached;
+
+  const qq = await qqSearch(host, title, artist);
+  const qqRanked = rankByScore(qq, song);
+  const bestQq = qqRanked[0];
+  if (bestQq && isStrongMatch(bestQq.score)) {
+    const out: MatchResult = { ranked: qqRanked.slice(0, MAX_MATCH_TRIES), earlyExit: true };
+    memoSet(key, out);
+    return out;
+  }
+
+  const ranked = await searchAllRanked(host, song, title, artist, qq);
+  if (ranked.length > 0) {
+    const out: MatchResult = { ranked: ranked.slice(0, MAX_MATCH_TRIES), earlyExit: false };
+    memoSet(key, out);
+    return out;
+  }
+  // 放宽层:严格层被时长闸门全否时,只救「标题精确 + 歌手精确」的候选(容差 ±15s)。
+  // 实测这类差异多来自前奏/尾奏裁剪,仍是同一录音;歌手不精确的一律不放宽,避免配到翻唱。
+  const relaxed = (
+    await searchAllRanked(host, song, title, artist, qq, DURATION_RELAXED_SEC)
+  ).filter((c) => c.score.title === 2 && c.score.artist === 2);
+  if (relaxed.length > 0) {
+    const out: MatchResult = { ranked: relaxed.slice(0, MAX_MATCH_TRIES), earlyExit: false, relaxed: true };
+    memoSet(key, out);
+    return out;
+  }
+  return null; // 失败不缓存:下次仍可重试
+}
+
+/** 强命中时其它平台尚未搜索:封面/歌词/详情兜底需要「全平台候选」。 */
+async function resolveAll(host: PluginHost, song: LyricSongInput): Promise<Array<PlatformCandidate & { score: CandidateScore }>> {
+  const title = cleanPlatformText(song?.title);
+  const artist = isArtistPlaceholder(song?.artist) ? "" : cleanPlatformText(song?.artist);
+  const key = `all:${resolveKey(song)}`;
+  const cached = memoGet<Array<PlatformCandidate & { score: CandidateScore }>>(key);
+  if (cached) return cached;
+  const ranked = await searchAllRanked(host, song, title, artist);
+  if (ranked.length > 0) memoSet(key, ranked);
+  return ranked;
+}
+
+// ==================== 各平台:元数据 / 封面 / 歌词 ====================
+
+/** QQ 详情 → SongMetadata(轨号/年份/风格/专辑/时长)。 */
+function buildQqMetadata(detail: { track: any; info: any }): SongMetadata | null {
   const t: any = detail?.track;
   const meta: SongMetadata = {};
   const name = t?.name || t?.title;
   if (name) meta.title = String(name);
-  const singers = Array.isArray(t?.singer)
-    ? t.singer.map((s: any) => s?.name).filter(Boolean)
-    : [];
+  const singers = Array.isArray(t?.singer) ? t.singer.map((s: any) => s?.name).filter(Boolean) : [];
   if (singers.length) meta.artist = singers.join("/");
   const albumName = t?.album?.name;
   if (albumName) meta.album = String(albumName);
 
-  // 轨号:QQ 的 index_album 即专辑内序号(1 基,实测「晴天」= 3 正确)
+  // 轨号:QQ 的 index_album 即专辑内序号(1 基)
   const track = Number(t?.index_album);
   if (Number.isFinite(track) && track > 0) meta.track = track;
 
-  // 年份:优先 track_info.time_public,兜底 album.time_public(形如 "2017-02-22")
+  // 年份:优先 track_info.time_public,兜底 album.time_public
   if (t?.time_public) {
     const y = parseYear(t.time_public);
     if (y) meta.year = y;
@@ -566,185 +991,201 @@ function buildMetadata(detail: { track: any; info: any }): SongMetadata | null {
     if (y) meta.year = y;
   }
 
-  // 时长(秒)
   const dur = Number(t?.interval);
   if (Number.isFinite(dur) && dur > 0) meta.duration = dur;
 
-  // 风格:取自**同级 info 块**的可读名(info.genre.content[].value);track_info.genre
-  // 只是数字码,与分类 id 对不上,不用。取不到即不填(绝不臆造)。
+  // 风格:只取同级 info 块的可读名;track_info.genre 是数字码,不用。
   const genre = pickGenre(detail?.info);
   if (genre) meta.genre = genre;
 
-  // 碟号不返回:成品文件不留 DISCNUMBER/DISCTOTAL(产品定调 2026-10-17)。
   meta.platform = "qq";
-  // 除 platform 外没有任何有效字段时不返回空壳。
   return Object.keys(meta).length > 1 ? meta : null;
 }
 
-function parseYear(v: any): number | undefined {
-  const m = String(v ?? "").match(/(19|20)\d{2}/);
-  if (!m) return undefined;
-  const y = Number(m[0]);
-  return Number.isFinite(y) && y >= 1900 && y <= 2100 ? y : undefined;
+/** 非 QQ 平台:候选自带字段直接组装(只填拿到的;风格/轨号没有就不填)。 */
+function buildBasicMetadata(c: PlatformCandidate, extra?: { album?: string; durationSec?: number }): SongMetadata | null {
+  const meta: SongMetadata = { platform: c.platform };
+  if (c.name) meta.title = c.name;
+  if (c.singerName) meta.artist = c.singerName;
+  const album = c.albumName || extra?.album || "";
+  if (album) meta.album = album;
+  if (c.year) meta.year = c.year;
+  if (c.track && c.track > 0) meta.track = c.track;
+  const dur = c.durationSec > 0 ? c.durationSec : (extra?.durationSec ?? 0);
+  if (dur > 0) meta.duration = dur;
+  return Object.keys(meta).length > 1 ? meta : null;
 }
 
-// ---------- Manifest ----------
+/** 某候选的元数据(QQ 需详情;酷我在专辑/时长缺失时补 songinfo)。
+ *  详情里的时长一旦与本地相差 >5s,说明是**同名的不同版本**(搜索期 interval 可能被平台写成别的值),
+ *  该候选作废,交由下一个候选/其它平台兜底。 */
+async function metadataFor(
+  host: PluginHost,
+  c: PlatformCandidate,
+  song: LyricSongInput,
+  tolSec = DURATION_TOLERANCE_SEC,
+): Promise<SongMetadata | null> {
+  let meta: SongMetadata | null = null;
+  if (c.platform === "qq") {
+    const detail = await qqSongDetail(host, c.id);
+    meta = detail ? buildQqMetadata(detail) : null;
+    if (meta) {
+      // 详情偶发只回标题/歌手/时长(如「老公天下第一」的 QQ 详情缺 album):
+      // 用搜索候选自带字段补齐,不让已有信息白白丢掉。
+      // 注意:详情**完全失败**时不回退候选 —— 交给其它平台(它们字段更全),
+      // 这是既有产品口径(见用例「详情缺 track_info → 走网易云兜底」)。
+      if (!meta.album && c.albumName) meta.album = c.albumName;
+      if (!meta.duration && c.durationSec > 0) meta.duration = c.durationSec;
+    }
+  } else if (c.platform === "kuwo" && (!c.albumName || c.durationSec <= 0)) {
+    const si = await kuwoSongInfo(host, c.id);
+    meta = buildBasicMetadata(c, si ?? undefined);
+  } else {
+    meta = buildBasicMetadata(c);
+  }
+  if (meta?.duration && !durationOk(song?.duration, meta.duration, tolSec)) return null;
+  return meta;
+}
+
+/** 某候选的封面(QQ 用详情里的专辑 mid;详情时长不符同样作废)。 */
+async function coverFor(
+  host: PluginHost,
+  c: PlatformCandidate,
+  song: LyricSongInput,
+  tolSec = DURATION_TOLERANCE_SEC,
+): Promise<string | null> {
+  if (c.coverUrl) return c.coverUrl;
+  if (c.platform === "qq") {
+    const detail = await qqSongDetail(host, c.id);
+    const interval = Number(detail?.track?.interval) || 0;
+    if (interval > 0 && !durationOk(song?.duration, interval, tolSec)) return null;
+    const albumMid = detail?.track?.album?.mid;
+    return albumMid ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${albumMid}.jpg` : null;
+  }
+  if (c.platform === "netease") return nsCoverUrl(host, c.id);
+  return null;
+}
+
+/** 某候选的歌词。 */
+async function lyricFor(host: PluginHost, c: PlatformCandidate): Promise<string | null> {
+  if (c.platform === "qq") return qqLyric(host, c.id);
+  if (c.platform === "netease") return nsLyric(host, c.id);
+  if (c.platform === "kugou") return kugouLyric(host, c.id);
+  return kuwoLyric(host, c.id);
+}
+
+/**
+ * 依次尝试候选(评分最高的先;最多 MAX_MATCH_TRIES 条),任一成功即返回。
+ * 若此前是「QQ 强命中提前收口」,且这批候选全部拿不到 → 再搜全平台兜底
+ * (例如 QQ 详情接口挂了,但网易云/酷狗/酷我有同一首)。
+ */
+async function firstAvailable<T>(
+  host: PluginHost,
+  song: LyricSongInput,
+  pick: (host: PluginHost, c: PlatformCandidate, song: LyricSongInput, tolSec: number) => Promise<T | null>,
+): Promise<T | null> {
+  const res = await resolveBest(host, song);
+  if (!res) return null;
+  const tol = res.relaxed ? DURATION_RELAXED_SEC : DURATION_TOLERANCE_SEC;
+  for (const c of res.ranked) {
+    const v = await pick(host, c, song, tol);
+    if (v) return v;
+  }
+  // 只有「QQ 强命中提前收口」才需要补搜其它平台(否则上面的候选已覆盖四平台)。
+  if (!res.earlyExit) return null;
+  const all = await resolveAll(host, song);
+  for (const c of all.slice(0, MAX_MATCH_TRIES)) {
+    const v = await pick(host, c, song, DURATION_TOLERANCE_SEC);
+    if (v) return v;
+  }
+  return null;
+}
+
+// ==================== Manifest ====================
 
 export const tagProviderManifest: PluginManifest = {
   id: "tag-provider",
   name: "在线标签补全",
-  version: "1.0.0",
+  version: "1.1.0",
   type: "metadata",
-  description: "从 QQ 音乐(默认)与网易云音乐(兜底)补全歌曲标签(轨号/年份/时长/专辑/风格等)、封面与歌词",
+  description: "从 QQ 音乐(默认)、网易云音乐、酷狗音乐、酷我音乐补全歌曲标签(轨号/年份/时长/专辑/风格等)、封面与歌词",
   capabilities: ["metadataProvider", "coverProvider", "lyricProvider"],
-  platforms: ["qq", "netease"],
-  platformLabels: { qq: "QQ音乐", netease: "网易云音乐" },
+  platforms: ["qq", "netease", "kugou", "kuwo"],
+  platformLabels: { qq: "QQ音乐", netease: "网易云音乐", kugou: "酷狗音乐", kuwo: "酷我音乐" },
   permissions: ["net", "log"],
   defaultEnabled: true,
   // 内置标签来源:下载期由本插件打上的标签,核心会在落盘后写「标签修复完成标记」,
   // 后续标签修复命中标记即跳过(外置插件不声明本字段,故其标签不标记)。
   builtinTagSource: true,
   configSchema: [],
-  // 插件侧 i18n 字典:默认文案即中文,故 zh 省略、只补 en。前端按当前界面语言取用。
   i18n: {
     en: {
       name: "Online Tag Filler",
-      description: "Enrich song tags (track/year/duration/album/genre...), cover art and lyrics from QQ Music, with NetEase Cloud Music as fallback",
+      description:
+        "Enrich song tags (track/year/duration/album/genre...), cover art and lyrics from QQ Music (default), NetEase Cloud Music, Kugou Music and Kuwo Music",
       documentation: `### Features
-Enriches a song's tags, cover art and lyrics from QQ Music, falling back to NetEase Cloud Music when QQ Music has no match. It declares three capabilities at once — \`metadataProvider\`, \`coverProvider\` and \`lyricProvider\` — so the core's tag-repair / cover / lyrics pipelines all use this plugin.
+Enriches a song's tags, cover art and lyrics from four platforms: QQ Music (default), NetEase Cloud Music, Kugou Music and Kuwo Music. It declares \`metadataProvider\`, \`coverProvider\` and \`lyricProvider\` at once, so the core's tag-repair / download-enrich / cover / lyrics pipelines all use this plugin.
 
 ### How it works
-1. The core walks enabled plugins by capability and calls \`searchMetadata(host, song)\` / \`searchCover(host, song)\` / \`searchLyrics(host, song)\`; first-match-wins;
-2. Every capability method runs a **two-stage** lookup: the QQ Music loop first; only when that yields nothing does the NetEase Cloud Music loop run. QQ Music is the default source, NetEase Cloud Music is strictly a fallback;
-3. Both stages search by \`title + artist\` (title only when there is no artist, or when the artist is a scanner placeholder such as \`Unknown Artist\`), then apply the same three gates: normalized title equality (case/space/punctuation ignored, decorations like \`(Live)\`/\`【】\`/\`feat.\` stripped, Simplified/Traditional variants folded together, and a trailing \` - artist\` suffix also accepted as a title form), normalized artist intersection, and — when \`song.duration\` is provided (in seconds) — the \`|Δ| ≤ 5s\` length check, which runs **against the candidate's own length first**, so a rejected candidate never triggers a detail request;
-4. **QQ Music stage**: \`search_for_qq_cp\` gives candidates carrying their declared length in seconds; track details (track no. / release year / duration / album mid) come from the musicu song-detail endpoint, and the **genre** name is read from the sibling \`info.genre.content[].value\` block (a human-readable name such as "R&B"/"Pop"), while \`track_info.genre\` is only a numeric code and is ignored; the cover is built from the album mid, lyrics come from the QQ lyric endpoint;
-5. **NetEase Cloud Music stage** (fallback only): \`POST /api/search/get\` gives candidates whose \`duration\` is in **milliseconds** (converted to seconds here); the search response's \`album\` carries only a \`picId\` and no \`picUrl\`, so the cover requires a second call to \`/api/song/detail/?ids=[id]\` to read \`album.picUrl\` (a direct URL); lyrics come from \`/api/song/lyric\` → \`lrc.lyric\`. This platform exposes no human-readable genre, so \`genre\` is always left empty. Every missing field is simply left empty — nothing is ever fabricated.
+1. QQ Music runs first. A **strong match** (exact normalized title + exact artist) is accepted immediately — no extra requests, no extra latency;
+2. Only when QQ has no candidate or only weak ones (artist missing, title variant only, detail/cover/lyric unavailable) are NetEase / Kugou / Kuwo queried **in parallel**, then the best candidate across all four platforms wins by score;
+3. Scoring (ported from Music Tag Web's match_score): title exact = 2, artist exact = 2 / contains = 1 / mismatch = rejected, album exact = 2 / contains = 1, duration within ±2s = +1; duration off by >5s, artist mismatch, or a version-marker mismatch (Live/Remix/伴奏/纯音乐/…) rejects the candidate;
+4. Requests are cached per keyword / song id (180s, successes only), so the three capability calls share one search round-trip. QQ requests stay globally throttled (≥1.2s + jitter).
 
 ### Notes
-- No configuration; enabled by default. QQ Music is the default source and NetEase Cloud Music is used only as a fallback;
-- All HTTP goes through \`host.http\` (respects the system proxy) with a UA + platform referer, single attempt, 10s timeout, never throws — a failed platform degrades gracefully to an empty result and the next platform is tried.`,
+- No configuration; enabled by default;
+- Every missing field is left empty — nothing is ever fabricated (e.g. Kugou/Kuwo expose no readable genre, Kuwo exposes no release year).`,
     },
   },
   documentation: `### 功能介绍
-从 QQ 音乐(默认来源)与网易云音乐(QQ 拿不到时的兜底来源)为歌曲补全标签(轨号 / 年份 /
+从 QQ 音乐(默认)、网易云音乐、酷狗音乐、酷我音乐四个平台为歌曲补全标签(轨号 / 年份 /
 时长 / 专辑 / 风格等)、封面与歌词。本插件一次声明 \`metadataProvider\`、\`coverProvider\`、
-\`lyricProvider\` 三种能力,核心的标签修复 / 封面 / 歌词链路都会调用它。
+\`lyricProvider\` 三种能力,核心的标签修复 / 下载补全 / 封面 / 歌词链路都会调用它。
 
 ### 处理逻辑
-1. 核心按能力遍历已启用插件,分别调用 \`searchMetadata(host, song)\` /
-   \`searchCover(host, song)\` / \`searchLyrics(host, song)\`,首个可用结果胜出;
-2. 本插件的**每个能力方法都是两段式**:先跑 QQ 音乐循环,**只有 QQ 全部候选都没命中**时才
-   跑网易云音乐循环(QQ 是默认获取标签的选择,网易云只是补充链路);
-3. 两个平台共用同一套三闸门:关键词都是 \`title + artist\`(artist 为空、或为 scanner 写入的
-   占位值如 \`Unknown Artist\` 时只用 title);候选按「标题归一化相等(忽略大小写/空格/标点,
-   去掉 \`(Live)\`/\`【】\`/\`feat.\` 等装饰,简繁字形折叠到简体,且尾部 \` - 歌手\` 后缀也作为一个
-   合法标题形态)+ 歌手归一化后交集」判定;若 \`song.duration\` 给了(秒),**先用候选自带时长
-   做时长预筛**(\`|Δ| ≤ 5s\`),不通过就不再调详情接口;
-4. **QQ 音乐段**:候选来自 \`search_for_qq_cp\`(自带秒级时长);轨号 / 年份 / 时长 / 专辑 mid
-   取自 musicu 歌曲详情接口;**风格**取自与 track_info 同级的 \`info.genre.content[].value\`
-   (可读名,如 "R&B"/"Pop"),而 track_info.genre 只是数字码、一律忽略;封面由 album mid
-   拼 CDN;歌词走 QQ 歌词接口;
-5. **网易云音乐段(仅兜底)**:候选来自 \`POST /api/search/get\`,其 \`duration\` 是**毫秒**
-   (此处已换算成秒);搜索响应里的 \`album\` 只有 picId、没有 picUrl,故封面须**二次调**
-   \`/api/song/detail/?ids=[id]\` 取 \`album.picUrl\` 直链;歌词取 \`/api/song/lyric\` 的
-   \`lrc.lyric\`;该平台不提供可读风格名,故 genre 一律不填。拿不到的字段一律不填,绝不臆造。
-
-### 说明
-- 无需配置,默认启用;QQ 音乐为默认来源,网易云音乐仅在 QQ 拿不到时兜底;
-- 所有 HTTP 均走 \`host.http\`(尊重系统代理),带 UA + 平台 Referer,单次尝试、10s 超时、
-  任何情况不抛异常;平台失败即优雅降级为空结果并继续尝试下一个平台。`,
+1. **先跑 QQ 音乐**:若得到强命中(标题归一化后精确相等 + 歌手精确吻合),立即采用,
+   不额外请求、不增加延迟;
+2. 只有 QQ 无候选 / 仅弱候选(缺歌手、标题只是变体、详情或封面/歌词拿不到)时,才把
+   网易云 / 酷狗 / 酷我**并发**搜索,四平台候选统一评分后取最优;
+3. **评分**(参考 Music Tag Web 的 match_score,并补上本地场景硬闸门):
+   标题精确 2 分、歌手精确 2 分(包含 1 分,本地有歌手却完全不匹配 → 否决)、
+   专辑精确 2 分(包含 1 分)、时长相差 ≤2s 加 1 分;**时长相差 >5s、歌手不匹配、
+   版本标记不一致(现场/Live/Remix/伴奏/纯音乐/翻唱/电台版…)→ 直接否决**;总分 ≥3
+   (标题必须命中)才可作为候选;
+4. 搜索结果按关键词 / 曲 ID 缓存 180s(只缓存成功响应),三个能力共享同一轮搜索;
+   QQ 请求仍走全局限流(≥1.2s + 300~800ms 抖动);
+5. 拿不到的字段一律不填,绝不臆造(例如酷狗/酷我没有可读风格名,酷我没有发行年份)。`,
 };
 
-// ---------- Plugin impl ----------
+// ==================== Plugin impl ====================
 
 export const tagProviderPlugin: MetadataProviderPlugin & CoverProviderPlugin & LyricProviderPlugin = {
   manifest: tagProviderManifest,
 
-  /** 补全标签：先 QQ 音乐（默认来源），QQ 拿不到再走网易云音乐（补充链路）；都拿不到返回 null。 */
   async searchMetadata(host: PluginHost, song: LyricSongInput): Promise<SongMetadata | null> {
     try {
-      const title = (song?.title || "").trim();
-      if (!title) return null;
-      // scanner 对「无歌手标签」写入的占位值(Unknown Artist)当空歌手:拼进关键词会恒 0 结果。
-      const artist = isArtistPlaceholder(song?.artist) ? "" : (song?.artist || "").trim();
-
-      // ① QQ 音乐（默认来源）：候选自带秒级时长，先做时长预筛再调详情（省一次网络往返）。
-      for (const c of await qqSearch(host, title, artist)) {
-        if (!titleMatches(c.name, title)) continue;
-        if (!artistMatches(c.singerName, artist)) continue;
-        if (!durationOk(song?.duration, c.interval)) continue;
-        const detail = await qqSongDetail(host, c.mid);
-        if (!detail) continue;
-        if (!durationOk(song?.duration, detail.track?.interval)) continue;
-        const meta = buildMetadata(detail);
-        if (meta) return meta;
-      }
-
-      // ② 网易云音乐（兜底）：只有 QQ 全部候选都没命中才走到这里。
-      const ns = firstMatch(await nsSearch(host, title, artist), title, artist, song?.duration);
-      if (ns) return buildNsMetadata(ns);
-      return null;
+      if (!cleanPlatformText(song?.title)) return null;
+      return await firstAvailable(host, song, metadataFor);
     } catch {
       return null;
     }
   },
 
-  /** 补全封面：先 QQ（album.mid 拼 CDN 直链），QQ 拿不到再网易云（须二次调详情取 album.picUrl）。 */
   async searchCover(host: PluginHost, song: LyricSongInput): Promise<{ url?: string } | null> {
     try {
-      const title = (song?.title || "").trim();
-      if (!title) return null;
-      const artist = isArtistPlaceholder(song?.artist) ? "" : (song?.artist || "").trim();
-
-      // ① QQ 音乐（默认来源）
-      for (const c of await qqSearch(host, title, artist)) {
-        if (!titleMatches(c.name, title)) continue;
-        if (!artistMatches(c.singerName, artist)) continue;
-        if (!durationOk(song?.duration, c.interval)) continue;
-        const detail = await qqSongDetail(host, c.mid);
-        if (!detail) continue;
-        if (!durationOk(song?.duration, detail.track?.interval)) continue;
-        const albumMid = detail.track?.album?.mid;
-        if (!albumMid) continue;
-        return { url: `https://y.gtimg.cn/music/photo_new/T002R300x300M000${albumMid}.jpg` };
-      }
-
-      // ② 网易云音乐（兜底）：搜索响应里 album 只有 picId、没有 picUrl，封面必须二次调详情接口。
-      const ns = firstMatch(await nsSearch(host, title, artist), title, artist, song?.duration);
-      if (ns) {
-        const url = await nsCoverUrl(host, ns.id);
-        if (url) return { url };
-      }
-      return null;
+      if (!cleanPlatformText(song?.title)) return null;
+      const url = await firstAvailable(host, song, coverFor);
+      return url ? { url } : null;
     } catch {
       return null;
     }
   },
 
-  /** 补全歌词：先 QQ，QQ 拿不到再网易云。
-   *  QQ 歌词接口不返回时长，故沿用原口径只判标题+歌手；网易云经 firstMatch 顺带过时长闸门
-   *  （更严格，避免给「不同版本」贴上错的词）。 */
   async searchLyrics(host: PluginHost, song: LyricSongInput): Promise<{ lrc?: string; text?: string } | null> {
     try {
-      const title = (song?.title || "").trim();
-      if (!title) return null;
-      const artist = isArtistPlaceholder(song?.artist) ? "" : (song?.artist || "").trim();
-
-      // ① QQ 音乐（默认来源）
-      for (const c of await qqSearch(host, title, artist)) {
-        if (!titleMatches(c.name, title)) continue;
-        if (!artistMatches(c.singerName, artist)) continue;
-        const lrc = await qqLyric(host, c.mid);
-        if (lrc) return { lrc };
-      }
-
-      // ② 网易云音乐（兜底）：歌词在 lrc.lyric（与 QQ 的 {lyric} 不同）。
-      const ns = firstMatch(await nsSearch(host, title, artist), title, artist, song?.duration);
-      if (ns) {
-        const lrc = await nsLyric(host, ns.id);
-        if (lrc) return { lrc };
-      }
-      return null;
+      if (!cleanPlatformText(song?.title)) return null;
+      const lrc = await firstAvailable(host, song, lyricFor);
+      return lrc && lrc.trim() ? { lrc } : null;
     } catch {
       return null;
     }
