@@ -706,8 +706,8 @@ describe("buildUpgradePlan 冷却 — N 天内尝试过就跳过", () => {
     seedSong({ id: "s-lo2", path: "l:s-up:/dl/lo2.flac", suffix: "flac", bitRate: 600, size: 15_000_000, duration: 200 });
     recordUpgradeAttempts("b1", ["s-lo1"]);
     const plan = buildUpgradePlan(["s-up"], cfg());
-    // belowBar = total（目标目录全量 = 待洗版数）；冷却只决定「本轮先洗谁」，不决定「还有多少要洗」。
-    expect(plan.belowBar).toBe(2);
+    // belowBar = 本轮可洗数 = total - cooled：冷却中的歌从「可洗」里剔除（前端「本轮可洗」）。
+    expect(plan.belowBar).toBe(1);
     expect(plan.cooled).toBe(1);
     expect(plan.items.map((i) => i.songId)).toEqual(["s-lo2"]);
   });
@@ -720,6 +720,8 @@ describe("buildUpgradePlan 冷却 — N 天内尝试过就跳过", () => {
       .run(new Date(Date.now() - 31 * 86_400_000).toISOString());
     const plan = buildUpgradePlan(["s-up"], cfg());
     expect(plan.cooled).toBe(0);
+    // 冷却过期 → 本轮可洗数回升到全量（这是「按冷却时间变化」的预期行为，不是 bug）。
+    expect(plan.belowBar).toBe(1);
     expect(plan.items.map((i) => i.songId)).toEqual(["s-lo1"]);
   });
 
@@ -769,7 +771,7 @@ describe("buildUpgradePlan — statsOnly 快路径与明细口径等价", () => 
   const cfg = () => resolveFetchConfig({ downloadRoot: "/MUSIC/DOWNLOAD", cacheRoot: "/MUSIC/DOWNLOADCACHE" });
   const wipe = () => {
     sqlite.prepare("DELETE FROM fetch_upgrade_attempts").run();
-    sqlite.prepare("DELETE FROM songs WHERE path LIKE 'l:s-up:%'").run();
+    sqlite.prepare("DELETE FROM songs WHERE path LIKE 'l:s-up:%' OR path LIKE 'l:s-lossless:%'").run();
   };
   beforeEach(wipe);
   afterEach(wipe);
@@ -796,7 +798,7 @@ describe("buildUpgradePlan — statsOnly 快路径与明细口径等价", () => 
     expect(fast.total).toBe(3);
     expect(fast.attempted).toBe(1);
     expect(fast.cooled).toBe(1);
-    expect(fast.belowBar).toBe(3);
+    expect(fast.belowBar).toBe(2);
   });
 
   it("冷却期外恢复：cooled 归零、belowBar 回到全量，attempted 仍记在册", () => {
@@ -816,6 +818,43 @@ describe("buildUpgradePlan — statsOnly 快路径与明细口径等价", () => 
     seedSong({ id: "s-lo1", path: "l:s-up:/dl/lo1.flac", suffix: "flac", bitRate: 600, size: 15_000_000, duration: 200 });
     const plan = buildUpgradePlan(["s-up"], cfg(), { statsOnly: true, songIds: ["s-lo1"] });
     expect(plan.items.map((i) => i.songId)).toEqual(["s-lo1"]);
+  });
+
+  // 2026-11-11 口径修正的回归锚点：belowBar 必须随冷却窗口实时变化，
+  // 且 detail 路径与 statsOnly 快路径逐项一致（前端「本轮可洗 / 冷却中 / 全部」三个数同源）。
+  it("建批预记冷却 → belowBar 立即下降；冷却过期 → 回升；attempted 只增不减", () => {
+    seedSong({ id: "s-lo1", path: "l:s-up:/dl/lo1.flac", suffix: "flac", bitRate: 600, size: 15_000_000, duration: 200 });
+    seedSong({ id: "s-lo2", path: "l:s-up:/dl/lo2.flac", suffix: "flac", bitRate: 600, size: 15_000_000, duration: 200 });
+    seedSong({ id: "s-lo3", path: "l:s-up:/dl/lo3.flac", suffix: "flac", bitRate: 600, size: 15_000_000, duration: 200 });
+
+    const before = buildUpgradePlan(["s-up"], cfg(), { statsOnly: true });
+    expect([before.total, before.cooled, before.belowBar, before.attempted]).toEqual([3, 0, 3, 0]);
+
+    // 建批即预记冷却（与 POST /upgrade/tasks、自动续批同语义）→ 可洗数立刻从 3 掉到 1。
+    recordUpgradeAttempts("b1", ["s-lo1", "s-lo2"]);
+    const fast = buildUpgradePlan(["s-up"], cfg(), { statsOnly: true });
+    const slow = buildUpgradePlan(["s-up"], cfg());
+    expect([fast.total, fast.cooled, fast.belowBar, fast.attempted]).toEqual([3, 2, 1, 2]);
+    expect([slow.total, slow.cooled, slow.belowBar, slow.attempted]).toEqual([3, 2, 1, 2]);
+    expect(fast.belowBar).toBe(fast.total - fast.cooled);
+
+    // 冷却过期 → 可洗数回到 3，但 attempted 仍是 2（累计口径不衰减）。
+    sqlite
+      .prepare("UPDATE fetch_upgrade_attempts SET attempted_at = ?")
+      .run(new Date(Date.now() - 31 * 86_400_000).toISOString());
+    const after = buildUpgradePlan(["s-up"], cfg(), { statsOnly: true });
+    expect([after.total, after.cooled, after.belowBar, after.attempted]).toEqual([3, 0, 3, 2]);
+  });
+
+  it("洗版成功迁出目标目录 → total 与 belowBar 同步 -1（成功的歌不再计入可洗）", () => {
+    seedSong({ id: "s-lo1", path: "l:s-up:/dl/lo1.flac", suffix: "flac", bitRate: 600, size: 15_000_000, duration: 200 });
+    seedSong({ id: "s-lo2", path: "l:s-up:/dl/lo2.flac", suffix: "flac", bitRate: 600, size: 15_000_000, duration: 200 });
+    expect(buildUpgradePlan(["s-up"], cfg(), { statsOnly: true }).belowBar).toBe(2);
+    // 模拟 migrateUpgradedSong：行从下载源迁到无损源（path 前缀改掉）。
+    sqlite.prepare("UPDATE songs SET path = 'l:s-lossless:/dl/lo1.flac' WHERE id = 's-lo1'").run();
+    const after = buildUpgradePlan(["s-up"], cfg(), { statsOnly: true });
+    expect(after.total).toBe(1);
+    expect(after.belowBar).toBe(1);
   });
 });
 
@@ -851,7 +890,7 @@ describe("buildUpgradePlan — attempted 统计（设置页「已尝试」口径
     );
     expect(plan.total).toBe(2);
     expect(plan.attempted).toBe(1);
-    expect(plan.belowBar).toBe(2); // belowBar = total（目标目录全量），与冷却无关
+    expect(plan.belowBar).toBe(2); // belowBar = total - cooled（cooled=0 → 与全量相同）
     expect(plan.cooled).toBe(0);
   });
 
@@ -869,8 +908,9 @@ describe("buildUpgradePlan — attempted 统计（设置页「已尝试」口径
     );
     expect(plan.attempted).toBe(1);
     expect(plan.cooled).toBe(1);
-    // belowBar = total（与 cooled 解耦）；att-3 仍在目标目录 = 待洗 1 首。
-    expect(plan.belowBar).toBe(1);
+    // att-3 冷却中 → 从「本轮可洗」里剔除；total 仍是 1（它还在目标目录里）。
+    expect(plan.belowBar).toBe(0);
+    expect(plan.total).toBe(1);
   });
 });
 

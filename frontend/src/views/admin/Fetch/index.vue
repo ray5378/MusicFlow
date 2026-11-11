@@ -301,13 +301,14 @@
           <el-divider content-position="left">{{ t('admin.fetch.upgrade.stats') }}</el-divider>
           <div class="upgrade-stats">
             <el-tag type="warning">{{ t('admin.fetch.upgrade.pending', { count: upgradePlan?.belowBar ?? 0 }) }}</el-tag>
+            <el-tag type="info">{{ t('admin.fetch.upgrade.cooled', { count: upgradePlan?.cooled ?? 0 }) }}</el-tag>
             <el-tag type="info">{{ t('admin.fetch.upgrade.attempted', { count: upgradePlan?.attempted ?? 0 }) }}</el-tag>
             <span v-if="upgradePlan" class="hint">{{ t('admin.fetch.upgrade.total', { count: upgradePlan.total }) }}</span>
           </div>
           <div class="upgrade-actions">
             <el-button type="primary" :loading="upgradeStarting" @click="doStartUpgrade"><MfIcon name="Download" />{{ t('admin.fetch.upgrade.start') }}</el-button>
             <el-button :loading="upgradeAttemptsResetting" @click="doResetUpgradeAttempts">{{ t('admin.fetch.upgrade.resetAttempts') }}</el-button>
-            <el-button :loading="planLoading" @click="loadUpgradeStats"><MfIcon name="RefreshCw" />{{ t('admin.fetch.upgrade.reload') }}</el-button>
+            <el-button :loading="planLoading" @click="loadUpgradeStats()"><MfIcon name="RefreshCw" />{{ t('admin.fetch.upgrade.reload') }}</el-button>
           </div>
           <div class="hint upgrade-hint">{{ t('admin.fetch.upgrade.autoContinueHint') }}</div>
         </div>
@@ -974,16 +975,36 @@ async function saveUpgradeConfig() {
   }
 }
 
-// 洗版统计（待洗版 / 已尝试 / 全库共）：不带 limit → 只取计数不列清单（预览已下线）。
-async function loadUpgradeStats() {
-  planLoading.value = true;
+// 洗版统计（本轮可洗 / 冷却中 / 已尝试 / 全库共）：不带 limit → 只取计数不列清单（预览已下线）。
+// silent=true 用于页签内的轮询：不闪「刷新统计」按钮的 loading，也不重复弹错误提示。
+async function loadUpgradeStats(opts?: { silent?: boolean }) {
+  const silent = opts?.silent === true;
+  if (!silent) planLoading.value = true;
   try {
     upgradePlan.value = await getUpgradePlan();
   } catch (e: any) {
-    ElMessage.error(apiErrorText(e, t("admin.fetch.upgrade.loadFailed")));
+    if (!silent) ElMessage.error(apiErrorText(e, t("admin.fetch.upgrade.loadFailed")));
   } finally {
-    planLoading.value = false;
+    if (!silent) planLoading.value = false;
   }
+}
+
+// 洗版统计轮询（2026-11-11）：任务在后台自动续批时，统计必须自己动起来。
+// 只在「洗版」页签可见期间跑；页面隐藏（切到别的浏览器页签）时空转一次不发请求。
+const UPGRADE_STATS_POLL_MS = 5000;
+let upgradeStatsPoll: ReturnType<typeof setInterval> | null = null;
+function stopUpgradeStatsPoll() {
+  if (upgradeStatsPoll) {
+    clearInterval(upgradeStatsPoll);
+    upgradeStatsPoll = null;
+  }
+}
+function startUpgradeStatsPoll() {
+  stopUpgradeStatsPoll();
+  upgradeStatsPoll = setInterval(() => {
+    if (document.hidden) return;
+    void loadUpgradeStats({ silent: true });
+  }, UPGRADE_STATS_POLL_MS);
 }
 
 async function doStartUpgrade() {
@@ -994,6 +1015,8 @@ async function doStartUpgrade() {
     ElMessage.success(t("admin.fetch.upgrade.started", { id: shortId(job?.id) }));
     activeTab.value = "upgradeJobs";
     await upgradeJobsRef.value?.refresh();
+    // 建批即预记冷却 → 本轮可洗数应立刻下降；这里主动拉一次，避免切回统计页签前看到旧数。
+    void loadUpgradeStats({ silent: true });
   } catch (e: any) {
     ElMessage.error(apiErrorText(e, t("admin.fetch.upgrade.startFailed")));
   } finally {
@@ -1109,13 +1132,16 @@ onUnmounted(() => {
     clearInterval(tagRepairPoll);
     tagRepairPoll = null;
   }
+  // 洗版统计轮询同理：离开页面必须清掉，否则每 5s 对着已卸载组件发请求。
+  stopUpgradeStatsPoll();
 });
 
 // 全库统计（洗版 / 全库下载）各是一次全表扫描，**首次切到对应页签才拉**：
 // 打开页面默认停在「配置」页签 → 首屏不再触发扫描，避免同步 SQLite 长扫描阻塞事件循环
-// 把整页拖成「卡加载」；之后由页签内的「刷新」按钮手动重拉（loadUpgradeStats / loadLibraryPlan）。
+// 把整页拖成「卡加载」。
+// 洗版统计例外（2026-11-11）：任务会在后台自动续批，数字必须跟着冷却窗口变，
+// 所以每次切回「洗版」页签都重拉，并在页签可见期间 5s 轮询；不再用「只拉一次」的闩锁。
 const libraryPlanLoaded = ref(false);
-const upgradeStatsLoaded = ref(false);
 // 配置页 7 个分组、三十多个 Element Plus 控件一次性实例化，是首屏最大的一段长任务。
 // 拆成 3 段渐进渲染：首屏只出「基础 + 音质」（用户真正第一眼看得到的部分），
 // 其余分组在后续空闲帧补齐，视觉结果完全一致，只是把不可见的下半部分挪出首帧。
@@ -1150,10 +1176,12 @@ watch(activeTab, (v) => {
       upgradeConfigLoaded.value = true;
       loadUpgradeConfig();
     }
-    if (!upgradeStatsLoaded.value) {
-      upgradeStatsLoaded.value = true;
-      loadUpgradeStats();
-    }
+    // 每次进入都重拉 + 开启轮询（任务可能正在后台自动续批，数字要跟着走）。
+    loadUpgradeStats();
+    startUpgradeStatsPoll();
+  } else {
+    // 离开「洗版」页签立即停轮询，避免在别的页签白转请求。
+    stopUpgradeStatsPoll();
   }
   if (v === "tagRepair" && !tagRepairStatusLoaded.value) {
     tagRepairStatusLoaded.value = true;

@@ -224,11 +224,11 @@ export interface UpgradePlan {
   /** 范围内任何时间在册的已尝试数（对齐全库下载 attempted 口径）。 */
   attempted: number;
   /**
-   * 待洗版数 = 目标目录**全量**（口径与后端 belowBar 一致，2026-10-16 修正）。
-   * 成功洗版的歌会迁出目标目录 → 单调递减、永不回升；冷却（cooled）只决定「本轮先洗谁」。
+   * 本轮可洗数 = total - cooled（口径与后端 belowBar 一致，2026-11-11 修正）。
+   * 建批预记冷却后立刻下降、冷却过期后自然回升；total 才是「目标目录全量」。
    */
   belowBar: number;
-  /** 因冷却期跳过的行数(N 天内已尝试过洗版,无论成败；仅作参考,不参与 belowBar)。 */
+  /** 当前处于冷却窗口内的行数(N 天内已尝试过洗版,无论成败)。 */
   cooled: number;
   truncated: boolean;
   items: UpgradePlanItem[];

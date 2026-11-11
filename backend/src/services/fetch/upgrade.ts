@@ -213,15 +213,16 @@ export function collectUpgradeSongs(sourceIds: string[]): UpgradeSongRow[] {
 /**
  * 只出统计的 SQL 快路径（不 materialize 明细），口径与 `buildUpgradePlan` 明细路径逐项等价：
  *   total     = 各源 `type='local' AND path LIKE 'l:<sid>:%'` 的行数之和（源已去重）；
- *   attempted = 这些行中在 `fetch_upgrade_attempts` 有记录的行数（与冷却窗口无关）；
- *   cooled    = 这些行中尝试时间仍在冷却窗口内的行数（仅作参考信息）；
- *   belowBar  = total（**待洗版数 = 目标目录全量**，与冷却窗口解耦）。
+ *   attempted = 这些行中在 `fetch_upgrade_attempts` 有记录的行数（与冷却窗口无关，累计口径）；
+ *   cooled    = 这些行中尝试时间仍在冷却窗口内的行数（当前冷却中）；
+ *   belowBar  = `max(0, total - cooled)`，即**本轮可洗数**（未被冷却挡住、下一批能选中的上限）。
  *
- * ⚠️ 「待洗版数」口径（2026-10-16 修正）：目标目录里的每一首歌都是待洗版对象，
- * 成功洗版的歌会迁出目标目录 → total 天然单调递减、永不回升。此前口径
- * `total - cooled` 有两个致命问题：①冷却窗口随时间单向衰减会让旧 attempted 过期，
- * belowBar 反而回升；②成功洗版后 total 与 cooled 同时 -1，belowBar 原地不动（洗了半天数字不降）。
- * 冷却只决定「本轮先洗谁」，不决定「还有多少要洗」。
+ * ⚠️ 「可洗数」口径（2026-11-11 修正，推翻 2026-10-16 的 belowBar = total）：
+ * 2026-10-16 让 belowBar 恒等于 total，直接后果是前端「待洗版」与「全库共」永远是同一个数：
+ * 建批/冷却/失败都不会让它变化，只有洗版成功迁出目标目录才 -1，用户观感是「跑了一天数字没动」。
+ * 现在的口径让 belowBar 随冷却窗口实时变化：建批预记冷却后立刻下降，冷却过期后自然回升，
+ * 与全库下载的 `pending = total - cooled` 保持一致。total 仍然单调递减（成功洗版会迁出），
+ * 想表达「总量」时看 total，想表达「这轮还能洗多少」时看 belowBar。
  */
 export function countUpgradePlanStats(
   sourceIds: string[],
@@ -261,8 +262,8 @@ export function countUpgradePlanStats(
     .get(cutoff, ...ids.map((sid) => `l:${sid}:%`)) as any;
   const attempted = Number(row?.attempted ?? 0);
   const cooled = Number(row?.cooled ?? 0);
-  // belowBar = total（待洗版数 = 目标目录全量）；cooled 仅供设置页参考，不参与 belowBar 计算。
-  return { total, attempted, cooled, belowBar: total };
+  // belowBar = 本轮可洗 = total - cooled（与全库下载 pending 同口径）；建批预记冷却 → 立刻下降。
+  return { total, attempted, cooled, belowBar: Math.max(0, total - cooled) };
 }
 
 /**
@@ -276,8 +277,8 @@ export function countUpgradePlanStats(
  *
  * - `songIds` 给了 → 只保留这些 id 的行（点名重试，绕过冷却）；否则取目标目录全部。
  * - `limit` 截断时 `truncated:true`；`total` = 范围内总数、
- *   `belowBar` = **待洗版数 = total**（目标目录全量；字段名沿用历史接口，口径与快路径一致）、
- *   `cooled` = 因冷却期跳过的行数（cooldownDays 天内已尝试过洗版，无论成败；仅作参考）、
+ *   `belowBar` = **本轮可洗数 = total - cooled**（字段名沿用历史接口，与快路径同口径）、
+ *   `cooled` = 因冷却期跳过的行数（cooldownDays 天内已尝试过洗版，无论成败）、
  *   `attempted` = 范围内任何时间在册的已尝试数（对齐全库下载统计口径，供设置页展示）。
  * - `items[].reason` 仍带 `isBelowUpgradeBar` 的**目标门槛**判定文案，仅作展示。
  */
@@ -328,7 +329,9 @@ export function buildUpgradePlan(
     }
     return true;
   });
-  const belowBar = total;
+  // 本轮可洗数（= 目标目录里不在冷却期内的歌）；显式 songIds 点名时仍按全量统计口径给出。
+  // 与冷却窗口联动：建批预记冷却后立刻下降，冷却过期后自然回升。
+  const belowBar = Math.max(0, total - cooled);
   // 已尝试（任何时间在册，不受冷却窗口限制）——供设置页「已尝试 N 首」统计。
   const attempted = rows.reduce((n, r) => n + (attemptedAt.has(r.id) ? 1 : 0), 0);
 
@@ -691,9 +694,9 @@ export function buildUpgradeContinuation(
   const sourceIds = resolveUpgradeSourceIds(cfg);
   const limit = Math.max(1, Math.floor(cfg.upgradeBatchLimit || 500));
   const plan = buildUpgradePlan(sourceIds, cfg, { limit });
-  // remaining = 「下一批仍可参与洗版的歌曲数」（= 目标目录全量 - 已在冷却期的 - 本批带入的）。
-  // belowBar 已改为 total（目标目录全量），故此处需再减去 cooled 才能等价于历史的「未尝试集」口径。
-  if (plan.items.length === 0) return { job: null, enqueued: 0, remaining: Math.max(0, plan.belowBar - plan.cooled) };
+  // remaining = 「下一批仍可参与洗版的歌曲数」（= 本轮可洗 belowBar - 本批带入的）。
+  // belowBar 已改为 total - cooled（本轮可洗数），故这里只需再减去本批条数。
+  if (plan.items.length === 0) return { job: null, enqueued: 0, remaining: plan.belowBar };
   const job = createFetchJob({
     kind: "upgrade",
     targets: { targets: buildUpgradeTargets(plan.items) },
@@ -702,7 +705,7 @@ export function buildUpgradeContinuation(
   });
   // 落冷却记录（失败也记——产品定调 2026-10-10：失败短期内也好不了，不该天天白扫）。
   recordUpgradeAttempts(job.id, plan.items.map((i) => i.songId));
-  return { job, enqueued: plan.items.length, remaining: Math.max(0, plan.belowBar - plan.cooled - plan.items.length) };
+  return { job, enqueued: plan.items.length, remaining: Math.max(0, plan.belowBar - plan.items.length) };
 }
 
 // ==================== 洗版冷却（fetch_upgrade_attempts 表） ====================
@@ -737,7 +740,7 @@ export function ensureUpgradeAttemptsTable(): void {
  * 同一首歌可能被重复尝试（冷却期过后重进候选池、点名重试、换源再试）。若沿用 OR IGNORE，
  * `attempted_at` 会**冻结在首次尝试时刻**，带来两个后果：
  *   ① 冷却判定（`attempted_at > now - N天`）随时间单向衰减 → 早已过期的歌重新「解冻」，
- *      前端「待洗版数」看起来回升；
+ *      前端「冷却中」数虚高（2026-11-11 起「本轮可洗」= total - cooled，会据此错误回升）；
  *   ② 一批歌冷却过期后重新入选、又被 OR IGNORE 静默跳过刷新 → 下一批仍选同一批歌 → 无限空转
  *      （每次尝试都不刷新时间戳，永远停在「刚过期」边界）。
  * 改为冲突时刷新时间戳/批次/状态，幂等语义不变（重复调用只更新时间，不产生新行）。
