@@ -279,8 +279,12 @@ export function startAirPlayDiscovery(): void {
     spinQuery(3000, (svc: Service) => {
       const dev = devices.get(deviceIdOf(svc));
       if (dev) {
+        const wasAvailable = dev.available;
         dev.lastSeen = Date.now();
         dev.available = true;
+        // 离线→在线跳变必须发 alive:主进程据此把桥补挂到正在播放的组
+        // (2026-11-12:此前只续 lastSeen 不发事件 ⇒ 设备上线后整曲无声)。
+        if (!wasAvailable) emit({ type: "alive", device: dev });
       }
     });
     // AP2 能力同样需要续期:部分接收端的 `_airplay` 记录不会主动重发 TXT。

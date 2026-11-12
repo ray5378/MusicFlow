@@ -1863,6 +1863,15 @@ export function startAirPlayService(): void {
   airPlayServiceActive = true;
   startAirPlayDiscovery();
   onAirPlayEvent((e) => {
+    if (e.type === "alive") {
+      // 设备上线(§5.2「重新上线按加入处理」):把桥补挂到正在播放的组 —— 与 byebye 对称。
+      // 2026-11-12 240 实测:容器重启后设备晚于起播被发现,旧实现没有上线补桥路径,
+      // AirPlay 成员整首静默、到下一首 playMedia 才出声。幂等,非组内成员/未播时零开销。
+      void import("../group/protocolPlayer.js")
+        .then((m) => m.notifyAirplayDeviceOnline(e.device.id))
+        .catch((err) => log.warn("桥设备上线补挂失败(忽略)", { deviceId: e.device.id, err: (err as Error)?.message || err }));
+      return;
+    }
     if (e.type === "byebye") {
       // Phase 5(§5.2 桥设备离线):桥占用设备**不等重连** —— 立刻从全部活跃桥
       // 路由摘除(bridgeStop + 清 owner,标 offline);设备重新上线按「加入」处理。

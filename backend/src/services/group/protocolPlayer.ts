@@ -81,8 +81,15 @@ export function groupIdOfBridgeMember(deviceId: string): string | null {
 /** 播中加入一台 AirPlay 到桥路由(§5.2:「bridgePrepare + 从 pump ring 回填,
  *  不 rejoinMembersAirplay」)。桥路由未激活时返回 false(调用方回落 legacy join)。
  *  抛错 = bridgePrepare 失败(调用方按 MAJ-07 降级:回落 solo cast)。 */
-export async function bridgeJoinMember(groupId: string, deviceId: string): Promise<boolean> {
+export async function bridgeJoinMember(
+  groupId: string,
+  deviceId: string,
+  /** 无既有路由时是否允许新建(设备上线补桥专用:调用方已确认组在播)。
+   *  默认 false = 保持旧契约(只自愈「已有桥会话但登记缺失」,绝不给空闲组挂孤儿桥)。 */
+  allowRouteInit = false,
+): Promise<boolean> {
   let route = activeBridgeRoutes.get(groupId);
+  let createdRoute = false;
   // 自愈(2026-10-27):容器重启后 resume-active 恢复的桥可能没有路由登记
   // (PUT delays 实测 isBridgeRouteActive=false ⇒ 重建不触发 ⇒ 补偿改值失效)。
   // 路由缺失不再一票否决:现场初始化空路由走完整 join —— 子进程 prepare 自带
@@ -91,9 +98,12 @@ export async function bridgeJoinMember(groupId: string, deviceId: string): Promi
     if (!isAirplayBridgeEnabled()) return false;
     // 只自愈「设备确实有桥会话在跑」的情形(登记缺失的恢复桥/泄漏桥);
     // 组未在播或设备无桥时保持旧契约 false —— 否则会给空闲组挂一座孤儿桥。
-    if (!isBridgeOwned(deviceId)) return false;
+    // allowRouteInit(设备上线补桥,2026-11-12):容器重启后本曲起播时该设备还没被 mDNS
+    // 发现 ⇒ 整条流没有路由;设备上线后必须能新建一条,否则只能等下一首 playMedia。
+    if (!allowRouteInit && !isBridgeOwned(deviceId)) return false;
     route = [];
     activeBridgeRoutes.set(groupId, route);
+    createdRoute = true;
   }
   if (!isAirplayBridgeEnabled()) return false;
   if (route.some((r) => r.deviceId === deviceId)) return true; // 已在路由内,幂等
@@ -102,7 +112,14 @@ export async function bridgeJoinMember(groupId: string, deviceId: string): Promi
   // 协议**逐成员**选(AP1 设备 raop / 已配对 AP2 设备 ap2-realtime),不是组级:
   // 同一组里 AP1 与 AP2 成员各按自己的协议出声(选择点唯一 = control.ts)。
   const protocol = selectAirPlayBridgeProtocol(deviceId);
-  await bridgePrepareDevice(deviceId, token, protocol, groupId);
+  try {
+    await bridgePrepareDevice(deviceId, token, protocol, groupId);
+  } catch (e) {
+    // 新建的空路由必须回收:否则 activeBridgeRoutes.has(gid) 恒真,resume 的
+    // ensureBridgeRouteOnResume 会误判「路由还在」而永不重建。
+    if (createdRoute && route.length === 0) activeBridgeRoutes.delete(groupId);
+    throw e;
+  }
   const spec: BridgeSocketSpec = { deviceId, socketPath: bridgeSocketPath(deviceId, token), token, protocol };
   route.push(spec);
   const groupName = sendspinGroupName(groupId);
@@ -119,6 +136,7 @@ export async function bridgeJoinMember(groupId: string, deviceId: string): Promi
   } catch (e) {
     const idx = route.findIndex((x) => x.deviceId === deviceId && x.token === token);
     if (idx >= 0) route.splice(idx, 1);
+    if (createdRoute && route.length === 0) activeBridgeRoutes.delete(groupId); // 同上:空路由不保留
     // 摘会话失败(子进程没跑/已断)不回滚错误语义,交对账兜底,保持 best-effort。
     await bridgeStopDevice(token, deviceId).catch(() => { /* ignore */ });
     log.warn(
@@ -270,6 +288,51 @@ export async function notifyAirplayDeviceOffline(deviceId: string): Promise<numb
     }
   }
   if (n > 0) log.info(`[group][bridge] 设备离线: device=${deviceId} 已从 ${n} 个组桥路由摘除(标 offline,重连按加入处理)`);
+  return n;
+}
+
+/** 设备上线(mDNS alive,§5.2「重新上线按加入处理」):把该设备补挂到**正在播放**的
+ *  组桥路由 —— 与 `notifyAirplayDeviceOffline` 对称。
+ *
+ *  背景(2026-11-12 240 实测):容器重启后 mDNS 尚未回填,持久化设备行的 lastSeen 还是
+ *  上一进程的旧值(实测 8.5h)→ playMedia 的 `getOnlineAirplayIdsTolerant` 判离线 ⇒ 整条
+ *  流一座桥都没有 ⇒ AirPlay 成员**整首静默**;设备约 20s 后才被 mDNS 发现,而旧实现只处理
+ *  byebye,没有任何「上线补桥」路径,只能等下一首 playMedia 才出声(现场:第一首不出声、
+ *  第二首才响)。
+ *
+ *  幂等:已在路由内直接跳过;队列未激活(空闲组)不挂孤儿桥;泵暂停中不补(新建桥句柄
+ *  没有 HEARTBEAT pause 标志),交给 resume 的 ensureBridgeRouteOnResume。
+ *  @returns 补挂成功的组数(诊断用)。 */
+export async function notifyAirplayDeviceOnline(deviceId: string): Promise<number> {
+  if (!isAirplayBridgeEnabled() || !deviceId) return 0;
+  if (isAirPlayDeviceDisabled(deviceId)) return 0;
+  const { getQueueController } = await import("../player/index.js");
+  let n = 0;
+  for (const g of getGroupManager().list()) {
+    if (!splitGroupMembers(g.id).airplay.includes(deviceId)) continue;
+    if (activeBridgeRoutes.get(g.id)?.some((r) => r.deviceId === deviceId)) continue; // 已在路由内
+    let active = false;
+    let index = -1;
+    try {
+      const q = getQueueController().snapshot(g.id);
+      active = !!q?.isActive;
+      index = q?.currentIndex ?? -1;
+    } catch { /* 队列未装配:按未在播处理 */ }
+    if (!active || index < 0) continue; // 空闲组:绝不挂孤儿桥
+    const st = await import("../sendspin/index.js")
+      .then((m) => m.sendspinGroupPoll(sendspinGroupName(g.id)))
+      .catch(() => null);
+    if (st?.paused) continue; // 暂停中:交给 resume 补建
+    try {
+      if (await bridgeJoinMember(g.id, deviceId, true)) {
+        n++;
+        log.info(`[group][bridge] ${g.id}: 设备上线补桥 device=${deviceId}(本曲剩余部分恢复出声)`);
+      }
+    } catch (e) {
+      log.warn(`[group][bridge] ${g.id}: 上线补桥失败 device=${deviceId}: ${(e as Error)?.message || e}`);
+    }
+  }
+  if (n > 0) log.info(`[group][bridge] 设备上线: device=${deviceId} 已补挂 ${n} 个组桥路由`);
   return n;
 }
 
@@ -610,6 +673,12 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
       const dlnaOnline = getOnlineMemberIds(groupId);
       const apOnline = await getOnlineAirplayIdsTolerant(groupId);
       const spinOnline = getOnlineSendspinIds(groupId);
+      // F5(2026-11-12 240):容器重启后 mDNS 尚未回填 ⇒ 本曲一座桥都没有(AirPlay 成员整首
+      // 静默)。起播同时后台补一次更宽的重扫(不阻塞起播);设备一被看见就走
+      // notifyAirplayDeviceOnline 把桥补挂到本曲,不必等下一首。
+      if (apOnline.length === 0 && splitGroupMembers(groupId).airplay.length > 0) {
+        void rescanAirPlayDevices(2000).catch(() => { /* 重扫失败由常驻发现兜底 */ });
+      }
       // F2:路由决策单行日志(格式由 check-group-invariants 钉住;ageMs 供 staleness 误判追查)。
       log.info(`[group][route] ${groupId} dlna=${dlnaOnline.length} spin=${spinOnline.length} ap=${apOnline.length} apDetail=${JSON.stringify(splitGroupMembers(groupId).airplay.map((id) => {
         const dev = getAirPlayDevice(id);
