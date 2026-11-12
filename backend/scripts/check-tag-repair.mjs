@@ -15,8 +15,9 @@
 //       唯一实现，且下载期与修复期两条路径都真的调用它（默认简体）。
 //   R4 终态不可得：真缺标签但各来源都拿不到的歌必须落 outcome='unobtainable' 标记（带 30 天
 //       TTL 自愈），否则候选池永不收敛（实测 96% 未命中、池子无限膨胀）。
-//   R5 待修口径：pending 必须 = DB 预筛「缺歌词/封面/专辑」集合 − 已落完成标记集合，
-//       与扫描阶段 isTagRepairMarked 的跳过口径一致，否则界面「待修复」长期停在原位。
+//   R5 待修口径：pending 必须 = 下载根内 DB 预筛「缺专辑/封面/歌词/歌名/歌手」集合。
+//       2026-11-12 起标记不再阻止重试（终态不可得 30 天 TTL 自愈），故**不剔除**已标记：
+//       剔除会让界面「待修复」小于实际处理量，与已修复数对不上。
 //   R6 写入安全：容器白名单 + 原子写（tagtmp → rename，绝不原地覆盖）+ mp3 写 ID3v2.3。
 //   R7 QQ 搜索端点：必须用 search_for_qq_cp（client_search_cp 在 240 生产恒 500、体 0 字节）。
 //   R8 QQ 限流：基础间隔 1.2s + 300~800ms 随机抖动（防同出口 IP 高频被封）。
@@ -200,13 +201,13 @@ mustMatch(
 );
 mustMatch(
   TAGREPAIR,
-  /const markedPaths = new Set\(getTagRepairMarkedPaths\(\)\);/,
-  "pending 计算必须取已标记路径集合（与扫描跳过口径一致）",
+  /const pending = selectMediaMissingRows\(\)\.filter\(\(r\) => \{/,
+  "pending 必须来自 DB 预筛 selectMediaMissingRows（缺专辑/封面/歌词/歌名/歌手）",
 );
 mustMatch(
   TAGREPAIR,
-  /!markedPaths\.has\(fsPath\)/,
-  "pending 必须真正剔除已标记的歌（否则界面「待修复」长期停在原位、与已修复数字对不上）",
+  /return Boolean\(fsPath && inDownloadRoots\(fsPath, cfg\)\);/,
+  "pending 必须按下载根目录过滤（范围外的歌不计入待修，否则数字永远降不下来）",
 );
 
 // ---------- R6 写入安全 ----------
@@ -286,18 +287,23 @@ mustMatch(
 // ---------- R10 时长单位（统一秒） ----------
 mustMatch(
   TAGPROVIDER,
-  /Math\.round\(\(Number\(s\?\.duration\) \|\| 0\) \/ 1000\)/,
+  /const dtMs = Number\(s\?\.dt \?\? s\?\.duration\) \|\| 0;/,
+  "网易云时长原值是毫秒（dt/duration），必须先取原值再统一换算",
+);
+mustMatch(
+  TAGPROVIDER,
+  /durationSec: Math\.round\(dtMs \/ 1000\),/,
   "网易云给的是毫秒，必须 /1000 换算成秒（否则时长闸门恒失败 → 拿不到封面/元数据）",
 );
 mustMatch(
   TAGPROVIDER,
-  /function durationOk\(songDurationSec: number \| null \| undefined, intervalSec: any\): boolean \{/,
+  /function durationOk\(songDurationSec: number \| null \| undefined, intervalSec: any/,
   "时长一致性判定必须以「秒」为入参（旧实现误当毫秒 /1000，差两个数量级）",
 );
 mustMatch(
   TAGPROVIDER,
-  /platforms: \["qq", "netease"\]/,
-  "平台优先级必须 QQ 在前、网易云兜底",
+  /const platforms: TagPlatform\[\] = \["qq", "netease", "kugou", "kuwo"\];/,
+  "平台优先级必须 QQ 在前（网易云/酷狗/酷我依次兜底）",
 );
 
 // ---------- R11 断点续跑（快照落盘 + 停止/被杀后接着跑） ----------

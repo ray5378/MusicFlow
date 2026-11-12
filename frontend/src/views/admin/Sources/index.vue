@@ -134,7 +134,7 @@
           <el-form-item label="WebDAV URL"><el-input v-model="newSource.config.url" placeholder="http://192.168.1.100:5000/dav" /></el-form-item>
           <el-form-item :label="t('common.username')"><el-input v-model="newSource.config.username" :placeholder="t('common.optional')" /></el-form-item>
           <el-form-item :label="t('common.password')"><el-input v-model="newSource.config.password" type="password" :placeholder="t('common.optional')" show-password /></el-form-item>
-          <el-form-item :label="t('admin.sources.rootPath')"><el-input v-model="newSource.config.root_path" placeholder="/docker/musicflow/无损音乐" /></el-form-item>
+          <el-form-item :label="t('admin.sources.rootPath')"><el-input v-model="newSource.config.root_path" :placeholder="t('admin.sources.rootPathPlaceholder')" /></el-form-item>
         </template>
         <template v-else-if="newSource.type === 'smb'">
           <p style="margin: -4px 0 12px 100px; font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.5;">{{ t('admin.sources.smbExample') }}</p>

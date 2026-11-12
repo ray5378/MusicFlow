@@ -140,27 +140,59 @@ function run(
 
 describe("PATCH22 转码总闸 maxConcurrentTranscodes", () => {
   it("A. 上限 2：6 首目标的转码并发峰值 ≤ 2，且能到 2（闸在放行不是串行）", async () => {
+    // 用「测试代管闸门」代替固定 sleep：转码进来先挂起，由用例放行。这样峰值判据与
+    // 磁盘/CPU 负载无关 —— 原写法 sleep 250ms，CI 上第二首进闸要 1~4s（/tmp 写 8MB 的
+    // 真实 I/O 在并行跑 628 个用例时被拖慢）→ peak=1 假红（2026-11-12 全量跑实测）。
     let cur = 0;
     let peak = 0;
+    const pending: Array<() => void> = [];
     const tr = async (src: string) => {
       cur++;
       peak = Math.max(peak, cur);
-      await new Promise((r) => setTimeout(r, 250));
-      cur--;
+      await new Promise<void>((resolve) => {
+        pending.push(() => {
+          cur--;
+          resolve();
+        });
+      });
       return { ok: true, srcPath: src, dstPath: src.replace(/\.mp3$/, ".flac"), skipped: false, bytes: 1000, warnings: [] };
     };
     const deps = makeDeps({ collectCandidates: oneMp3, transcodeFile: tr });
     const targets = Array.from({ length: 6 }, (_, i) => tgt({ id: `t${i}`, title: `Song ${i}` }));
-    const r = await run({
+    const done = run({
       targets,
       sourceId: "src-1",
       config: { transcodeEnabled: true, transcodeTarget: "flac", transcodeLoudnessNormalize: false, maxConcurrentTranscodes: 2, perHostMinIntervalMs: 0, maxConcurrentDownloads: 3 },
       deps,
     });
+
+    const waitFor = async (cond: () => boolean, why: string): Promise<void> => {
+      const deadline = Date.now() + 10_000;
+      while (!cond()) {
+        if (Date.now() > deadline) throw new Error(`等待超时：${why}`);
+        await new Promise((r) => setTimeout(r, 5));
+      }
+    };
+    // 闸上限 2 ⇒ 第 2 首**必然**能进闸；若被退化成串行，这里会 10s 后明确失败。
+    await waitFor(() => pending.length >= 2, "第 2 首转码进闸（闸=2 时应立即放行）");
+    expect(peak).toBe(2);
+
+    // 逐批放行（每批 ≤2），直到 6 首全部转码完成。
+    let entered = 0;
+    while (entered < 6) {
+      if (pending.length === 0) {
+        await waitFor(() => pending.length > 0, "下一首转码进闸");
+        continue;
+      }
+      const batch = pending.splice(0, pending.length);
+      entered += batch.length;
+      batch.forEach((fn) => fn());
+    }
+    const r = await done;
     expect(r.items.map((x: any) => x.status)).toEqual(Array(6).fill("done"));
     expect(peak).toBeLessThanOrEqual(2);
     expect(peak).toBe(2);
-  });
+  }, 30_000);
 
   it("B. 转码抛错经 finally 释放闸位：失败歌照常收尾，其余歌不被卡死", async () => {
     let calls = 0;
