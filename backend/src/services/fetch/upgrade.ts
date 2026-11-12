@@ -23,7 +23,7 @@ import * as path from "node:path";
 import { eq, and, like } from "drizzle-orm";
 import { db, sqlite } from "../../db/index.js";
 import { songs, albums } from "../../db/schema.js";
-import { extractMetadataLocal, upsertSong } from "../source/scanner.js";
+import { applyAlbumConsensus, extractMetadataLocal, upsertSong } from "../source/scanner.js";
 import { recomputeSourceSongCount, sourceIdOfSongPath } from "../source/songCount.js";
 import type { FetchTarget } from "./candidates.js";
 import { DEFAULT_DOWNLOAD_ROOT, DEFAULT_LOSSLESS_ROOT, type FetchConfig } from "./config.js";
@@ -463,6 +463,8 @@ export async function migrateUpgradedSong(args: {
     if (!newRow && existsSync(args.newPath)) {
       try {
         const meta = await extractMetadataLocal(args.newPath);
+        // 与扫描入库同一口径：专辑无法自证时先做多平台一致判定(≥2 平台一致才采用)。
+        await applyAlbumConsensus(meta, newFullPath);
         upsertSong(newFullPath, meta, args.newSourceId, fingerprintOf(args.newPath));
       } catch (e) {
         warnings.push(`新文件元数据抽取失败: ${msgOf(e)}`);

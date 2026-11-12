@@ -593,20 +593,24 @@ const tagRepairTagType = computed<'primary' | 'success' | 'info' | 'warning' | '
 // 标签来源分布（按完成标记行的 platform 聚合，后端 DB 聚合、无实时探测）：
 // 把 platform 码映射为可读名并算占比；"" = 历史（未记录来源，旧行 platform 为 NULL）。
 // 只在有数据时展示，且按 count 降序排（QQ 优先命中 → 通常居首）。
+const PLATFORM_LABEL_KEYS: Record<string, string> = {
+  qq: "admin.fetch.tagRepair.platformQq",
+  netease: "admin.fetch.tagRepair.platformNetease",
+  kugou: "admin.fetch.tagRepair.platformKugou",
+  kuwo: "admin.fetch.tagRepair.platformKuwo",
+};
 const tagRepairPlatformRows = computed(() => {
   const list = tagRepairStatus.value.stats?.platforms ?? [];
   const total = list.reduce((s, r) => s + (r.count ?? 0), 0);
   return list
     .filter((r) => (r.count ?? 0) > 0)
     .map((r) => {
-      const label =
-        r.platform === "qq"
-          ? t("admin.fetch.tagRepair.platformQq")
-          : r.platform === "netease"
-            ? t("admin.fetch.tagRepair.platformNetease")
-            : r.platform
-              ? r.platform
-              : t("admin.fetch.tagRepair.platformUnknown");
+      const key = r.platform ? PLATFORM_LABEL_KEYS[r.platform] : "";
+      const label = key
+        ? t(key)
+        : r.platform
+          ? r.platform
+          : t("admin.fetch.tagRepair.platformUnknown");
       return {
         key: r.platform || "__unknown__",
         label,

@@ -173,6 +173,22 @@ export function cleanAlbumTag(value?: string): string {
 }
 
 /**
+ * 专辑值是否「无法自证」——只有多平台一致才能采信:
+ *   - 空 / Unknown Album / 「空」「未知」「none」等占位词;
+ *   - 不含任何字母或数字的值(纯符号:♡ / ? / … / ⊙▽⊙)。
+ * 含字母或数字的真实专辑名一律 false,不触发联网比对。
+ *
+ * 口径(产品定调 2026-11):下载/洗版、扫描入库、标签修复三条链路**统一**用它判断
+ * 是否需要查多平台共识;一致则采用,不一致时空值回退歌名、纯符号保留原值。
+ */
+export function needsAlbumConsensus(value?: string): boolean {
+  const v = (value ?? "").trim();
+  if (!v) return true;
+  if (isUnknownAlbum(v) || JUNK_ALBUM_RE.test(v)) return true;
+  return !/[\p{L}\p{N}]/u.test(v);
+}
+
+/**
  * 多平台专辑共识:至少 minPlatforms 个**不同平台**给出同一个专辑名,才认为它是真数据。
  *
  * 为什么需要:专辑写成 `空` / `♡` / `Unknown` 时,单看字符串无法区分「占位垃圾」和

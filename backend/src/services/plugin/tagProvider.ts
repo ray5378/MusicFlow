@@ -24,6 +24,10 @@
 //     且歌手不精确的一律不放宽(避免配到翻唱);
 //   - 版本标记:候选名与本地名的「现场/Live/Remix/伴奏/纯音乐/翻唱/电台版…」集合必须一致,
 //     不一致直接否决 —— 否则 `晴天 (KTV版伴奏)` 归一化后与 `晴天` 相等,会把伴奏当正曲;
+//     「片段/抖音/剪辑/试听」是**温和标记**(2026-11-12):不否决,只作同分排序偏好,
+//     因为这类多是同一录音的剪辑/试听片段,硬否决会把本可命中的正曲挡掉;
+//   - 占位歌手(Unknown Artist / 未知歌手 / 网络歌手 / 群星 / 华语群星 / 佚名 / Various Artists)
+//     不拼进搜索关键词、也不参与歌手否决(2026-11-12:定向样本 8/70 首是这类署名);
 //   - 总分红线:total >= 3(即标题必须命中)才可作为候选。
 //
 // 【各平台字段来源】(2026-11-12 在 240 生产容器实测)
@@ -37,12 +41,18 @@
 //   - 酷狗:complexsearch.kugou.com 搜索(signature = MD5(固定 KEY + 参数串 + 固定 KEY) 大写;
 //     实测 240 直连 200、~0.14s);候选自带 SongName/SingerName/AlbumName/Duration/PublishDate/
 //     Image(封面,{size} 替换为 480,歌手头像 singerimg 视为无封面);歌词走
-//     m.kugou.com/app/i/krc.php(返回带 BOM 的 LRC);无轨号/风格 → 不填。
+//     lyrics.kugou.com search → download(fmt=lrc, content 为 base64);
+//     旧 m.kugou.com/app/i/krc.php 2026-11-12 实测恒返回空,已弃用;无轨号/风格 → 不填。
 //   - 酷我:search.kuwo.cn/r.s(web 版 /api/www/* 在本网络恒 "request is illegal",勿用);
 //     响应是**单引号 JSON + &nbsp; 实体**,需容错解析;候选自带 NAME/ARTIST/ALBUM/DURATION/
 //     MUSICRID/web_albumpic_short(封面前缀 http://img1.kuwo.cn/star/albumcover/);
 //     专辑/时长缺失时用 m.kuwo.cn/newh5/singles/songinfoandlrc 的 songinfo 补;歌词也取自该接口
 //     的 lrclist;无年份/轨号/风格 → 不填。
+//
+// 【流派来源(2026-11-12 实测)】只有 QQ 的 `info.genre.content[].value` 可用:
+//   网易云专辑详情 /api/v1/album/{id} 的 `tags` 恒为空串、酷狗/酷我均不暴露可读流派。
+//   因此非 QQ 命中时,若 QQ 侧存在「标题精确 + 歌手通过」的候选,会补取一次详情只填 genre
+//   (搜索/详情均 memo,已查过不重复请求);拿不到就不填。
 //
 // 【匹配比较口径】标题/歌手/专辑比较前统一:小写 → 简繁折叠到简体 → 去括号装饰(【】()《》等)
 // →去 feat./ft. 及之后 → 去标点空白。**简繁折叠只用于比较**,写入字形仍由核心
@@ -268,7 +278,9 @@ function normalizeText(s: any): string {
     t = t.replace(/[(\[【《〈「『（〔｛][^)\]】》〉」』）〕｝]*[)\]】》〉」』）〕｝]/g, " ");
   }
   t = t.replace(/\b(?:feat|ft)\.?.*$/g, " ");
-  t = t.replace(/[\s.\-_'"`~!@#$%^&*()\[\]{}<>?/\\|,;:，。；：、！？…—“”‘’《》〈〉【】「」『』·（）〔〕｛｝]/g, "");
+  // 字符组里刻意用 \u 转义表示引号/反引号:守卫脚本的剥注释器按字符扫描、不解析正则字面量,
+  // 直接写裸字符会让它提前进入字符串态、把后续注释整段吞掉(check-tag-repair R7 假红)。
+  t = t.replace(/[\s.\-_\u0027\u0022\u0060~!@#$%^&*()\[\]{}<>?/\\|,;:，。；：、！？…—“”‘’《》〈〉【】「」『』·（）〔〕｛｝]/g, "");
   return t;
 }
 
@@ -280,8 +292,20 @@ function splitArtists(s: any): string[] {
     .filter(Boolean);
 }
 
-/** scanner 对「无歌手标签」写入的占位值;拼进关键词会恒 0 结果,匹配时也不参与交集。 */
-const ARTIST_PLACEHOLDERS = new Set(["unknown artist", "未知歌手", "未知艺术家"]);
+/** 无信息量的歌手值:拼进关键词会恒 0 结果,匹配时也不参与歌手否决。
+ *  除 scanner 写入的 Unknown 占位外,还包括「群星/网络歌手/佚名」这类**合辑署名**
+ *  (2026-11-12 定向样本:8/70 首);把它们当真实歌手会让整首永远配不上。 */
+const ARTIST_PLACEHOLDERS = new Set([
+  "unknown artist",
+  "未知歌手",
+  "未知艺术家",
+  "网络歌手",
+  "群星",
+  "华语群星",
+  "佚名",
+  "various artists",
+  "va",
+]);
 function isArtistPlaceholder(s: any): boolean {
   return ARTIST_PLACEHOLDERS.has(String(s ?? "").trim().toLowerCase());
 }
@@ -301,7 +325,16 @@ function titleForms(wantTitle: string): string[] {
 function titleMatches(candName: any, wantTitle: string): boolean {
   const a = normalizeText(candName);
   if (!a) return false;
-  return titleForms(wantTitle).some((f) => normalizeText(f) === a);
+  return titleForms(wantTitle).some((f) => {
+    const w = normalizeText(f);
+    if (!w) return false;
+    if (w === a) return true;
+    // 温和版本标记(片段/抖音/剪辑/试听)只影响排序,不参与否决:
+    // 去掉尾部这类标记后相等即视为同一录音(括号形式已在 normalizeText 阶段去掉)。
+    const wc = stripSoftVersionSuffix(w);
+    const ac = stripSoftVersionSuffix(a);
+    return !!wc && wc === ac;
+  });
 }
 
 function artistMatches(candSinger: any, wantArtist: string): boolean {
@@ -345,15 +378,41 @@ function durationOk(songDurationSec: number | null | undefined, intervalSec: any
 }
 
 /** 版本标记:现场 / 伴奏 / Remix 等。候选与本地必须一致(详见文件头【评分逻辑】)。
- *  拉丁字母标记要求词边界(避免 discover / recover 被误判成 cover)。 */
+ *  拉丁字母标记要求词边界(避免 discover / recover 被误判成 cover)。
+ *  【2026-11-12】「片段 / 抖音 / 剪辑 / 试听」从硬闸门下放到**温和层**:
+ *  这类候选多是同一录音的剪辑/试听片段,标题归一化后本就相等;继续硬否决会挡掉本可命中的正曲。
+ *  但 Live / 伴奏 / 纯音乐 / 翻唱 / 加速版等是**不同录音**,仍保持否决。 */
 const VERSION_MARKER_RE =
-  /(?:^|[^a-z])(live|remix|acoustic|cover|instrumental|karaoke)(?![a-z])|(伴奏|纯音乐|翻唱|现场|电台版|dj版|铃声|片段|加速版|慢速版|抖音)/gi;
+  /(?:^|[^a-z])(live|remix|acoustic|cover|instrumental|karaoke)(?![a-z])|(伴奏|纯音乐|翻唱|现场|电台版|dj版|铃声|加速版|慢速版)/gi;
+
+/** 温和版本标记:只作排序偏好(同分时优先「标记集合一致」),绝不否决候选。 */
+const SOFT_VERSION_MARKER_RE = /(片段|抖音|剪辑|试听)/gi;
+
+/** 去掉尾部温和标记(可带「版」字,可连续):「晴天片段」「晴天 剪辑版」→「晴天」。 */
+const SOFT_VERSION_SUFFIX_RE = /(?:(?:片段|抖音|剪辑|试听)(?:版)?)+$/;
+function stripSoftVersionSuffix(t: string): string {
+  return t.replace(SOFT_VERSION_SUFFIX_RE, "");
+}
 
 function versionMarkers(s: any): Set<string> {
   const out = new Set<string>();
   const t = applyVariant(cleanPlatformText(s).toLowerCase(), "simplified");
   for (const m of t.matchAll(VERSION_MARKER_RE)) out.add((m[1] ?? m[2] ?? "").toLowerCase());
   return out;
+}
+
+/** 温和版本标记集合(用于排序偏好)。 */
+function softVersionMarkers(s: any): Set<string> {
+  const out = new Set<string>();
+  const t = applyVariant(cleanPlatformText(s).toLowerCase(), "simplified");
+  for (const m of t.matchAll(SOFT_VERSION_MARKER_RE)) out.add((m[1] ?? "").toLowerCase());
+  return out;
+}
+
+function sameMarkers(a: Set<string>, b: Set<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const x of a) if (!b.has(x)) return false;
+  return true;
 }
 
 /**
@@ -432,7 +491,12 @@ function rankByScore(
     const i = PLATFORM_ORDER.indexOf(p);
     return i < 0 ? PLATFORM_ORDER.length : i;
   };
-  scored.sort((a, b) => b.score.total - a.score.total || orderOf(a.platform) - orderOf(b.platform));
+  // 温和版本标记只影响同分排序:标记集合与本地一致的候选优先(不改变任何分数/闸门)。
+  const localSoft = softVersionMarkers(song?.title);
+  const softRank = (c: PlatformCandidate): number => (sameMarkers(localSoft, softVersionMarkers(c.name)) ? 0 : 1);
+  scored.sort(
+    (a, b) => b.score.total - a.score.total || softRank(a) - softRank(b) || orderOf(a.platform) - orderOf(b.platform),
+  );
   return scored;
 }
 
@@ -707,17 +771,62 @@ function kugouCoverUrl(raw: any): string | undefined {
   return u.replace("{size}", "480");
 }
 
-/** 酷狗歌词:krc.php 返回带 BOM 的 LRC;若拿到的是加密 KRC(非 [ 开头)则视为无。 */
-async function kugouLyric(host: PluginHost, hash: string): Promise<string | null> {
-  const text = await requestText(
+/** 酷狗歌词(2026-11-12 换接口):lyrics.kugou.com 搜索 → download(lrc) → base64 解码。
+ *  旧的 `m.kugou.com/app/i/krc.php` 实测**恒返回空**(3/3 首,含热门曲),已不作为主路径。
+ *  搜索用「候选名 + 候选歌手」而不用本地字段:与匹配结果同源,避免二次歧义;
+ *  多个候选时优先时长接近的,否则取第一个(与 Music Tag Web 同口径)。 */
+async function kugouLyric(host: PluginHost, c: PlatformCandidate): Promise<string | null> {
+  const memoKey = `kg:ly:${c.id}`;
+  const cached = memoGet<string>(memoKey);
+  if (cached !== undefined) return cached;
+
+  const kw = [c.name, isArtistPlaceholder(c.singerName) ? "" : c.singerName].filter(Boolean).join(" ");
+  const durMs = Math.max(0, Math.round((Number(c.durationSec) || 0) * 1000));
+  const search = await requestJson(
     host,
-    "http://m.kugou.com/app/i/krc.php?cmd=100&timelength=999999&hash=" + encodeURIComponent(hash),
+    "https://lyrics.kugou.com/search?ver=1&man=yes&client=pc&keyword=" + encodeURIComponent(kw)
+      + `&duration=${durMs}&hash=${encodeURIComponent(c.id)}`,
     { headers: { Referer: "https://www.kugou.com/" } },
   );
-  if (!text) return null;
-  const s = text.replace(/^\uFEFF/, "").trim();
-  if (!s || !s.includes("[")) return null;
-  return s;
+  const list = search?.candidates;
+  if (!Array.isArray(list) || list.length === 0) return null;
+  const pick = pickKugouLyricCandidate(list, durMs);
+  if (!pick?.id) return null;
+  const dl = await requestJson(
+    host,
+    "https://lyrics.kugou.com/download?ver=1&client=pc&id=" + encodeURIComponent(String(pick.id))
+      + "&accesskey=" + encodeURIComponent(String(pick?.accesskey ?? "")) + "&fmt=lrc&charset=utf8",
+    { headers: { Referer: "https://www.kugou.com/" } },
+  );
+  const content = dl?.content;
+  if (typeof content !== "string" || !content) return null;
+  const lrc = normalizeLrc(Buffer.from(content, "base64").toString("utf8"));
+  // 只认带时间戳/标签的 LRC;解出来不是歌词(如 KRC 密文乱码)一律当没有。
+  if (!lrc || !lrc.includes("[")) return null;
+  memoSet(memoKey, lrc);
+  return lrc;
+}
+
+/** 歌词候选挑选:时长与候选曲目接近(±5s)的优先,否则第一个。 */
+function pickKugouLyricCandidate(list: any[], durMs: number): any {
+  if (durMs <= 0) return list[0];
+  const near = list.find((x: any) => {
+    const d = Number(x?.duration);
+    return Number.isFinite(d) && d > 0 && Math.abs(d - durMs) <= 5000;
+  });
+  return near ?? list[0];
+}
+
+/** 统一歌词文本:去 BOM、还原 HTML 实体、统一换行。 */
+function normalizeLrc(s: any): string {
+  return String(s ?? "")
+    .replace(/^\uFEFF/, "")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&#39;/g, "'")
+    .replace(/\r\n?/g, "\n")
+    .trim();
 }
 
 // ==================== 酷我音乐 ====================
@@ -819,16 +928,23 @@ function kuwoCoverUrl(short: any): string | undefined {
   return "http://img1.kuwo.cn/star/albumcover/" + s;
 }
 
-/** 酷我歌曲信息(专辑 / 时长缺失时补全):songinfo 里 artist 可能为空,只取 album/duration。 */
-async function kuwoSongInfo(host: PluginHost, rid: string): Promise<{ album?: string; durationSec?: number } | null> {
-  const memoKey = `kw:si:${rid}`;
-  const cached = memoGet<{ album?: string; durationSec?: number }>(memoKey);
+/** 酷我 songinfoandlrc 原始响应(元数据与歌词共用一次请求;只缓存有 data 的成功响应)。 */
+async function kuwoSongRaw(host: PluginHost, rid: string): Promise<any> {
+  const memoKey = `kw:raw:${rid}`;
+  const cached = memoGet<any>(memoKey);
   if (cached) return cached;
   const data = await requestJson(
     host,
     "https://m.kuwo.cn/newh5/singles/songinfoandlrc?musicId=" + encodeURIComponent(rid),
     { headers: { Referer: "https://www.kuwo.cn/" } },
   );
+  if (data?.data) memoSet(memoKey, data);
+  return data;
+}
+
+/** 酷我歌曲信息(专辑 / 时长缺失时补全):songinfo 里 artist 可能为空,只取 album/duration。 */
+async function kuwoSongInfo(host: PluginHost, rid: string): Promise<{ album?: string; durationSec?: number } | null> {
+  const data = await kuwoSongRaw(host, rid);
   const si = data?.data?.songinfo;
   if (!si) return null;
   const out: { album?: string; durationSec?: number } = {};
@@ -836,20 +952,12 @@ async function kuwoSongInfo(host: PluginHost, rid: string): Promise<{ album?: st
   if (album) out.album = album;
   const dur = Number(si?.duration) || 0;
   if (dur > 0) out.durationSec = dur;
-  memoSet(memoKey, out);
   return out;
 }
 
 /** 酷我歌词:lrclist 的 time(秒,小数)+ lineLyric,拼成标准 LRC。 */
 async function kuwoLyric(host: PluginHost, rid: string): Promise<string | null> {
-  const memoKey = `kw:ly:${rid}`;
-  const cached = memoGet<string>(memoKey);
-  if (cached) return cached;
-  const data = await requestJson(
-    host,
-    "https://m.kuwo.cn/newh5/singles/songinfoandlrc?musicId=" + encodeURIComponent(rid),
-    { headers: { Referer: "https://www.kuwo.cn/" } },
-  );
+  const data = await kuwoSongRaw(host, rid);
   const list = data?.data?.lrclist;
   if (!Array.isArray(list) || list.length === 0) return null;
   const lines: string[] = [];
@@ -861,9 +969,8 @@ async function kuwoLyric(host: PluginHost, rid: string): Promise<string | null> 
     const s = (t - m * 60).toFixed(2).padStart(5, "0");
     lines.push(`[${String(m).padStart(2, "0")}:${s}]${text}`);
   }
-  const lrc = lines.join("\n");
+  const lrc = normalizeLrc(lines.join("\n"));
   if (!lrc) return null;
-  memoSet(memoKey, lrc);
   return lrc;
 }
 
@@ -965,6 +1072,149 @@ async function resolveAll(host: PluginHost, song: LyricSongInput): Promise<Array
   return ranked;
 }
 
+// ==================== 专辑多平台一致判定 ====================
+//
+// 用途(产品定调 2026-11):本地专辑值「无法自证」(空 / 占位词 / 纯符号)时,
+// 不看单一平台的结论,而是让**每个平台各自选出自己的最优候选**,再看这些平台的
+// 专辑名是否一致 —— **至少 2 个不同平台报同一个专辑名**才采信。
+//
+// 为什么不用四家混排后的 top1:混排 top1 仍是「某一个平台说的」,无法区分
+// 《空》这类真专辑与平台占位噪声;跨平台一致才有自证力。
+//
+// 口径:
+//   - 每平台只取评分最高的一条(严格层 → 放宽层,与 searchMetadata 同口径);
+//   - 专辑归一化:先剥离**尾部版本标注**(Explicit / Deluxe / Remastered / 豪华版…),
+//     再「小写 + 去空白」;**绝不剥其它标点/符号**:否则 ♡ / ? 这类纯符号专辑会全部
+//     折叠成空串,被误判成「一致」(2026-11-12:平台间 `X` / `X (Deluxe)` 的写法差异
+//     曾把同一张专辑拆成两组,共识永远凑不齐);
+//   - 空 / Unknown Album 不参与投票;拿不到专辑的平台直接缺席;
+//   - 只缓存**有结论**的结果(与全文件「只缓存成功」纪律一致)。
+
+/** 专辑一致判定所需的最少不同平台数。 */
+const ALBUM_CONSENSUS_MIN_PLATFORMS = 2;
+
+/** 专辑尾部「版本标注」白名单(中英):只有命中这些词的括号/短横标注才参与剥离。
+ *  【2026-11-12】平台之间常见 `X (Explicit)` / `X (Deluxe)` / `X - Remastered` 的写法差异,
+ *  不剥离会导致同一张专辑被拆成两组、共识永远凑不齐 2 个平台。 */
+const ALBUM_EDITION_RE =
+  /^(?:explicit|clean|deluxe(?:\s*edition)?|remaster(?:ed)?(?:\s*version)?|expanded(?:\s*edition)?|special(?:\s*edition)?|bonus(?:\s*track)?|anniversary(?:\s*edition)?|reissue|mono|stereo|hi[- ]?res|24[- ]?bit|豪华版|加强版|重制版|特别版|纪念版|数位版|彩蛋版)$/i;
+
+function isAlbumEditionAnnotation(raw: string): boolean {
+  return ALBUM_EDITION_RE.test(raw.replace(/[_/]/g, " ").replace(/\s+/g, " ").trim());
+}
+
+/** 平台侧专辑值归一化:剥离**尾部版本标注**后,小写 + 去空白,保留其它符号。
+ *  纯符号值(♡ / ?)不做任何剥离,避免被折叠成空串后误判一致(见上文口径)。 */
+function albumConsensusKey(v: string): string {
+  let s = String(v ?? "").trim();
+  for (let i = 0; i < 4; i++) {
+    const bracketed = s.match(/[\(（\[【]\s*([^\(（\[【\)）\]】]*?)\s*[\)）\]】]$/);
+    if (bracketed && bracketed.index !== undefined && bracketed.index > 0 && isAlbumEditionAnnotation(bracketed[1]!)) {
+      s = s.slice(0, bracketed.index).trim();
+      continue;
+    }
+    const dashed = s.match(/\s+[-–—]\s+(.+)$/);
+    if (dashed && dashed.index !== undefined && dashed.index > 0 && isAlbumEditionAnnotation(dashed[1]!)) {
+      s = s.slice(0, dashed.index).trim();
+      continue;
+    }
+    break;
+  }
+  return s.toLowerCase().replace(/\s+/g, "");
+}
+
+/** 该平台「最优候选」的专辑名;严格层全被否时退放宽层(仅标题+歌手精确)。 */
+async function platformBestAlbum(
+  host: PluginHost,
+  cands: PlatformCandidate[],
+  song: LyricSongInput,
+): Promise<string> {
+  if (cands.length === 0) return "";
+  let ranked = rankByScore(cands, song);
+  if (ranked.length === 0) {
+    ranked = rankByScore(cands, song, DURATION_RELAXED_SEC)
+      .filter((c) => c.score.title === 2 && c.score.artist === 2);
+  }
+  const best = ranked[0];
+  if (!best) return "";
+  const usable = (v: string): string => {
+    const a = cleanPlatformText(v).trim();
+    if (!a || ALBUM_PLACEHOLDERS.has(a.toLowerCase())) return "";
+    return a;
+  };
+  // 严格层**前 3 个**候选里取第一个带有效专辑的(2026-11-12):原实现只看 ranked[0],
+  // 实测同平台 top3 内常有一条带专辑而另一条缺字段,逐条取可多救 3~4 首且不增加请求。
+  for (const c of ranked.slice(0, MAX_MATCH_TRIES)) {
+    const a = usable(c.albumName);
+    if (a) return a;
+  }
+  // 前 3 条都没有专辑字段 → 才走详情补全(QQ / 酷我),控制请求量。
+  let album = best.albumName || "";
+  // 酷我搜索常缺专辑 → 用 songinfo 补(与 metadataFor 同口径)。
+  if (!album && best.platform === "kuwo") {
+    const si = await kuwoSongInfo(host, best.id);
+    album = si?.album || "";
+  }
+  // QQ 搜索偶发缺 album → 用详情补。
+  if (!album && best.platform === "qq") {
+    const detail = await qqSongDetail(host, best.id);
+    album = cleanPlatformText(detail?.track?.album?.name ?? "");
+  }
+  return usable(album);
+}
+
+/**
+ * 四平台并发搜索 → 每平台取最优候选的专辑 → 归一化分组 → 返回一致值。
+ * 仅当某一组覆盖 ≥2 个不同平台时返回(组内取首个出现的原值)。
+ */
+async function resolveAlbumConsensus(
+  host: PluginHost,
+  song: LyricSongInput,
+): Promise<{ album: string; platforms: string[] } | null> {
+  const title = cleanPlatformText(song?.title);
+  if (!title) return null;
+  const artist = isArtistPlaceholder(song?.artist) ? "" : cleanPlatformText(song?.artist);
+
+  const key = `cons:${resolveKey(song)}`;
+  const cached = memoGet<{ album: string; platforms: string[] }>(key);
+  if (cached) return cached;
+
+  const platforms: TagPlatform[] = ["qq", "netease", "kugou", "kuwo"];
+  const settled = await Promise.allSettled([
+    qqSearch(host, title, artist),
+    nsSearch(host, title, artist),
+    kugouSearch(host, title, artist),
+    kuwoSearch(host, title, artist),
+  ]);
+  // 各平台并行取最优候选的专辑(酷我/QQ 的补全请求也并行)。
+  const albums = await Promise.all(
+    platforms.map((p, i) => {
+      const r = settled[i];
+      return r && r.status === "fulfilled" ? platformBestAlbum(host, r.value, song) : Promise.resolve("");
+    }),
+  );
+
+  const groups = new Map<string, { value: string; platforms: Set<string> }>();
+  for (let i = 0; i < platforms.length; i++) {
+    const album = albums[i];
+    if (!album) continue;
+    const k = albumConsensusKey(album);
+    if (!k) continue;
+    const g = groups.get(k) ?? { value: album, platforms: new Set<string>() };
+    g.platforms.add(platforms[i]!);
+    groups.set(k, g);
+  }
+  let best: { album: string; platforms: string[] } | null = null;
+  for (const g of groups.values()) {
+    if (g.platforms.size >= ALBUM_CONSENSUS_MIN_PLATFORMS) {
+      best = { album: g.value, platforms: [...g.platforms] };
+      break;
+    }
+  }
+  if (best) memoSet(key, best);
+  return best;
+}
+
 // ==================== 各平台:元数据 / 封面 / 歌词 ====================
 
 /** QQ 详情 → SongMetadata(轨号/年份/风格/专辑/时长)。 */
@@ -1047,6 +1297,34 @@ async function metadataFor(
   return meta;
 }
 
+/**
+ * 流派兜底(2026-11-12 四平台实测):
+ *   - 网易云专辑详情(retina /api/v1/album/{id})的 `tags` 在 230/240 实测**恒为空串**
+ *     (含《海阔天空》这类老专辑);酷狗搜索/详情、酷我 songinfo 也**不暴露可读流派**;
+ *     故流派只剩 QQ `info.genre.content[].value` 一个可靠来源。
+ *   - 当本次匹配没拿到 genre,而 QQ 侧存在「标题精确 + 歌手通过」的候选时,补取一次详情
+ *     只要 genre(QQ 搜索/详情均走 memo,已查过的不会重复请求);拿不到就留空,绝不臆造。
+ */
+async function qqGenreFor(host: PluginHost, song: LyricSongInput): Promise<string | undefined> {
+  const title = cleanPlatformText(song?.title);
+  if (!title) return undefined;
+  const artist = isArtistPlaceholder(song?.artist) ? "" : cleanPlatformText(song?.artist);
+
+  const memoKey = `genre:${resolveKey(song)}`;
+  const cached = memoGet<string>(memoKey);
+  if (cached) return cached;
+
+  const cands = rankByScore(await qqSearch(host, title, artist), song);
+  const hit = cands
+    .slice(0, MAX_MATCH_TRIES)
+    .find((c) => c.score.title === 2 && (!artist || c.score.artist === 2));
+  if (!hit) return undefined;
+  const genre = pickGenre((await qqSongDetail(host, hit.id))?.info);
+  if (!genre) return undefined;
+  memoSet(memoKey, genre);
+  return genre;
+}
+
 /** 某候选的封面(QQ 用详情里的专辑 mid;详情时长不符同样作废)。 */
 async function coverFor(
   host: PluginHost,
@@ -1070,7 +1348,7 @@ async function coverFor(
 async function lyricFor(host: PluginHost, c: PlatformCandidate): Promise<string | null> {
   if (c.platform === "qq") return qqLyric(host, c.id);
   if (c.platform === "netease") return nsLyric(host, c.id);
-  if (c.platform === "kugou") return kugouLyric(host, c.id);
+  if (c.platform === "kugou") return kugouLyric(host, c);
   return kuwoLyric(host, c.id);
 }
 
@@ -1106,7 +1384,7 @@ async function firstAvailable<T>(
 export const tagProviderManifest: PluginManifest = {
   id: "tag-provider",
   name: "在线标签补全",
-  version: "1.1.0",
+  version: "1.3.0",
   type: "metadata",
   description: "从 QQ 音乐(默认)、网易云音乐、酷狗音乐、酷我音乐补全歌曲标签(轨号/年份/时长/专辑/风格等)、封面与歌词",
   capabilities: ["metadataProvider", "coverProvider", "lyricProvider"],
@@ -1134,7 +1412,11 @@ Enriches a song's tags, cover art and lyrics from four platforms: QQ Music (defa
 
 ### Notes
 - No configuration; enabled by default;
-- Every missing field is left empty — nothing is ever fabricated (e.g. Kugou/Kuwo expose no readable genre, Kuwo exposes no release year).`,
+- Every missing field is left empty — nothing is ever fabricated. Genre is only available from QQ Music (NetEase album \`tags\` and Kugou/Kuwo expose no readable genre); when another platform wins, QQ is asked once for the genre of an exact-title match (memoized);
+- Kugou lyrics use \`lyrics.kugou.com\` search + download; placeholder artists (Unknown / 群星 / Various Artists…) never enter the search keyword or veto a candidate; "片段/抖音/剪辑/试听" are soft version markers (ranking preference only), while Live/伴奏/纯音乐/翻唱 still reject.
+
+### Album consensus
+When a local album tag cannot prove itself (empty, a placeholder such as "Unknown Album", or pure symbols like \`♡\` / \`?\`), all four platforms are queried and each contributes its best album from the first three strict matches. Trailing edition annotations (\`(Explicit)\`, \`(Deluxe)\`, \`(Remastered)\`, …) are ignored when comparing; the album is accepted only when **at least two different platforms** agree.`,
     },
   },
   documentation: `### 功能介绍
@@ -1154,7 +1436,15 @@ Enriches a song's tags, cover art and lyrics from four platforms: QQ Music (defa
    (标题必须命中)才可作为候选;
 4. 搜索结果按关键词 / 曲 ID 缓存 180s(只缓存成功响应),三个能力共享同一轮搜索;
    QQ 请求仍走全局限流(≥1.2s + 300~800ms 抖动);
-5. 拿不到的字段一律不填,绝不臆造(例如酷狗/酷我没有可读风格名,酷我没有发行年份)。`,
+5. 拿不到的字段一律不填,绝不臆造。风格(流派)只有 QQ 提供可读值 ——
+   网易云专辑 \`tags\` 与酷狗/酷我均无可读流派;非 QQ 命中时会用 QQ 侧同曲候选补取一次
+   (memo 化,拿不到不填);酷狗歌词走 lyrics.kugou.com 的 search + download(lrc);
+6. **专辑多平台一致判定**:本地专辑为空 / 占位词 / 纯符号时,四平台各自取
+   **严格层前 3 个候选中第一个带专辑的**做比对,归一化时容忍 \`(Explicit)\` /
+   \`(Deluxe)\` / \`(Remastered)\` 等尾部版本标注,**至少 2 个不同平台一致**才采用;
+7. 占位歌手(Unknown Artist / 未知歌手 / 网络歌手 / 群星 / 华语群星 / 佚名 / Various Artists)
+   不拼进搜索关键词、不参与歌手否决;「片段 / 抖音 / 剪辑 / 试听」为温和版本标记,
+   不否决候选,仅在同分时优先选择标记一致者(Live / 伴奏 / 纯音乐 / 翻唱仍否决)。`,
 };
 
 // ==================== Plugin impl ====================
@@ -1165,7 +1455,12 @@ export const tagProviderPlugin: MetadataProviderPlugin & CoverProviderPlugin & L
   async searchMetadata(host: PluginHost, song: LyricSongInput): Promise<SongMetadata | null> {
     try {
       if (!cleanPlatformText(song?.title)) return null;
-      return await firstAvailable(host, song, metadataFor);
+      const meta = await firstAvailable(host, song, metadataFor);
+      if (meta && !meta.genre) {
+        const genre = await qqGenreFor(host, song);
+        if (genre) meta.genre = genre;
+      }
+      return meta;
     } catch {
       return null;
     }
@@ -1184,8 +1479,21 @@ export const tagProviderPlugin: MetadataProviderPlugin & CoverProviderPlugin & L
   async searchLyrics(host: PluginHost, song: LyricSongInput): Promise<{ lrc?: string; text?: string } | null> {
     try {
       if (!cleanPlatformText(song?.title)) return null;
-      const lrc = await firstAvailable(host, song, lyricFor);
-      return lrc && lrc.trim() ? { lrc } : null;
+      const raw = await firstAvailable(host, song, lyricFor);
+      const lrc = normalizeLrc(raw);
+      return lrc ? { lrc } : null;
+    } catch {
+      return null;
+    }
+  },
+
+  async searchAlbumConsensus(
+    host: PluginHost,
+    song: LyricSongInput,
+  ): Promise<{ album: string; platforms: string[] } | null> {
+    try {
+      if (!cleanPlatformText(song?.title)) return null;
+      return await resolveAlbumConsensus(host, song);
     } catch {
       return null;
     }

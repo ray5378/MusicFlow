@@ -549,6 +549,7 @@ describe("orchestrator — downloadRootOverride（洗版成品根覆盖）", () 
         searchLyrics: async () => null,
         searchCover: async () => null,
         searchMetadata: async () => null,
+        searchAlbumConsensus: async () => null,
       } as unknown as FetchDeps;
 
       const r = await runFetchPipeline({

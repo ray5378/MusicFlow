@@ -206,3 +206,41 @@ export async function searchMetadata(song: LyricSongInput, opts?: ProviderMatchO
   }
   return null;
 }
+
+/** Whether any enabled metadata provider implements the album-consensus probe. */
+export function hasAlbumConsensusProvider(): boolean {
+  return getEnabledByCapability("metadataProvider").some(
+    (p) => typeof p.impl?.searchAlbumConsensus === "function",
+  );
+}
+
+/**
+ * 专辑多平台一致判定(first-match-wins,按 `metadata.providerPriority` 顺序)。
+ *
+ * 只在专辑值「无法自证」(空 / 占位 / 纯符号)时调用:实现方应并发查多个平台,
+ * **至少 2 个不同平台**报同一专辑名才返回;否则返回 null,由调用方决定回退策略。
+ * @returns `{ album, platforms }` 或 null(无一致结果)。
+ */
+export async function searchAlbumConsensus(
+  song: LyricSongInput,
+  opts?: ProviderMatchOptions,
+): Promise<{ album: string; platforms: string[] } | null> {
+  const providers = filterProvidersByPreference(getEnabledByCapability("metadataProvider"), "metadata");
+  for (const { manifest, impl } of providers) {
+    if (typeof impl?.searchAlbumConsensus !== "function") continue;
+    const cfg = getPluginConfig(manifest.id) || {};
+    const host = createPluginHost(manifest, cfg, APP_VERSION);
+    try {
+      const r = await impl.searchAlbumConsensus(host, song);
+      if (r && r.album) {
+        recordSuccess(manifest.id);
+        opts?.onMatch?.(manifest.id, manifest.builtinTagSource === true);
+        return r;
+      }
+    } catch (e: any) {
+      recordFailure(manifest.id, e?.message || String(e));
+      log.error(`provider ${manifest.id} failed`, { err: e?.message || e });
+    }
+  }
+  return null;
+}

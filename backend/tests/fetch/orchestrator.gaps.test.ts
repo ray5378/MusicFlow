@@ -130,6 +130,7 @@ function makeDeps(over: Record<string, unknown> = {}): FetchDeps {
     searchLyrics: async () => null,
     searchCover: async () => null,
     searchMetadata: async () => null,
+    searchAlbumConsensus: async () => null,
     shouldSkipByCooldown: () => false,
     lastDownloadAttempt: () => null,
     recordDownloadAttempt: () => undefined,

@@ -490,6 +490,13 @@ export interface MetadataProviderPlugin {
   manifest: PluginManifest;
   /** Return the matched tag metadata for a song, or null if this provider can't. */
   searchMetadata(host: PluginHost, song: LyricSongInput): Promise<SongMetadata | null>;
+  /** 专辑多平台一致判定(可选):本地专辑值「无法自证」(空/占位/纯符号)时,
+   *  并发查多个平台,仅当**至少 2 个不同平台**报同一专辑名时返回该值。
+   *  返回 null = 无一致结果(调用方自行决定回退策略)。 */
+  searchAlbumConsensus?(
+    host: PluginHost,
+    song: LyricSongInput,
+  ): Promise<{ album: string; platforms: string[] } | null>;
 }
 
 /** A discovered / controllable playback device (renderer). */

@@ -10,7 +10,8 @@ import { deleteSongLyric } from "../lyricsStore.js";
 import { deleteAnalysisMany } from "../audio/analysisStore.js";
 import { invalidateArtistList } from "../../utils/artistListCache.js";
 import { createLogger } from "../../utils/logger.js";
-import { recoverUnknownTags, isUnknownAlbum } from "./tagRecovery.js";
+import { recoverUnknownTags, isUnknownAlbum, needsAlbumConsensus } from "./tagRecovery.js";
+import { searchAlbumConsensus } from "../../plugins/providers.js";
 import { songGroupEnabled, groupKeyForConfig, findGroupForSongConfig } from "../plugin/core/songGroup.js";
 import { newGroupId, normalizeGroupText } from "../../utils/songGroup.js";
 import { buildSmbConfig, normalizeSmbPath, smbReaddir, smbReadRange, type SmbEntry } from "./smbClient.js";
@@ -286,6 +287,7 @@ export async function scanWebDAVSource(sourceId: string, config: any, mode: Scan
         // 升到顶(4MB)仍解析不出标签 —— 此前完全静默,现在留一条可检索的 warn。
         log.warn(`[SCANNER] ${path.basename(href)} 取头升到 ${HEADER_LADDER[HEADER_LADDER.length - 1] / 1024 / 1024}MB 仍解析不出标签,元数据回落文件名推断`);
       }
+      await applyAlbumConsensus(meta, songPath);
       const result = upsertSong(songPath, meta, sourceId, mode === "incremental" ? buildFingerprint(entry) : undefined);
       if (result === "added") added++;
       else updated++;
@@ -526,6 +528,7 @@ export async function scanSmbSource(
       if (meta.incomplete) {
         log.warn(`[SCANNER] ${entry.name} 取头升到 ${HEADER_LADDER[HEADER_LADDER.length - 1] / 1024 / 1024}MB 仍解析不出标签,元数据回落文件名推断`);
       }
+      await applyAlbumConsensus(meta, songPath);
       const result = upsertSong(songPath, meta, sourceId, mode === "incremental" ? fp : undefined);
       if (result === "added") added++;
       else updated++;
@@ -1045,6 +1048,37 @@ export function resolveLocalGroup(meta: MusicMetadata): { groupId: string; group
 }
 
 
+/**
+ * 扫描入库前的「专辑多平台一致判定」:与下载/洗版/标签修复同一口径(产品定调 2026-11)。
+ *
+ * 触发条件 = 专辑值无法自证(空 / Unknown / 「空」等占位 / 纯符号 ♡·? ·…);
+ * 命中后并发查多平台,**≥2 个不同平台一致**才改写 meta.album。
+ * 拿不到一致结果时保持原值:空值仍由 upsertSong 用歌名兜底,纯符号原样保留。
+ *
+ * 纪律:整段 try/catch —— 联网/插件异常绝不让入库失败。
+ * 库里已有可信专辑(非占位/非纯符号)时直接跳过,避免全量扫描对同一批歌反复联网。
+ */
+export async function applyAlbumConsensus(meta: MusicMetadata, songPath: string): Promise<void> {
+  try {
+    if (!needsAlbumConsensus(meta.album)) return;
+    const title = String(meta.title ?? "").trim();
+    if (!title || /^unknown(\s*title)?$/i.test(title)) return;
+    // 已入库且专辑可信 → 无需再比对(增量扫描/重扫同一文件时省掉一轮网络)。
+    const row = db.select({ album: songs.album }).from(songs).where(eq(songs.path, songPath)).get();
+    const dbAlbum = String(row?.album ?? "").trim();
+    if (dbAlbum && !needsAlbumConsensus(dbAlbum)) return;
+    const r = await searchAlbumConsensus({
+      title,
+      artist: meta.artist ?? null,
+      album: meta.album || null,
+      duration: meta.duration || null,
+    });
+    if (r?.album) meta.album = r.album;
+  } catch {
+    /* 联网/一致性判定失败 → 保持原值,入库照常 */
+  }
+}
+
 export function upsertSong(songPath: string, meta: MusicMetadata, sourceId: string, fingerprint?: string): "added" | "updated" {
   // 三条扫描链路(webdav/smb/local)的唯一入库入口:Unknown 标签在这里统一兜底。
   recoverUnknownTags(meta, songPath);
@@ -1229,6 +1263,7 @@ export async function scanLocalFiles(
       const stat = fs.statSync(filePath);
       const fp = `${stat.size}|${stat.mtimeMs}`;
       const meta = await extractMetadataLocal(filePath);
+      await applyAlbumConsensus(meta, `l:${sourceId}:${filePath}`);
       const result = upsertSong(`l:${sourceId}:${filePath}`, meta, sourceId, fp);
       if (result === "added") added++;
       else updated++;
@@ -1287,6 +1322,7 @@ export async function scanLocalSource(sourceId: string, config: any, mode: ScanM
         }
       }
       const meta = await extractMetadataLocal(filePath);
+      await applyAlbumConsensus(meta, songKey);
       const result = upsertSong(songKey, meta, sourceId, fp);
       if (result === "added") added++;
       else updated++;

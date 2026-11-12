@@ -72,10 +72,12 @@ vi.mock("music-metadata", () => ({ parseFile: parseFileMock }));
 const searchCoverMock = vi.hoisted(() => vi.fn());
 const searchLyricsMock = vi.hoisted(() => vi.fn());
 const searchMetadataMock = vi.hoisted(() => vi.fn());
+const searchAlbumConsensusMock = vi.hoisted(() => vi.fn());
 vi.mock("../../src/plugins/providers.js", () => ({
   searchCover: searchCoverMock,
   searchLyrics: searchLyricsMock,
   searchMetadata: searchMetadataMock,
+  searchAlbumConsensus: searchAlbumConsensusMock,
 }));
 
 const writeTagsMock = vi.hoisted(() => vi.fn());
@@ -122,7 +124,7 @@ let root: string;
 function insertSong(
   id: string,
   fsPath: string,
-  opts: { album?: string; albumId?: string; hasLyrics?: number | null } = {},
+  opts: { album?: string; albumId?: string; hasLyrics?: number | null; coverArt?: string } = {},
 ): void {
   mkdirSync(dirname(fsPath), { recursive: true });
   writeFileSync(fsPath, "fLaC-fake-audio-bytes");
@@ -133,6 +135,7 @@ function insertSong(
       artist: "测试歌手",
       album: opts.album ?? "测试专辑",
       albumId: opts.albumId ?? null,
+      coverArt: opts.coverArt ?? null,
       path: `l:dl-testsrc:${fsPath}`,
       suffix: "flac",
       bitRate: 900,
@@ -157,7 +160,7 @@ function queueState(): Record<string, { count: number; nextAt: number }> {
 /** 构造 parseFile 返回的 common 形状。
  *  探针读的维度：picture/lyrics/album + 专辑艺术家/轨/碟/年/流派（元数据维度）。
  *  默认全部「已存在」，用 over 开关模拟缺失。 */
-function probe(over: Partial<{ cover: boolean; lyric: boolean; album: boolean; meta: boolean }> = {}): {
+function probe(over: Partial<{ cover: boolean; lyric: boolean; album: boolean; meta: boolean; title: boolean; artist: boolean }> = {}): {
   common: {
     picture: unknown[];
     lyrics: string[];
@@ -177,8 +180,8 @@ function probe(over: Partial<{ cover: boolean; lyric: boolean; album: boolean; m
       picture: over.cover === false ? [] : [{}],
       lyrics: over.lyric === false ? [] : ["[00:01]x"],
       album: over.album === false ? "" : "专辑",
-      title: "测试歌",
-      artist: "测试歌手",
+      title: over.title === false ? "" : "测试歌",
+      artist: over.artist === false ? "" : "测试歌手",
       albumartist: metaMissing ? "" : "测试专辑艺术家",
       track: { no: metaMissing ? 0 : 3, of: 12 },
       disk: { no: metaMissing ? 0 : 1, of: 2 },
@@ -198,6 +201,7 @@ beforeEach(() => {
   searchCoverMock.mockResolvedValue(null);
   searchLyricsMock.mockResolvedValue(null);
   searchMetadataMock.mockResolvedValue(null);
+  searchAlbumConsensusMock.mockResolvedValue(null);
   writeTagsMock.mockResolvedValue({ ok: true, file: "/x.flac", bytes: 1, mtimeMs: 1, warnings: [] });
   cacheRemoteCoverMock.mockResolvedValue(null);
   resolveCoverFileMock.mockReturnValue(null);
@@ -319,29 +323,44 @@ describe("repairSongTags", () => {
   });
 
   // ---- 修正3（2026-10-17）：scanner 占位专辑值不写进文件 ----
-  it("修正3：DB 专辑为占位值(Unknown Album) 而文件专辑为空 → 绝不写占位；网络也拿不到时 unobtainable", async () => {
+  it("修正3：DB 专辑为占位值(Unknown Album) 而文件专辑为空 → 绝不写占位；无法自证时 skip", async () => {
     const p = join(root, "ph1.flac");
-    insertSong("s-ph1", p, { album: "Unknown Album" });
+    insertSong("s-ph1", p, { album: "Unknown Album", hasLyrics: 1, coverArt: "c.jpg" });
     parseFileMock.mockResolvedValueOnce(probe({ album: false }));
-    searchMetadataMock.mockResolvedValueOnce(null);
 
     const r = await repairSongTags("s-ph1", cfg());
-    // 占位值视同空 → needAlbum=false（不兜底写入）；needMeta=true 故走网络，但拿不到 → 无写入。
-    expect(r.outcome).toBe("unobtainable");
+    // 占位值视同空 → needAlbum=false；专辑无法自证但多平台也无一致结论 → 不写任何值。
+    expect(r.outcome).toBe("skip");
     expect(writeTagsMock).not.toHaveBeenCalled();
+    // 2026-11-12 起不再为专辑单独走 searchMetadata（只补歌名/歌手）。
+    expect(searchMetadataMock).not.toHaveBeenCalled();
   });
 
-  it("修正3：占位专辑不作为兜底，但网络拿到真专辑名时照常写入（不臆造、也不丢失）", async () => {
+  it("修正3：占位专辑不作为兜底，但多平台一致拿到真专辑名时照常写入（不臆造、也不丢失）", async () => {
     const p = join(root, "ph2.flac");
     insertSong("s-ph2", p, { album: "未知专辑" });
     parseFileMock.mockResolvedValueOnce(probe({ album: false }));
-    searchMetadataMock.mockResolvedValueOnce({ title: "x", artist: "y", album: "真专辑" });
+    // 2026-11 统一口径：专辑只认「≥2 个不同平台一致」的结果，单一平台（searchMetadata）的
+    // album 不再直接采用。
+    searchAlbumConsensusMock.mockResolvedValueOnce({ album: "真专辑", platforms: ["qq", "netease"] });
 
     const r = await repairSongTags("s-ph2", cfg());
     expect(r.outcome).toBe("fixed");
     expect(r.album).toBe(true);
     const tags = writeTagsMock.mock.calls[0][1];
     expect(tags.album).toBe("真专辑");
+  });
+
+  it("统一口径：多平台不一致时，单一平台 metadata 的 album 不写进文件（且不再补其它元数据）", async () => {
+    const p = join(root, "ph3.flac");
+    insertSong("s-ph3", p, { album: "Unknown Album", hasLyrics: 1, coverArt: "c.jpg" });
+    parseFileMock.mockResolvedValueOnce(probe({ album: false }));
+    // 单一平台 metadata 只可能提供 album；2026-11-12 起 album 不采用、其它字段也不补 → 无写入。
+    searchAlbumConsensusMock.mockResolvedValueOnce(null);
+
+    const r = await repairSongTags("s-ph3", cfg());
+    expect(r.outcome).toBe("skip");
+    expect(writeTagsMock).not.toHaveBeenCalled();
   });
 
   // ---- 修正2（2026-10-17）：文件已内嵌封面而 albums.cover_art 为空 → 落盘并回写 ----
@@ -373,27 +392,27 @@ describe("repairSongTags", () => {
     expect(existsSync(join(getDataDir(), "covers", "alb1.jpg"))).toBe(true);
   });
 
-  it("修正1：真写入后登记完成标记（src=命中的 provider id），下轮扫描可直接跳过", async () => {
+  it("修正1：真写入后登记完成标记（src=命中的 provider id）；2026-11-12 起标记不再阻止重试", async () => {
     const p = join(root, "mark-after.flac");
     insertSong("s-ma", p, { hasLyrics: 0 });
-    parseFileMock.mockResolvedValueOnce(probe({ lyric: false }));
+    parseFileMock.mockResolvedValue(probe({ lyric: false }));
     searchLyricsMock.mockResolvedValueOnce("[00:01.00]测试歌词");
 
     const r = await repairSongTags("s-ma", cfg());
     expect(r.outcome).toBe("fixed");
     // 真写入 → 标记登记（此前只在下载期标记，修复后无标记导致 tag_repair_done 恒 0 行）
     expect(isTagRepairMarked(p)).toBe(true);
-    // 同一进程再跑一次（文件未变）→ 命中标记直接 skip、不探针
+    // 强制重试：第二轮即便有标记也重新探针；DB has_lyrics 已对齐 1 → 文件齐备，直接 skip。
     parseFileMock.mockClear();
     const r2 = await repairSongTags("s-ma", cfg());
+    expect(parseFileMock).toHaveBeenCalled();
     expect(r2.outcome).toBe("skip");
-    expect(parseFileMock).not.toHaveBeenCalled();
   });
 
-  it("修正6（选项C）：unobtainable（真缺但拿不到）→ 登记 outcome='unobtainable' 标记，池子一轮收敛", async () => {
+  it("修正6（选项C）：unobtainable（真缺但拿不到）→ 仍登记标记，但每轮强制重试", async () => {
     const p = join(root, "mark-none.flac");
     insertSong("s-mn", p, { hasLyrics: 0 });
-    parseFileMock.mockResolvedValueOnce(probe({ lyric: false }));
+    parseFileMock.mockResolvedValue(probe({ lyric: false }));
     searchLyricsMock.mockResolvedValueOnce(null);
 
     const r = await repairSongTags("s-mn", cfg());
@@ -402,15 +421,15 @@ describe("repairSongTags", () => {
       .prepare("SELECT outcome, src FROM tag_repair_done WHERE fs_path = ?")
       .get(p) as { outcome: string; src: string };
     expect(row.outcome).toBe("unobtainable");
-    // 已登记 → 命中标记：下轮扫描直接跳过（不再无限重探/重扫，池子收敛）
     expect(isTagRepairMarked(p)).toBe(true);
     expect(getTagRepairStats().unobtainableTotal).toBe(1);
     // 该行不计入「已修复」
     expect(getTagRepairRepairedTotal()).toBe(0);
+    // 2026-11-12：标记不再跳过 —— 第二轮仍会重新探针并重试
     parseFileMock.mockClear();
     const r2 = await repairSongTags("s-mn", cfg());
-    expect(r2.outcome).toBe("skip");
-    expect(parseFileMock).not.toHaveBeenCalled();
+    expect(parseFileMock).toHaveBeenCalled();
+    expect(r2.outcome).toBe("unobtainable");
   });
 
   it("修正6：unobtainable 标记带 30 天 TTL —— 超期后允许重探（自愈窗口；防断网把整库永久标记）", async () => {
@@ -429,12 +448,12 @@ describe("repairSongTags", () => {
 
   it("来源平台透传：searchMetadata 命中 QQ → 完成标记 platform=qq（供来源分布聚合）", async () => {
     const p = join(root, "plat-qq.flac");
-    insertSong("s-pq", p);
-    parseFileMock.mockResolvedValueOnce(probe({ meta: false }));
+    insertSong("s-pq", p, { hasLyrics: 1, coverArt: "c.jpg" });
+    parseFileMock.mockResolvedValueOnce(probe({ title: false }));
     // 模拟真实 providers.searchMetadata：拿到 meta 前先回调 onMatch（providerId=tag-provider）。
     searchMetadataMock.mockImplementationOnce(async (_song: unknown, opts?: { onMatch?: (id: string, b: boolean) => void }) => {
       opts?.onMatch?.("tag-provider", true);
-      return { albumArtist: "测试专辑艺术家", track: 3, year: 2024, genre: "Pop", platform: "qq" };
+      return { title: "补的歌名", platform: "qq" };
     });
 
     const r = await repairSongTags("s-pq", cfg());
@@ -448,11 +467,11 @@ describe("repairSongTags", () => {
 
   it("来源平台透传：QQ 落空、网易云兜底命中 → 完成标记 platform=netease", async () => {
     const p = join(root, "plat-ns.flac");
-    insertSong("s-pns", p);
-    parseFileMock.mockResolvedValueOnce(probe({ meta: false }));
+    insertSong("s-pns", p, { hasLyrics: 1, coverArt: "c.jpg" });
+    parseFileMock.mockResolvedValueOnce(probe({ artist: false }));
     searchMetadataMock.mockImplementationOnce(async (_song: unknown, opts?: { onMatch?: (id: string, b: boolean) => void }) => {
       opts?.onMatch?.("tag-provider", true);
-      return { albumArtist: "测试专辑艺术家", platform: "netease" };
+      return { artist: "补的歌手", platform: "netease" };
     });
 
     const r = await repairSongTags("s-pns", cfg());
@@ -535,15 +554,14 @@ describe("repairSongTags", () => {
     expect(writeTagsMock).toHaveBeenCalledTimes(1);
   });
 
-  it("命中下载期完成标记（文件未变）→ 不探针、不联网直接 skip", async () => {
+  it("命中下载期完成标记（文件未变）→ 仍探针（2026-11-12 强制重试），齐备时只 skip 不联网", async () => {
     const p = join(root, "marked.flac");
     insertSong("s-mark", p, { hasLyrics: 0 });
     // 模拟「下载期内置标签来源插件已打好标签并登记标记」。
     expect(markTagRepairDone(p, "tag-provider")).toBe(true);
-    // 不额外排 once 假值：用 beforeEach 的默认桩验证「根本没被调用」，避免 once 队列跨用例泄漏。
     const r = await repairSongTags("s-mark", cfg());
     expect(r.outcome).toBe("skip");
-    expect(parseFileMock).not.toHaveBeenCalled();
+    expect(parseFileMock).toHaveBeenCalled(); // 标记不再阻止探针
     expect(searchCoverMock).not.toHaveBeenCalled();
     expect(searchLyricsMock).not.toHaveBeenCalled();
     expect(writeTagsMock).not.toHaveBeenCalled();
@@ -660,7 +678,7 @@ describe("tagRepair stats/progress", () => {
     expect(getTagRepairStats().repaired).toBe(1); // 运行结束已清缓存，重算拿到新值
   });
 
-  it("修正7：pending 口径剔除已落完成标记的歌（不再重扫 → 不再计入待修复）", () => {
+  it("修正7（2026-11-12 调整）：pending 不再剔除已落标记的歌（强制重试口径）", () => {
     const p = join(root, "pend-mk.flac");
     insertSong("s-pmk", p, { hasLyrics: 0, albumId: null });
     cfg();
@@ -673,7 +691,7 @@ describe("tagRepair stats/progress", () => {
     // beforeEach 已清 statsCache → 首次计算即为最新值（无缓存干扰）。
     const s = getTagRepairStats();
     expect(s.total).toBe(1);
-    expect(s.pending).toBe(0); // 该歌 DB 缺歌词/封面，但已落标记 → 不计入待修
+    expect(s.pending).toBe(1); // 标记不再阻止重试 → 该歌仍计入待修
     expect(s.unobtainableTotal).toBe(1);
   });
 
@@ -877,10 +895,10 @@ describe("repairSongTags 异常与补写缺口", () => {
     expect(writeTagsMock).not.toHaveBeenCalled();
   });
 
-  it("元数据补全抛错 → 只告警，退回 unobtainable", async () => {
+  it("歌名补全抛错 → 只告警，退回 unobtainable", async () => {
     const p = join(root, "meta-err.flac");
-    insertSong("s-merr", p);
-    parseFileMock.mockResolvedValueOnce(probe({ meta: false }));
+    insertSong("s-merr", p, { hasLyrics: 1, coverArt: "c.jpg" });
+    parseFileMock.mockResolvedValueOnce(probe({ title: false }));
     searchMetadataMock.mockRejectedValueOnce(new Error("net down"));
     const r = await repairSongTags("s-merr", cfg());
     expect(r.outcome).toBe("unobtainable");
@@ -1079,14 +1097,14 @@ describe("tagRepair 队列与全量扫的异常分支", () => {
     expect(queueState()["s-qab"]).toBeUndefined();
   });
 
-  it("全量扫：命中完成标记 → 计入 skipped，不探针", async () => {
+  it("全量扫：完成标记不再跳过 → 仍探针（强制重试），齐备则 skip", async () => {
     const p = join(root, "all-marked.flac");
     insertSong("s-allmk", p, { hasLyrics: 0 });
     cfg();
     markTagRepairDone(p, "tag-provider");
     parseFileMock.mockClear();
     const { result } = await runTagRepairOnce("all", cfg());
-    expect(parseFileMock).not.toHaveBeenCalled();
+    expect(parseFileMock).toHaveBeenCalled();
     expect(result?.skipped).toBeGreaterThanOrEqual(1);
   });
 
@@ -1111,6 +1129,7 @@ describe("tagRepair 队列与全量扫的异常分支", () => {
             artist: "a",
             album: "专辑",
             albumId: null,
+            coverArt: "c.jpg",
             path: `l:dl-testsrc:${join(root, `bulk${i}.flac`)}`,
             suffix: "flac",
             bitRate: 900,
@@ -1391,7 +1410,7 @@ describe("续跑快照 / 立刻停止", () => {
     // 剩余 pendingIds（库里另外 2 首视为已探完、不得重探）；观测时 scan 进度分母 = 本段已处理 +
     // 本阶段剩余，未提前冲到 100%。scan 无候选 → 顺入 0 候选的 repair 收尾，快照被消费清空。
     for (const id of ["sc1", "sc2", "sc3", "sc4", "sc5"]) {
-      insertSong(id, join(root, `${id}.flac`), { hasLyrics: 0 });
+      insertSong(id, join(root, `${id}.flac`), { hasLyrics: 1, coverArt: "c.jpg" });
     }
     cfg();
     // 快照只留 3 首未探：sc1/sc2 视为上一段已探完。

@@ -24,7 +24,7 @@ import { eq } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { songs } from "../../db/schema.js";
 import { downloadToFile, probeRemoteSize, type DownloadResult } from "../../utils/httpDownload.js";
-import { searchCover, searchLyrics, searchMetadata } from "../../plugins/providers.js";
+import { searchAlbumConsensus, searchCover, searchLyrics, searchMetadata } from "../../plugins/providers.js";
 import type { LyricSongInput } from "../../plugins/types.js";
 import { markTagRepairDone } from "./tagRepairMarker.js";
 import { collectCandidates, type FetchTarget } from "./candidates.js";
@@ -39,7 +39,7 @@ import {
 } from "./quality.js";
 import { probeFile, toCandidateQuality } from "./probe.js";
 import { verifyIntegrity } from "./integrity.js";
-import { recoverUnknownTags, isUnknownAlbum, consensusAlbum } from "../source/tagRecovery.js";
+import { recoverUnknownTags, isUnknownAlbum, needsAlbumConsensus, consensusAlbum } from "../source/tagRecovery.js";
 import { writeTags, applyTagsVariant, type SongTags } from "./tagWriter.js";
 import { transcodeFile } from "./transcode.js";
 import { finalizeFile, type FinalizeResult } from "./finalize.js";
@@ -194,6 +194,8 @@ export interface FetchDeps {
   searchCover: typeof searchCover;
   /** 元数据 provider（价值增值项：一次调用补齐缺失的轨/碟/年/流派/专辑，拿不到只告警）。 */
   searchMetadata: typeof searchMetadata;
+  /** 专辑多平台一致判定（本地专辑无法自证时空/占位/纯符号；≥2 平台一致才采用）。 */
+  searchAlbumConsensus: typeof searchAlbumConsensus;
   /** 下载尝试台账（PATCH17 / 2026-10-11 定调 B）：窗口内试过即跳过，**永久失效类除外**
    *  （否则 fail_count 永远停在 1，死链清理永不生效）；终态时记录（可轮转）。 */
   shouldSkipByCooldown: typeof shouldSkipByCooldown;
@@ -222,6 +224,7 @@ const DEFAULT_DEPS: FetchDeps = {
   searchLyrics,
   searchCover,
   searchMetadata,
+  searchAlbumConsensus,
   shouldSkipByCooldown,
   lastDownloadAttempt,
   recordDownloadAttempt,
@@ -1529,16 +1532,34 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
       if (recoverUnknownTags(tags, "", t.artist && t.artist !== artist ? t.artist : cand.artist || "")) {
         warnings.push("标签为 Unknown,已按歌词/信源信息回填");
       }
-      // 专辑仍然缺失(信源与歌词都没有,或原值是「空」「♡」这类无法自证的值):
-      // 先看**多个平台是否报同一个专辑**,一致才当真实数据(产品口径 2026-11,
-      // 例:暗杠的真专辑《空》在两个平台都报「空」时保留);不一致/只有一个平台
-      // 才退回「用歌名当专辑」——下载/洗版不接受「专辑 = Unknown Album」的成品。
-      if (isUnknownAlbum(tags.album) && tags.title && !/^unknown(\s*title)?$/i.test(tags.title.trim())) {
-        const consensus = consensusAlbum(allCandidates);
+      // 专辑仍然「无法自证」(空 / Unknown / 「空」「♡」这类占位或纯符号):
+      // 让**多个平台各自**给出自己的最优候选专辑,≥2 个不同平台一致才当真实数据
+      // (产品口径 2026-11)。一致则采用;不一致时空值仍用歌名兜底,纯符号保留原值
+      // (如 Yee《♡》)——下载/洗版不接受「专辑 = Unknown Album」的成品。
+      if (needsAlbumConsensus(tags.album) && tags.title && !/^unknown(\s*title)?$/i.test(tags.title.trim())) {
+        let consensus = "";
+        try {
+          const r = await withTimeout(
+            deps.searchAlbumConsensus({
+              title: tags.title,
+              artist: tags.artist ?? null,
+              album: tags.album ?? null,
+              duration: t.durationSec ?? cand.declared?.durationSec ?? null,
+              url: cand.url,
+              source: cand.platform || cand.pluginId,
+            }),
+            ENRICH_TIMEOUT_MS,
+          );
+          consensus = r?.album || "";
+        } catch (e) {
+          warnings.push(`专辑多平台比对失败(忽略): ${msgOf(e)}`);
+        }
+        // 信源候选自身的专辑也是一路「平台」信息,作为补充投票源(与 provider 结果同口径)。
+        if (!consensus) consensus = consensusAlbum(allCandidates);
         if (consensus) {
           tags.album = consensus;
-          warnings.push(`专辑缺失,已按多平台一致结果回填: ${consensus}`);
-        } else {
+          warnings.push(`专辑无法自证,已按多平台一致结果回填: ${consensus}`);
+        } else if (isUnknownAlbum(tags.album)) {
           tags.album = tags.title.trim();
           warnings.push(`专辑标签缺失,已用歌名作为专辑: ${tags.album}`);
         }
