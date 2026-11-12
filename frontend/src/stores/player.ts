@@ -11,6 +11,7 @@ import { waitAsyncTask } from "@/utils/asyncTask";
 import { getClientId } from "@/utils/clientId";
 import { getDeviceCard } from "@/utils/deviceCard";
 import { seekTargetFromLogical, toLogicalPosition, withTimeOffset } from "@/utils/transcodedSeek";
+import { prefetchEnabled, prefetchNext, resetPrefetch, takePrefetched } from "@/utils/nextPrefetch";
 import { alignSeekSeconds } from "@/utils/seekGranularity";
 import { gt } from "@/locales";
 
@@ -228,6 +229,9 @@ export const usePlayerStore = defineStore("player", () => {
   // 起算，需加回该偏移才是逻辑位置（进度显示 / 歌词 / 时长）。换歌 / 正常起播时归 0。
   const localStreamOffset = ref(0);
   let howl: Howl | null = null;
+  // 下一首预取的 blob URL：切歌时消费，旧的在 howl.unload() 之后才释放
+  //（播放中 revoke 会让正在读的流立刻断掉）。
+  let localPrefetchBlobUrl: string | null = null;
   // 拖动 seek 的 trailing debounce：el-slider @input 每帧触发，不防抖会让一次拖拽
   // 起几十个 ffmpeg 转码（与 setVolume / castSeek 同款 250ms）。
   let localSeekTimer: ReturnType<typeof setTimeout> | null = null;
@@ -521,6 +525,7 @@ export const usePlayerStore = defineStore("player", () => {
     api.post(`/rest/api/v1/peers/${encodeURIComponent(pid)}/play-mode`, {
       mode: localPlayMode.value,
     }).catch(() => {});
+    scheduleNextPrefetch();
   }
 
   async function startLocalPlayback(opts?: { timeOffsetSec?: number; autoplay?: boolean }) {
@@ -532,6 +537,7 @@ export const usePlayerStore = defineStore("player", () => {
     localSeekActive = false; // 重建开始：手指值已落地，后续由 timer 按新流位置推进
     localStreamOffset.value = offset;
     if (howl) { howl.unload(); howl = null; }
+    if (localPrefetchBlobUrl) { try { URL.revokeObjectURL(localPrefetchBlobUrl); } catch {} localPrefetchBlobUrl = null; }
     const song = localQueue.value[localIndex.value];
     if (!song) return;
     loadLocalLyrics(song);
@@ -553,8 +559,17 @@ export const usePlayerStore = defineStore("player", () => {
       if (song.duration > 0) return;
       localDuration.value = toLogicalPosition(raw, offset);
     };
+    // 下一首预取完成 → 直接用 blob 起播（瞬时开始，不再走网络）。seek 重建(offset>0)
+    // 不吃预取：那份 blob 是从头开始的整曲，留着只占内存，释放后交给下面的重新预取。
+    let playSrc = getStreamUrl(song, offset);
+    if (offset === 0) {
+      const pre = takePrefetched(song.id);
+      if (pre) { localPrefetchBlobUrl = pre; playSrc = pre; }
+    } else {
+      resetPrefetch();
+    }
     howl = new Howl({
-      src: [getStreamUrl(song, offset)],
+      src: [playSrc],
       format: fmt ? [fmt] : [],
       volume: volume.value,
       html5: true,
@@ -587,6 +602,8 @@ export const usePlayerStore = defineStore("player", () => {
     autoshowQueue();
     // 播放不阻塞:预探测接下来可能播放的外部音源,提前确认可用/换源/跳过。
     probeUpcoming();
+    // 当前曲已在播 → 立刻开始把下一首整曲拉到本地，切歌时 0 等待。
+    scheduleNextPrefetch();
   }
 
   // Auto-skip when a song can't be fetched/played (e.g. no stream available on
@@ -877,6 +894,53 @@ export const usePlayerStore = defineStore("player", () => {
     return idx >= 0 && idx < n ? idx : null;
   }
 
+  // ===== 下一首预取（详见 utils/nextPrefetch.ts 顶部说明）=====
+  //
+  // 只读地算「下一首」：与 localNext 同序，但不改任何指针、不触发重洗/刷新服务端序列。
+  // 序列尾（shuffle/order 到底）返回 null —— 此时下一首取决于「重洗/停止」，
+  // 提前拉没有意义（重洗序列由 localNext 当场决定）。
+  function peekNextIndex(): number | null {
+    const n = localQueue.value.length;
+    if (n === 0 || localIndex.value < 0) return null;
+    if (localPlayMode.value === "one") return localIndex.value;
+    if (localPlayMode.value === "shuffle") {
+      if (serverShuffleUsable()) {
+        const order = srvShuffleOrder as number[];
+        let pos = srvShufflePos;
+        if (pos < 0 || pos >= order.length || order[pos] !== localIndex.value) {
+          pos = order.indexOf(localIndex.value);
+        }
+        if (pos < 0) return null;
+        for (let p = pos + 1; p < order.length; p++) {
+          if (!isKnownUnplayableIdx(order[p])) return order[p];
+        }
+        return null;
+      }
+      ensureShuffleReady();
+      for (let p = shufflePos + 1; p < shuffleOrder.length; p++) {
+        if (!isKnownUnplayableIdx(shuffleOrder[p])) return shuffleOrder[p];
+      }
+      return null;
+    }
+    const nextIdx = localIndex.value < n - 1 ? localIndex.value + 1
+      : localPlayMode.value === "all" ? 0 : -1;
+    return nextIdx >= 0 ? nextIdx : null;
+  }
+
+  // 安排「下一首」预取：只在本机播放中、且没有切到其它播放端（流转/投屏）时做。
+  // 远程歌（带 streamUrl）与已判 unplayable 的歌直接跳过，省带宽也省服务端转码槽。
+  function scheduleNextPrefetch(): void {
+    if (!prefetchEnabled() || isRemotePeer.value || !localIsPlaying.value) return;
+    const idx = peekNextIndex();
+    if (idx === null || idx === localIndex.value) return; // one 模式重播当前曲：不预取
+    const song = localQueue.value[idx];
+    if (!song || song.streamUrl) return;
+    if (probeCache.get(song.id) === "unplayable") return;
+    const nav = typeof navigator !== "undefined" ? (navigator as any) : null;
+    if (nav?.connection?.saveData) return; // 省流量模式：不提前拉
+    prefetchNext(song.id, getStreamUrl(song, 0));
+  }
+
   function localNext() {
     if (localQueue.value.length === 0) return;
     if (localPlayMode.value === "one") { startLocalPlayback(); syncLocalIndex(); return; }
@@ -1000,6 +1064,8 @@ export const usePlayerStore = defineStore("player", () => {
     localSeekActive = false;
     localStreamOffset.value = 0;
     if (howl) { howl.unload(); howl = null; }
+    if (localPrefetchBlobUrl) { try { URL.revokeObjectURL(localPrefetchBlobUrl); } catch {} localPrefetchBlobUrl = null; }
+    resetPrefetch();
     stopLocalProgressTimer();
     localQueue.value = []; localIndex.value = -1; localIsPlaying.value = false;
     localCurrentTime.value = 0; localDuration.value = 0;
@@ -1503,6 +1569,8 @@ export const usePlayerStore = defineStore("player", () => {
   // (Distinct from switchPeer, which only changes the UI view.)
   async function startCast(deviceId: string, deviceName: string) {
     if (howl) { howl.pause(); }
+    // 投屏接管：本机不再需要下一首，立刻停掉预取（不占带宽，也不与流转争转码槽）。
+    resetPrefetch();
     stopLocalProgressTimer();
     const st = ensureRemoteState(`dlna:${deviceId}`, deviceName);
 
@@ -2166,6 +2234,8 @@ export const usePlayerStore = defineStore("player", () => {
         startCastPoll(st);
       }
       currentPeerId.value = peerId;
+      // 切到别的播放端：本机预取作废（对端有自己的出流链路）。
+      resetPrefetch();
       // 显式切到远端:记录偏好,后续会话才恢复该端。
       localStorage.setItem(PREFERRED_PEER_KEY, peerId);
       // 流转/切换受控目标:立即从新目标端重新拉取音量,消除跨端单例污染。
@@ -2182,6 +2252,8 @@ export const usePlayerStore = defineStore("player", () => {
       localStorage.removeItem(PREFERRED_PEER_KEY);
       // 回本机:恢复本机音量(控制远端期间单例被远端读数占用过)。
       resyncVolumeForPeer(localPeerId.value);
+      // 切回本机且仍在播：恢复下一首预取（切换期间被 resetPrefetch 停掉了）。
+      scheduleNextPrefetch();
       if (localIsPlaying.value) autoshowQueue();
     }
   }
