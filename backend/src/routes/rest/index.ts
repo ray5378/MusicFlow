@@ -1502,7 +1502,7 @@ function fmtLrcTime(sec: number): string {
 async function serveTranscodedSong(
   c: any,
   input: { source: string; headers?: Record<string, string> },
-  opts: { format: "mp3" | "aac"; bitrateKbps: number; timeOffset?: number; af?: string[]; songId?: string },
+  opts: { format: "mp3" | "aac"; bitrateKbps: number; timeOffset?: number; af?: string[]; songId?: string; prefetch?: boolean },
 ) {
   // ffmpeg 输入硬契约:回环 token URL 或本地路径(见 services/dlna/control.ts 注释 / SPEC §1.8)。
   if (/^https?:\/\//i.test(input.source) && !input.source.startsWith(loopbackBase())) {
@@ -1538,6 +1538,7 @@ async function serveTranscodedSong(
     // P2-5:这里进「音质转码」池 —— 走到本函数的前提就是客户端显式要了
     // format / maxBitRate(decideTranscode 判定),不能被默认管道挤占。
     slot: "quality",
+    ...(opts.prefetch ? { prefetch: true } : {}),
   });
 }
 
@@ -1619,12 +1620,21 @@ export async function resolveRequestAf(
  */
 async function serveFfmpegPipe(
   c: any,
-  opts: { songId?: string; mime: string; sourceLabel: string; args: string[]; slot: "quality" | "pipeline"; extraHeaders?: Record<string, string>; icyMetaint?: number },
+  opts: { songId?: string; mime: string; sourceLabel: string; args: string[]; slot: "quality" | "pipeline"; extraHeaders?: Record<string, string>; icyMetaint?: number; prefetch?: boolean },
 ) {
-  const { spawnTranscoderWithArgs, acquireTranscodeSlot } =
+  const { spawnTranscoderWithArgs, acquireTranscodeSlot, tryAcquirePrefetchSlot } =
     await import("../../services/transcode.js");
   // 租约式占用:释放必然落到申请时那个池(分池后 release 传错池会静默吃额度)。
-  const releaseSlot = await acquireTranscodeSlot(opts.slot);
+  //
+  // Prefetch=1(客户端「下一首预取」)是**低优先级**流量:不排队、不占留给真实播放
+  // 的最后一格。池里没有空位就立刻 429,让客户端静默放弃 —— 预取迟一点无所谓,
+  // 绝不能因为预取先占槽而让用户点歌后等转码。正常播放仍走排队(等得到槽)。
+  const releaseSlot = opts.prefetch
+    ? tryAcquirePrefetchSlot(opts.slot)
+    : await acquireTranscodeSlot(opts.slot);
+  if (!releaseSlot) {
+    return c.json(fail(0, "prefetch skipped: transcode busy"), 429);
+  }
   if (c.req.raw.signal.aborted) {
     releaseSlot();
     return new Response(null, { status: 499 });
@@ -1672,7 +1682,8 @@ async function serveFfmpegPipe(
       log.error("ffmpeg 出流退出异常", { code, stderr: errBuf.slice(0, 800), source: opts.sourceLabel });
     }
     // P0-4 HTTP 落点:自然播完(exit 0 且客户端没断开)上报边播边测。
-    if (code === 0 && !signal.aborted && opts.songId) {
+    // 预取流不是「用户播放」,不进边播边测/播放统计。
+    if (code === 0 && !signal.aborted && opts.songId && !opts.prefetch) {
       void (async () => {
         try {
           const { reportPlaybackLoudness } = await import("../../services/audio/analysisStore.js");
@@ -1815,7 +1826,7 @@ async function servePipelinedSong(
   c: any,
   song: any,
   input: { source: string; headers?: Record<string, string> },
-  opts: { timeOffset?: number; af: string[]; codecOverride?: { codec: "flac" | "mp3" | "aac" | "opus"; bitrateKbps?: number; mime: string }; extraHeaders?: Record<string, string>; icyMetaint?: number },
+  opts: { timeOffset?: number; af: string[]; codecOverride?: { codec: "flac" | "mp3" | "aac" | "opus"; bitrateKbps?: number; mime: string }; extraHeaders?: Record<string, string>; icyMetaint?: number; prefetch?: boolean },
 ) {
   const { resolveChannelCodec, buildPipelineCommand, resolvePipelineInput } =
     await import("../../services/audio/pipeline.js");
@@ -1836,6 +1847,7 @@ async function servePipelinedSong(
     args,
     // P2-5:默认实时管道进「归一化管道」池(与用户显式要的音质档位分开算)。
     slot: "pipeline",
+    ...(opts.prefetch ? { prefetch: true } : {}),
     ...(opts.extraHeaders ? { extraHeaders: opts.extraHeaders } : {}),
     ...(opts.icyMetaint ? { icyMetaint: opts.icyMetaint } : {}),
   });
@@ -2460,6 +2472,9 @@ restRoutes.get("/stream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
   // P4-2:per-player DSP 的查键。HTTP 客户端必须自报(Web 用 `local:<uuid>`),
   // 不自报就没有 per-device 音色 —— 服务端无从知道"这是哪台设备在播"。
   const dspPeerId = getParam(c, "peerId") || "";
+  // Prefetch=1(客户端「下一首整曲预取」):低优先级 —— 转码池没有空位立即 429,
+  // 客户端静默放弃并回退在线流;不排队、不拼 flow 队列、不写边播边测/播放统计。
+  const prefetch = getParam(c, "prefetch") === "1";
 
   // debug:seek 重拉流的服务端入口。客户端(Web / 安卓 / Windows)拖动进度条后
   // 不是改播放位置,而是带 timeOffset 重新拉一次流 —— 想确认「拖动到底有没有
@@ -2485,6 +2500,7 @@ restRoutes.get("/stream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
         timeOffset,
         af: await resolveRequestAf(song, dspPeerId),
         songId: song.id,
+        prefetch,
       });
     }
   }
@@ -2511,7 +2527,7 @@ restRoutes.get("/stream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
     // 客户端自己在推进(Web 用 Howler / Flutter 用自己的队列),服务端替它拼流会让两边
     // 各推进一次 → 跳歌。DLNA 的队列本就由服务端持有(QueueController),所以能默认接管。
     // 关闭 / 不适用 → 落回下面的单曲管道(逐首仍是完整六段,D9)。
-    if (timeOffset === 0 && getParam(c, "flow") === "1") {
+    if (!prefetch && timeOffset === 0 && getParam(c, "flow") === "1") {
       const peerId = dspPeerId;
       if (peerId) {
         const { resolveFlowSettings } = await import("../../services/audio/flowSource.js");
@@ -2535,6 +2551,7 @@ restRoutes.get("/stream", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
     return servePipelinedSong(c, song, input, {
       timeOffset,
       af: await resolveRequestAf(song, dspPeerId),
+      prefetch,
     });
   } catch (e: any) {
     return c.json(fail(0, e.message || "Stream failed"));

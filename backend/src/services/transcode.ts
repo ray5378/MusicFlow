@@ -309,6 +309,27 @@ export function acquireTranscodeSlot(
   });
 }
 
+/**
+ * 预取租约(Prefetch=1):低优先级 —— 只在池里还有「留给真实播放」的空位时成功,
+ * 否则立即返回 null(调用方直接 429,客户端静默放弃)。
+ *
+ * 与 acquireTranscodeSlot 的区别:
+ *   - **不排队**:预取不制造排队,错过就错过(下一首迟到由客户端回退在线流);
+ *   - **预留最后一格**:最多把池用到 limit-1,真实播放请求永远不必排在预取后面。
+ * 租约形态一致(幂等释放),释放必然落到申请时那个池。
+ */
+export function tryAcquirePrefetchSlot(kind: TranscodeSlotKind = "pipeline"): (() => void) | null {
+  const pool = slotPools[kind];
+  if (pool.active >= pool.limit - 1) return null;
+  pool.active++;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    releaseTranscodeSlot(pool);
+  };
+}
+
 /** 释放一个槽并唤醒下一个排队者（内部使用；外部请用 acquire 返回的租约）。 */
 function releaseTranscodeSlot(pool: SlotPool): void {
   pool.active = Math.max(0, pool.active - 1);

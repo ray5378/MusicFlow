@@ -9,6 +9,7 @@ import {
   normalizeTargetFormat,
   resolveFfmpeg,
   acquireTranscodeSlot,
+  tryAcquirePrefetchSlot,
   activeTranscodeCount,
   slotLimit,
   resolveSlotLimits,
@@ -273,6 +274,28 @@ describe("并发池（P2-5 / P3-6）", () => {
     expect(activeTranscodeCount()).toBe(2);
     expect(activeTranscodeCount("quality")).toBe(1);
     expect(activeTranscodeCount("pipeline")).toBe(1);
+  });
+
+  it("预取租约(Prefetch=1):不排队、为真实播放预留最后一格、池满立即拒绝", async () => {
+    const limit = slotLimit("pipeline");
+    // 占到「只剩最后一格」之前:预取仍能拿到槽,但停在 limit-1
+    for (let i = 0; i < limit - 2; i++) await hold("pipeline");
+    const pref = tryAcquirePrefetchSlot("pipeline");
+    expect(pref).toBeTypeOf("function");
+    expect(activeTranscodeCount("pipeline")).toBe(limit - 1);
+
+    // 只剩最后一格 ⇒ 预取立即放弃(留给真实播放,不排队)
+    expect(tryAcquirePrefetchSlot("pipeline")).toBeNull();
+
+    // 真实播放不用排队,直接拿到预留的那格
+    await hold("pipeline");
+    expect(activeTranscodeCount("pipeline")).toBe(limit);
+    expect(tryAcquirePrefetchSlot("pipeline")).toBeNull();
+
+    // 释放幂等:重复释放不会多还额度
+    pref!();
+    pref!();
+    expect(activeTranscodeCount("pipeline")).toBe(limit - 1);
   });
 });
 

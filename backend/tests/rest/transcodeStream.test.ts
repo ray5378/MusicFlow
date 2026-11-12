@@ -13,7 +13,7 @@ import { db, initDatabase, encryptPassword } from "../../src/db/index.js";
 import { users, artists, albums, songs, mediaSources } from "../../src/db/schema.js";
 import { authMiddleware } from "../../src/middleware/auth.js";
 import { restRoutes } from "../../src/routes/rest/index.js";
-import { resolveFfmpeg } from "../../src/services/transcode.js";
+import { resolveFfmpeg, acquireTranscodeSlot, slotLimit } from "../../src/services/transcode.js";
 
 // 真实链路:authMiddleware + restRoutes + 真实磁盘音频文件 + 真实 ffmpeg 转码进程。
 // 与 opensubsonic.test.ts 的唯一区别:本文件用系统 ffmpeg 生成一个 4s WAV fixture,
@@ -157,5 +157,32 @@ describe("OpenSubsonic /rest/stream 转码端到端（真实 ffmpeg）", () => {
     expect(res.headers.get("content-length")).toBeNull();
     expect(buf.length).toBeGreaterThan(500);
     expect(hasMpegFrameSync(buf)).toBe(true);
+  }, 30000);
+
+  it("prefetch=1 → 与普通播放同样出流(低优先级只影响调度,不影响输出)", async () => {
+    const { res, buf } = await stream("prefetch=1");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("audio/flac");
+    expect(buf.subarray(0, 4).toString("ascii")).toBe("fLaC");
+  }, 30000);
+
+  it("prefetch=1 且管道池只剩最后一格 → 立即 429(不排队,客户端静默放弃)", async () => {
+    // 占到「只剩最后一格」:预取必须把最后一格留给真实播放。
+    const leases: Array<() => void> = [];
+    try {
+      for (let i = 0; i < slotLimit("pipeline") - 1; i++) {
+        leases.push(await acquireTranscodeSlot("pipeline"));
+      }
+      const busy = await stream("prefetch=1");
+      expect(busy.res.status).toBe(429);
+
+      // 空位释放后预取恢复(证明只是低优先级,不是禁用)
+      while (leases.length) leases.pop()!();
+      const ok = await stream("prefetch=1");
+      expect(ok.res.status).toBe(200);
+      expect(ok.res.headers.get("content-type")).toBe("audio/flac");
+    } finally {
+      while (leases.length) leases.pop()!();
+    }
   }, 30000);
 });
