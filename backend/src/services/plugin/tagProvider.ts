@@ -93,7 +93,6 @@ const DURATION_BONUS_SEC = 2;
  *  仍属同一录音;放宽到 15s 可救回「最寂寞的时候 (忧郁版)」这类严格层误杀。 */
 const DURATION_RELAXED_SEC = 15;
 /** 评分接受红线:标题 2 分 × 3 = 6;总分 < 3 视为无效匹配。 */
-const MIN_ACCEPT_SCORE = 3;
 /** 单曲最多参与封面/歌词/详情兜底的候选数(防请求放大)。 */
 const MAX_MATCH_TRIES = 3;
 
@@ -337,13 +336,6 @@ function titleMatches(candName: any, wantTitle: string): boolean {
   });
 }
 
-function artistMatches(candSinger: any, wantArtist: string): boolean {
-  const want = splitArtists(wantArtist);
-  if (want.length === 0) return true;
-  const have = splitArtists(candSinger);
-  return want.some((w) => have.includes(w));
-}
-
 /** 歌手打分:2 精确 / 1 包含 / 0 本地无歌手 / -1 本地有歌手但完全不匹配(否决)。 */
 function scoreArtist(candSinger: any, wantArtist: string): number {
   const want = splitArtists(wantArtist);
@@ -462,10 +454,8 @@ function scoreTagCandidateWith(c: PlatformCandidate, song: LyricSongInput, tolSe
   const durationScore = localDur > 0 && platDur > 0 && Math.abs(localDur - platDur) <= DURATION_BONUS_SEC ? 1 : 0;
 
   const album = scoreAlbum(c.albumName, song?.album);
+  // 标题已精确命中即固定 6 分,恒 ≥ 门槛;旧实现的 `total < MIN_ACCEPT_SCORE` 分支不可达(已删)。
   const total = 2 * 3 + artist * 2 + album + durationScore;
-  if (total < MIN_ACCEPT_SCORE) {
-    return { title: 2, artist, album, duration: durationScore, total, reject: "总分不足" };
-  }
   return { title: 2, artist, album, duration: durationScore, total };
 }
 

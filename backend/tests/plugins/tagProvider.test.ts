@@ -1593,3 +1593,268 @@ describe("tagRecovery — needsAlbumConsensus(三条链路统一触发条件)", 
     expect(needsAlbumConsensus(value)).toBe(expected);
   });
 });
+
+
+// ==================== 覆盖率门禁补强（2026-11-12） ====================
+// CI 的「下载 + 标签修复覆盖率门禁」对 tagProvider.ts 卡 statements 95 / branches 90。
+// 四平台扩源带进来一批边界分支（字段缺失 / 结构异常 / 兜底补全 / 缓存命中），这里逐条覆盖，
+// 而不是去调低阈值 —— 门禁本身就是防覆盖率塌方的。
+
+describe("tag-provider — 评分/专辑边界（覆盖率补强）", () => {
+  it("专辑部分包含 → 1 分；完全无关 / 占位 → 0 分", () => {
+    const base = { platform: "kugou" as const, id: "h", name: "告白气球", singerName: "周杰伦", durationSec: 215 };
+    expect(scoreTagCandidate({ ...base, albumName: "周杰伦的床边故事" }, { title: "告白气球", artist: "周杰伦", album: "床边故事" }).album).toBe(1);
+    expect(scoreTagCandidate({ ...base, albumName: "周杰伦的床边故事" }, { title: "告白气球", artist: "周杰伦", album: "完全无关" }).album).toBe(0);
+    expect(scoreTagCandidate({ ...base, albumName: "周杰伦的床边故事" }, { title: "告白气球", artist: "周杰伦", album: "Unknown Album" }).album).toBe(0);
+  });
+
+  it("候选名 / 期望标题归一化后为空 → 标题闸门直接判否", () => {
+    expect(scoreTagCandidate({ platform: "kugou", id: "h", name: "♡♡", singerName: "周杰伦", durationSec: 215 }, SONG).reject).toBe("标题不匹配");
+    expect(scoreTagCandidate({ platform: "kugou", id: "h", name: "告白气球", singerName: "周杰伦", durationSec: 215 }, { title: "()", artist: "" }).reject).toBe("标题不匹配");
+  });
+
+  it("温和版本标记只在排序层生效：无标记候选仍排前", async () => {
+    const kg = {
+      data: {
+        lists: [
+          { FileHash: "H_SOFT", SongName: "告白气球 片段", SingerName: "周杰伦", AlbumName: "A", Duration: 215 },
+          { FileHash: "H_FULL", SongName: "告白气球", SingerName: "周杰伦", AlbumName: "B", Duration: 215 },
+        ],
+      },
+    };
+    const host = routeHost({ map: { [F_QQ_SEARCH]: SEARCH_EMPTY, [F_KG_SEARCH]: kg } });
+    expect((await tagProviderPlugin.searchMetadata(host, SONG))?.album).toBe("B");
+  });
+});
+
+describe("tag-provider — 酷狗字段缺失与歌词边界（覆盖率补强）", () => {
+  it("缺 hash / 缺歌名被跳过；缺歌手/专辑/时长不臆造；singerimg 不算封面", async () => {
+    const kg = {
+      data: {
+        lists: [
+          { SongName: "无 hash" },
+          { FileHash: "H_ONLY" },
+          { FileHash: "H_OK", SongName: "告白气球", SingerName: "", AlbumName: "", Duration: 0, Image: "http://singerimg.kugou.com/240/x.jpg" },
+        ],
+      },
+    };
+    const host = routeHost({ map: { [F_QQ_SEARCH]: SEARCH_EMPTY, [F_KG_SEARCH]: kg } });
+    const song = emptySong({ artist: "", duration: undefined });
+    const meta = await tagProviderPlugin.searchMetadata(host, song);
+    expect(meta?.platform).toBe("kugou");
+    expect(meta?.album).toBeUndefined();
+    expect(meta?.duration).toBeUndefined();
+    expect(await tagProviderPlugin.searchCover(host, song)).toBeNull();
+  });
+
+  it("歌词候选空 / 无 id / 内容非字符串 / 非 LRC → null", async () => {
+    const base = { [F_QQ_SEARCH]: SEARCH_EMPTY, [F_KG_SEARCH]: KG_SEARCH };
+    const cases: any[] = [
+      { [F_KG_LYRIC_SEARCH]: { candidates: [] } },
+      { [F_KG_LYRIC_SEARCH]: { candidates: [{ duration: 215000 }] } },
+      { [F_KG_LYRIC_SEARCH]: { candidates: [{ id: "ly" }] }, [F_KG_LYRIC_DL]: { content: 123 } },
+      { [F_KG_LYRIC_SEARCH]: { candidates: [{ id: "ly" }] }, [F_KG_LYRIC_DL]: { content: Buffer.from("纯文本", "utf8").toString("base64") } },
+    ];
+    for (const extra of cases) {
+      __resetTagProviderMemo();
+      const host = routeHost({ map: { ...base, ...extra } });
+      expect(await tagProviderPlugin.searchLyrics(host, SONG)).toBeNull();
+    }
+  });
+
+  it("歌词第二次请求命中 memo：搜索端点只打一次", async () => {
+    const host = routeHost({
+      map: {
+        [F_QQ_SEARCH]: SEARCH_EMPTY,
+        [F_KG_SEARCH]: KG_SEARCH,
+        [F_KG_LYRIC_SEARCH]: { candidates: [{ id: "ly1", accesskey: "ak", duration: 215000 }] },
+        [F_KG_LYRIC_DL]: { content: Buffer.from("[00:01.00]词", "utf8").toString("base64") },
+      },
+    });
+    expect((await tagProviderPlugin.searchLyrics(host, SONG))?.lrc).toBe("[00:01.00]词");
+    expect((await tagProviderPlugin.searchLyrics(host, SONG))?.lrc).toBe("[00:01.00]词");
+    expect(host.calls.filter((u: string) => u.includes(F_KG_LYRIC_SEARCH)).length).toBe(1);
+  });
+
+  it("占位歌手不拼进歌词关键词；候选无时长时取第一个歌词候选", async () => {
+    const kg = {
+      data: {
+        lists: [{ FileHash: "H_PH", SongName: "告白气球", SingerName: "Unknown Artist", AlbumName: "A" }],
+      },
+    };
+    const host = routeHost({
+      map: {
+        [F_QQ_SEARCH]: SEARCH_EMPTY,
+        [F_KG_SEARCH]: kg,
+        [F_KG_LYRIC_SEARCH]: { candidates: [{ id: "ly_first", duration: 0 }, { id: "ly_second", duration: 215000 }] },
+        [F_KG_LYRIC_DL]: { content: Buffer.from("[00:01.00]词", "utf8").toString("base64") },
+      },
+    });
+    expect((await tagProviderPlugin.searchLyrics(host, emptySong({ artist: "Unknown Artist" })))?.lrc).toBe("[00:01.00]词");
+    const url = host.calls.find((u: string) => u.includes(F_KG_LYRIC_SEARCH))!;
+    expect(url).toContain(encodeURIComponent("告白气球"));
+    expect(url).not.toContain("Unknown");
+    expect(host.calls.some((u: string) => u.includes("id=ly_first"))).toBe(true);
+  });
+});
+
+describe("tag-provider — 酷我边界（覆盖率补强）", () => {
+  it("单引号 JSON：转义引号 / 反斜杠 / 双引号段落都能解析", async () => {
+    const raw = String.raw`{'abslist':[{'MUSICRID':'MUSIC_9','NAME':'告白气球','ARTIST':'周杰伦 It\'s','ALBUM':'A\\B','DURATION':'215','web_albumpic_short':''}],'note':"he said \"hi\" \\ ok"}`;
+    const host = routeHost({ rawFor: { [F_KW_SEARCH]: raw }, map: { [F_QQ_SEARCH]: SEARCH_EMPTY } });
+    const meta = await tagProviderPlugin.searchMetadata(host, SONG);
+    expect(meta?.platform).toBe("kuwo");
+    expect(meta?.artist).toContain("It's");
+  });
+
+  it("空响应 / 非法 JSON / 缺 MUSICRID → 空候选（不抛）", async () => {
+    const base = { [F_QQ_SEARCH]: SEARCH_EMPTY, [F_KG_SEARCH]: KG_SEARCH };
+    for (const raw of ["", "{bad json", "{'abslist':[{'NAME':'告白气球','ARTIST':'x','DURATION':'215'}]}"]) {
+      __resetTagProviderMemo();
+      const host = routeHost({ rawFor: { [F_KW_SEARCH]: raw }, map: base });
+      expect((await tagProviderPlugin.searchMetadata(host, SONG))?.platform).toBe("kugou");
+    }
+  });
+
+  it("songinfo 缺失 / 无时长；lrclist 为空 / 时间非法 / 文本空 → 不编造", async () => {
+    const kw = "{'abslist':[{'MUSICRID':'MUSIC_77','NAME':'告白气球','ARTIST':'周杰伦','ALBUM':'','DURATION':'215'}]}";
+    const base = { [F_QQ_SEARCH]: SEARCH_EMPTY, [F_KG_SEARCH]: { data: { lists: [] } } };
+    let host = routeHost({ rawFor: { [F_KW_SEARCH]: kw }, map: { ...base, [F_KW_INFO]: { data: {} } } });
+    const meta = await tagProviderPlugin.searchMetadata(host, SONG);
+    expect(meta?.platform).toBe("kuwo");
+    expect(meta?.album).toBeUndefined();
+    __resetTagProviderMemo();
+    host = routeHost({
+      rawFor: { [F_KW_SEARCH]: kw },
+      map: { ...base, [F_KW_INFO]: { data: { songinfo: { album: "A" }, lrclist: [] } } },
+    });
+    expect(await tagProviderPlugin.searchLyrics(host, SONG)).toBeNull();
+    __resetTagProviderMemo();
+    host = routeHost({
+      rawFor: { [F_KW_SEARCH]: kw },
+      map: { ...base, [F_KW_INFO]: { data: { songinfo: { album: "A" }, lrclist: [{ time: "x", lineLyric: "" }] } } },
+    });
+    expect(await tagProviderPlugin.searchLyrics(host, SONG)).toBeNull();
+  });
+});
+
+describe("tag-provider — 四平台并搜的缓存/去重/失败（覆盖率补强）", () => {
+  it("同平台重复候选去重；某平台抛错按 rejected 跳过；解析不到缓存时不写", async () => {
+    const kwDup = "{'abslist':[{'MUSICRID':'MUSIC_1','NAME':'告白气球','ARTIST':'周杰伦','ALBUM':'B','DURATION':'215'},{'MUSICRID':'MUSIC_1','NAME':'告白气球','ARTIST':'周杰伦','ALBUM':'B','DURATION':'215'}]}";
+    const host = routeHost({
+      rawFor: { [F_KW_SEARCH]: kwDup },
+      throwFor: [F_NS_SEARCH],
+      map: { [F_QQ_SEARCH]: SEARCH_EMPTY, [F_KG_SEARCH]: KG_SEARCH },
+    });
+    const cover = await tagProviderPlugin.searchCover(host, emptySong({ artist: "Unknown Artist" }));
+    expect(cover?.url).toContain("imge.kugou.com");
+    __resetTagProviderMemo();
+    const empty = routeHost({
+      rawFor: { [F_KW_SEARCH]: "{'abslist':[]}" },
+      map: { [F_QQ_SEARCH]: SEARCH_EMPTY, [F_KG_SEARCH]: { data: { lists: [] } } },
+    });
+    expect(await tagProviderPlugin.searchCover(empty, SONG)).toBeNull();
+  });
+});
+
+describe("tag-provider — 专辑共识边界（覆盖率补强）", () => {
+  it("QQ 搜索缺专辑 → 用详情补；空标题直接 null；二次调用命中 memo", async () => {
+    const host = {
+      http: async (url: string) => ({
+        ok: true,
+        text: async () => {
+          if (url.includes(F_QQ_SEARCH)) {
+            return JSON.stringify({
+              code: 0,
+              data: {
+                song: {
+                  list: [{ mid: "m1", title: "告白气球", singer: [{ name: "周杰伦" }], album: { mid: "am", name: "" }, interval: 215 }],
+                },
+              },
+            });
+          }
+          if (url.includes(F_QQ_DETAIL)) {
+            return JSON.stringify({
+              code: 0,
+              req: {
+                code: 0,
+                data: {
+                  track_info: {
+                    mid: "m1",
+                    name: "告白气球",
+                    singer: [{ name: "周杰伦" }],
+                    album: { mid: "am", name: "周杰伦的床边故事" },
+                    interval: 215,
+                  },
+                },
+              },
+            });
+          }
+          if (url.includes(F_NS_SEARCH)) return JSON.stringify(NS_CLOUD);
+          if (url.includes(F_KG_SEARCH)) return JSON.stringify({ data: { lists: [] } });
+          if (url.includes(F_KW_SEARCH)) return JSON.stringify({ abslist: [] });
+          return JSON.stringify({});
+        },
+      }),
+    } as any;
+    expect((await tagProviderPlugin.searchAlbumConsensus!(host, SONG))?.album).toBe("周杰伦的床边故事");
+    expect((await tagProviderPlugin.searchAlbumConsensus!(host, SONG))?.album).toBe("周杰伦的床边故事");
+    expect(await tagProviderPlugin.searchAlbumConsensus!(host, { title: "   ", artist: "周杰伦" })).toBeNull();
+  });
+
+  it("某平台抛错 → 不参与投票；符号专辑键为空 → 不参与投票", async () => {
+    const host = routeHost({
+      throwFor: [F_KW_SEARCH],
+      map: {
+        [F_QQ_SEARCH]: { code: 0, data: { song: { list: [] } } },
+        [F_NS_SEARCH]: NS_CLOUD,
+        [F_KG_SEARCH]: { data: { lists: [{ FileHash: "H", SongName: "告白气球", SingerName: "周杰伦", AlbumName: "周杰伦的床边故事", Duration: 215 }] } },
+      },
+    });
+    expect((await tagProviderPlugin.searchAlbumConsensus!(host, SONG))?.album).toBe("周杰伦的床边故事");
+    __resetTagProviderMemo();
+    const sym = routeHost({
+      rawFor: { [F_KW_SEARCH]: "{'abslist':[{'MUSICRID':'MUSIC_2','NAME':'告白气球','ARTIST':'周杰伦','ALBUM':'♡','DURATION':'215'}]}" },
+      map: { [F_QQ_SEARCH]: { code: 0, data: { song: { list: [] } } }, [F_KG_SEARCH]: { data: { lists: [] } }, [F_NS_SEARCH]: { code: 200, result: { songs: [] } } },
+    });
+    expect(await tagProviderPlugin.searchAlbumConsensus!(sym, SONG)).toBeNull();
+  });
+
+  it("标题读取抛错 → 共识能力软失败 null", async () => {
+    const bad = { get title(): string { throw new Error("boom"); }, artist: "周杰伦" } as any;
+    expect(await tagProviderPlugin.searchAlbumConsensus!({} as any, bad)).toBeNull();
+  });
+});
+
+describe("tag-provider — QQ 详情时长回退与 HTTP 边界（覆盖率补强）", () => {
+  it("详情缺 interval → 用搜索候选时长补齐", async () => {
+    const host = routeHost({
+      map: {
+        [F_QQ_SEARCH]: SEARCH,
+        [F_QQ_DETAIL]: {
+          code: 0,
+          req: {
+            code: 0,
+            data: {
+              track_info: {
+                mid: "003OUlho2HcRHC",
+                name: "告白气球",
+                singer: [{ name: "周杰伦" }],
+                album: { mid: "000MkMni19ClKG", name: "周杰伦的床边故事" },
+              },
+            },
+          },
+        },
+      },
+    });
+    expect((await tagProviderPlugin.searchMetadata(host, SONG))?.duration).toBe(215);
+  });
+
+  it("响应为 null / 请求抛错 → 按无结果软失败，其它平台兜底", async () => {
+    let host = routeHost({ nullFor: [F_QQ_SEARCH], map: { [F_KG_SEARCH]: KG_SEARCH } });
+    expect((await tagProviderPlugin.searchMetadata(host, SONG))?.platform).toBe("kugou");
+    __resetTagProviderMemo();
+    host = routeHost({ throwFor: [F_KW_SEARCH, F_NS_SEARCH], map: { [F_QQ_SEARCH]: SEARCH_EMPTY, [F_KG_SEARCH]: KG_SEARCH } });
+    expect((await tagProviderPlugin.searchMetadata(host, SONG))?.platform).toBe("kugou");
+  });
+});
