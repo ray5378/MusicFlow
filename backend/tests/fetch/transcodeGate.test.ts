@@ -143,6 +143,10 @@ describe("PATCH22 转码总闸 maxConcurrentTranscodes", () => {
     // 用「测试代管闸门」代替固定 sleep：转码进来先挂起，由用例放行。这样峰值判据与
     // 磁盘/CPU 负载无关 —— 原写法 sleep 250ms，CI 上第二首进闸要 1~4s（/tmp 写 8MB 的
     // 真实 I/O 在并行跑 628 个用例时被拖慢）→ peak=1 假红（2026-11-12 全量跑实测）。
+    // 等待上限必须按「最坏负载」而非典型负载给：本文件排在全量跑的最前面，正好撞上
+    // 628 个 worker 同时 spawn 的开场风暴（2026-11-12 全量跑实测单文件 setup 占 24%、
+    // 首分片建进程 ~60s），10s 上限会在开场风暴里假红成「第 2 首没进闸」。
+    // 120s 只影响真回归时的报错延迟，正常路径 waitFor 一命中即返回，不拖慢用例。
     let cur = 0;
     let peak = 0;
     const pending: Array<() => void> = [];
@@ -167,7 +171,7 @@ describe("PATCH22 转码总闸 maxConcurrentTranscodes", () => {
     });
 
     const waitFor = async (cond: () => boolean, why: string): Promise<void> => {
-      const deadline = Date.now() + 10_000;
+      const deadline = Date.now() + 120_000;
       while (!cond()) {
         if (Date.now() > deadline) throw new Error(`等待超时：${why}`);
         await new Promise((r) => setTimeout(r, 5));
@@ -192,7 +196,7 @@ describe("PATCH22 转码总闸 maxConcurrentTranscodes", () => {
     expect(r.items.map((x: any) => x.status)).toEqual(Array(6).fill("done"));
     expect(peak).toBeLessThanOrEqual(2);
     expect(peak).toBe(2);
-  }, 30_000);
+  }, 240_000);
 
   it("B. 转码抛错经 finally 释放闸位：失败歌照常收尾，其余歌不被卡死", async () => {
     let calls = 0;
