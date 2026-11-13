@@ -480,6 +480,13 @@
               </el-button>
             </el-tooltip>
           </div>
+          <!-- 移动端:倍速放在最底部一行(添加到歌单下方),与桌面播放条一致 -->
+          <div v-if="isMobile" class="pm-extra">
+            <span class="pm-extra-label">{{ t("layout.playbackRate") }}</span>
+            <el-select :model-value="playerStore.studyRate" size="small" class="study-rate pm-rate" @change="onStudyRate">
+              <el-option v-for="r in studyRates" :key="r" :label="`${r}x`" :value="r" />
+            </el-select>
+          </div>
         </div>
       </div>
     </transition>
@@ -1664,6 +1671,12 @@ watch(controlsDrawerOpen, (open) => {
       display: flex; align-items: center; gap: 16px;
       .pm-play-btn { width: 60px; height: 60px; min-width: 60px; min-height: 60px; background: var(--fnos-red) !important; border-color: var(--fnos-red) !important; box-shadow: 0 4px 24px rgba(246, 44, 85, 0.55); }
       .pm-nav-btn { width: 48px; height: 48px; min-width: 48px; min-height: 48px; }
+    }
+    .pm-extra {
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+      margin-top: 2px;
+      .pm-extra-label { font-size: 12px; color: rgba(255, 255, 255, 0.6); }
+      .pm-rate { width: 92px; }
     }
   }
 }

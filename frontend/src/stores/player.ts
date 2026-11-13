@@ -609,8 +609,19 @@ export const usePlayerStore = defineStore("player", () => {
       onloaderror: () => { localHandlePlaybackError(song.id); },
       onplayerror: () => { localHandlePlaybackError(song.id); },
     });
-    // 音乐与学习音频统一恢复用户上次选择的倍速。
-    if (playbackRate.value !== 1) howl.rate(playbackRate.value);
+    // 倍速:直接写原生 audio.playbackRate,不要用 howl.rate()。
+    // Howler 的 html5 rate() 会重挂基于 duration 的结束定时器并移除 native ended
+    // 监听;而 /rest/stream 是实时管道流,duration 常为 Infinity/NaN,结果是播完
+    // 不触发 onend、下一首永远不开始。写原生属性不会动 ended 绑定,切歌链路保持原样。
+    const applyLocalRate = () => {
+      const node = (howl as any)?._node as HTMLAudioElement | undefined;
+      if (node) node.playbackRate = playbackRate.value;
+    };
+    if (playbackRate.value !== 1) {
+      applyLocalRate();
+      // 重新 play() 后(如暂停态重建)再补一次,避免节点重建丢失倍速。
+      howl.once("play", applyLocalRate);
+    }
     if (!autoplay) {
       // 暂停态下拖动：只重建流、不自动播（管道有背压，不会空跑），保持暂停外观。
       localIsPlaying.value = false;

@@ -250,6 +250,7 @@
       "measureBusy": "A measurement run is already in progress",
       "measureDisabled": "Turn the switch on first"
     },
+    "playbackRate": "Playback speed",
     "rate": {
       "title": "Output sample rate",
       "desc": "Target sample rate for server-side streaming (takes effect on the next track). Leave on Auto: use the rate the device reported, falling back to 48000 Hz. Sendspin devices report their own sample rate to the server (filled in automatically); the DLNA/UPnP protocol does not expose it, so pick it manually. For grouped playback the lowest value among members is used.",
