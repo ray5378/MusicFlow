@@ -9,7 +9,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { db, initDatabase, encryptPassword } from "../../src/db/index.js";
-import { users, songs, playlists, playlistSongs, playHistory, mediaSources, studyProgress } from "../../src/db/schema.js";
+import { users, songs, playlists, playlistSongs, playHistory, mediaSources, studyProgress, studyPlaylistProgress } from "../../src/db/schema.js";
 import { and, eq } from "drizzle-orm";
 import { authMiddleware } from "../../src/middleware/auth.js";
 import { restRoutes } from "../../src/routes/rest/index.js";
@@ -253,6 +253,37 @@ describe("学习 API", () => {
     expect(studyList.body.items.some((p: any) => p.id === id)).toBe(true);
   });
 
+  it("学习歌单名称在同一用户下不可重复(忽略大小写与首尾空格)", async () => {
+    const created = await call("POST", "/v1/study/playlists", { name: "重复测试" });
+    expect(created.res.status).toBe(200);
+    const dup = await call("POST", "/v1/study/playlists", { name: "  重复测试 " });
+    expect(dup.res.status).toBe(409);
+
+    const other = await call("POST", "/v1/study/playlists", { name: "另一个歌单" });
+    const renamed = await call("PUT", `/v1/study/playlists/${other.body.id}`, { name: "重复测试" });
+    expect(renamed.res.status).toBe(409);
+    // 改成自己当前的名字不算重名
+    const self = await call("PUT", `/v1/study/playlists/${created.body.id}`, { name: "重复测试" });
+    expect(self.res.status).toBe(200);
+    // 不同用户可以各自使用同名歌单
+    const carol = await callAs("carol", "POST", "/v1/study/playlists", { name: "重复测试" });
+    expect(carol.res.status).toBe(200);
+  });
+
+  it("管理员的学习歌单列表不包含其他用户创建的歌单", async () => {
+    const carolPl = await callAs("carol", "POST", "/v1/study/playlists", { name: "Carol私有课" });
+    expect(carolPl.res.status).toBe(200);
+    const adminList = await call("GET", "/v1/study/playlists");
+    expect(adminList.body.items.some((p: any) => p.id === carolPl.body.id)).toBe(false);
+    const carolList = await callAs("carol", "GET", "/v1/study/playlists");
+    expect(carolList.body.items.some((p: any) => p.id === carolPl.body.id)).toBe(true);
+  });
+
+  it("学习歌单曲目返回与源文件一致的文件名(含扩展名)", async () => {
+    const tracks = await call("GET", "/v1/study/playlists/pl-study/tracks");
+    expect(tracks.body.items[0].fileName).toBe("第01课.mp3");
+  });
+
   it("学习歌单文件夹:新建/归类/改名/解散,并支持按名称搜索歌单", async () => {
     const folder = await call("POST", "/v1/study/playlist-folders", { name: "高数" });
     expect(folder.res.status).toBe(200);
@@ -442,6 +473,52 @@ describe("学习 API", () => {
     // 他人同名记录不受影响
     expect(db.select().from(studyProgress).where(and(eq(studyProgress.userId, "u3"), eq(studyProgress.songId, "st1"))).get()).toBeTruthy();
     db.delete(studyProgress).where(and(eq(studyProgress.userId, "u3"), eq(studyProgress.songId, "st1"))).run();
+  });
+
+  it("清空学习记录:只清当前用户,他人记录不受影响", async () => {
+    await call("PUT", "/v1/study/progress", { songId: "st2", positionSec: 20, durationSec: 600 });
+    db.insert(studyProgress).values({
+      userId: "u3", songId: "st2", positionSec: 12, durationSec: 600, finished: 0,
+      updatedAt: new Date().toISOString(),
+    }).onConflictDoNothing().run();
+    const cleared = await call("DELETE", "/v1/study/progress");
+    expect(cleared.res.status).toBe(200);
+    expect(db.select().from(studyProgress).where(eq(studyProgress.userId, "u1")).all()).toHaveLength(0);
+    expect(db.select().from(studyProgress).where(eq(studyProgress.userId, "u3")).all().length).toBeGreaterThan(0);
+    // 音频文件与歌曲行仍在
+    expect(db.select().from(songs).where(eq(songs.id, "st2")).get()).toBeTruthy();
+    db.delete(studyProgress).where(eq(studyProgress.userId, "u3")).run();
+  });
+
+  it("学习歌单续播:记录位置、continue 返回歌单条目、清空记录一并清理", async () => {
+    const put = await call("PUT", "/v1/study/playlists/pl-study/progress", {
+      songId: "st1", positionSec: 42, durationSec: 600,
+    });
+    expect(put.res.status).toBe(200);
+    const saved = db.select().from(studyPlaylistProgress)
+      .where(and(eq(studyPlaylistProgress.userId, "u1"), eq(studyPlaylistProgress.playlistId, "pl-study"))).get();
+    expect(saved?.songId).toBe("st1");
+    expect(saved?.positionSec).toBe(42);
+
+    // 歌单曲目带上所属歌单,前端据此上报整单续播位置
+    const tracks = await call("GET", "/v1/study/playlists/pl-study/tracks");
+    expect(tracks.body.items[0].playlistId).toBe("pl-study");
+    expect(tracks.body.items[0].fileName).toBe("第01课.mp3");
+
+    const cont = await call("GET", "/v1/study/continue");
+    const item = cont.body.playlistItems.find((i: any) => i.playlistId === "pl-study");
+    expect(item?.id).toBe("st1");
+    expect(item?.playlistName).toBe("课程清单");
+    expect(item?.positionSec).toBe(42);
+
+    // 不在歌单内的曲目拒绝上报
+    const bad = await call("PUT", "/v1/study/playlists/pl-study/progress", { songId: "st2", positionSec: 1 });
+    expect(bad.res.status).toBe(400);
+
+    // 清空学习记录同时清空歌单续播
+    const cleared = await call("DELETE", "/v1/study/progress");
+    expect(cleared.res.status).toBe(200);
+    expect(db.select().from(studyPlaylistProgress).where(eq(studyPlaylistProgress.userId, "u1")).all()).toHaveLength(0);
   });
 
   it("学习记录只保留最新 50 条", async () => {

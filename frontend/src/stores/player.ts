@@ -48,6 +48,9 @@ export interface Song {
   kind?: string;
   sourceId?: string;
   relDir?: string;
+  /** 播放来源是学习歌单时存在:额外上报「整单续播」位置。 */
+  playlistId?: string;
+  playlistName?: string;
 }
 
 export interface LyricLine {
@@ -1183,6 +1186,12 @@ export const usePlayerStore = defineStore("player", () => {
     if (!force && positionSec <= 0) return;
     studyReportAt = now;
     api.put("/rest/api/v1/study/progress", { songId: song.id, positionSec, durationSec }).catch(() => {});
+    // 来自学习歌单的播放:同时记录整单续播位置(继续学习页可整单续播)。
+    if (song.playlistId) {
+      api.put(`/rest/api/v1/study/playlists/${encodeURIComponent(song.playlistId)}/progress`, {
+        songId: song.id, positionSec, durationSec,
+      }).catch(() => {});
+    }
   }
   /** 当前是否在学习音频上(供学习页控制条显示)。 */
   const isStudyPlaying = computed(() => !!currentStudySong());
@@ -1491,11 +1500,17 @@ export const usePlayerStore = defineStore("player", () => {
     const position = Math.round(st.currentTime || 0);
     if (!force && position <= 0) return;
     castStudyReportAt.set(st.peerId, now);
+    const durationSec = Math.round(st.duration || song.duration || 0);
     api.put("/rest/api/v1/study/progress", {
       songId: song.id,
       positionSec: position,
-      durationSec: Math.round(st.duration || song.duration || 0),
+      durationSec,
     }).catch(() => {});
+    if (song.playlistId) {
+      api.put(`/rest/api/v1/study/playlists/${encodeURIComponent(song.playlistId)}/progress`, {
+        songId: song.id, positionSec: position, durationSec,
+      }).catch(() => {});
+    }
   }
 
   // Per-peer poll: mirrors backend transport state + queue into the peer's

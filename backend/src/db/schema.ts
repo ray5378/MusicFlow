@@ -212,6 +212,20 @@ export const studyProgress = sqliteTable("study_progress", {
   pk: primaryKey({ columns: [t.userId, t.songId] }),
 }));
 
+// 学习歌单播放进度(按 用户 × 歌单 一行):记录「上次在哪个歌单、听到哪一首的哪一秒」,
+// 用于「继续学习」里的歌单条目 —— 点击后整单续播,而不是只续播单条音频。
+// 与 study_progress 分开存:曲目可能同时出现在多个歌单,两种入口互不覆盖。
+export const studyPlaylistProgress = sqliteTable("study_playlist_progress", {
+  userId: text("user_id").notNull(),
+  playlistId: text("playlist_id").notNull(),
+  songId: text("song_id").notNull(),
+  positionSec: real("position_sec").default(0),
+  durationSec: integer("duration_sec").default(0),
+  updatedAt: text("updated_at").default(""),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.userId, t.playlistId] }),
+}));
+
 // OpenSubsonic 评分(setRating):按用户 × 条目类型(song|album|artist) × 条目 id
 // 存储 0–5 星;rating=0 表示删除评分。列表响应里的 userRating 来自这里。
 export const userRatings = sqliteTable("user_ratings", {

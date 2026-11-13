@@ -29,6 +29,11 @@ export interface StudySong extends Song {
   kind?: string;
   sourceId?: string;
   relDir?: string;
+  /** 源文件名(含扩展名),学习歌单列表按此展示;缺失时回退 title。 */
+  fileName?: string;
+  /** 播放来源歌单:存在时播放会额外上报「整单续播」位置。 */
+  playlistId?: string;
+  playlistName?: string;
   positionSec?: number;
   durationSec?: number;
   progress?: number;
@@ -115,14 +120,37 @@ export async function resolveStudyFiles(
   return res.data.items || [];
 }
 
-export async function fetchContinueLearning(limit = 20): Promise<StudySong[]> {
+/** 继续学习:单条音频记录 + 学习歌单续播记录(可整单从上次位置续播)。 */
+export interface ContinueLearningResult {
+  items: StudySong[];
+  playlistItems: StudySong[];
+}
+
+export async function fetchContinueLearning(limit = 20): Promise<ContinueLearningResult> {
   const res = await api.get("/rest/api/v1/study/continue", { params: { limit } });
-  return res.data.items || [];
+  return { items: res.data.items || [], playlistItems: res.data.playlistItems || [] };
+}
+
+/** 上报学习歌单播放位置(整单续播用;曲目必须属于该歌单)。 */
+export async function reportStudyPlaylistProgress(
+  playlistId: string,
+  songId: string,
+  positionSec: number,
+  durationSec: number,
+): Promise<void> {
+  await api.put(`/rest/api/v1/study/playlists/${encodeURIComponent(playlistId)}/progress`, {
+    songId, positionSec, durationSec,
+  });
 }
 
 /** 删除一条学习记录(仅影响继续学习/进度,不删除音频文件)。 */
 export async function deleteStudyProgress(songId: string): Promise<void> {
   await api.delete(`/rest/api/v1/study/progress/${encodeURIComponent(songId)}`);
+}
+
+/** 清空当前用户全部学习记录(仅影响继续学习/进度,不删除音频文件)。 */
+export async function clearStudyProgress(): Promise<void> {
+  await api.delete("/rest/api/v1/study/progress");
 }
 
 export async function fetchRecentStudy(limit = 50, sourceId = ""): Promise<StudySong[]> {

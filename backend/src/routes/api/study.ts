@@ -5,7 +5,9 @@
 //          GET  /v1/study/dir?id=dir:<源id>:<相对目录>   实时列目录
 //   播放:  POST /v1/study/resolve            点播即入库,返回 songId(之后走 /rest/stream)
 //          PUT  /v1/study/progress           上报学习进度(不写音乐播放历史)
+//          DELETE /v1/study/progress          清空全部学习记录
 //          DELETE /v1/study/progress/:songId  删除一条学习记录
+//          PUT  /v1/study/playlists/:id/progress  记录学习歌单播放位置(整单续播)
 //          GET  /v1/study/continue           继续学习
 //          GET  /v1/study/recent             最近添加
 //          GET  /v1/study/search             学习内容搜索
@@ -13,7 +15,7 @@
 import type { Hono } from "hono";
 import { and, desc, eq, inArray, notInArray, or, sql, like } from "drizzle-orm";
 import { db } from "../../db/index.js";
-import { playlists, playlistSongs, songs, studyProgress, mediaSources, studyPlaylistFolders } from "../../db/schema.js";
+import { playlists, playlistSongs, songs, studyProgress, mediaSources, studyPlaylistFolders, studyPlaylistProgress } from "../../db/schema.js";
 import { PERM, permMiddleware } from "./shared.js";
 import { apiError, apiErrorStatus, BusinessErrorCode } from "../../utils/errors.js";
 import { serializeSongRow } from "../../utils/songSource.js";
@@ -33,6 +35,8 @@ import {
 
 /** 每个用户保留的学习记录上限(按 updatedAt 取最新)。 */
 const STUDY_PROGRESS_LIMIT = 50;
+/** 每个用户保留的学习歌单续播条目上限。 */
+const STUDY_PLAYLIST_PROGRESS_LIMIT = 50;
 
 function fail(c: any, e: unknown) {
   if (e instanceof StudyError) {
@@ -57,6 +61,14 @@ function parseDirId(raw: string): { sourceId: string; relDir: string } {
     : { sourceId: rest, relDir: "" };
 }
 
+/** 源文件名(含扩展名):学习列表按「和原文件一致的文件名」展示,不依赖元数据标题。 */
+function studyFileNameOf(s: any): string {
+  const raw = String(s?.path || "").replace(/\\/g, "/");
+  const tail = raw.replace(/^[lsw]:[^:]+:/, "");
+  const base = tail.slice(tail.lastIndexOf("/") + 1);
+  try { return decodeURIComponent(base); } catch { return base; }
+}
+
 function studySongPayload(s: any, extra: Record<string, any> = {}) {
   return {
     ...serializeSongRow(s),
@@ -64,8 +76,41 @@ function studySongPayload(s: any, extra: Record<string, any> = {}) {
     kind: "study",
     sourceId: s.sourceId,
     relDir: s.relDir || "",
+    fileName: studyFileNameOf(s),
     ...extra,
   };
+}
+
+/** 学习歌单的访问权限:本人可见始终成立,管理员沿用既有放行规则。 */
+function canAccessStudyPlaylist(pl: any, user: any): boolean {
+  return !!pl && pl.kind === "study" && (pl.ownerId === user?.id || !!user?.isAdmin);
+}
+
+/** 裁剪某用户的学习歌单续播记录,只保留最新 N 条。 */
+function pruneStudyPlaylistProgress(userId: string): void {
+  const keep = db.select({ playlistId: studyPlaylistProgress.playlistId })
+    .from(studyPlaylistProgress)
+    .where(eq(studyPlaylistProgress.userId, userId))
+    .orderBy(desc(studyPlaylistProgress.updatedAt))
+    .limit(STUDY_PLAYLIST_PROGRESS_LIMIT)
+    .all()
+    .map((r) => r.playlistId);
+  if (keep.length >= STUDY_PLAYLIST_PROGRESS_LIMIT) {
+    db.delete(studyPlaylistProgress)
+      .where(and(eq(studyPlaylistProgress.userId, userId), notInArray(studyPlaylistProgress.playlistId, keep)))
+      .run();
+  }
+}
+
+/** 同一用户的学习歌单名称唯一(忽略首尾空格与大小写);重名抛 409。 */
+function assertStudyPlaylistNameFree(ownerId: string, name: string, excludeId = ""): void {
+  const target = name.trim().toLocaleLowerCase();
+  if (!ownerId || !target) return;
+  const rows = db.select({ id: playlists.id, name: playlists.name }).from(playlists)
+    .where(and(eq(playlists.kind, "study"), eq(playlists.ownerId, ownerId))).all();
+  const hit = rows.find((r) =>
+    r.id !== excludeId && String(r.name || "").trim().toLocaleLowerCase() === target);
+  if (hit) throw new StudyError(409, "已存在同名学习歌单");
 }
 
 // ==================== 歌单导出 / 导入 ====================
@@ -333,6 +378,47 @@ export function registerStudy(app: Hono): void {
     return c.json({ success: true, finished: !!finished });
   });
 
+  // 记录「学习歌单」播放位置:继续学习页据此提供整单续播入口。
+  app.put("/v1/study/playlists/:id/progress", permMiddleware(PERM.STUDY_STREAM), async (c) => {
+    const user = c.get("user");
+    if (!user) return fail(c, new StudyError(401, "未登录"));
+    const id = c.req.param("id")!;
+    const pl = db.select().from(playlists).where(eq(playlists.id, id)).get();
+    if (!pl || pl.kind !== "study") return fail(c, new StudyError(404, "学习歌单不存在"));
+    if (!canAccessStudyPlaylist(pl, user)) return fail(c, new StudyError(403, "无权访问该歌单"));
+    const body = await c.req.json().catch(() => ({}));
+    const songId = String(body?.songId || "");
+    if (!songId) return fail(c, new StudyError(400, "缺少歌曲 id"));
+    const inPlaylist = db.select({ id: playlistSongs.id })
+      .from(playlistSongs)
+      .where(and(eq(playlistSongs.playlistId, id), eq(playlistSongs.songId, songId))).get();
+    if (!inPlaylist) return fail(c, new StudyError(400, "该曲目不在歌单内"));
+    const song = db.select().from(songs).where(eq(songs.id, songId)).get();
+    if (!song || song.kind !== "study") return fail(c, new StudyError(404, "学习音频不存在"));
+    const duration = Math.max(0, Number(body?.durationSec) || song.duration || 0);
+    const position = Math.max(0, Number(body?.positionSec) || 0);
+    const now = new Date().toISOString();
+    db.insert(studyPlaylistProgress).values({
+      userId: user.id, playlistId: id, songId, positionSec: position,
+      durationSec: duration, updatedAt: now,
+    }).onConflictDoUpdate({
+      target: [studyPlaylistProgress.userId, studyPlaylistProgress.playlistId],
+      set: { songId, positionSec: position, durationSec: duration, updatedAt: now },
+    }).run();
+    pruneStudyPlaylistProgress(user.id);
+    return c.json({ success: true });
+  });
+
+  // 清空当前用户全部学习记录(只影响「继续学习」,不删除音频文件)。
+  app.delete("/v1/study/progress", permMiddleware(PERM.STUDY_STREAM), (c) => {
+    const user = c.get("user");
+    if (!user) return fail(c, new StudyError(401, "未登录"));
+    db.delete(studyProgress).where(eq(studyProgress.userId, user.id)).run();
+    // 歌单续播与单条记录同属「学习记录」,一并清空。
+    db.delete(studyPlaylistProgress).where(eq(studyPlaylistProgress.userId, user.id)).run();
+    return c.json({ success: true });
+  });
+
   app.delete("/v1/study/progress/:songId", permMiddleware(PERM.STUDY_STREAM), (c) => {
     const user = c.get("user");
     if (!user) return fail(c, new StudyError(401, "未登录"));
@@ -341,12 +427,16 @@ export function registerStudy(app: Hono): void {
     db.delete(studyProgress)
       .where(and(eq(studyProgress.userId, user.id), eq(studyProgress.songId, songId)))
       .run();
+    // 该曲目若正是某个歌单的续播位置,也一并移除,避免「删了又出现」。
+    db.delete(studyPlaylistProgress)
+      .where(and(eq(studyPlaylistProgress.userId, user.id), eq(studyPlaylistProgress.songId, songId)))
+      .run();
     return c.json({ success: true });
   });
 
   app.get("/v1/study/continue", permMiddleware(PERM.STUDY_BROWSE), (c) => {
     const user = c.get("user");
-    if (!user) return c.json({ items: [] });
+    if (!user) return c.json({ items: [], playlistItems: [] });
     const limit = Math.min(100, Math.max(1, parseInt(c.req.query("limit") || "20") || 20));
     const rows = db.select({ p: studyProgress, s: songs })
       .from(studyProgress)
@@ -358,8 +448,29 @@ export function registerStudy(app: Hono): void {
       ))
       .orderBy(desc(studyProgress.updatedAt))
       .limit(limit).all();
+    // 学习歌单续播:「继续学习」不只续单条音频,还能整单续播(从上次那一首的位置继续)。
+    const playlistRows = db.select({ p: studyPlaylistProgress, s: songs, pl: playlists })
+      .from(studyPlaylistProgress)
+      .innerJoin(songs, eq(studyPlaylistProgress.songId, songs.id))
+      .innerJoin(playlists, eq(studyPlaylistProgress.playlistId, playlists.id))
+      .where(and(
+        eq(studyPlaylistProgress.userId, user.id),
+        eq(songs.kind, "study"),
+        eq(playlists.kind, "study"),
+        or(eq(playlists.ownerId, user.id), eq(playlists.isPublic, 1)),
+      ))
+      .orderBy(desc(studyPlaylistProgress.updatedAt))
+      .limit(limit).all();
     return c.json({
       items: rows.map((r) => studySongPayload(r.s, {
+        positionSec: r.p.positionSec || 0,
+        durationSec: r.p.durationSec || r.s.duration || 0,
+        progress: r.p.durationSec ? Math.min(1, (r.p.positionSec || 0) / r.p.durationSec) : 0,
+        updatedAt: r.p.updatedAt || "",
+      })),
+      playlistItems: playlistRows.map((r) => studySongPayload(r.s, {
+        playlistId: r.pl.id,
+        playlistName: r.pl.name,
         positionSec: r.p.positionSec || 0,
         durationSec: r.p.durationSec || r.s.duration || 0,
         progress: r.p.durationSec ? Math.min(1, (r.p.positionSec || 0) / r.p.durationSec) : 0,
@@ -461,9 +572,11 @@ export function registerStudy(app: Hono): void {
       const tracks: any[] = Array.isArray(rawPl?.tracks) ? rawPl.tracks.slice(0, STUDY_IMPORT_MAX_TRACKS) : [];
       totalTracks += tracks.length;
 
+      // 同名合并按「忽略大小写」匹配,与创建/重命名的唯一性口径一致,避免导入造出重名歌单。
+      const nameKey = name.toLocaleLowerCase();
       let pl = db.select().from(playlists)
-        .where(and(eq(playlists.kind, "study"), eq(playlists.ownerId, user.id), eq(playlists.name, name)))
-        .get();
+        .where(and(eq(playlists.kind, "study"), eq(playlists.ownerId, user.id))).all()
+        .find((p) => String(p.name || "").trim().toLocaleLowerCase() === nameKey);
       let isNew = false;
       if (!pl) {
         const id = `pl-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 6)}`;
@@ -518,10 +631,12 @@ export function registerStudy(app: Hono): void {
   app.get("/v1/study/playlists", permMiddleware(PERM.STUDY_BROWSE), (c) => {
     const user = c.get("user");
     const q = (c.req.query("q") || "").trim();
-    const conds: any[] = [eq(playlists.kind, "study")];
-    if (!user?.isAdmin) {
-      conds.push(or(eq(playlists.ownerId, user?.id ?? ""), eq(playlists.isPublic, 1)));
-    }
+    const conds: any[] = [
+      eq(playlists.kind, "study"),
+      // 学习歌单属于个人空间:管理员也只看到自己的歌单(与公开歌单),
+      // 不再把其他用户创建的学习歌单混进管理员列表。
+      or(eq(playlists.ownerId, user?.id ?? ""), eq(playlists.isPublic, 1)),
+    ];
     if (q) conds.push(like(playlists.name, `%${q}%`));
     const rows = db.select().from(playlists).where(and(...conds)).orderBy(desc(playlists.updatedAt)).all();
     return c.json({
@@ -542,13 +657,18 @@ export function registerStudy(app: Hono): void {
     const body = await c.req.json().catch(() => ({}));
     const name = String(body?.name || "").trim();
     if (!name) return fail(c, new StudyError(400, "缺少歌单名称"));
-    const folder = ensureStudyFolder(user?.id || "", body?.folder);
-    const id = `pl-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-    db.insert(playlists).values({
-      id, name, ownerId: user?.id || "", kind: "study", folder,
-      isPublic: body?.public ? 1 : 0, comment: String(body?.comment || ""),
-    }).run();
-    return c.json({ id });
+    try {
+      assertStudyPlaylistNameFree(user?.id || "", name);
+      const folder = ensureStudyFolder(user?.id || "", body?.folder);
+      const id = `pl-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      db.insert(playlists).values({
+        id, name, ownerId: user?.id || "", kind: "study", folder,
+        isPublic: body?.public ? 1 : 0, comment: String(body?.comment || ""),
+      }).run();
+      return c.json({ id });
+    } catch (e) {
+      return fail(c, e);
+    }
   });
 
   // ==================== 歌单文件夹 ====================
@@ -667,6 +787,8 @@ export function registerStudy(app: Hono): void {
     if (!pl || pl.kind !== "study") return fail(c, new StudyError(404, "学习歌单不存在"));
     if (pl.ownerId !== user?.id && !user?.isAdmin) return fail(c, new StudyError(403, "无权删除该歌单"));
     db.delete(playlistSongs).where(eq(playlistSongs.playlistId, id)).run();
+    // 歌单删除后其续播记录失去意义,一并清理(所有用户的该歌单进度)。
+    db.delete(studyPlaylistProgress).where(eq(studyPlaylistProgress.playlistId, id)).run();
     db.delete(playlists).where(eq(playlists.id, id)).run();
     return c.json({ success: true });
   });
@@ -678,8 +800,18 @@ export function registerStudy(app: Hono): void {
     if (!pl || pl.kind !== "study") return fail(c, new StudyError(404, "学习歌单不存在"));
     if (pl.ownerId !== user?.id && !user?.isAdmin) return fail(c, new StudyError(403, "无权修改该歌单"));
     const body = await c.req.json().catch(() => ({}));
+    let nextName: string | undefined;
+    if (body?.name !== undefined) {
+      nextName = String(body.name || "").trim();
+      if (!nextName) return fail(c, new StudyError(400, "缺少歌单名称"));
+      try {
+        assertStudyPlaylistNameFree(pl.ownerId, nextName, id);
+      } catch (e) {
+        return fail(c, e);
+      }
+    }
     db.update(playlists).set({
-      ...(body?.name !== undefined ? { name: String(body.name) } : {}),
+      ...(nextName !== undefined ? { name: nextName } : {}),
       ...(body?.comment !== undefined ? { comment: String(body.comment) } : {}),
       ...(body?.public !== undefined ? { isPublic: body.public ? 1 : 0 } : {}),
       // folder 传空串 = 移回根目录;非空会自动补建文件夹(按歌单拥有者隔离)。
@@ -704,7 +836,8 @@ export function registerStudy(app: Hono): void {
       : new Map<string, any>();
     const items = entries.map((e) => {
       const s = e.songId ? map.get(e.songId) : null;
-      return s ? { ...studySongPayload(s), entryId: e.id } : null;
+      // 带上所属歌单:Web/客户端播放学习歌单时据此上报「整单续播」位置。
+      return s ? { ...studySongPayload(s, { playlistId: id, playlistName: pl.name }), entryId: e.id } : null;
     }).filter(Boolean);
     return c.json({ id, name: pl.name, items, total: items.length });
   });

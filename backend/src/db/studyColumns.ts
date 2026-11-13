@@ -21,6 +21,25 @@ export function ensureStudyColumns(sqlite: DatabaseType): void {
   ensureColumn(sqlite, "playlists", "kind", "TEXT NOT NULL DEFAULT 'music'");
   ensureColumn(sqlite, "playlists", "folder", "TEXT DEFAULT ''");
 
+  // 老库补表:新库由 db/index.ts 的 CREATE TABLE 建出;这里保持同一份 DDL,
+  // 让升级后的库也能存「学习歌单续播」进度。
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS study_playlist_progress (
+      user_id TEXT NOT NULL,
+      playlist_id TEXT NOT NULL,
+      song_id TEXT NOT NULL,
+      position_sec REAL DEFAULT 0,
+      duration_sec INTEGER DEFAULT 0,
+      updated_at TEXT DEFAULT '',
+      PRIMARY KEY (user_id, playlist_id),
+      FOREIGN KEY (user_id) REFERENCES users(id),
+      FOREIGN KEY (playlist_id) REFERENCES playlists(id),
+      FOREIGN KEY (song_id) REFERENCES songs(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_study_playlist_progress_user
+      ON study_playlist_progress(user_id, updated_at DESC);
+  `);
+
   // 防御性回填：历史行若被外部工具写成 NULL/空串，统一归入音乐面，
   // 保证「音乐面 = kind='music'」这一过滤假设永远成立。
   const songsFixed = sqlite

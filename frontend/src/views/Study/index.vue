@@ -428,34 +428,60 @@
 
         <!-- ===== 继续学习 ===== -->
         <div v-else-if="mode === 'continue'" v-loading="loadingContinue" class="pane">
-          <div v-if="continueItems.length === 0" class="empty">
+          <div v-if="continueItems.length > 0 || continuePlaylistItems.length > 0" class="block-head">
+            <span class="block-title">{{ t("study.continueLearning") }}</span>
+            <el-button text size="small" class="clear-records" @click="clearAllRecords">
+              <MfIcon name="Trash2" :size="14" />{{ t("study.clearRecords") }}
+            </el-button>
+          </div>
+          <div v-if="continueItems.length === 0 && continuePlaylistItems.length === 0" class="empty">
             <MfIcon name="BookOpen" :size="36" />
             <p>{{ t("study.continueEmpty") }}</p>
           </div>
-          <div v-else class="study-list">
-            <div
-              v-for="(s, i) in continueItems"
-              :key="s.id"
-              class="study-row"
-              @click="onResumeClick(i)"
-              @contextmenu="openContextMenu($event, continueMenuActions(s), s.title, s.relDir || '')"
-              v-longpress="() => openActionSheet(continueMenuActions(s), s.title, s.relDir || '')"
-            >
-              <span class="row-play"><MfIcon name="Play" :size="14" /></span>
-              <span class="row-title">{{ s.title }}</span>
-              <span class="row-dir" :title="s.relDir || s.album || ''">{{ s.relDir || s.album || "—" }}</span>
-              <span class="row-progress">
-                <span class="bar"><span class="bar-in" :style="{ width: pct(s) + '%' }"></span></span>
-                <span class="pct-text">{{ pct(s) }}%</span>
-              </span>
-              <span class="row-dur">{{ fmtTime(s.positionSec) }} / {{ fmtTime(s.durationSec || s.duration) }}</span>
-              <span class="row-actions" @click.stop>
-                <span class="row-btn" :title="t('songTable.moreActions')" @click="openContextMenu($event, continueMenuActions(s), s.title, s.relDir || '')">
-                  <MfIcon name="MoreHorizontal" :size="15" />
+          <template v-else>
+            <!-- 学习歌单续播:点击整单从上次那一首的位置继续 -->
+            <div v-if="continuePlaylistItems.length > 0" class="study-list playlist-continue">
+              <div
+                v-for="p in continuePlaylistItems"
+                :key="`pl-${p.playlistId}`"
+                class="study-row"
+                @click="resumePlaylist(p)"
+              >
+                <span class="row-play"><MfIcon name="ListMusic" :size="14" /></span>
+                <span class="row-title">{{ p.playlistName }}</span>
+                <span class="row-dir" :title="p.fileName || p.title">{{ p.fileName || p.title }}</span>
+                <span class="row-progress">
+                  <span class="bar"><span class="bar-in" :style="{ width: pct(p) + '%' }"></span></span>
+                  <span class="pct-text">{{ pct(p) }}%</span>
                 </span>
-              </span>
+                <span class="row-dur">{{ fmtTime(p.positionSec) }} / {{ fmtTime(p.durationSec || p.duration) }}</span>
+              </div>
             </div>
-          </div>
+            <div v-if="continueItems.length > 0" class="study-list">
+              <div
+                v-for="(s, i) in continueItems"
+                :key="s.id"
+                class="study-row"
+                @click="onResumeClick(i)"
+                @contextmenu="openContextMenu($event, continueMenuActions(s), s.title, s.relDir || '')"
+                v-longpress="() => openActionSheet(continueMenuActions(s), s.title, s.relDir || '')"
+              >
+                <span class="row-play"><MfIcon name="Play" :size="14" /></span>
+                <span class="row-title">{{ s.title }}</span>
+                <span class="row-dir" :title="s.relDir || s.album || ''">{{ s.relDir || s.album || "—" }}</span>
+                <span class="row-progress">
+                  <span class="bar"><span class="bar-in" :style="{ width: pct(s) + '%' }"></span></span>
+                  <span class="pct-text">{{ pct(s) }}%</span>
+                </span>
+                <span class="row-dur">{{ fmtTime(s.positionSec) }} / {{ fmtTime(s.durationSec || s.duration) }}</span>
+                <span class="row-actions" @click.stop>
+                  <span class="row-btn" :title="t('songTable.moreActions')" @click="openContextMenu($event, continueMenuActions(s), s.title, s.relDir || '')">
+                    <MfIcon name="MoreHorizontal" :size="15" />
+                  </span>
+                </span>
+              </div>
+            </div>
+          </template>
         </div>
 
         <!-- ===== 最近添加 ===== -->
@@ -576,6 +602,7 @@ import {
   deleteStudyPlaylist,
   deleteStudyPlaylistFolder,
   deleteStudyProgress,
+  clearStudyProgress,
   fetchContinueLearning,
   fetchRecentStudy,
   fetchStudyDir,
@@ -1027,14 +1054,52 @@ function showEntryInfo(e: StudyDirEntry) {
 // ==================== 继续学习 / 最近添加 ====================
 const mode = ref<"dir" | "playlists" | "continue" | "recent">("dir");
 const continueItems = ref<StudySong[]>([]);
+/** 学习歌单续播条目(继续学习页顶部,点击整单续播)。 */
+const continuePlaylistItems = ref<StudySong[]>([]);
 const loadingContinue = ref(false);
 const recentItems = ref<StudySong[]>([]);
 const loadingRecent = ref(false);
 
 async function loadContinue() {
   loadingContinue.value = true;
-  try { continueItems.value = await fetchContinueLearning(50); } catch { continueItems.value = []; }
-  finally { loadingContinue.value = false; }
+  try {
+    const res = await fetchContinueLearning(50);
+    continueItems.value = res.items;
+    continuePlaylistItems.value = res.playlistItems;
+  } catch {
+    continueItems.value = [];
+    continuePlaylistItems.value = [];
+  } finally { loadingContinue.value = false; }
+}
+/** 歌单续播:取整单曲目,定位到上次那一首,并从上次位置继续。 */
+async function resumePlaylist(item: StudySong) {
+  if (!item.playlistId) return;
+  try {
+    const res = await fetchStudyPlaylistTracks(item.playlistId);
+    if (!res.items.length) { ElMessage.warning(t("study.playlistEmpty")); return; }
+    const idx = res.items.findIndex((s) => s.id === item.id);
+    playSongs(res.items, idx >= 0 ? idx : 0, item.positionSec || 0);
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.error || t("playlists.playFailed"));
+  }
+}
+/** 清空学习记录:单条内容与歌单续播一起清除(不删音频文件)。 */
+async function clearAllRecords() {
+  try {
+    await ElMessageBox.confirm(
+      t("study.clearRecordsConfirm"),
+      t("study.clearRecords"),
+      { type: "warning", confirmButtonText: t("common.confirm"), cancelButtonText: t("common.cancel") },
+    );
+  } catch { return; }
+  try {
+    await clearStudyProgress();
+    continueItems.value = [];
+    continuePlaylistItems.value = [];
+    ElMessage.success(t("study.clearRecordsDone"));
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.error || t("common.operationFailed"));
+  }
 }
 async function loadRecent() {
   loadingRecent.value = true;
@@ -1180,17 +1245,26 @@ async function loadPlaylists() {
   }
 }
 async function createPlaylist() {
+  let value = "";
   try {
-    const { value } = await ElMessageBox.prompt(t("study.newPlaylistTip"), t("study.newPlaylist"), {
+    ({ value } = await ElMessageBox.prompt(t("study.newPlaylistTip"), t("study.newPlaylist"), {
       confirmButtonText: t("common.confirm"), cancelButtonText: t("common.cancel"),
       inputPlaceholder: t("study.playlistNamePlaceholder"),
       inputValidator: (v: string) => (String(v || "").trim() ? true : t("study.nameRequired")),
-    });
+    }));
+  } catch { return; /* 取消 */ }
+  try {
     // 在文件夹视图里新建时,直接归入当前文件夹。
     await createStudyPlaylist(String(value).trim(), currentFolder.value);
     await loadPlaylists();
     ElMessage.success(t("study.playlistCreated"));
-  } catch { /* 取消 */ }
+  } catch (e: any) {
+    ElMessage.error(
+      e?.response?.status === 409
+        ? t("study.playlistNameExists")
+        : (e?.response?.data?.error || t("common.operationFailed")),
+    );
+  }
 }
 
 async function createFolder() {
@@ -1434,7 +1508,13 @@ async function renamePlaylist(p: StudyPlaylist) {
     await loadPlaylists();
     ElMessage.success(t("playlists.renamed"));
   } catch (e: any) {
-    if (e?.response) ElMessage.error(e.response.data?.error || t("playlists.renameFailed"));
+    if (e?.response) {
+      ElMessage.error(
+        e.response.status === 409
+          ? t("study.playlistNameExists")
+          : (e.response.data?.error || t("playlists.renameFailed")),
+      );
+    }
   }
 }
 async function playPlaylist(p: StudyPlaylist) {

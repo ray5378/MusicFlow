@@ -326,6 +326,21 @@ export function initDatabase() {
     );
     CREATE INDEX IF NOT EXISTS idx_study_progress_user ON study_progress(user_id, updated_at DESC);
 
+    -- 学习歌单播放进度:按 用户 × 歌单 一行,记录「上次听到哪首的哪一秒」。
+    CREATE TABLE IF NOT EXISTS study_playlist_progress (
+      user_id TEXT NOT NULL,
+      playlist_id TEXT NOT NULL,
+      song_id TEXT NOT NULL,
+      position_sec REAL DEFAULT 0,
+      duration_sec INTEGER DEFAULT 0,
+      updated_at TEXT DEFAULT '',
+      PRIMARY KEY (user_id, playlist_id),
+      FOREIGN KEY (user_id) REFERENCES users(id),
+      FOREIGN KEY (playlist_id) REFERENCES playlists(id),
+      FOREIGN KEY (song_id) REFERENCES songs(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_study_playlist_progress_user ON study_playlist_progress(user_id, updated_at DESC);
+
     CREATE TABLE IF NOT EXISTS user_ratings (
       user_id TEXT NOT NULL,
       item_type TEXT NOT NULL,
