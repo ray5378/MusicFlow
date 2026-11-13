@@ -120,6 +120,11 @@ export async function fetchContinueLearning(limit = 20): Promise<StudySong[]> {
   return res.data.items || [];
 }
 
+/** 删除一条学习记录(仅影响继续学习/进度,不删除音频文件)。 */
+export async function deleteStudyProgress(songId: string): Promise<void> {
+  await api.delete(`/rest/api/v1/study/progress/${encodeURIComponent(songId)}`);
+}
+
 export async function fetchRecentStudy(limit = 50, sourceId = ""): Promise<StudySong[]> {
   const res = await api.get("/rest/api/v1/study/recent", { params: { limit, sourceId: sourceId || undefined } });
   return res.data.items || [];

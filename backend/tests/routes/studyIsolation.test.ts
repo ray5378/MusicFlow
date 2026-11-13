@@ -429,4 +429,37 @@ describe("学习 API", () => {
     expect(empty.body.created).toBe(1);
     expect(empty.body.trackCount).toBe(0);
   });
+
+  it("删除学习记录:只删自己的那一条", async () => {
+    await call("PUT", "/v1/study/progress", { songId: "st1", positionSec: 30, durationSec: 600 });
+    db.insert(studyProgress).values({
+      userId: "u3", songId: "st1", positionSec: 12, durationSec: 600, finished: 0,
+      updatedAt: new Date().toISOString(),
+    }).onConflictDoNothing().run();
+    const del = await call("DELETE", "/v1/study/progress/st1");
+    expect(del.res.status).toBe(200);
+    expect(db.select().from(studyProgress).where(and(eq(studyProgress.userId, "u1"), eq(studyProgress.songId, "st1"))).get()).toBeUndefined();
+    // 他人同名记录不受影响
+    expect(db.select().from(studyProgress).where(and(eq(studyProgress.userId, "u3"), eq(studyProgress.songId, "st1"))).get()).toBeTruthy();
+    db.delete(studyProgress).where(and(eq(studyProgress.userId, "u3"), eq(studyProgress.songId, "st1"))).run();
+  });
+
+  it("学习记录只保留最新 50 条", async () => {
+    const ids = Array.from({ length: 60 }, (_, i) => `cap${i}`);
+    db.insert(songs).values(ids.map((id) => ({
+      id, title: id, artist: "", album: "上限", duration: 100,
+      path: `l:src-study:${id}.mp3`, suffix: "mp3", type: "local", kind: "study", sourceId: "src-study",
+    }))).run();
+    const base = Date.parse("2026-01-01T00:00:00.000Z");
+    db.insert(studyProgress).values(ids.map((songId, i) => ({
+      userId: "u3", songId, positionSec: i, durationSec: 100, finished: 0,
+      updatedAt: new Date(base + i * 1000).toISOString(),
+    }))).run();
+    const put = await callAs("carol", "PUT", "/v1/study/progress", { songId: "cap59", positionSec: 50, durationSec: 100 });
+    expect(put.res.status).toBe(200);
+    const left = db.select().from(studyProgress).where(eq(studyProgress.userId, "u3")).all();
+    expect(left.length).toBe(50);
+    expect(left.some((r) => r.songId === "cap59")).toBe(true);
+    expect(left.some((r) => r.songId === "cap0")).toBe(false);
+  });
 });

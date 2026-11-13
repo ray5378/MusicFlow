@@ -438,8 +438,8 @@
               :key="s.id"
               class="study-row"
               @click="onResumeClick(i)"
-              @contextmenu="openContextMenu($event, songMenuActions(s), s.title, s.relDir || '')"
-              v-longpress="() => openActionSheet(songMenuActions(s), s.title, s.relDir || '')"
+              @contextmenu="openContextMenu($event, continueMenuActions(s), s.title, s.relDir || '')"
+              v-longpress="() => openActionSheet(continueMenuActions(s), s.title, s.relDir || '')"
             >
               <span class="row-play"><MfIcon name="Play" :size="14" /></span>
               <span class="row-title">{{ s.title }}</span>
@@ -450,7 +450,7 @@
               </span>
               <span class="row-dur">{{ fmtTime(s.positionSec) }} / {{ fmtTime(s.durationSec || s.duration) }}</span>
               <span class="row-actions" @click.stop>
-                <span class="row-btn" :title="t('songTable.moreActions')" @click="openContextMenu($event, songMenuActions(s), s.title, s.relDir || '')">
+                <span class="row-btn" :title="t('songTable.moreActions')" @click="openContextMenu($event, continueMenuActions(s), s.title, s.relDir || '')">
                   <MfIcon name="MoreHorizontal" :size="15" />
                 </span>
               </span>
@@ -575,6 +575,7 @@ import {
   createStudyPlaylistFolder,
   deleteStudyPlaylist,
   deleteStudyPlaylistFolder,
+  deleteStudyProgress,
   fetchContinueLearning,
   fetchRecentStudy,
   fetchStudyDir,
@@ -942,6 +943,32 @@ function songMenuActions(s: StudySong): MenuAction[] {
   ];
 }
 
+/** 继续学习记录:在歌曲菜单上追加「删除记录」。 */
+function continueMenuActions(s: StudySong): MenuAction[] {
+  return [
+    ...songMenuActions(s),
+    { divider: true },
+    { label: t("study.deleteRecord"), icon: Trash2, danger: true, onClick: () => removeContinueRecord(s) },
+  ];
+}
+
+async function removeContinueRecord(s: StudySong) {
+  try {
+    await ElMessageBox.confirm(
+      t("study.deleteRecordConfirm", { name: s.title }),
+      t("study.deleteRecord"),
+      { type: "warning", confirmButtonText: t("common.confirm"), cancelButtonText: t("common.cancel") },
+    );
+  } catch { return; }
+  try {
+    await deleteStudyProgress(s.id);
+    await loadContinue();
+    ElMessage.success(t("study.recordDeleted"));
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.error || t("common.operationFailed"));
+  }
+}
+
 function playlistMenuActions(p: StudyPlaylist): MenuAction[] {
   return [
     { label: t("playlists.playAll"), icon: Play, onClick: () => playPlaylist(p) },
@@ -1006,7 +1033,7 @@ const loadingRecent = ref(false);
 
 async function loadContinue() {
   loadingContinue.value = true;
-  try { continueItems.value = await fetchContinueLearning(30); } catch { continueItems.value = []; }
+  try { continueItems.value = await fetchContinueLearning(50); } catch { continueItems.value = []; }
   finally { loadingContinue.value = false; }
 }
 async function loadRecent() {

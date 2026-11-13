@@ -5,12 +5,13 @@
 //          GET  /v1/study/dir?id=dir:<源id>:<相对目录>   实时列目录
 //   播放:  POST /v1/study/resolve            点播即入库,返回 songId(之后走 /rest/stream)
 //          PUT  /v1/study/progress           上报学习进度(不写音乐播放历史)
+//          DELETE /v1/study/progress/:songId  删除一条学习记录
 //          GET  /v1/study/continue           继续学习
 //          GET  /v1/study/recent             最近添加
 //          GET  /v1/study/search             学习内容搜索
 //   歌单:  GET/POST/DELETE /v1/study/playlists..., 曲目增删
 import type { Hono } from "hono";
-import { and, desc, eq, inArray, or, sql, like } from "drizzle-orm";
+import { and, desc, eq, inArray, notInArray, or, sql, like } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { playlists, playlistSongs, songs, studyProgress, mediaSources, studyPlaylistFolders } from "../../db/schema.js";
 import { PERM, permMiddleware } from "./shared.js";
@@ -29,6 +30,9 @@ import {
   studyRelPathOf,
   type StudySourceRow,
 } from "../../services/study/browse.js";
+
+/** 每个用户保留的学习记录上限(按 updatedAt 取最新)。 */
+const STUDY_PROGRESS_LIMIT = 50;
 
 function fail(c: any, e: unknown) {
   if (e instanceof StudyError) {
@@ -313,7 +317,31 @@ export function registerStudy(app: Hono): void {
       target: [studyProgress.userId, studyProgress.songId],
       set: { positionSec: position, durationSec: duration, finished, updatedAt: now },
     }).run();
+    // 学习记录只保留最新 50 条:超出部分按 updatedAt 从旧到新清理。
+    const keepSongIds = db.select({ songId: studyProgress.songId })
+      .from(studyProgress)
+      .where(eq(studyProgress.userId, user.id))
+      .orderBy(desc(studyProgress.updatedAt))
+      .limit(STUDY_PROGRESS_LIMIT)
+      .all()
+      .map((r) => r.songId);
+    if (keepSongIds.length >= STUDY_PROGRESS_LIMIT) {
+      db.delete(studyProgress)
+        .where(and(eq(studyProgress.userId, user.id), notInArray(studyProgress.songId, keepSongIds)))
+        .run();
+    }
     return c.json({ success: true, finished: !!finished });
+  });
+
+  app.delete("/v1/study/progress/:songId", permMiddleware(PERM.STUDY_STREAM), (c) => {
+    const user = c.get("user");
+    if (!user) return fail(c, new StudyError(401, "未登录"));
+    const songId = String(c.req.param("songId") || "");
+    if (!songId) return fail(c, new StudyError(400, "缺少歌曲 id"));
+    db.delete(studyProgress)
+      .where(and(eq(studyProgress.userId, user.id), eq(studyProgress.songId, songId)))
+      .run();
+    return c.json({ success: true });
   });
 
   app.get("/v1/study/continue", permMiddleware(PERM.STUDY_BROWSE), (c) => {
