@@ -1756,6 +1756,12 @@ onBeforeUnmount(() => {
     width: 24px; height: 24px; border-radius: 50%; flex-shrink: 0;
     display: inline-flex; align-items: center; justify-content: center;
     background: rgba(255, 255, 255, 0.08); color: var(--fnos-text-secondary);
+    transition: background 0.18s ease, color 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
+    /* 悬停时二次高亮:让用户明确这里就是播放按钮。 */
+    &:hover {
+      background: #409eff; color: #fff; transform: scale(1.12);
+      box-shadow: 0 0 0 3px rgba(64, 158, 255, 0.25);
+    }
   }
   /* 课名完整显示:允许换行,不再用省略号截断。 */
   .row-title {
