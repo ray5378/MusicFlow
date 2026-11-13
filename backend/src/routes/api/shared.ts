@@ -4,7 +4,7 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { db } from "../../db/index.js";
-import { users, playlists, playlistSongs, songs, albums, artists, mediaSources, plugins, wishes, userFavoriteSongs, userFavoriteAlbums, userFavoriteArtists, playlistFavorites, playHistory, genres, deviceQueues } from "../../db/schema.js";
+import { users, playlists, playlistSongs, songs, albums, artists, mediaSources, plugins, wishes, userFavoriteSongs, userFavoriteAlbums, userFavoriteArtists, playlistFavorites, playHistory, studyProgress, genres, deviceQueues } from "../../db/schema.js";
 import { eq, like, inArray, or, and, sql, desc, asc, isNotNull, isNull, count, ne } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import { randomBytes } from "node:crypto";
@@ -291,6 +291,8 @@ export function deleteSongDb(id: string): boolean {
   db.delete(playlistSongs).where(eq(playlistSongs.songId, id)).run();
   db.delete(userFavoriteSongs).where(eq(userFavoriteSongs.songId, id)).run();
   db.delete(playHistory).where(eq(playHistory.songId, id)).run();
+  // 学习进度同属 songs.id 外键(无 CASCADE),删歌前必须先清,否则抛 FK 错误。
+  db.delete(studyProgress).where(eq(studyProgress.songId, id)).run();
   // P0-6:单曲删除是用户显式意图,回写跟删。顺序:先回写后歌曲行
   // (audio_analysis.row_id 有 FK 无 CASCADE,反了会直接抛错;崩溃也只留下
   // "无测量的歌",下次照常重测,反方向则是幽灵数据)。

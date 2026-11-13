@@ -71,6 +71,8 @@ export function buildPlaylistsPage(qp: {
   // 音乐库对所有用户开放:任何登录用户都能看到「自己 + 公开 + 导入/插件歌单
   // (sourceUrl 非空,如 go-music-dl 等导入的曲库内容)」;私人普通歌单仍仅属主可见。
   const where = and(
+    // 分区隔离:音乐歌单列表不含学习歌单(学习歌单走 /v1/study/playlists)。
+    eq(playlists.kind, "music"),
     user?.isAdmin
       ? undefined
       : or(
@@ -171,6 +173,7 @@ function readPlaylistPoolEntries(force = false): PlaylistPoolEntry[] {
       sourceUrl: playlists.sourceUrl,
     })
     .from(playlists)
+    .where(eq(playlists.kind, "music"))
     .all();
   const entries = rows.map((r) => ({
     id: r.id,
@@ -458,7 +461,7 @@ app.get("/v1/playlists", permMiddleware(PERM.PLAYLIST_VIEW), (c) => {
 
 app.get("/playlist", (c) => {
   const user = c.get("user");
-  const all = db.select().from(playlists).all().filter(p => p.ownerId === user?.id || p.isPublic || p.sourceUrl);
+  const all = db.select().from(playlists).all().filter(p => p.kind !== "study" && (p.ownerId === user?.id || p.isPublic || p.sourceUrl));
   const dailyRank = (p: any) => {
     const c = p.comment || "";
     const tag = dailyRecommendTag() || "每日推荐";
@@ -483,7 +486,7 @@ app.get("/v1/playlists/:id/tracks", permMiddleware(PERM.PLAYLIST_VIEW), (c) => {
   const page = Math.max(1, parseInt(c.req.query("page") || "1") || 1);
   const pageSize = Math.min(200, Math.max(1, parseInt(c.req.query("pageSize") || "50") || 50));
   const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
-  if (!playlist) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.playlist.notFound"), apiErrorStatus(BusinessErrorCode.NOT_FOUND));
+  if (!playlist || playlist.kind === "study") return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.playlist.notFound"), apiErrorStatus(BusinessErrorCode.NOT_FOUND));
   // 「随机歌曲」固定歌单惰性刷新:客户端(音流随心听)读取曲目列表时若超过
   // 刷新间隔则立即重建,播完一轮再来取时歌单必然已刷新好 → 无空白等待。
   if (playlist.id === RANDOM_PLAYLIST_ID) maybeRefreshRandomSongs();
@@ -508,7 +511,7 @@ app.get("/v1/playlists/:id/tracks", permMiddleware(PERM.PLAYLIST_VIEW), (c) => {
   // per track). Order is preserved by mapping back through pageEntries.
   const songIds = pageEntries.filter((e) => e.playable && e.songId).map((e) => e.songId as string);
   const songMap = songIds.length
-    ? new Map(db.select().from(songs).where(inArray(songs.id, songIds)).all().map((s) => [s.id, s]))
+    ? new Map(db.select().from(songs).where(and(inArray(songs.id, songIds), eq(songs.kind, "music"))).all().map((s) => [s.id, s]))
     : new Map<string, any>();
   const albumIds: string[] = [];
   for (const s of songMap.values()) if (s.albumId) albumIds.push(s.albumId as string);

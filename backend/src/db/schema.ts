@@ -87,6 +87,13 @@ export const songs = sqliteTable("songs", {
   // 分组只附加列,不删行。
   groupId: text("group_id"),
   groupKey: text("group_key"),
+  /** 分区:'music' | 'study'。与 type(行来自哪种源)正交:
+   *  学习源扫入的行一律 kind='study',不进专辑/艺人/推荐/历史等音乐面。 */
+  kind: text("kind").notNull().default("music"),
+  /** 所属媒体源 id(扫描时写入);kind='study' 的目录浏览与续播按它聚合。 */
+  sourceId: text("source_id"),
+  /** 相对源根的目录(统一 '/' 分隔,无首尾斜杠,根目录为 '')。 */
+  relDir: text("rel_dir").default(""),
   createdAt: text("created_at").default(""),
   updatedAt: text("updated_at").default(""),
 });
@@ -114,9 +121,24 @@ export const playlists = sqliteTable("playlists", {
   sourcePlatform: text("source_platform"),
   sourcePlugin: text("source_plugin"), // 插件同步歌单的归属插件 id(如 go-music-dl 私人歌单);导入歌单为空
   externalId: text("external_id"),
+  /** 分区:'music' | 'study'。学习歌单与音乐歌单严格分开,列表互不可见。 */
+  kind: text("kind").notNull().default("music"),
+  /** 学习歌单所属文件夹名(仅 kind='study' 有意义;空串=根目录)。 */
+  folder: text("folder").default(""),
   createdAt: text("created_at").default(""),
   updatedAt: text("updated_at").default(""),
 });
+
+// 学习歌单文件夹:按课程归档学习歌单。文件夹按 owner 隔离,名称即标识;
+// 单独建表是为了「空文件夹」也能持久化(仅靠 playlists.folder 无法表示空夹)。
+export const studyPlaylistFolders = sqliteTable("study_playlist_folders", {
+  ownerId: text("owner_id").notNull(),
+  name: text("name").notNull(),
+  createdAt: text("created_at").default(""),
+  updatedAt: text("updated_at").default(""),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.ownerId, t.name] }),
+}));
 
 export const playlistSongs = sqliteTable("playlist_songs", {
   id: integer("id").primaryKey(),
@@ -176,6 +198,20 @@ export const playHistory = sqliteTable("play_history", {
   playedAt: text("played_at").default(""),
 });
 
+// 学习进度(按用户 × 学习音频一行):与播放历史完全分开 —— 音乐面不读写它,
+// 学习播放也不写 play_history / playCount。position_sec = 上次离开的秒数,
+// finished = 是否播完(≥95% 由写侧判定),updated_at 用于「继续学习」排序。
+export const studyProgress = sqliteTable("study_progress", {
+  userId: text("user_id").notNull(),
+  songId: text("song_id").notNull(),
+  positionSec: real("position_sec").default(0),
+  durationSec: integer("duration_sec").default(0),
+  finished: integer("finished").default(0),
+  updatedAt: text("updated_at").default(""),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.userId, t.songId] }),
+}));
+
 // OpenSubsonic 评分(setRating):按用户 × 条目类型(song|album|artist) × 条目 id
 // 存储 0–5 星;rating=0 表示删除评分。列表响应里的 userRating 来自这里。
 export const userRatings = sqliteTable("user_ratings", {
@@ -210,6 +246,8 @@ export const mediaSources = sqliteTable("media_sources", {
   /** 该源已入库曲目数（l:/s:/w: 三段并集）。扫描结束后重算写回，非逐条增减；
    *  NULL = 尚未统计（老库升级/新建源），列表接口会惰性算一次并回填。 */
   songCount: integer("song_count"),
+  /** 源分区:'music' | 'study'。一个源整体属于一个分区,扫入的歌曲继承该值。 */
+  kind: text("kind").notNull().default("music"),
   createdAt: text("created_at").default(""),
   updatedAt: text("updated_at").default(""),
 });

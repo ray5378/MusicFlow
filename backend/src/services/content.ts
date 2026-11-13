@@ -31,6 +31,8 @@ export function songsToQueueItems(rows: any[]): any[] {
       mime: suffixToMime(s.suffix || ""),
       coverArt,
       duration: typeof s.duration === "number" ? s.duration : undefined,
+      // 学习音频标记:客户端据此决定写 study_progress 而不是音乐播放历史。
+      kind: s.kind || undefined,
       // 扩展元数据。0 / 空串在库里表示"未知",统一归一成 undefined,免得
       // 客户端把「第 0 轨」「0 年」当成真实值显示出来。
       track: s.track || undefined,

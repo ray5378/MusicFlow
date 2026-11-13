@@ -44,6 +44,10 @@ export interface Song {
   /** 远程(未入库)歌曲:直接指向后端代理流的相对 URL(如 /rest/stream-remote?...)。
    *  有值时代替 /rest/stream?id= 作为播放源,播放不要求先入库。 */
   streamUrl?: string;
+  /** 内容类型:study = 学习音频(不写音乐历史、启用学习进度与倍速),缺省 music。 */
+  kind?: string;
+  sourceId?: string;
+  relDir?: string;
 }
 
 export interface LyricLine {
@@ -75,6 +79,8 @@ function songToQueueItem(song: Song): any {
     mime: SUFFIX_MIME[(song.suffix || "").toLowerCase()] || "audio/mpeg",
     coverArt: song.coverArt || (song.albumId ? `al-${song.albumId}` : undefined),
     duration: song.duration || undefined,
+    // 学习音频标记必须随队列项持久化:刷新/换端恢复队列后仍要写 study_progress。
+    kind: song.kind || undefined,
   };
 }
 
@@ -171,6 +177,8 @@ function queueItemToSong(it: any): Song {
     coverArt: it.coverArt || (it.albumId ? `al-${it.albumId}` : undefined),
     // 服务端队列项只有 mime → 还原成 suffix,保证 Howler 能定出 format(见上方注释)。
     suffix: MIME_SUFFIX[(it.mime || "").toLowerCase()],
+    // 恢复的队列项也可能带学习标记(后端 QueueItem 透传),用于继续写学习进度。
+    kind: it.kind || undefined,
   };
   // 恢复的远程歌(id 为 remote:provider:source:rid)没有 streamUrl(同步到后端时只存了
   // songId),按 id 重新拼出 /rest/stream-remote 代理流,保证恢复队列里的远程歌可播。
@@ -218,6 +226,8 @@ export const usePlayerStore = defineStore("player", () => {
   const localCurrentTime = ref(0);
   const localDuration = ref(0);
   const localPlayMode = ref<PlayMode>((localStorage.getItem("playMode") as PlayMode) || "shuffle");
+  // 学习模块倍速:只对 kind='study' 的音频生效(音乐恒 1.0,避免影响普通听歌)。
+  const studyRate = ref(Number(localStorage.getItem("studyRate") || "1") || 1);
   const localLyrics = ref<LyricLine[]>([]);
   const localCurrentLyricLine = ref("");
   const localCurrentLyricIndex = ref(-1);
@@ -229,6 +239,10 @@ export const usePlayerStore = defineStore("player", () => {
   // 起算，需加回该偏移才是逻辑位置（进度显示 / 歌词 / 时长）。换歌 / 正常起播时归 0。
   const localStreamOffset = ref(0);
   let howl: Howl | null = null;
+  // 当前 Howl 对应的歌曲:换歌瞬间 localIndex 已前进,但旧流还没 unload ——
+  // 上报学习进度必须按「流对应的歌」写,不能按队列当前项写(否则会把上一首的
+  // 进度写成下一首的,直接把下一首标记成已学完)。
+  let localHowlSong: Song | null = null;
   // 下一首预取的 blob URL：切歌时消费，旧的在 howl.unload() 之后才释放
   //（播放中 revoke 会让正在读的流立刻断掉）。
   let localPrefetchBlobUrl: string | null = null;
@@ -533,13 +547,17 @@ export const usePlayerStore = defineStore("player", () => {
     // 「同一首的 seek 重建」，据此避免重复 scrobble（详见 onplay 内注释）。
     const offset = Math.max(0, Math.round((opts?.timeOffsetSec ?? 0) * 10) / 10);
     const autoplay = opts?.autoplay !== false;
+    // 换歌 / 拖动重建前,先把上一首学习音频的进度落库(seek 重建进度仍按新流位置计算)。
+    reportStudyProgress(true);
+    studyReportAt = 0;
     if (localSeekTimer) { clearTimeout(localSeekTimer); localSeekTimer = null; }
     localSeekActive = false; // 重建开始：手指值已落地，后续由 timer 按新流位置推进
     localStreamOffset.value = offset;
     if (howl) { howl.unload(); howl = null; }
     if (localPrefetchBlobUrl) { try { URL.revokeObjectURL(localPrefetchBlobUrl); } catch {} localPrefetchBlobUrl = null; }
     const song = localQueue.value[localIndex.value];
-    if (!song) return;
+    if (!song) { localHowlSong = null; return; }
+    localHowlSong = song;
     loadLocalLyrics(song);
     // 时长播种（S5）：管道流无 Content-Length，howl.duration() 在首包前是
     // NaN/0/Infinity —— 先用库内时长（秒）播种，进度条分母/拖动映射从第一帧就是对的；
@@ -578,15 +596,18 @@ export const usePlayerStore = defineStore("player", () => {
         syncDuration();
         startLocalProgressTimer();
         // 远程歌(未入库)不 scrobble:后端按 songId 写播放记录,remote: 伪 id 会外键报错。
+        // 学习音频也不写音乐历史(进度走 study_progress),避免污染「播放历史」与推荐。
         // offset>0 是 seek 重建（同一首），不重复上报（换歌时 offset=0 照常上报）。
-        if (!song.streamUrl && offset === 0) api.get(`/rest/scrobble?id=${song.id}`).catch(() => {});
+        if (!song.streamUrl && song.kind !== "study" && offset === 0) api.get(`/rest/scrobble?id=${song.id}`).catch(() => {});
       },
-      onpause: () => { localIsPlaying.value = false; stopLocalProgressTimer(); },
+      onpause: () => { localIsPlaying.value = false; stopLocalProgressTimer(); reportStudyProgress(true); },
       onend: () => { localNext(); },
       onload: syncDuration,
       onloaderror: () => { localHandlePlaybackError(song.id); },
       onplayerror: () => { localHandlePlaybackError(song.id); },
     });
+    // 学习音频恢复用户上次选择的倍速;音乐恒 1.0(studyRate 不作用于普通歌曲)。
+    if (song.kind === "study" && studyRate.value !== 1) howl.rate(studyRate.value);
     if (!autoplay) {
       // 暂停态下拖动：只重建流、不自动播（管道有背压，不会空跑），保持暂停外观。
       localIsPlaying.value = false;
@@ -613,6 +634,7 @@ export const usePlayerStore = defineStore("player", () => {
   function localHandlePlaybackError(songId: string) {
     try { howl?.unload(); } catch {}
     howl = null;
+    localHowlSong = null;
     console.warn(`[player] Playback failed songId=${songId}, auto-skipping`);
     localNext();
   }
@@ -1060,10 +1082,12 @@ export const usePlayerStore = defineStore("player", () => {
   }
 
   function localClearQueue() {
+    reportStudyProgress(true);
     if (localSeekTimer) { clearTimeout(localSeekTimer); localSeekTimer = null; }
     localSeekActive = false;
     localStreamOffset.value = 0;
     if (howl) { howl.unload(); howl = null; }
+    localHowlSong = null;
     if (localPrefetchBlobUrl) { try { URL.revokeObjectURL(localPrefetchBlobUrl); } catch {} localPrefetchBlobUrl = null; }
     resetPrefetch();
     stopLocalProgressTimer();
@@ -1105,10 +1129,60 @@ export const usePlayerStore = defineStore("player", () => {
       if (playing) {
         localCurrentTime.value = toLogicalPosition(howl.seek() as number || 0, localStreamOffset.value, localDuration.value);
         updateLocalLyric();
+        // 学习音频每 10 秒心跳一次进度(内部按 studyReportAt 节流,非学习音频直接返回)。
+        reportStudyProgress();
       }
     }, 250);
   }
   function stopLocalProgressTimer() { if (localProgressTimer) { clearInterval(localProgressTimer); localProgressTimer = null; } }
+
+  // ==================== 学习模块(进度 / 倍速 / 15 秒跳转) ====================
+  // 学习音频的进度写在 study_progress,不进音乐播放历史;每 10 秒心跳一次,
+  // 暂停 / 换歌 / 清空队列时立即补报一次,保证刷新后能续播。
+  let studyReportAt = 0;
+  function currentStudySong(): Song | null {
+    const s = localQueue.value[localIndex.value];
+    return s && s.kind === "study" && s.id ? s : null;
+  }
+  function reportStudyProgress(force = false): void {
+    const song = localHowlSong;
+    if (!song || song.kind !== "study" || !song.id) return;
+    const now = Date.now();
+    if (!force && now - studyReportAt < 10_000) return;
+    const durationSec = Math.round(localDuration.value || song.duration || 0);
+    const positionSec = Math.round(localCurrentTime.value || 0);
+    if (!force && positionSec <= 0) return;
+    studyReportAt = now;
+    api.put("/rest/api/v1/study/progress", { songId: song.id, positionSec, durationSec }).catch(() => {});
+  }
+  /** 当前是否在学习音频上(供学习页控制条显示)。 */
+  const isStudyPlaying = computed(() => !!currentStudySong());
+  /** 倍速:仅学习音频生效;写入 localStorage 记住用户上次选择。 */
+  function setStudyRate(rate: number): void {
+    const r = Math.min(2, Math.max(0.5, Number(rate) || 1));
+    if (r === studyRate.value) return;
+    studyRate.value = r;
+    localStorage.setItem("studyRate", String(r));
+    if (!howl || !currentStudySong()) return;
+    // 不能直接 howl.rate():Howler 对 html5 音频会把 native `ended` 监听删掉,
+    // 改装一个按 duration 计算的 setTimeout;而 /rest/stream 是实时管道,duration
+    // 常为 Infinity/NaN → 播完不触发 onend,下一首永远不开始。暂停时同样会中招
+    // (上一轮播放留下的 _endTimers 还在)。
+    // 统一改为带当前位置重建流:新 Howl 在 play 前应用 rate(走 Howler 的 load
+    // queue),继续使用 native ended,切歌链路保持原样。
+    if (localSeekTimer) { clearTimeout(localSeekTimer); localSeekTimer = null; }
+    localSeekActive = false;
+    const wasPlaying = howl.playing();
+    const target = seekTargetFromLogical(Math.max(0, localCurrentTime.value));
+    startLocalPlayback({ timeOffsetSec: target.serverOffset, autoplay: wasPlaying });
+  }
+  /** 快进/快退(学习页的 ±15 秒)。走统一 seek:本机带 timeOffset 重拉,投屏走 castSeek。 */
+  function skipBy(seconds: number): void {
+    const dur = duration.value || localDuration.value || 0;
+    const target = Math.max(0, Math.min(currentTime.value + seconds, dur > 0.5 ? dur - 0.5 : currentTime.value + seconds));
+    if (Math.abs(target - currentTime.value) < 0.2) return;
+    seek(target);
+  }
 
   // ==================== Remote (DLNA cast + group) playback ====================
   // All functions operate on a specific peer's RemoteState. The UI-routed
@@ -1244,6 +1318,8 @@ export const usePlayerStore = defineStore("player", () => {
     if (st.isPlaying) {
       api.post(peerApi(st.peerId, "/pause")).catch(() => {});
       st.isPlaying = false;
+      // 暂停瞬间把学习进度立即落库(与本地播放 onpause 行为一致)。
+      reportCastStudyProgress(st, true);
     } else {
       api.post(peerApi(st.peerId, "/play")).catch(() => {});
       st.isPlaying = true;
@@ -1280,6 +1356,8 @@ export const usePlayerStore = defineStore("player", () => {
     //   乐观值 st.currentTime 必须与下发值同源:tick/轮询只按秒级比较,不同源会被拽回。
     const t = alignSeekSeconds(clamped);
     st.currentTime = t; updateCastLyric(st);
+    // 学习音频拖动后立即落一次进度,避免拖完就停/切端导致续播位置丢失。
+    reportCastStudyProgress(st, true);
     seekDragging.add(st.peerId);
     const timer = seekTimers.get(st.peerId);
     if (timer) clearTimeout(timer);
@@ -1346,6 +1424,23 @@ export const usePlayerStore = defineStore("player", () => {
     // 短窗内保守按陈旧处理。
     return elapsed < DEVICE_ECHO_GUARD_MS;
   }
+  /**
+   * 把服务端采样 position 外推到「此刻」:local 实例用 reportedAt,DLNA/AirPlay/
+   * sendspin/群组没有 reportedAt,用 status.updatedAt。否则每 2s 轮询会把最多 2s 前
+   * 的位置当成现在,歌词稳定滞后并周期性回跳。
+   */
+  function projectPeerPosition(s: any, pos: number, playing: boolean): number {
+    if (!playing) return pos;
+    const reportedAt = typeof s.reportedAt === "number" && Number.isFinite(s.reportedAt) ? s.reportedAt : null;
+    const updatedAt = typeof s.updatedAt === "number" && Number.isFinite(s.updatedAt) ? s.updatedAt : null;
+    const at = reportedAt ?? updatedAt;
+    if (at === null) return pos;
+    const ageSec = (Date.now() - at) / 1000;
+    if (!(ageSec > 0) || ageSec > 30) return pos;
+    const dur = typeof s.duration === "number" ? s.duration : 0;
+    const projected = pos + ageSec;
+    return dur > 0 ? Math.min(projected, dur) : projected;
+  }
   const volumeIssuedAt = new Map<string, number>(); // 每设备最近一次下发音量的时刻(ms)
   let transportIssuedAt = 0; // 最近一次下发播放/暂停命令的时刻(ms)
   /**
@@ -1361,6 +1456,27 @@ export const usePlayerStore = defineStore("player", () => {
   const seekIssued = new Map<string, { at: number; target: number }>();
   const SEEK_UI_GUARD_MS = 6000;
   const SEEK_UI_TOLERANCE_SEC = 2.5;
+  /** 投屏/群组播放学习音频时,按 peer 节流上报进度(10s),保证「继续学习」跨端一致。 */
+  const castStudyReportAt = new Map<string, number>();
+  /** 每 peer 上一帧 tick 的墙钟时刻:按真实经过时间推进,替代固定 +0.25。 */
+  const castTickAt = new Map<string, number>();
+
+  /** 把当前投屏/群组播放的学习音频进度写进 study_progress(force=暂停/拖动 seek 时立即落库)。 */
+  function reportCastStudyProgress(st: RemoteState, force = false) {
+    const song = st.queue[st.index];
+    if (!song || song.kind !== "study" || !song.id) return;
+    if (!force && !st.isPlaying) return;
+    const now = Date.now();
+    if (!force && now - (castStudyReportAt.get(st.peerId) || 0) < 10_000) return;
+    const position = Math.round(st.currentTime || 0);
+    if (!force && position <= 0) return;
+    castStudyReportAt.set(st.peerId, now);
+    api.put("/rest/api/v1/study/progress", {
+      songId: song.id,
+      positionSec: position,
+      durationSec: Math.round(st.duration || song.duration || 0),
+    }).catch(() => {});
+  }
 
   // Per-peer poll: mirrors backend transport state + queue into the peer's
   // RemoteState. Each peer has its own timer, so multiple targets are tracked
@@ -1410,7 +1526,13 @@ export const usePlayerStore = defineStore("player", () => {
             } else if (g) {
               seekIssued.delete(st.peerId); // 窗到期,恢复正常采纳
             }
-            if (adopt) st.currentTime = s.position;
+            if (adopt) {
+              // 外推到此刻再写入:设备型 peer 的 position 是 2s 前采的样,直接当现在
+              // 会让歌词稳定滞后并在每次轮询时回跳。
+              const stPlaying = st.isPlaying || s.state === "PLAYING" || s.state === "playing" || s.state === "STARTED";
+              st.currentTime = projectPeerPosition(s, s.position, stPlaying);
+              castTickAt.set(st.peerId, Date.now());
+            }
           }
           if (typeof s.duration === "number" && s.duration > 0) st.duration = s.duration;
           // 播放状态判定(自愈):
@@ -1436,14 +1558,23 @@ export const usePlayerStore = defineStore("player", () => {
           }
 
           const media = s.media;
+          // 当前曲在本地队列里的条目(用于识别 kind=study;窗口合并保证当前曲在队列中)。
+          const mediaSong = media?.songId
+            ? (st.queue[st.index]?.id === media.songId
+                ? st.queue[st.index]
+                : st.queue.find((x) => x.id === media.songId))
+            : undefined;
           if (media && media.songId && media.songId !== st.lastScrobbledSongId) {
             st.lastScrobbledSongId = media.songId;
             // 换歌:旧 seek 目标作废,否则新歌 0s 会被误判"未落位"冻结 6s。
             seekIssued.delete(st.peerId);
             seekDragging.delete(st.peerId);
-            api.get(`/rest/scrobble?id=${media.songId}`).catch(() => {});
+            // 学习音频不写音乐播放历史(与本地播放一致),进度单独走 study_progress。
+            if (mediaSong?.kind !== "study") api.get(`/rest/scrobble?id=${media.songId}`).catch(() => {});
             loadCastLyrics(st, media.songId);
           }
+          // 投屏/群组上的学习音频同样落学习进度:「继续学习」才能跨端续播。
+          reportCastStudyProgress(st);
           updateCastLyric(st);
           // 队列同步收敛:只在「服务端队列真的变了」时拉一次当前曲附近的窗口。
           // 判据优先用 /status 的 queueRevision(覆盖换歌 + 远端插歌/删歌/排序/改播放模式);
@@ -1476,9 +1607,14 @@ export const usePlayerStore = defineStore("player", () => {
     st.tickTimer = setInterval(() => {
       // 拖拽中手指值优先(见 castSeek seekDragging),tick 不推进。
       if (seekDragging.has(st.peerId)) return;
+      // 按真实经过时间推进:后台标签页/休眠唤醒时定时器会被节流或延后,固定 +0.25
+      // 会让投屏歌词时钟越走越慢。单帧最多补 2s(轮询周期),下一次轮询会再校准。
+      const now = Date.now();
+      const last = castTickAt.get(st.peerId) || 0;
+      castTickAt.set(st.peerId, now);
       if (st.isPlaying && st.duration > 0 && st.currentTime < st.duration) {
-        st.currentTime += 0.25;
-        if (st.currentTime > st.duration) st.currentTime = st.duration;
+        const dt = last ? Math.min(2, Math.max(0, (now - last) / 1000)) : 0.25;
+        st.currentTime = Math.min(st.duration, st.currentTime + dt);
         updateCastLyric(st);
       }
     }, 250);
@@ -1487,6 +1623,7 @@ export const usePlayerStore = defineStore("player", () => {
     st.polling = false;
     if (st.pollTimer) { clearTimeout(st.pollTimer); st.pollTimer = null; }
     if (st.tickTimer) { clearInterval(st.tickTimer); st.tickTimer = null; }
+    castTickAt.delete(st.peerId);
     const timer = seekTimers.get(st.peerId);
     if (timer) { clearTimeout(timer); seekTimers.delete(st.peerId); }
     seekDragging.delete(st.peerId);
@@ -1585,7 +1722,8 @@ export const usePlayerStore = defineStore("player", () => {
 
     const song = st.queue[st.index];
     if (song) {
-      api.get(`/rest/scrobble?id=${song.id}`).catch(() => {});
+      // 学习音频不写音乐播放历史(进度由学习模块单独记录)。
+      if (song.kind !== "study") api.get(`/rest/scrobble?id=${song.id}`).catch(() => {});
       loadCastLyrics(st, song.id);
     }
 
@@ -2531,6 +2669,8 @@ export const usePlayerStore = defineStore("player", () => {
     // UI-routed controls
     playSong, addToQueue, playQueue, setContentOrigin, togglePlay, next, prev,
     seek, seekPercent, setVolume, cyclePlayMode,
+    // 学习模块控制(倍速 / ±15 秒 / 进度上报)
+    studyRate, setStudyRate, skipBy, isStudyPlaying, reportStudyProgress,
     removeFromQueue, clearQueue, getCoverUrl, loadLyrics, updateCurrentLyric,
     toggleLyrics, togglePlaylistPanel, togglePlayMode,
     // cast lifecycle (投屏)

@@ -70,6 +70,8 @@ export interface QueueItem {
   mime: string;
   coverArt?: string;
   duration?: number;
+  /** 歌曲类型(study = 学习音频);随队列快照返回,客户端据此写学习进度。 */
+  kind?: string;
   // 以下为展示用扩展元数据(HA 的 media_track / media_album_artist 等需要)。
   // 全部可选:只带 songId 的精简队列项(HA 点播 / flow / 持久化恢复)会在 cast 前
   // 由 QueueController.resolveItem 补齐。

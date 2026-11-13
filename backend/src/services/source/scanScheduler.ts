@@ -24,11 +24,12 @@ let ticking = false;
 export function runScanSchedulerOnce(nowMs = Date.now()): string[] {
   const triggered: string[] = [];
   const rows = sqlite
-    .prepare("SELECT id, name, type, config FROM media_sources WHERE enabled = 1")
-    .all() as { id: string; name: string; type: string; config: string | null }[];
+    .prepare("SELECT id, name, type, kind, config FROM media_sources WHERE enabled = 1")
+    .all() as { id: string; name: string; type: string; kind: string | null; config: string | null }[];
   const d = new Date(nowMs);
   const dayStart = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
   for (const s of rows) {
+    if (s.kind === "study") continue; // 学习源不参与扫描(实时目录浏览 + 点播入库)
     if (s.type !== "local" && s.type !== "webdav" && s.type !== "smb") continue;
     let cfg: { scanAutoEnabled?: boolean; scanAutoTimeOfDay?: string } = {};
     try {

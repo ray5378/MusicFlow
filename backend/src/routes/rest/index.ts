@@ -593,7 +593,10 @@ restRoutes.get("/getAvatar", (c) => {
 // ==================== Browsing ====================
 
 restRoutes.get("/getMusicFolders", (c) => {
-  const sources = db.select().from(mediaSources).where(eq(mediaSources.enabled, 1)).all();
+  // 第三方客户端只看音乐源的文件夹;学习源完全不对 OpenSubsonic 暴露。
+  const sources = db.select().from(mediaSources)
+    .where(and(eq(mediaSources.enabled, 1), eq(mediaSources.kind, "music")))
+    .all();
   return c.json(ok({ musicFolders: { musicFolder: [{ id: 0, name: "Music" }, ...sources.map(s => ({ id: s.id as any, name: s.name }))] } }));
 });
 
@@ -656,7 +659,7 @@ restRoutes.get("/getAlbum", permMiddleware(PERM.LIBRARY_BROWSE), (c) => {
   if (!album) return c.json(fail(70, "Album not found"));
   // Server-side paging: only the requested page is pulled from SQL (was: load the
   // whole album into memory then slice). A huge compilation album never spikes memory.
-  const whereAlbum = eq(songs.albumId, id);
+  const whereAlbum = and(eq(songs.albumId, id), eq(songs.kind, "music"));
   const offset = Math.max(0, parseInt(getParam(c, "offset") || "0", 10) || 0);
   const size = parseInt(getParam(c, "size") || "0", 10) || 0;
   const songTotal = db.select({ n: sql<number>`count(*)` }).from(songs).where(whereAlbum).get()?.n ?? 0;
@@ -689,7 +692,8 @@ restRoutes.get("/getAlbumInfo2", (c) => {
 restRoutes.get("/getSong", permMiddleware(PERM.LIBRARY_BROWSE), (c) => {
   const id = getParam(c, "id") || "";
   const user = c.get("user");
-  const song = db.select().from(songs).where(eq(songs.id, id)).get();
+  // 学习内容不对第三方开放:即便手握 id 也按不存在处理。
+  const song = db.select().from(songs).where(and(eq(songs.id, id), eq(songs.kind, "music"))).get();
   if (!song) return c.json(fail(70, "Song not found"));
   return c.json(ok({ song: songToChild(song, getStarredSet(user?.id), getRatingValue(user?.id, "song", id)) }));
 });
@@ -705,7 +709,7 @@ restRoutes.get("/getMusicDirectory", permMiddleware(PERM.LIBRARY_BROWSE), (c) =>
   }
   const album = db.select().from(albums).where(eq(albums.id, id)).get();
   if (album) {
-    const albumSongs = db.select().from(songs).where(eq(songs.albumId, id)).all();
+    const albumSongs = db.select().from(songs).where(and(eq(songs.albumId, id), eq(songs.kind, "music"))).all();
     return c.json(ok({ directory: { id: album.id, name: album.name, child: albumSongs.map(s => songToChild(s, starredSet)) } }));
   }
   return c.json(ok({ directory: { id, name: "", child: [] } }));
@@ -844,15 +848,15 @@ const searchHandler = (c: any) => {
       albumArtist: songs.albumArtist,
       composer: songs.composer,
       createdAt: songs.createdAt,
-    }).from(songs).all().sort((a, b) => (a.title || "").localeCompare(b.title || ""));
+    }).from(songs).where(eq(songs.kind, "music")).all().sort((a, b) => (a.title || "").localeCompare(b.title || ""));
     foundAlbums = db.select().from(albums).all();
     foundArtists = db.select().from(artists).all();
   } else if (isId) {
-    foundSongs = db.select().from(songs).where(eq(songs.id, query.trim())).all();
+    foundSongs = db.select().from(songs).where(and(eq(songs.id, query.trim()), eq(songs.kind, "music"))).all();
     foundAlbums = db.select().from(albums).where(eq(albums.id, query.trim())).all();
     foundArtists = db.select().from(artists).where(eq(artists.id, query.trim())).all();
   } else {
-    foundSongs = db.select().from(songs).where(or(like(songs.title, q), like(songs.artist, q), like(songs.album, q))).all();
+    foundSongs = db.select().from(songs).where(and(eq(songs.kind, "music"), or(like(songs.title, q), like(songs.artist, q), like(songs.album, q)))).all();
     foundAlbums = db.select().from(albums).where(or(like(albums.name, q), like(albums.artist, q))).all();
     foundArtists = db.select().from(artists).where(like(artists.name, q)).all();
   }
@@ -872,7 +876,7 @@ restRoutes.get("/getSongsByGenre", permMiddleware(PERM.LIBRARY_BROWSE), (c) => {
   const count = parseInt(getParam(c, "count") || "10") || 10;
   const offset = parseInt(getParam(c, "offset") || "0") || 0;
   const user = c.get("user");
-  const allSongs = db.select().from(songs).where(eq(songs.genre, genre)).all();
+  const allSongs = db.select().from(songs).where(and(eq(songs.genre, genre), eq(songs.kind, "music"))).all();
   return c.json(ok({ songsByGenre: { song: paginate(allSongs, offset, count).map(s => songToChild(s, getStarredSet(user?.id))) } }));
 });
 
@@ -891,7 +895,7 @@ restRoutes.get("/getRandomSongs", permMiddleware(PERM.LIBRARY_BROWSE), (c) => {
   const effFrom = Number.isFinite(ri) ? ri : cfg.fromYear ?? null;
   const effTo = Number.isFinite(toi) ? toi : cfg.toYear ?? null;
 
-  const conds: any[] = [];
+  const conds: any[] = [eq(songs.kind, "music")];
   if (effGenre) {
     // 客户端显式 genre 按 Subsonic 语义精确匹配;插件预设按部分匹配(与插件文档一致)。
     if (clientGenre) conds.push(eq(songs.genre, clientGenre));
@@ -903,12 +907,10 @@ restRoutes.get("/getRandomSongs", permMiddleware(PERM.LIBRARY_BROWSE), (c) => {
   // SQL 随机取样:先只对 id 列 ORDER BY random() 取样(sorter 只携带 13 万个短 id,
   // 不把含大文本列的整行拖进排序堆),再按取样 id 回表取整行、按取样顺序返回。
   // year 过滤只作用于取样阶段:有过滤才需要 join albums,无过滤走单表免 join。
-  const idRows = conds.length
-    ? db.select({ id: songs.id }).from(songs)
-        .leftJoin(albums, eq(songs.albumId, albums.id))
-        .where(and(...(conds as any[])))
-        .orderBy(sql`random()`).limit(size).all()
-    : db.select({ id: songs.id }).from(songs).orderBy(sql`random()`).limit(size).all();
+  const idRows = db.select({ id: songs.id }).from(songs)
+    .leftJoin(albums, eq(songs.albumId, albums.id))
+    .where(and(...(conds as any[])))
+    .orderBy(sql`random()`).limit(size).all();
   const ids = idRows.map(r => r.id);
   const sampled = ids.length ? (() => {
     const fetched = db.select().from(songs).where(inArray(songs.id, ids)).all();
@@ -925,7 +927,7 @@ restRoutes.get("/getGenres", permMiddleware(PERM.LIBRARY_BROWSE), (c) => {
   // 的瞬态内存尖峰)。语义与原实现一致:跳过空串 genre(NULL/'' 排除,'' 保留)。
   const songRows = db.select({ genre: songs.genre, count: sql<number>`count(*)` })
     .from(songs)
-    .where(sql`${songs.genre} is not null and ${songs.genre} != ''`)
+    .where(and(sql`${songs.genre} is not null and ${songs.genre} != ''`, eq(songs.kind, "music")))
     .groupBy(songs.genre).all();
   for (const r of songRows) {
     genreMap.set(r.genre!, { songCount: r.count, albumCount: 0 });
@@ -951,7 +953,7 @@ restRoutes.get("/getTopSongs", permMiddleware(PERM.LIBRARY_SEARCH), (c) => {
   }
   const count = parseInt(getParam(c, "count") || "50") || 50;
   const user = c.get("user");
-  const allSongs = db.select().from(songs).where(eq(songs.artist, artistName)).all().slice(0, count);
+  const allSongs = db.select().from(songs).where(and(eq(songs.artist, artistName), eq(songs.kind, "music"))).all().slice(0, count);
   return c.json(ok({ topSongs: { song: allSongs.map(s => songToChild(s, getStarredSet(user?.id))) } }));
 });
 
@@ -966,11 +968,14 @@ restRoutes.get("/getPlaylists", permMiddleware(PERM.PLAYLIST_VIEW), (c) => {
   // (sourceUrl 非空,音乐库内容对所有用户开放)。Pushed to SQL,
   // and the daily-recommend-first ordering is expressed as a CASE + recency.
   const where = user?.isAdmin
-    ? undefined
-    : or(
-        eq(playlists.isPublic, 1),
-        eq(playlists.ownerId, user?.id ?? ""),
-        isNotNull(playlists.sourceUrl),
+    ? eq(playlists.kind, "music")
+    : and(
+        eq(playlists.kind, "music"),
+        or(
+          eq(playlists.isPublic, 1),
+          eq(playlists.ownerId, user?.id ?? ""),
+          isNotNull(playlists.sourceUrl),
+        ),
       );
   // 当前用户收藏的歌单 id 集合:每项 favorite 状态按它判断(收藏已按用户隔离)。
   const favIds = new Set(db.select({ pid: playlistFavorites.playlistId })
@@ -996,7 +1001,8 @@ restRoutes.get("/getPlaylist", permMiddleware(PERM.PLAYLIST_VIEW), (c) => {
   const id = getParam(c, "id") || "";
   const user = c.get("user");
   const playlist = db.select().from(playlists).where(eq(playlists.id, id)).get();
-  if (!playlist) return c.json(fail(70, "Playlist not found"));
+  // 学习歌单不对第三方客户端开放(与音乐歌单严格分开)。
+  if (!playlist || playlist.kind === "study") return c.json(fail(70, "Playlist not found"));
   // 「随机歌曲」固定歌单惰性刷新:距上次生成超时则立即重建(毫秒级),客户端播完
   // 一轮再来读取时歌单必然已刷新好 → 消除「现场生成导致的空白等待」。
   if (playlist.id === RANDOM_PLAYLIST_ID) maybeRefreshRandomSongs();
@@ -1255,7 +1261,7 @@ restRoutes.all("/setRating", permMiddleware(PERM.FAVORITES_MANAGE), async (c) =>
   const rating = Math.max(0, Math.min(5, parseInt(String(body.rating ?? getParam(c, "rating") ?? "0"), 10) || 0));
   if (!id) return c.json(fail(10, "Missing id"));
   let itemType: string | null = null;
-  if (db.select({ id: songs.id }).from(songs).where(eq(songs.id, id)).get()) itemType = "song";
+  if (db.select({ id: songs.id }).from(songs).where(and(eq(songs.id, id), eq(songs.kind, "music"))).get()) itemType = "song";
   else if (db.select({ id: albums.id }).from(albums).where(eq(albums.id, id)).get()) itemType = "album";
   else if (db.select({ id: artists.id }).from(artists).where(eq(artists.id, id)).get()) itemType = "artist";
   if (!itemType) return c.json(fail(70, "Item not found"));
@@ -1274,7 +1280,7 @@ restRoutes.get("/getStarred", permMiddleware(PERM.FAVORITES_MANAGE), (c) => {
   if (!user) return c.json(ok({ starred: { song: [], album: [], artist: [] } }));
   const favs = db.select().from(userFavoriteSongs).where(eq(userFavoriteSongs.userId, user.id)).all();
   const starredSet = new Set(favs.map(f => f.songId));
-  const favSongs = favs.map(f => { const song = db.select().from(songs).where(eq(songs.id, f.songId)).get(); return song ? songToChild(song, starredSet) : null; }).filter(Boolean);
+  const favSongs = favs.map(f => { const song = db.select().from(songs).where(and(eq(songs.id, f.songId), eq(songs.kind, "music"))).get(); return song ? songToChild(song, starredSet) : null; }).filter(Boolean);
   // 专辑/艺人收藏各自独立读表(不再从歌曲收藏推导)。
   const albumSet = getAlbumStarredSet(user.id);
   const favAlbums = db.select().from(userFavoriteAlbums).where(eq(userFavoriteAlbums.userId, user.id)).all()
@@ -1323,7 +1329,7 @@ restRoutes.get("/getStarred2", permMiddleware(PERM.FAVORITES_MANAGE), (c) => {
   const slice = size > 0 ? ordered.slice(offset, offset + size) : ordered;
   // Only fetch the songs on the requested page (not the whole favorite list),
   // so a library with thousands of starred tracks doesn't pull them all at once.
-  const favSongs = slice.map(f => { const song = db.select().from(songs).where(eq(songs.id, f.songId)).get(); return song ? songToChild(song, starredSet) : null; }).filter(Boolean);
+  const favSongs = slice.map(f => { const song = db.select().from(songs).where(and(eq(songs.id, f.songId), eq(songs.kind, "music"))).get(); return song ? songToChild(song, starredSet) : null; }).filter(Boolean);
   // 组内多源:一次查询收藏页内所有 group_id 的成员行,按组合并附加
   // (前端收藏页据此合并展示同一首歌的本地/WebDAV/平台多源)
   const favGroupIds = [...new Set(favSongs.filter((s: any) => s.groupId).map((s: any) => s.groupId as string))];
@@ -1380,6 +1386,9 @@ restRoutes.on(["GET", "POST"], "/scrobble", permMiddleware(PERM.HISTORY_MANAGE),
   const id = getParam(c, "id");
   const nowIso = new Date().toISOString();
   if (!user || !id) return c.json(ok());
+  const songRow: any = db.select().from(songs).where(eq(songs.id, id)).get();
+  // 学习音频不写音乐历史/播放次数,也不外发 scrobble(学习进度走 /v1/study/progress)。
+  if (!songRow || songRow.kind === "study") return c.json(ok());
   const submission = (getParam(c, "submission") || "true") !== "false";
   if (submission) {
     const windowStart = new Date(Date.now() - HISTORY_DEDUPE_WINDOW_MS).toISOString();
@@ -1402,7 +1411,6 @@ restRoutes.on(["GET", "POST"], "/scrobble", permMiddleware(PERM.HISTORY_MANAGE),
   // 写入、挡不住插件派发,这里按「用户+歌曲+窗口」只放行一次,否则每次调用
   // 都会真实地向 Last.fm / ListenBrainz 提交一条重复收听记录。
   try {
-    const songRow: any = db.select().from(songs).where(eq(songs.id, id)).get();
     const event = {
       songId: id,
       title: songRow?.title || "",
@@ -3098,7 +3106,7 @@ restRoutes.get("/getCoverArt", permMiddleware(PERM.COVER_VIEW), async (c) => {
 //  - 随机歌曲/平台推荐(本地随机)/为你推荐/最近更新:依赖本地音库存在歌单(或歌曲);
 //  - 插件推荐:依赖已从平台导入的歌单(sourceUrl 非空)。
 restRoutes.get("/api/v1/home/sections", permMiddleware(PERM.LIBRARY_BROWSE), (c) => {
-  const songCount = db.select({ n: sql<number>`count(*)` }).from(songs).get()?.n ?? 0;
+  const songCount = db.select({ n: sql<number>`count(*)` }).from(songs).where(eq(songs.kind, "music")).get()?.n ?? 0;
   const playlistCount = db.select({ n: sql<number>`count(*)` }).from(playlists).get()?.n ?? 0;
   const importedCount = db.select({ n: sql<number>`count(*)` }).from(playlists)
     .where(isNotNull(playlists.sourceUrl)).get()?.n ?? 0;

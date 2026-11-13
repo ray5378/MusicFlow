@@ -72,7 +72,9 @@ function whereClause(kind: BackfillKind): string {
   // 歌词只补「库里确实没有歌词」的歌:lyrics 存在线歌词文件引用,has_lyrics 是扫描/
   // 回填写入的存在性标注(1 = 文件里自带内嵌歌词)。任一为真都视为已有歌词,
   // 不再重复在线搜索 —— 这就是「区分有和没有」的用途。
-  if (kind === "lyrics") return "(lyrics IS NULL OR lyrics = '') AND COALESCE(has_lyrics, 0) = 0";
+  // 学习音频(kind='study')永远不走在线歌词:课程名容易被音乐库误匹配(曾整批
+  // 落成韩文歌词)。学习行只认同目录 sidecar .lrc,故批量歌词补全直接排除。
+  if (kind === "lyrics") return "(lyrics IS NULL OR lyrics = '') AND COALESCE(has_lyrics, 0) = 0 AND COALESCE(kind, 'music') <> 'study'";
   // 封面候选必须与执行期的守卫同口径,否则「可匹配」数量会被整座本地库撑大:
   // 本地(WebDAV)歌的封面按设计存在**专辑行**(songs.cover_art 恒为空),而
   // covers.ts 的专辑守卫命中后「只返回引用、不写库,保持本地歌数据原样」——

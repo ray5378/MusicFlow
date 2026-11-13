@@ -35,6 +35,7 @@
         <el-menu-item v-if="authStore.isAdmin || authStore.hasPerm(PERM.RENDERER_MANAGE) || authStore.hasPerm(PERM.RENDERER_USE)" index="/groups" @mouseenter="prefetchRoute('/groups')"><MfIcon name="Speaker" /><template #title>{{ t('layout.players') }}</template></el-menu-item>
         <el-menu-item v-if="authStore.isAdmin || authStore.hasPerm(PERM.FLOW_MANAGE)" index="/flows" @mouseenter="prefetchRoute('/flows')"><MfIcon name="Workflow" /><template #title>{{ t('layout.flows') }}</template></el-menu-item>
         <el-menu-item v-if="authStore.hasPerm(PERM.HISTORY_MANAGE)" index="/history" @mouseenter="prefetchRoute('/history')"><MfIcon name="Clock" /><template #title>{{ t('layout.playHistory') }}</template></el-menu-item>
+        <el-menu-item v-if="authStore.hasPerm(PERM.STUDY_BROWSE)" index="/study" @mouseenter="prefetchRoute('/study')"><MfIcon name="BookOpen" /><template #title>{{ t('layout.study') }}</template></el-menu-item>
         <el-menu-item v-if="authStore.hasPerm(PERM.RENDERER_USE)" index="/audio" @mouseenter="prefetchRoute('/audio')"><MfIcon name="SlidersHorizontal" /><template #title>{{ t('layout.audio') }}</template></el-menu-item>
         <el-divider v-if="authStore.isAdmin" />
         <el-menu-item v-if="authStore.isAdmin" index="/admin/plugins" @mouseenter="prefetchRoute('/admin/plugins')"><MfIcon name="Cable" /><template #title>{{ t('layout.pluginManage') }}</template></el-menu-item>
@@ -248,14 +249,24 @@
           <el-tooltip :content="t('layout.prevTrack')" placement="top">
             <el-button circle @click="playerStore.prev" class="ctrl-btn"><MfIcon name="SkipBack" :size="20" /></el-button>
           </el-tooltip>
+          <!-- 学习音频:复用同一个播放条,只在播放学习内容时多出 ±15 秒 -->
+          <el-tooltip v-if="playerStore.isStudyPlaying" :content="t('study.back15')" placement="top">
+            <el-button circle size="small" class="ctrl-btn" @click="playerStore.skipBy(-15)"><MfIcon name="RotateCcw" :size="16" /></el-button>
+          </el-tooltip>
           <el-tooltip :content="playerStore.isPlaying ? t('layout.pause') : t('layout.play')" placement="top">
             <el-button circle @click="playerStore.togglePlay" type="primary" class="ctrl-btn play-btn">
               <MfIcon :name="playerStore.isPlaying ? 'pause' : 'play'" :size="26" />
             </el-button>
           </el-tooltip>
+          <el-tooltip v-if="playerStore.isStudyPlaying" :content="t('study.forward15')" placement="top">
+            <el-button circle size="small" class="ctrl-btn" @click="playerStore.skipBy(15)"><MfIcon name="RotateCcw" :size="16" class="flip-x" /></el-button>
+          </el-tooltip>
           <el-tooltip :content="t('layout.nextTrack')" placement="top">
             <el-button circle @click="playerStore.next" class="ctrl-btn"><MfIcon name="SkipForward" :size="20" /></el-button>
           </el-tooltip>
+          <el-select v-if="playerStore.isStudyPlaying" :model-value="playerStore.studyRate" size="small" class="study-rate" @change="onStudyRate">
+            <el-option v-for="r in studyRates" :key="r" :label="`${r}x`" :value="r" />
+          </el-select>
         </div>
       </div>
       <div class="player-right">
@@ -587,6 +598,7 @@ const routePrefetchers: Record<string, () => Promise<unknown>> = {
   "/groups": () => import("@/views/Groups/index.vue"),
   "/flows": () => import("@/views/Flows/index.vue"),
   "/history": () => import("@/views/History/index.vue"),
+  "/study": () => import("@/views/Study/index.vue"),
   "/audio": () => import("@/views/Audio/index.vue"),
   "/settings": () => import("@/views/Settings/index.vue"),
   "/admin/plugins": () => import("@/views/admin/Plugins/index.vue"),
@@ -723,6 +735,9 @@ const playModeIconName = computed(() => {
     default: return "list-ordered";
   }
 });
+// 学习音频倍速(复用同一播放条,只在播放学习内容时出现)
+const studyRates = [0.75, 1, 1.25, 1.5, 1.75, 2];
+function onStudyRate(v: any) { playerStore.setStudyRate(Number(v) || 1); }
 const playModeTooltip = computed(() => {
   switch (playerStore.playMode) {
     case "one": return t("layout.playMode.one");
@@ -1425,6 +1440,10 @@ watch(controlsDrawerOpen, (open) => {
   }
 }
 .ctrl-btn .playback-icon { display: block; }
+/* 学习音频:前进 15 秒图标左右翻转;倍速选择器跟随播放条 */
+.flip-x { transform: scaleX(-1); }
+.study-rate { width: 84px; margin-left: 4px; }
+.study-rate :deep(.el-select__wrapper) { min-height: 28px; }
 /* 主播放按钮：保留红色实心（无边框） */
 .ctrl-btn.play-btn {
   width: 44px; height: 44px;

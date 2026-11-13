@@ -14,7 +14,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import {
-  Airplay, ArrowLeft, AudioLines, Box, Cable, Check, ChevronDown, ChevronRight, ChevronUp, CircleCheck, CircleSlash,
+  Airplay, ArrowLeft, AudioLines, BookOpen, Box, Cable, Check, ChevronDown, ChevronRight, ChevronUp, CircleCheck, CircleSlash,
   Clock, Copy, Disc3, Download, FolderOpen, Globe, Headphones, Heart, Home, Info,
   KeyRound, Laptop, Library, Link2Off, List, ListMusic, ListOrdered, Loader2, Menu,
   MessageCircle, Monitor, MoreHorizontal, Pause, Pencil, Pin, Play, Plus, Radar, RefreshCw,
@@ -70,7 +70,7 @@ const ALIAS: Record<string, string> = {
 // this as an explicit map lets the bundler tree-shake lucide-vue-next instead of
 // pulling in every icon like the old `import * from lucide-vue-next`.
 const ICONS: Record<string, any> = {
-  Airplay, ArrowLeft, AudioLines, Box, Cable, Check, ChevronDown, ChevronRight, ChevronUp, CircleCheck, CircleSlash,
+  Airplay, ArrowLeft, AudioLines, BookOpen, Box, Cable, Check, ChevronDown, ChevronRight, ChevronUp, CircleCheck, CircleSlash,
   Clock, Copy, Disc3, Download, FolderOpen, Globe, Headphones, Heart, Home, Info,
   KeyRound, Laptop, Library, Link2Off, List, ListMusic, ListOrdered, Loader2, Menu,
   MessageCircle, Monitor, MoreHorizontal, Pause, Pencil, Pin, Play, Plus, Radar, RefreshCw,

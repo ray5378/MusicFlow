@@ -16,6 +16,8 @@ export const PERM = {
   RENDERER_USE: "renderer.use", // 使用播放器(DLNA/AirPlay/群组,需设备授权)
   RENDERER_MANAGE: "renderer.manage", // 管理播放器
   FLOW_MANAGE: "flow.manage", // 音流(自动化流程)
+  STUDY_BROWSE: "study.browse", // 学习模块:浏览学习源 / 目录 / 搜索 / 学习歌单
+  STUDY_STREAM: "study.stream", // 学习模块:点播入库与学习进度上报
   SETTINGS_MANAGE: "settings.manage", // 系统设置
   USER_MANAGE: "user.manage", // 用户管理
 } as const;
@@ -34,4 +36,5 @@ export const ROUTE_PERM: Record<string, PermKey | undefined> = {
   "/history": PERM.HISTORY_MANAGE,
   "/groups": undefined, // 管理页仍按 requiresAdmin
   "/flows": PERM.FLOW_MANAGE,
+  "/study": PERM.STUDY_BROWSE,
 };

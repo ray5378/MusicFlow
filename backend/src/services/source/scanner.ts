@@ -174,6 +174,8 @@ export async function scanWebDAVSource(sourceId: string, config: any, mode: Scan
   const auth = buildAuthHeader(username, password);
   const baseUrl = normalizeUrl(url, root_path);
   const baseUrlPath = decodeURIComponent(new URL(baseUrl).pathname);
+  // 整源分区:study 源扫入的行统一打学习章,且跳过联网专辑一致性校准。
+  const srcKind = getSourceKind(sourceId);
 
   const progress: ScanProgress = {
     phase: "traverse", totalDirs: 0, processedDirs: 0,
@@ -227,9 +229,12 @@ export async function scanWebDAVSource(sourceId: string, config: any, mode: Scan
 
   // File worker: download header, extract metadata, upsert
   const processFile = async (entry: PropfindEntry) => {
+    // propfind 返回的 href 已 decodeURIComponent,直接按根路径前缀截相对路径。
     const href = entry.href;
     const songPath = `w:${sourceId}:${href}`;
     seenPaths.add(songPath);
+    const relFile = stripRoot(baseUrlPath, href);
+    const relDir = relDirOf(relFile ?? href);
 
     // Incremental: skip if fingerprint unchanged (size + mtime + etag)
     if (mode === "incremental") {
@@ -287,8 +292,8 @@ export async function scanWebDAVSource(sourceId: string, config: any, mode: Scan
         // 升到顶(4MB)仍解析不出标签 —— 此前完全静默,现在留一条可检索的 warn。
         log.warn(`[SCANNER] ${path.basename(href)} 取头升到 ${HEADER_LADDER[HEADER_LADDER.length - 1] / 1024 / 1024}MB 仍解析不出标签,元数据回落文件名推断`);
       }
-      await applyAlbumConsensus(meta, songPath);
-      const result = upsertSong(songPath, meta, sourceId, mode === "incremental" ? buildFingerprint(entry) : undefined);
+      if (srcKind !== "study") await applyAlbumConsensus(meta, songPath);
+      const result = upsertSong(songPath, meta, sourceId, mode === "incremental" ? buildFingerprint(entry) : undefined, { kind: srcKind, relDir });
       if (result === "added") added++;
       else updated++;
     } catch (e: any) {
@@ -395,6 +400,7 @@ export async function scanWebDAVSource(sourceId: string, config: any, mode: Scan
     // 顺序(可达分支):先回写后歌曲行(audio_analysis.row_id 有 FK 无 CASCADE)。
     if (visited.size > 0) {
       deleteAnalysisMany(removedIds);
+      deleteStudyProgressFor(removedIds);
       for (const id of removedIds) {
         db.delete(songs).where(eq(songs.id, id)).run();
       }
@@ -429,6 +435,8 @@ export async function scanSmbSource(
 ) {
   const cfg = buildSmbConfig(config);
   if (!cfg) throw new Error("SMB 配置不完整(缺少 host/share)");
+  const srcKind = getSourceKind(sourceId);
+  const smbRoot = normalizeSmbPath(cfg.root_path);
 
   const progress: ScanProgress = {
     phase: "traverse", totalDirs: 0, processedDirs: 0,
@@ -482,6 +490,7 @@ export async function scanSmbSource(
   const processFile = async (entry: SmbEntry) => {
     const songPath = `s:${sourceId}:${entry.path}`;
     seenPaths.add(songPath);
+    const relDir = relDirOf(stripRoot(smbRoot, entry.path) ?? entry.path);
 
     // 增量：size+mtime 未变就跳过(SMB 没有 etag)。
     const fp = `${entry.size}|${entry.mtimeMs}`;
@@ -528,8 +537,8 @@ export async function scanSmbSource(
       if (meta.incomplete) {
         log.warn(`[SCANNER] ${entry.name} 取头升到 ${HEADER_LADDER[HEADER_LADDER.length - 1] / 1024 / 1024}MB 仍解析不出标签,元数据回落文件名推断`);
       }
-      await applyAlbumConsensus(meta, songPath);
-      const result = upsertSong(songPath, meta, sourceId, mode === "incremental" ? fp : undefined);
+      if (srcKind !== "study") await applyAlbumConsensus(meta, songPath);
+      const result = upsertSong(songPath, meta, sourceId, mode === "incremental" ? fp : undefined, { kind: srcKind, relDir });
       if (result === "added") added++;
       else updated++;
     } catch (e: any) {
@@ -622,6 +631,7 @@ export async function scanSmbSource(
     }
     if (visited.size > 0) {
       deleteAnalysisMany(removedIds);
+      deleteStudyProgressFor(removedIds);
       for (const id of removedIds) db.delete(songs).where(eq(songs.id, id)).run();
       removed = removedIds.length;
     } else {
@@ -705,9 +715,16 @@ export async function extractMetadataHeader(headerBuf: Buffer, fileName: string,
     let track = common.track?.no || 0;
     let discNumber = common.disk?.no || 1;
 
-    // For MP3: estimate duration from file size and bitrate if not parsed
-    if (ext === ".mp3" && duration === 0 && bitRate > 0) {
-      duration = Math.round(((fileSize) * 8) / (bitRate * 1000));
+    // MP3 的时长陷阱：parseBuffer 只拿到截断头时，music-metadata 会按「到手字节 /
+    // 码率」算出假时长(实测 256KB 头 + 128kbps = 16s，全库学习音频都变成 0:16)。
+    // 只有解析值≈截断缓冲对应时长、且真实文件明显更大时，才改用 fileSize 换算；
+    // 带 Xing/VBR 头能给出完整时长的情况下解析值与缓冲估算差得远，保持原值。
+    if (ext === ".mp3" && bitRate > 0 && fileSize > headerBuf.length * 1.5) {
+      const fromSize = Math.round((fileSize * 8) / (bitRate * 1000));
+      const headerSeconds = (headerBuf.length * 8) / (bitRate * 1000);
+      if (duration === 0 || Math.abs(duration - headerSeconds) <= Math.max(2, headerSeconds * 0.02)) {
+        duration = fromSize;
+      }
     }
     // 无损容器：截断头解析出的 format.bitrate 是「到手字节/时长」的估算垃圾值，
     // duration 来自 STREAMINFO 等结构头、fileSize 是真实大小，两者可信 → 现场换算。
@@ -947,8 +964,13 @@ export async function extractMetadataLocal(filePath: string): Promise<MusicMetad
     const common = metadata.common || {};
     let duration = Math.round(format.duration || 0);
     let bitRate = Math.round((format.bitrate || 0) / 1000);
-    if (ext === ".mp3" && duration === 0 && bitRate > 0) {
-      duration = Math.round((stat.size * 8) / (bitRate * 1000));
+    // 同 extractMetadataHeader：截断缓冲会被算成假时长，真实文件更大时按文件大小换算。
+    if (ext === ".mp3" && bitRate > 0 && stat.size > buf.length * 1.5) {
+      const fromSize = Math.round((stat.size * 8) / (bitRate * 1000));
+      const headerSeconds = (buf.length * 8) / (bitRate * 1000);
+      if (duration === 0 || Math.abs(duration - headerSeconds) <= Math.max(2, headerSeconds * 0.02)) {
+        duration = fromSize;
+      }
     }
     // 无损容器：码率不信任截断头解析出的 format.bitrate，按 size*8/duration 现场换算。
     if (LOSSLESS_SIZE_BITRATE_EXTS.has(ext) && duration > 0) {
@@ -1079,13 +1101,81 @@ export async function applyAlbumConsensus(meta: MusicMetadata, songPath: string)
   }
 }
 
-export function upsertSong(songPath: string, meta: MusicMetadata, sourceId: string, fingerprint?: string): "added" | "updated" {
-  // 三条扫描链路(webdav/smb/local)的唯一入库入口:Unknown 标签在这里统一兜底。
-  recoverUnknownTags(meta, songPath);
-  // 专辑被清成空(Unknown/网址/广告/GBK 乱码)时用歌名当专辑,与下载/洗版口径一致:
-  // 宁可让专辑=歌名,也不要把「空」「www.xxx.com」「ÔÚÏß...」这类脏值写进库里。
-  if (isUnknownAlbum(meta.album) && meta.title && !/^unknown(\s*title)?$/i.test(meta.title.trim())) {
-    meta.album = meta.title.trim();
+// ==================== 学习模块分区 ====================
+
+/** 源分区(整源标记)。查不到或非法值一律按音乐处理 —— 学习内容必须显式标记。 */
+function getSourceKind(sourceId: string): "music" | "study" {
+  try {
+    const row = db.select({ kind: mediaSources.kind }).from(mediaSources).where(eq(mediaSources.id, sourceId)).get();
+    return row?.kind === "study" ? "study" : "music";
+  } catch {
+    return "music";
+  }
+}
+
+function getSourceName(sourceId: string): string {
+  try {
+    return db.select({ name: mediaSources.name }).from(mediaSources).where(eq(mediaSources.id, sourceId)).get()?.name || "学习";
+  } catch {
+    return "学习";
+  }
+}
+
+/** 相对源根的文件路径 → 目录(统一 '/' 分隔、无首尾斜杠、根目录为 '')。 */
+function relDirOf(relPath: string): string {
+  const p = String(relPath || "").replace(/\\/g, "/").replace(/^\/+/, "");
+  const i = p.lastIndexOf("/");
+  return i > 0 ? p.slice(0, i) : "";
+}
+
+/** full 在 prefix 之下时返回相对路径,否则 null(跨根/异常 href)。 */
+function stripRoot(prefix: string, full: string): string | null {
+  const root = String(prefix || "").replace(/\\/g, "/").replace(/\/+$/, "");
+  const f = String(full || "").replace(/\\/g, "/");
+  if (f === root) return "";
+  return f.startsWith(root + "/") ? f.slice(root.length + 1) : null;
+}
+
+/** 删歌前清学习进度(study_progress.song_id 有 FK 且无 CASCADE)。分批避变量上限。 */
+function deleteStudyProgressFor(ids: string[]): void {
+  for (let i = 0; i < ids.length; i += 400) {
+    const chunk = ids.slice(i, i + 400);
+    const ph = chunk.map(() => "?").join(",");
+    sqlite.prepare(`DELETE FROM study_progress WHERE song_id IN (${ph})`).run(...chunk);
+  }
+}
+
+export interface UpsertScope {
+  /** 源分区:study 时跳过艺人/专辑/同曲归组,并写 kind/source_id/rel_dir。 */
+  kind?: "music" | "study";
+  /** 相对源根的目录(统一 '/'、无首尾斜杠,根目录 ''),仅学习行使用。 */
+  relDir?: string;
+}
+
+export function upsertSong(
+  songPath: string,
+  meta: MusicMetadata,
+  sourceId: string,
+  fingerprint?: string,
+  scope?: UpsertScope,
+): "added" | "updated" {
+  const kind: "music" | "study" = scope?.kind === "study" ? "study" : "music";
+  const relDir = String(scope?.relDir ?? "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  if (kind === "study") {
+    // 学习行不产生任何音乐面数据:不建艺人/专辑、不参与同曲归组。
+    // album 列在学习面不展示,这里放课程名(源下第一级目录),便于排障与导出。
+    const course = relDir.split("/").filter(Boolean)[0] || getSourceName(sourceId);
+    meta.artist = "";
+    meta.albumArtist = "";
+    meta.album = course;
+  } else {
+    // 三条扫描链路(webdav/smb/local)的唯一入库入口:Unknown 标签在这里统一兜底。
+    recoverUnknownTags(meta, songPath);
+    // 专辑被清成空(Unknown/网址/广告/GBK 乱码)时用歌名当专辑,与下载/洗版口径一致:
+    // 宁可让专辑=歌名,也不要把「空」「www.xxx.com」「ÔÚÏß...」这类脏值写进库里。
+    if (isUnknownAlbum(meta.album) && meta.title && !/^unknown(\s*title)?$/i.test(meta.title.trim())) {
+      meta.album = meta.title.trim();
+    }
   }
   // 行类型以路径前缀为唯一真相:WebDAV 扫描写 `w:<sourceId>:<href>`,本地写
   // `l:<sourceId>:<绝对路径>`,SMB 写 `s:<sourceId>:<共享内路径>`。此前 insert/update
@@ -1093,17 +1183,19 @@ export function upsertSong(songPath: string, meta: MusicMetadata, sourceId: stri
   // 「本地」,播放优选的 local 优先排序也退化成并列(谁先入库谁在前)。
   const rowType = songPath.startsWith("w:") ? "webdav" : songPath.startsWith("s:") ? "smb" : "local";
   const existing = db.select().from(songs).where(eq(songs.path, songPath)).get();
-  const artistId = findOrCreateArtist(meta.artist) || null;
-  const albumId = findOrCreateAlbum(meta.album, artistId, meta.artist, meta.year, meta.picture, meta.genre) || null;
+  const artistId = kind === "music" ? (findOrCreateArtist(meta.artist) || null) : null;
+  const albumId = kind === "music"
+    ? (findOrCreateAlbum(meta.album, artistId, meta.artist, meta.year, meta.picture, meta.genre) || null)
+    : null;
   if (existing) {
     // 同曲多源归组:已分组行保持组不变;历史 NULL 组行(归组启用前/插件关闭期
-    // 扫入的存量)在元数据更新时顺带补组,与 web 导入同规则。
+    // 扫入的存量)在元数据更新时顺带补组,与 web 导入同规则。学习行不归组。
     //
     // 但「分组键变了」必须重算:标签从 Unknown Artist 修正为真实歌手后,旧 key
     // 仍指向旧组,这行就永远进不了同曲组(实测 SMB 的 Coldplay 一条歌手已修正,
     // group_key 仍是 `...\x01unknown artist\x01unknown album`)。同 key 命中已有组
     // 时 resolveLocalGroup 会并入,不会另开新组。
-    const resolvedGroup = songGroupEnabled() ? resolveLocalGroup(meta) : null;
+    const resolvedGroup = kind === "music" && songGroupEnabled() ? resolveLocalGroup(meta) : null;
     const groupKeyChanged = !!resolvedGroup && existing.groupKey !== resolvedGroup.groupKey;
     const backfill = (!existing.groupId || groupKeyChanged) ? resolvedGroup : null;
     db.update(songs).set({
@@ -1119,21 +1211,28 @@ export function upsertSong(songPath: string, meta: MusicMetadata, sourceId: stri
       // 文件里没有歌词时不把已有的 1 降级(在线歌词文件可能已落盘),NULL 视为未检测。
       hasLyrics: meta.lyrics ? 1 : (existing.hasLyrics ?? 0),
       type: rowType,
+      kind,
+      sourceId,
+      relDir,
       updatedAt: new Date().toISOString(),
       ...(backfill ? { groupId: backfill.groupId, groupKey: backfill.groupKey } : {}),
+      ...(kind === "study" ? { groupId: null, groupKey: null } : {}),
       ...(fingerprint ? { fingerprint } : {}),
     }).where(eq(songs.id, existing.id)).run();
     return "updated";
   }
   // 同曲多源归组(与 web 导入一致,受 core-song-group 插件开关门控):命中已有组
-  // 并入,否则新建;插件关闭时 NULL 平铺。
-  const group = songGroupEnabled() ? resolveLocalGroup(meta) : null;
+  // 并入,否则新建;插件关闭时 NULL 平铺。学习行永不归组。
+  const group = kind === "music" && songGroupEnabled() ? resolveLocalGroup(meta) : null;
   const songId = uuidv4();
   db.insert(songs).values({
     id: songId, title: meta.title, artist: meta.artist, artistId, album: meta.album, albumId,
     duration: meta.duration, bitRate: meta.bitRate, contentType: meta.contentType,
     suffix: meta.suffix, path: songPath, size: meta.size, genre: meta.genre,
     type: rowType,
+    kind,
+    sourceId,
+    relDir,
     discNumber: meta.discNumber, track: meta.track, playCount: 0,
     // 文件头能拿到的标签全部入库;歌词只标注存在性(正文不落库),
     // 冷门标签进 tags JSON;入库后这首歌的批量回填(has_lyrics 已有值)会自动跳过。
@@ -1243,6 +1342,7 @@ export async function scanLocalFiles(
 
   let added = 0, updated = 0, skipped = 0, failed = 0;
   const rootPath = resolveSourceRoot(sourceId);
+  const srcKind = getSourceKind(sourceId);
 
   for (let i = 0; i < list.length; i++) {
     if (signal?.aborted) break;
@@ -1263,8 +1363,9 @@ export async function scanLocalFiles(
       const stat = fs.statSync(filePath);
       const fp = `${stat.size}|${stat.mtimeMs}`;
       const meta = await extractMetadataLocal(filePath);
-      await applyAlbumConsensus(meta, `l:${sourceId}:${filePath}`);
-      const result = upsertSong(`l:${sourceId}:${filePath}`, meta, sourceId, fp);
+      const relDir = relDirOf(stripRoot(rootPath || "", filePath) ?? path.relative(rootPath || path.dirname(filePath), filePath));
+      if (srcKind !== "study") await applyAlbumConsensus(meta, `l:${sourceId}:${filePath}`);
+      const result = upsertSong(`l:${sourceId}:${filePath}`, meta, sourceId, fp, { kind: srcKind, relDir });
       if (result === "added") added++;
       else updated++;
     } catch (e: any) {
@@ -1299,6 +1400,7 @@ export async function scanLocalSource(sourceId: string, config: any, mode: ScanM
 
   let added = 0, updated = 0, skipped = 0, failed = 0;
   const seenPaths = new Set<string>();
+  const srcKind = getSourceKind(sourceId);
   // Incremental mode: load existing l:<sourceId>:* paths once, then check in memory
   // instead of running one SELECT per file.
   const existingByPath = mode === "incremental"
@@ -1322,8 +1424,9 @@ export async function scanLocalSource(sourceId: string, config: any, mode: ScanM
         }
       }
       const meta = await extractMetadataLocal(filePath);
-      await applyAlbumConsensus(meta, songKey);
-      const result = upsertSong(songKey, meta, sourceId, fp);
+      const relDir = relDirOf(stripRoot(dirPath, filePath) ?? path.relative(dirPath, filePath));
+      if (srcKind !== "study") await applyAlbumConsensus(meta, songKey);
+      const result = upsertSong(songKey, meta, sourceId, fp, { kind: srcKind, relDir });
       if (result === "added") added++;
       else updated++;
     } catch (e: any) {
@@ -1361,6 +1464,7 @@ export async function scanLocalSource(sourceId: string, config: any, mode: ScanM
   // 源可达成立,回写跟删。顺序:先回写后歌曲行(FK 无 CASCADE)。
   if (removedIds.length > 0) {
     deleteAnalysisMany(removedIds);
+    deleteStudyProgressFor(removedIds);
     for (const s of existingSongs) {
       if (!seenPaths.has(s.path)) {
         deleteStmt.run(s.id);

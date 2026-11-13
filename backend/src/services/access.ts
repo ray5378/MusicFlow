@@ -43,6 +43,8 @@ export const PERM = {
   LIBRARY_BROWSE: "library.browse", // 浏览曲库(歌曲/专辑/艺术家/风格)
   LIBRARY_SEARCH: "library.search", // 搜索(本地 + 在线/插件)
   LIBRARY_STREAM: "library.stream", // 播放 / 试听 / 下载音频流
+  STUDY_BROWSE: "study.browse",     // 学习模块:浏览学习源 / 目录 / 搜索 / 歌单
+  STUDY_STREAM: "study.stream",     // 学习模块:点播入库与进度上报
   PLAYLIST_VIEW: "playlist.view",   // 查看歌单
   PLAYLIST_MANAGE: "playlist.manage", // 创建 / 编辑 / 删除歌单
   PLAYLIST_IMPORT: "playlist.import", // 导入 / 导出 / 同步歌单
@@ -63,6 +65,8 @@ export const PERMISSION_CATALOG: PermDefinition[] = [
   { key: PERM.LIBRARY_BROWSE, label: "浏览曲库", category: "library", desc: "查看歌曲、专辑、艺术家、风格列表与详情", defaultGranted: true },
   { key: PERM.LIBRARY_SEARCH, label: "搜索", category: "library", desc: "本地搜索与在线/插件搜索", defaultGranted: true },
   { key: PERM.LIBRARY_STREAM, label: "播放音频", category: "library", desc: "播放 / 试听 / 获取音频流(stream / download)", defaultGranted: true },
+  { key: PERM.STUDY_BROWSE, label: "学习内容浏览", category: "library", desc: "浏览学习源、学习文件夹、学习搜索与学习歌单", defaultGranted: true },
+  { key: PERM.STUDY_STREAM, label: "学习内容播放", category: "library", desc: "打开学习音频(点播即入库)与上报学习进度", defaultGranted: true },
   { key: PERM.PLAYLIST_VIEW, label: "查看歌单", category: "playlist", desc: "查看歌单与曲目列表", defaultGranted: true },
   { key: PERM.PLAYLIST_MANAGE, label: "管理歌单", category: "playlist", desc: "创建、编辑、删除歌单", defaultGranted: true },
   { key: PERM.PLAYLIST_IMPORT, label: "导入导出歌单", category: "playlist", desc: "URL / 文件导入、导出、平台同步", defaultGranted: true },

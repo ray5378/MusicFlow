@@ -34,6 +34,10 @@ export function parseLrc(content: string): LrcLine[] {
   const seen = new Set<string>();
   const timeRegex = /\[(\d{1,2}):(\d{1,2})(?:[.:](\d{1,3}))?\]/g;
   const metaRegex = /^\[(ti|ar|al|by|offset|length|re|ve|au|la):/i;
+  // LRC `[offset:N]`(毫秒):正值让歌词提前 N ms(等价于所有时间戳减去 N)。
+  // 旧实现只把它当元数据跳过,导致带 offset 的歌词整体偏移;这里统一在解析时应用。
+  const offsetMatch = content.match(/\[offset:\s*([+-]?\d+)\s*\]/i);
+  const offsetSec = offsetMatch ? Number(offsetMatch[1]) / 1000 : 0;
   // enhanced LRC 的行内逐字标签 `<mm:ss.xx>`:不是行级时间戳,只作进度信息,渲染前剥掉,
   // 否则端上会直接显示 "<00:10.50>" 这种原始标签。
   const wordTagRegex = /<\d{1,2}:\d{1,2}(?:[.:]\d{1,3})?>/g;
@@ -41,7 +45,7 @@ export function parseLrc(content: string): LrcLine[] {
     const min = parseInt(m[1]);
     const sec = parseInt(m[2]);
     const frac = m[3] ? parseInt(m[3].padEnd(3, "0")) / 1000 : 0;
-    return min * 60 + sec + frac;
+    return Math.max(0, min * 60 + sec + frac - offsetSec);
   };
   const push = (time: number, text: string) => {
     const key = `${time}\u0000${text}`;
@@ -127,14 +131,30 @@ export function getLyricsCacheEntries(): number {
   return lrcCache.size;
 }
 
-// 读取 sidecar .lrc(本地文件 / WebDAV 同目录 URL)。离线优先、最准;
-// web 歌曲 path 不是 w:/l: 前缀,直接返回 null。
+/** 学习音频的 sidecar .lrc 大量是 GBK/GB18030(中文课程光盘拷贝),按 UTF-8 → GB18030 顺序探测解码。 */
+function decodeLrcBytes(buf: Buffer): string {
+  if (buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) {
+    return buf.subarray(3).toString("utf8");
+  }
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(buf);
+  } catch {
+    try {
+      return new TextDecoder("gb18030").decode(buf);
+    } catch {
+      return buf.toString("utf8");
+    }
+  }
+}
+
+// 读取 sidecar .lrc(本地文件 / WebDAV 同目录 URL / SMB 同目录文件)。离线优先、最准;
+// web 歌曲 path 不是 w:/l:/s: 前缀,直接返回 null。
 async function readSidecarLrc(song: SongRow): Promise<string | null> {
   try {
     const colon1 = song.path.indexOf(":");
     if (colon1 < 0) return null;
     const prefix = song.path.slice(0, colon1);
-    if (prefix !== "w" && prefix !== "l") return null;
+    if (prefix !== "w" && prefix !== "l" && prefix !== "s") return null;
     const rest = song.path.slice(colon1 + 1);
     const colon2 = rest.indexOf(":");
     if (colon2 < 0) return null;
@@ -174,9 +194,25 @@ async function readSidecarLrc(song: SongRow): Promise<string | null> {
       } finally { clearTimeout(timeout); }
     } else if (prefix === "l") {
       const fs = await import("fs");
-      if (fs.existsSync(lrcPath)) return fs.readFileSync(lrcPath, "utf8");
+      if (fs.existsSync(lrcPath)) return decodeLrcBytes(fs.readFileSync(lrcPath));
       // D21 修复:本地 l: 分支同目录没有 .lrc 也补一条 debug。
       log.debug(`readSidecarLrc: 本地 sidecar 文件不存在(${lrcPath})`);
+    } else if (prefix === "s") {
+      // SMB 侧车歌词:学习音频全在 SMB 学习源上,旧实现只认 w:/l:,sidecar 被跳过 →
+      // 落到在线歌词按课程名乱匹配(中文课程匹配出韩文歌词)。按同目录同名 .lrc 直接读回。
+      const { loadSmbConfig, smbStat, smbReadRange } = await import("./source/smbClient.js");
+      const cfg = loadSmbConfig(sourceId);
+      if (!cfg) { log.warn(`readSidecarLrc: SMB 源配置不可用(source=${sourceId}),跳过 sidecar`); return null; }
+      let size = 0;
+      try {
+        size = (await smbStat(sourceId, cfg, lrcPath)).size;
+      } catch {
+        log.debug(`readSidecarLrc: SMB sidecar 不存在(${lrcPath})`);
+        return null;
+      }
+      if (size <= 0) return null;
+      const buf = await smbReadRange(sourceId, cfg, lrcPath, 0, Math.min(size, 512 * 1024) - 1);
+      return decodeLrcBytes(buf);
     }
   } catch (e) { log.warn("readSidecarLrc: 读取 sidecar 歌词异常,按无 sidecar 处理", { err: e }); }
   return null;
@@ -199,19 +235,25 @@ export async function fetchLrcForSong(song: SongRow): Promise<string | null> {
   }
 
   let content: string | null = null;
+  // 学习音频:只能用同目录 sidecar .lrc。旧版本没有 SMB sidecar 分支,已把在线
+  // 歌词(按课程名误匹配到的韩文歌)落库成 39 条脏缓存;在线 provider 对课程
+  // 音频也只会继续误匹配。故学习行跳过 ①落库缓存 与 ③在线检索。
+  const isStudy = (song as any).kind === "study";
 
   // ① 已落库的歌词:优先读 online-lyrics/<ref>.lrc 文件(新格式),文件缺失时
   //    把列内旧文本当歌词(v1.7.4 兼容)。离线也能显示,不依赖 provider 常驻。
-  try {
-    const row = sqlite.prepare("SELECT lyrics FROM songs WHERE id = ?").get(song.id) as any;
-    if (row?.lyrics) content = resolveLyricContent(row.lyrics);
-  } catch { /* ignore */ }
+  if (!isStudy) {
+    try {
+      const row = sqlite.prepare("SELECT lyrics FROM songs WHERE id = ?").get(song.id) as any;
+      if (row?.lyrics) content = resolveLyricContent(row.lyrics);
+    } catch { /* ignore */ }
+  }
 
   // ② sidecar .lrc(离线优先、最准)
   if (!content) content = await readSidecarLrc(song);
 
   // ③ 在线按需(A 开关):sidecar/落库都没有时,问 lyricProvider 插件
-  if (!content && getSettingBool("lyrics.onDemand", true) && hasLyricProvider()) {
+  if (!content && !isStudy && getSettingBool("lyrics.onDemand", true) && hasLyricProvider()) {
     // 把 source/album/extra 一并传给 lyric provider:插件据此优先同平台回退
     // (go-music-dl 的搜索回退需要 source 判断"本平台优先",否则只能盲目多平台搜索)。
     let sourceData: any = null;

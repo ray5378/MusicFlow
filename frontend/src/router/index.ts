@@ -30,6 +30,9 @@ const routes = [
       { path: "flows", name: "Flows", component: () => import("@/views/Flows/index.vue"), meta: { perm: PERM.FLOW_MANAGE } },
       { path: "flows/:id", name: "FlowEditor", component: () => import("@/views/Flows/Editor.vue"), meta: { perm: PERM.FLOW_MANAGE } },
       { path: "history", name: "History", component: () => import("@/views/History/index.vue"), meta: { perm: PERM.HISTORY_MANAGE } },
+      // 学习模块(P1 Web):学习源目录浏览 / 学习歌单。音乐面不可见,权限独立。
+      { path: "study", name: "Study", component: () => import("@/views/Study/index.vue"), meta: { perm: PERM.STUDY_BROWSE } },
+      { path: "study/playlists/:id", name: "StudyPlaylistDetail", component: () => import("@/views/Study/PlaylistDetail.vue"), meta: { perm: PERM.STUDY_BROWSE } },
       // 「音频」：② 响度归一化 + 滤镜链开关（均 admin 可见）+ ③ 设备音色（renderer.use）。
       { path: "audio", name: "Audio", component: () => import("@/views/Audio/index.vue"), meta: { perm: PERM.RENDERER_USE } },
       { path: "settings", name: "Settings", component: () => import("@/views/Settings/index.vue") },

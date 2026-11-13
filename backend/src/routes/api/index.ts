@@ -31,6 +31,7 @@ import { registerPlay } from "./play.js";
 import { registerFlows } from "./flows.js";
 import { registerWebhook } from "./webhook.js";
 import { registerSystem } from "./system.js";
+import { registerStudy } from "./study.js";
 
 export const apiRoutes = new Hono();
 
@@ -60,6 +61,7 @@ registerSettings(apiRoutes);
 registerDailyRecommend(apiRoutes);
 registerTasks(apiRoutes);
 registerHistory(apiRoutes);
+registerStudy(apiRoutes);
 registerDlna(apiRoutes);
 registerAirplay(apiRoutes);
 registerSendspin(apiRoutes);

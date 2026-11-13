@@ -10,6 +10,7 @@
           <div class="source-info">
             <h3>{{ source.name }}</h3>
             <el-tag :type="source.enabled ? 'success' : 'info'" size="small">{{ source.type }}</el-tag>
+            <el-tag :type="source.kind === 'study' ? 'warning' : 'info'" size="small" effect="plain">{{ source.kind === 'study' ? t('admin.sources.kindStudy') : t('admin.sources.kindMusic') }}</el-tag>
           </div>
           <el-dropdown @command="(cmd: string) => handleCommand(cmd, source)">
             <MfIcon name="MoreHorizontal" class="more-btn"  />
@@ -130,6 +131,13 @@
             <el-option :label="t('admin.sources.localDir')" value="local" />
           </el-select>
         </el-form-item>
+        <el-form-item :label="t('admin.sources.sourceKind')">
+          <el-select v-model="newSource.kind">
+            <el-option :label="t('admin.sources.kindMusic')" value="music" />
+            <el-option :label="t('admin.sources.kindStudy')" value="study" />
+          </el-select>
+          <span class="form-hint">{{ t('admin.sources.kindHint') }}</span>
+        </el-form-item>
         <template v-if="newSource.type === 'webdav'">
           <el-form-item label="WebDAV URL"><el-input v-model="newSource.config.url" placeholder="http://192.168.1.100:5000/dav" /></el-form-item>
           <el-form-item :label="t('common.username')"><el-input v-model="newSource.config.username" :placeholder="t('common.optional')" /></el-form-item>
@@ -137,7 +145,8 @@
           <el-form-item :label="t('admin.sources.rootPath')"><el-input v-model="newSource.config.root_path" :placeholder="t('admin.sources.rootPathPlaceholder')" /></el-form-item>
         </template>
         <template v-else-if="newSource.type === 'smb'">
-          <p style="margin: -4px 0 12px 100px; font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.5;">{{ t('admin.sources.smbExample') }}</p>
+          <p style="margin: -4px 0 6px 100px; font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.5;">{{ t('admin.sources.smbExample') }}</p>
+          <p class="smb-warn" style="margin: 0 0 12px 100px; font-size: 12px; line-height: 1.6;">{{ t('admin.sources.smbSpecialChars') }}</p>
           <el-form-item :label="t('admin.sources.smbHost')"><el-input v-model="newSource.config.host" placeholder="192.168.1.100" /></el-form-item>
           <el-form-item :label="t('admin.sources.smbShare')"><el-input v-model="newSource.config.share" placeholder="Music" /></el-form-item>
           <el-form-item :label="t('admin.sources.smbPort')"><el-input-number v-model="newSource.config.port" :min="1" :max="65535" controls-position="right" /></el-form-item>
@@ -170,6 +179,13 @@
     <el-dialog v-model="showEditDialog" :title="t('admin.sources.editDialogTitle')" width="500px" :append-to-body="true">
       <el-form label-width="100px">
         <el-form-item :label="t('common.name')"><el-input v-model="editSource.name" /></el-form-item>
+        <el-form-item :label="t('admin.sources.sourceKind')">
+          <el-select v-model="editSource.kind">
+            <el-option :label="t('admin.sources.kindMusic')" value="music" />
+            <el-option :label="t('admin.sources.kindStudy')" value="study" />
+          </el-select>
+          <span class="form-hint">{{ t('admin.sources.kindEditHint') }}</span>
+        </el-form-item>
         <template v-if="editSource.type === 'webdav'">
           <el-form-item label="WebDAV URL"><el-input v-model="editSource.config.url" /></el-form-item>
           <el-form-item :label="t('common.username')"><el-input v-model="editSource.config.username" /></el-form-item>
@@ -177,6 +193,7 @@
           <el-form-item :label="t('admin.sources.rootPath')"><el-input v-model="editSource.config.root_path" /></el-form-item>
         </template>
         <template v-else-if="editSource.type === 'smb'">
+          <p class="smb-warn" style="margin: 0 0 12px 100px; font-size: 12px; line-height: 1.6;">{{ t('admin.sources.smbSpecialChars') }}</p>
           <el-form-item :label="t('admin.sources.smbHost')"><el-input v-model="editSource.config.host" /></el-form-item>
           <el-form-item :label="t('admin.sources.smbShare')"><el-input v-model="editSource.config.share" /></el-form-item>
           <el-form-item :label="t('admin.sources.smbPort')"><el-input-number v-model="editSource.config.port" :min="1" :max="65535" controls-position="right" /></el-form-item>
@@ -221,8 +238,8 @@ const { t } = useI18n();
 const sources = ref<any[]>([]);
 const showAddDialog = ref(false);
 const showEditDialog = ref(false);
-const newSource = reactive({ name: "", type: "webdav", autoEnabled: false, autoTime: "03:00", config: { url: "", username: "", password: "", root_path: "", path: "", host: "", share: "", port: 445, domain: "WORKGROUP" } });
-const editSource = reactive({ id: "", name: "", type: "webdav", enabled: 1, config: { url: "", username: "", password: "", root_path: "", path: "", host: "", share: "", port: 445, domain: "WORKGROUP", scanAutoEnabled: false, scanAutoTimeOfDay: "03:00" } });
+const newSource = reactive({ name: "", type: "webdav", kind: "music", autoEnabled: false, autoTime: "03:00", config: { url: "", username: "", password: "", root_path: "", path: "", host: "", share: "", port: 445, domain: "WORKGROUP" } });
+const editSource = reactive({ id: "", name: "", type: "webdav", kind: "music", enabled: 1, config: { url: "", username: "", password: "", root_path: "", path: "", host: "", share: "", port: 445, domain: "WORKGROUP", scanAutoEnabled: false, scanAutoTimeOfDay: "03:00" } });
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 // 本页发起的删除任务:完成/失败只提示一次
 const pendingDeletes = new Set<string>();
@@ -257,9 +274,9 @@ async function addSource() {
         : { path: newSource.config.path };
     config.scanAutoEnabled = newSource.autoEnabled;
     config.scanAutoTimeOfDay = newSource.autoTime;
-    await api.post("/rest/api/v1/sources", { name: newSource.name, type: newSource.type, config });
+    await api.post("/rest/api/v1/sources", { name: newSource.name, type: newSource.type, kind: newSource.kind, config });
     showAddDialog.value = false;
-    newSource.name = ""; newSource.autoEnabled = false; newSource.autoTime = "03:00";
+    newSource.name = ""; newSource.autoEnabled = false; newSource.autoTime = "03:00"; newSource.kind = "music";
     newSource.config = { url: "", username: "", password: "", root_path: "", path: "", host: "", share: "", port: 445, domain: "WORKGROUP" };
     ElMessage.success(t("common.addSuccess"));
     loadSources();
@@ -389,6 +406,7 @@ async function scanSource(source: any, mode: "full" | "incremental" = "full") {
 
 function openEdit(source: any) {
   editSource.id = source.id; editSource.name = source.name; editSource.type = source.type;
+  editSource.kind = source.kind === "study" ? "study" : "music";
   editSource.enabled = source.enabled;
   // 定时增量扫描两键回填：缺省时归一成「关 + 03:00」，避免开关/时间选择器拿到 undefined。
   editSource.config = {
@@ -405,7 +423,7 @@ function openEdit(source: any) {
 
 async function saveEdit() {
   try {
-    await api.put(`/rest/api/v1/sources/${editSource.id}`, { name: editSource.name, enabled: editSource.enabled, config: editSource.config });
+    await api.put(`/rest/api/v1/sources/${editSource.id}`, { name: editSource.name, kind: editSource.kind, enabled: editSource.enabled, config: editSource.config });
     showEditDialog.value = false; ElMessage.success(t("common.saveSuccess")); loadSources();
   } catch (e: any) { ElMessage.error(e.response?.data?.error || t("common.saveFailed")); }
 }
@@ -439,6 +457,12 @@ onUnmounted(() => {
 
 <style lang="scss" scoped>
 .admin-sources { padding: 24px 32px 130px; max-width: 1200px; margin: 0 auto; }
+.smb-warn {
+  color: var(--el-color-warning);
+  background: var(--el-color-warning-light-9);
+  border: 1px solid var(--el-color-warning-light-7);
+  border-radius: 6px;
+}
 .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px; h2 { font-size: 28px; font-weight: 700; margin: 0; } }
 .source-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 16px; }
 .source-card {

@@ -30,6 +30,9 @@ import { isSourceScanRunning, listScanJobs, scanJobs, startSourceScan } from "..
 import { closeSmbSource, testSmbConnection } from "../../services/source/smbClient.js";
 import { recomputeSourceSongCount } from "../../services/source/songCount.js";
 import { listSourceDeleteJobs, startSourceDelete } from "../../services/source/sourceDelete.js";
+import { deleteRanges } from "../../services/source/sourceDeleteCore.js";
+import { sqlite } from "../../db/index.js";
+import { invalidateStudyDirCache } from "../../services/study/browse.js";
 
 /**
  * 归一化媒体源开关。
@@ -67,6 +70,15 @@ function sanitizeScanAuto(config: Record<string, unknown>): Record<string, unkno
   return out;
 }
 
+/**
+ * 归一化源分区。只认 'music' / 'study'，其余一律 music —— 学习内容必须显式标记。
+ */
+function normalizeKind(v: unknown, fallback: "music" | "study" = "music"): "music" | "study" {
+  const k = String(v ?? "").trim().toLowerCase();
+  if (k === "study" || k === "music") return k;
+  return fallback;
+}
+
 export function registerSources(app: Hono): void {
 // 歌曲数读存字段（扫描结束/单曲删除/换源后由 songCount.ts 重算写回）：
 // 打开音源页不再按源各扫一遍索引。NULL = 老库升级或新建源尚未统计 → 惰性算一次并回填。
@@ -89,6 +101,7 @@ app.post("/v1/sources", adminMiddleware, async (c) => {
     id,
     name: body.name,
     type: body.type || "webdav",
+    kind: normalizeKind(body.kind),
     // 不传 enabled → 默认开启(与历史行为一致)
     enabled: normalizeEnabled(body.enabled, 1),
     // 与 PUT 同口径消毒「每日定时增量扫描」两键（非布尔 / 非法 HH:mm 一律删除）
@@ -102,12 +115,35 @@ app.put("/v1/sources/:id", adminMiddleware, async (c) => {
   const body = await c.req.json();
   const existing = db.select().from(mediaSources).where(eq(mediaSources.id, id)).get();
   if (!existing) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.source.notFound"), apiErrorStatus(BusinessErrorCode.NOT_FOUND));
+  const nextKind = normalizeKind(body.kind, normalizeKind(existing.kind));
   db.update(mediaSources).set({
     name: body.name || existing.name,
+    kind: nextKind,
     enabled: normalizeEnabled(body.enabled, existing.enabled),   // 不传 → 保持原值
     config: body.config ? JSON.stringify(sanitizeScanAuto(body.config)) : existing.config,
     updatedAt: new Date().toISOString(),
   }).where(eq(mediaSources.id, id)).run();
+  // 整源改分区:已入库行同步改章。music → study 时同时断开专辑/艺人/同曲组,
+  // 否则这些行仍挂在音乐面的专辑计数里(重扫前就应该是干净的)。
+  if (nextKind !== existing.kind) {
+    const ranges = deleteRanges(id);
+    if (nextKind === "study") {
+      sqlite.prepare(
+        `UPDATE songs SET kind = 'study', source_id = ?, artist_id = NULL, album_id = NULL, group_id = NULL, group_key = NULL
+         WHERE (path >= ? AND path < ?) OR (path >= ? AND path < ?) OR (path >= ? AND path < ?)`,
+      ).run(id, ...ranges);
+      cleanupOrphans();
+    } else {
+      sqlite.prepare(
+        `UPDATE songs SET kind = 'music', source_id = ?
+         WHERE (path >= ? AND path < ?) OR (path >= ? AND path < ?) OR (path >= ? AND path < ?)`,
+      ).run(id, ...ranges);
+    }
+    // 该源的专辑/艺人归属变了 → 曲目数照旧需要重算
+    recomputeSourceSongCount(id);
+  }
+  // 源配置(路径/账号/分区)可能变了,学习目录缓存必须立即失效。
+  invalidateStudyDirCache(id);
   return c.json({ success: true });
 });
 
@@ -121,6 +157,7 @@ app.delete("/v1/sources/:id", adminMiddleware, (c) => {
   }
   // 202:任务已入队,立即返回;前端轮询 /sources/delete-status 看进度。
   const { total, removed } = startSourceDelete(id);
+  invalidateStudyDirCache(id);
   return c.json({ success: true, deleting: true, total, removed }, 202);
 });
 
@@ -174,6 +211,14 @@ app.post("/v1/sources/:id/scan", adminMiddleware, async (c) => {
   const id = c.req.param("id")!;
   const source = db.select().from(mediaSources).where(eq(mediaSources.id, id)).get();
   if (!source) return c.json(apiError(BusinessErrorCode.NOT_FOUND, "errors.source.notFound"), apiErrorStatus(BusinessErrorCode.NOT_FOUND));
+  // 学习源不参与媒体库扫描:学习面只做实时目录浏览 + 点播入库(kind='study'),
+  // 强制走音乐扫描器会把 8.3 短名/联网专辑校准混进来,子进程还可能崩。
+  if (source.kind === "study") {
+    return c.json(
+      apiError(BusinessErrorCode.INVALID_PARAM, "学习源不参与媒体库扫描,请在学习页直接浏览和播放"),
+      apiErrorStatus(BusinessErrorCode.INVALID_PARAM),
+    );
+  }
   if (!source.enabled) return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.source.disabled"), apiErrorStatus(BusinessErrorCode.CONFLICT));
   if (isSourceScanRunning(id)) {
     return c.json(apiError(BusinessErrorCode.CONFLICT, "errors.scanner.busy"), apiErrorStatus(BusinessErrorCode.CONFLICT));

@@ -10,6 +10,7 @@ import md5 from "md5";
 import { JWT_SECRET, getDataDir } from "../utils/env.js";
 import { createLogger } from "../utils/logger.js";
 import { ensureSongCountColumn } from "./songCountColumn.js";
+import { ensureStudyColumns } from "./studyColumns.js";
 
 const dataDir = getDataDir();
 if (!fs.existsSync(dataDir)) {
@@ -186,6 +187,12 @@ export function initDatabase() {
       -- 组内优先级 local > smb > webdav > web,播放优选/展示合并基于它。分组只附加列,不删行。
       group_id TEXT,
       group_key TEXT,
+      -- 分区:'music'(默认) | 'study'。学习模块与歌曲库共用 songs 表但严格隔离:
+      -- 音乐面所有列表/搜索/推荐/历史只取 kind='music';学习源扫入的行 kind='study'。
+      kind TEXT NOT NULL DEFAULT 'music',
+      -- 学习内容专用:所属源 id 与相对源根的目录(根目录为空串),供文件夹浏览/续播聚合。
+      source_id TEXT,
+      rel_dir TEXT DEFAULT '',
       created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       FOREIGN KEY (artist_id) REFERENCES artists(id),
@@ -217,8 +224,22 @@ export function initDatabase() {
       source_url TEXT,
       source_platform TEXT,
       external_id TEXT,
+      -- 分区:'music'(默认) | 'study'。学习歌单只在学习入口出现,音乐歌单列表不含它。
+      kind TEXT NOT NULL DEFAULT 'music',
+      -- 学习歌单所属文件夹名(空串=根目录);文件夹本身见 study_playlist_folders。
+      folder TEXT DEFAULT '',
       created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      FOREIGN KEY (owner_id) REFERENCES users(id)
+    );
+
+    -- 学习歌单文件夹:按课程归档。名称即标识,(owner_id, name) 唯一。
+    CREATE TABLE IF NOT EXISTS study_playlist_folders (
+      owner_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      created_at TEXT DEFAULT '',
+      updated_at TEXT DEFAULT '',
+      PRIMARY KEY (owner_id, name),
       FOREIGN KEY (owner_id) REFERENCES users(id)
     );
 
@@ -290,6 +311,21 @@ export function initDatabase() {
       FOREIGN KEY (song_id) REFERENCES songs(id)
     );
 
+    -- 学习进度:按 用户 × 学习音频 一行。音乐面不读写本表,学习播放也不写
+    -- play_history/play_count,两套进度互不污染。
+    CREATE TABLE IF NOT EXISTS study_progress (
+      user_id TEXT NOT NULL,
+      song_id TEXT NOT NULL,
+      position_sec REAL DEFAULT 0,
+      duration_sec INTEGER DEFAULT 0,
+      finished INTEGER DEFAULT 0,
+      updated_at TEXT DEFAULT '',
+      PRIMARY KEY (user_id, song_id),
+      FOREIGN KEY (user_id) REFERENCES users(id),
+      FOREIGN KEY (song_id) REFERENCES songs(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_study_progress_user ON study_progress(user_id, updated_at DESC);
+
     CREATE TABLE IF NOT EXISTS user_ratings (
       user_id TEXT NOT NULL,
       item_type TEXT NOT NULL,
@@ -318,6 +354,8 @@ export function initDatabase() {
       enabled INTEGER DEFAULT 1,
       config TEXT DEFAULT '{}',
       song_count INTEGER,
+      -- 源分区:'music'(默认) | 'study'。整源标记,扫入歌曲继承该值。
+      kind TEXT NOT NULL DEFAULT 'music',
       created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
     );
@@ -420,6 +458,9 @@ export function initDatabase() {
     -- 列表页滚动预取每块都要 ORDER BY 排序:title 无索引时整表排序是块延迟主因
     -- (Music 页 78k 行实测每块 ~95ms),补索引后走索引排序,深 offset 也接近 O(1)。
     CREATE INDEX IF NOT EXISTS idx_songs_title ON songs(title);
+    -- 分区索引:音乐面列表/搜索恒带 kind='music';学习目录按 (源, 目录) 实时聚合。
+    -- 注意:kind/source_id/rel_dir 由 ensureStudyColumns 在老库启动时补列,
+    -- 索引必须在补列之后建(见下方 ensureStudyColumns 之后),否则老库启动即报 no such column。
     CREATE INDEX IF NOT EXISTS idx_albums_artist ON albums(artist_id);
     CREATE INDEX IF NOT EXISTS idx_artists_name ON artists(name);
     CREATE INDEX IF NOT EXISTS idx_albums_name ON albums(name);
@@ -727,6 +768,18 @@ export function initDatabase() {
   // 老库补列见 db/songCountColumn.ts。NULL = 尚未统计（老库升级 / 新建源），
   // 列表接口会惰性算一次并回填，不需要启动时全量算。
   ensureSongCountColumn(sqlite);
+  // 学习模块(songs/media_sources/playlists.kind + songs.source_id/rel_dir +
+  // study_progress)。新库由上面的 CREATE TABLE 建好,老库补列/补表逻辑在
+  // db/studyColumns.ts —— 与 song_count 同模式,本文件不放 ad-hoc 迁移语句。
+  ensureStudyColumns(sqlite);
+  // 学习相关索引必须在 ensureStudyColumns 补完 kind/source_id/rel_dir 之后创建:
+  // 老库升级时上面 CREATE TABLE 不会新增列,提前建索引会直接 SQLITE_ERROR 启动崩溃。
+  sqlite.exec(`
+    CREATE INDEX IF NOT EXISTS idx_songs_kind_created ON songs(kind, created_at);
+    CREATE INDEX IF NOT EXISTS idx_songs_kind_source_dir ON songs(kind, source_id, rel_dir);
+    CREATE INDEX IF NOT EXISTS idx_playlists_kind ON playlists(kind);
+    CREATE INDEX IF NOT EXISTS idx_media_sources_kind ON media_sources(kind);
+  `);
 
   // Plugins (built-in and external drop-ins) are seeded from the unified catalog
   // at boot via registerBuiltinPlugins() — see plugins/registry.ts.
@@ -793,7 +846,7 @@ export function backfillSongTypes(): number {
 // 风格表回填:从 songs.genre 全量同步(幂等,启动时调用)。
 // 每个风格名只分配一次 uuid,之后保持不变;同步最新计数。
 export function backfillGenres(): void {
-  const rows = sqlite.prepare("SELECT genre AS name, COUNT(*) AS n FROM songs WHERE genre != '' GROUP BY genre").all() as any[];
+  const rows = sqlite.prepare("SELECT genre AS name, COUNT(*) AS n FROM songs WHERE genre != '' AND kind = 'music' GROUP BY genre").all() as any[];
   const now = new Date().toISOString();
   const insert = sqlite.prepare("INSERT OR IGNORE INTO genres (id, name, song_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?)");
   const update = sqlite.prepare("UPDATE genres SET song_count = ?, updated_at = ? WHERE name = ?");
