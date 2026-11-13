@@ -78,7 +78,10 @@
                   @contextmenu="openContextMenu($event, playlistMenuActions(p), p.name, playlistMeta(p))"
                   v-longpress="() => openActionSheet(playlistMenuActions(p), p.name, playlistMeta(p))"
                 >
-                  <div class="pl-icon"><MfIcon name="ListMusic" :size="26" /></div>
+                  <span class="pl-icon pl-play" :title="t('playlists.playAll')" @click.stop="playPlaylist(p)">
+                    <MfIcon name="ListMusic" :size="22" class="ic-idle" />
+                    <MfIcon name="Play" :size="22" class="ic-play" />
+                  </span>
                   <div class="pl-info">
                     <div class="pl-name">{{ p.name }}</div>
                     <div class="pl-meta">{{ playlistMeta(p) }}</div>
@@ -161,7 +164,10 @@
                   @contextmenu="openContextMenu($event, playlistMenuActions(p), p.name, playlistMeta(p))"
                   v-longpress="() => openActionSheet(playlistMenuActions(p), p.name, playlistMeta(p))"
                 >
-                  <div class="pl-icon"><MfIcon name="ListMusic" :size="26" /></div>
+                  <span class="pl-icon pl-play" :title="t('playlists.playAll')" @click.stop="playPlaylist(p)">
+                    <MfIcon name="ListMusic" :size="22" class="ic-idle" />
+                    <MfIcon name="Play" :size="22" class="ic-play" />
+                  </span>
                   <div class="pl-info">
                     <div class="pl-name">{{ p.name }}</div>
                     <div class="pl-meta">{{ playlistMeta(p) }}</div>
@@ -378,7 +384,10 @@
                 @contextmenu="openContextMenu($event, playlistMenuActions(p), p.name, playlistMeta(p))"
                 v-longpress="() => openActionSheet(playlistMenuActions(p), p.name, playlistMeta(p))"
               >
-                <div class="pl-icon"><MfIcon name="ListMusic" :size="26" /></div>
+                <span class="pl-icon pl-play" :title="t('playlists.playAll')" @click.stop="playPlaylist(p)">
+                  <MfIcon name="ListMusic" :size="22" class="ic-idle" />
+                  <MfIcon name="Play" :size="22" class="ic-play" />
+                </span>
                 <div class="pl-info">
                   <div class="pl-name">{{ p.name }}</div>
                   <div class="pl-meta">{{ playlistMeta(p) }}</div>
@@ -421,7 +430,10 @@
                 @contextmenu="openContextMenu($event, playlistMenuActions(p), p.name, playlistMeta(p))"
                 v-longpress="() => openActionSheet(playlistMenuActions(p), p.name, playlistMeta(p))"
               >
-                <div class="pl-icon"><MfIcon name="ListMusic" :size="26" /></div>
+                <span class="pl-icon pl-play" :title="t('playlists.playAll')" @click.stop="playPlaylist(p)">
+                  <MfIcon name="ListMusic" :size="22" class="ic-idle" />
+                  <MfIcon name="Play" :size="22" class="ic-play" />
+                </span>
                 <div class="pl-info">
                   <div class="pl-name">{{ p.name }}</div>
                   <div class="pl-meta">{{ playlistMeta(p) }}</div>
@@ -1830,6 +1842,18 @@ onBeforeUnmount(() => {
     display: flex; align-items: center; justify-content: center;
     background: linear-gradient(135deg, rgba(79, 172, 254, 0.35), rgba(0, 242, 254, 0.18));
     color: #7fd0ff;
+  }
+  /* 歌单图标即播放入口:悬停二次高亮并切换成播放三角。 */
+  .pl-play {
+    cursor: pointer;
+    transition: background 0.18s ease, color 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
+    .ic-play { display: none; }
+    &:hover {
+      background: #409eff; color: #fff; transform: scale(1.06);
+      box-shadow: 0 0 0 3px rgba(64, 158, 255, 0.25);
+      .ic-idle { display: none; }
+      .ic-play { display: block; }
+    }
   }
   .pl-info { min-width: 0; flex: 1; }
   .pl-name { font-size: 14px; font-weight: 600; color: var(--fnos-text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
