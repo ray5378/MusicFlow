@@ -179,17 +179,39 @@ function normalizeFolderName(raw: unknown): string {
   return String(raw ?? "").trim().slice(0, FOLDER_NAME_MAX);
 }
 
-/** 文件夹按 owner 隔离;存在即幂等创建。空名不建(表示根目录)。 */
+/** 文件夹路径:用 / 分隔多级目录,空段与首尾斜杠会被清理。 */
+function normalizeFolderPath(raw: unknown): string {
+  return String(raw ?? "")
+    .split("/")
+    .map((s) => s.trim().slice(0, FOLDER_NAME_MAX))
+    .filter(Boolean)
+    .slice(0, 12)
+    .join("/");
+}
+function folderParentOf(path: string): string {
+  const i = path.lastIndexOf("/");
+  return i >= 0 ? path.slice(0, i) : "";
+}
+function folderBaseNameOf(path: string): string {
+  const i = path.lastIndexOf("/");
+  return i >= 0 ? path.slice(i + 1) : path;
+}
+
+/** 文件夹按 owner 隔离;支持 a/b 多级路径,逐级补齐父目录,存在即幂等。 */
 function ensureStudyFolder(ownerId: string, rawName: unknown): string {
-  const name = normalizeFolderName(rawName);
-  if (!name || !ownerId) return name;
-  const found = db.select().from(studyPlaylistFolders)
-    .where(and(eq(studyPlaylistFolders.ownerId, ownerId), eq(studyPlaylistFolders.name, name))).get();
-  if (!found) {
-    const now = new Date().toISOString();
-    db.insert(studyPlaylistFolders).values({ ownerId, name, createdAt: now, updatedAt: now }).run();
+  const path = normalizeFolderPath(rawName);
+  if (!path || !ownerId) return path;
+  let acc = "";
+  for (const seg of path.split("/")) {
+    acc = acc ? `${acc}/${seg}` : seg;
+    const found = db.select().from(studyPlaylistFolders)
+      .where(and(eq(studyPlaylistFolders.ownerId, ownerId), eq(studyPlaylistFolders.name, acc))).get();
+    if (!found) {
+      const now = new Date().toISOString();
+      db.insert(studyPlaylistFolders).values({ ownerId, name: acc, createdAt: now, updatedAt: now }).run();
+    }
   }
-  return name;
+  return path;
 }
 
 /** 当前用户自己的文件夹名:仅本人可见,管理员的列表也不混入他人文件夹。 */
@@ -516,8 +538,65 @@ export function registerStudy(app: Hono): void {
     const body = await c.req.json().catch(() => ({}));
     const name = normalizeFolderName(body?.name);
     if (!name) return fail(c, new StudyError(400, "缺少文件夹名称"));
-    ensureStudyFolder(user.id, name);
-    return c.json({ success: true, name });
+    // parent 为空表示根目录;落在某个文件夹内时创建多级子目录。
+    const parent = normalizeFolderPath(body?.parent);
+    const path = ensureStudyFolder(user.id, parent ? `${parent}/${name}` : name);
+    return c.json({ success: true, name: path });
+  });
+
+  /** 重命名(或移动)文件夹:旧路径及其所有子目录、歌单归属一起改到新路径。 */
+  app.post("/v1/study/playlist-folders/rename", permMiddleware(PERM.STUDY_BROWSE), async (c) => {
+    const user = c.get("user");
+    if (!user) return fail(c, new StudyError(401, "未登录"));
+    const body = await c.req.json().catch(() => ({}));
+    const path = normalizeFolderPath(body?.path);
+    const nextBase = folderBaseNameOf(normalizeFolderPath(body?.name));
+    if (!path) return fail(c, new StudyError(400, "缺少文件夹路径"));
+    if (!nextBase) return fail(c, new StudyError(400, "缺少新文件夹名称"));
+    const rows = db.select().from(studyPlaylistFolders)
+      .where(eq(studyPlaylistFolders.ownerId, user.id)).all();
+    if (!rows.some((f) => f.name === path)) return fail(c, new StudyError(404, "文件夹不存在"));
+    const newPath = folderParentOf(path) ? `${folderParentOf(path)}/${nextBase}` : nextBase;
+    if (newPath === path) return c.json({ success: true, name: newPath });
+    if (rows.some((f) => f.name === newPath)) return fail(c, new StudyError(409, "同级已存在同名文件夹"));
+    const now = new Date().toISOString();
+    for (const f of rows) {
+      if (f.name !== path && !f.name.startsWith(path + "/")) continue;
+      db.update(studyPlaylistFolders)
+        .set({ name: newPath + f.name.slice(path.length), updatedAt: now })
+        .where(and(eq(studyPlaylistFolders.ownerId, user.id), eq(studyPlaylistFolders.name, f.name))).run();
+    }
+    for (const pl of db.select().from(playlists)
+      .where(and(eq(playlists.kind, "study"), eq(playlists.ownerId, user.id))).all()) {
+      const folder = pl.folder || "";
+      if (folder !== path && !folder.startsWith(path + "/")) continue;
+      db.update(playlists).set({ folder: newPath + folder.slice(path.length), updatedAt: now })
+        .where(eq(playlists.id, pl.id)).run();
+    }
+    return c.json({ success: true, name: newPath });
+  });
+
+  /** 删除文件夹:连同子目录一起解散,里面的歌单回到被删文件夹的上一级。 */
+  app.post("/v1/study/playlist-folders/delete", permMiddleware(PERM.STUDY_BROWSE), async (c) => {
+    const user = c.get("user");
+    if (!user) return fail(c, new StudyError(401, "未登录"));
+    const body = await c.req.json().catch(() => ({}));
+    const path = normalizeFolderPath(body?.path);
+    if (!path) return fail(c, new StudyError(400, "缺少文件夹路径"));
+    const parent = folderParentOf(path);
+    const rows = db.select().from(studyPlaylistFolders)
+      .where(eq(studyPlaylistFolders.ownerId, user.id)).all();
+    const targets = rows.map((f) => f.name)
+      .filter((name) => name === path || name.startsWith(path + "/"));
+    if (targets.length === 0) return c.json({ success: true });
+    const now = new Date().toISOString();
+    for (const name of targets) {
+      db.update(playlists).set({ folder: parent, updatedAt: now })
+        .where(and(eq(playlists.kind, "study"), eq(playlists.ownerId, user.id), eq(playlists.folder, name))).run();
+      db.delete(studyPlaylistFolders)
+        .where(and(eq(studyPlaylistFolders.ownerId, user.id), eq(studyPlaylistFolders.name, name))).run();
+    }
+    return c.json({ success: true });
   });
 
   app.put("/v1/study/playlist-folders/:name", permMiddleware(PERM.STUDY_BROWSE), async (c) => {

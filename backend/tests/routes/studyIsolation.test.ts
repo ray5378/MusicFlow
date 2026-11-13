@@ -209,9 +209,11 @@ describe("学习 API", () => {
   });
 
   it("dir 条目回带 songId 与当前用户进度(章节进度列)", async () => {
-    // 前置用例已给 st2 写入 90/600
+    // 自己写入进度,避免依赖用例执行顺序
+    const put = await call("PUT", "/v1/study/progress", { songId: "st2", positionSec: 90, durationSec: 600 });
+    expect(put.res.status).toBe(200);
     const prog = db.select().from(studyProgress).all();
-    expect(prog.map((p) => [p.userId, p.songId, p.positionSec, p.durationSec])).toEqual([["u1", "st2", 90, 600]]);
+    expect(prog.map((p) => [p.userId, p.songId, p.positionSec, p.durationSec])).toContainEqual(["u1", "st2", 90, 600]);
     const { body } = await call("GET", `/v1/study/dir?id=dir:src-study:英语`);
     const item = body.items.find((i: any) => i.name === "words.mp3");
     expect(item?.songId).toBe("st2");
@@ -313,6 +315,31 @@ describe("学习 API", () => {
     const removed = await callAs("carol", "DELETE", `/v1/study/playlist-folders/${encodeURIComponent("Alice课程")}`);
     expect(removed.res.status).toBe(200);
     expect((await call("GET", "/v1/study/playlists")).body.folders).toContain("Alice课程");
+  });
+
+  it("学习歌单文件夹支持多级子目录:改名/删除整棵迁移", async () => {
+    const parent = await call("POST", "/v1/study/playlist-folders", { name: "多级" });
+    expect(parent.body.name).toBe("多级");
+    const child = await call("POST", "/v1/study/playlist-folders", { name: "子目录", parent: "多级" });
+    expect(child.body.name).toBe("多级/子目录");
+    const pl = await call("POST", "/v1/study/playlists", { name: "多级歌单", folder: "多级/子目录" });
+
+    let list = await call("GET", "/v1/study/playlists");
+    expect(list.body.folders).toEqual(expect.arrayContaining(["多级", "多级/子目录"]));
+    expect(list.body.items.find((p: any) => p.id === pl.body.id)?.folder).toBe("多级/子目录");
+
+    // 重命名父目录:子目录与歌单一起迁移
+    const renamed = await call("POST", "/v1/study/playlist-folders/rename", { path: "多级", name: "改名" });
+    expect(renamed.body.name).toBe("改名");
+    list = await call("GET", "/v1/study/playlists");
+    expect(list.body.folders).toContain("改名/子目录");
+    expect(list.body.items.find((p: any) => p.id === pl.body.id)?.folder).toBe("改名/子目录");
+
+    // 删除父目录:整棵解散,夹内歌单回到上一级(此处为根目录)
+    await call("POST", "/v1/study/playlist-folders/delete", { path: "改名" });
+    list = await call("GET", "/v1/study/playlists");
+    expect(list.body.folders).not.toContain("改名/子目录");
+    expect(list.body.items.find((p: any) => p.id === pl.body.id)?.folder).toBe("");
   });
 
   it("导出学习歌单:带 songId 与相对路径,可跨库重入库", async () => {

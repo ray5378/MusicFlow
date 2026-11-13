@@ -322,15 +322,32 @@
         <!-- ===== 学习歌单 ===== -->
         <div v-else-if="mode === 'playlists'" v-loading="loadingPlaylists" class="pane">
           <div class="block-head">
-            <nav v-if="currentFolder" class="crumb">
-              <button type="button" class="crumb-home" @click="currentFolder = ''">
+            <nav class="crumb">
+              <button
+                type="button"
+                class="crumb-home"
+                :class="{ current: !currentFolder, 'drop-active': dragOverFolder === '__root__' }"
+                @click="currentFolder = ''"
+                @dragover.prevent="dragOverFolder = '__root__'"
+                @dragleave="onFolderDragLeave('__root__')"
+                @drop.prevent="dropPlaylistOnFolder('')"
+              >
                 <MfIcon name="Home" :size="14" />
                 <span>{{ t("study.playlists") }}</span>
               </button>
-              <MfIcon name="ChevronRight" :size="14" class="crumb-sep" />
-              <span class="crumb-seg current">{{ currentFolder }}</span>
+              <template v-for="c in crumbItems" :key="c.path">
+                <MfIcon name="ChevronRight" :size="14" class="crumb-sep" />
+                <button
+                  type="button"
+                  class="crumb-seg"
+                  :class="{ current: c.path === currentFolder, 'drop-active': dragOverFolder === c.path }"
+                  @click="currentFolder = c.path"
+                  @dragover.prevent="dragOverFolder = c.path"
+                  @dragleave="onFolderDragLeave(c.path)"
+                  @drop.prevent="dropPlaylistOnFolder(c.path)"
+                >{{ c.label }}</button>
+              </template>
             </nav>
-            <span v-else class="block-title">{{ t("study.playlists") }}</span>
             <div class="block-actions">
               <el-button size="small" @click="openImportDialog">
                 <MfIcon name="Upload" :size="14" />{{ t("study.importPlaylists") }}
@@ -346,104 +363,60 @@
               </el-button>
             </div>
           </div>
+          <div v-if="currentFolder" class="crumb-hint">{{ t("study.crumbDropHint") }}</div>
 
-          <!-- 根层:文件夹 + 未归夹歌单 -->
-          <template v-if="!currentFolder">
-            <div v-if="folders.length > 0" class="folder-grid playlists">
-              <div
-                v-for="f in folders"
-                :key="f"
-                class="folder-card"
-                :class="{ 'drop-active': dragOverFolder === f }"
-                @click="currentFolder = f"
-                @contextmenu="openContextMenu($event, playlistFolderMenuActions(f), f, t('study.folderPlaylistCount', { count: folderCount(f) }))"
-                v-longpress="() => openActionSheet(playlistFolderMenuActions(f), f, t('study.folderPlaylistCount', { count: folderCount(f) }))"
-                @dragover.prevent="dragOverFolder = f"
-                @dragleave="onFolderDragLeave(f)"
-                @drop.prevent="dropPlaylistOnFolder(f)"
-              >
-                <div class="folder-icon"><MfIcon name="FolderOpen" :size="26" /></div>
-                <div class="folder-info">
-                  <div class="folder-name">{{ f }}</div>
-                  <div class="folder-meta">{{ t("study.folderPlaylistCount", { count: folderCount(f) }) }}</div>
-                </div>
-                <span class="card-more" :title="t('songTable.moreActions')" @click.stop="openContextMenu($event, playlistFolderMenuActions(f), f, t('study.folderPlaylistCount', { count: folderCount(f) }))">
-                  <MfIcon name="MoreHorizontal" :size="16" />
-                </span>
-              </div>
-            </div>
-            <div v-if="rootPlaylists.length > 0" class="playlist-grid">
-              <div
-                v-for="p in rootPlaylists"
-                :key="p.id"
-                class="playlist-card"
-                :class="{ selected: playlistSelection.has(p.id) }"
-                draggable="true"
-                @dragstart="onPlaylistDragStart(p, $event)"
-                @click="onPlaylistCardClick(p)"
-                @contextmenu="openContextMenu($event, playlistMenuActions(p), p.name, playlistMeta(p))"
-                v-longpress="() => openActionSheet(playlistMenuActions(p), p.name, playlistMeta(p))"
-              >
-                <span class="pl-icon pl-play" :title="t('playlists.playAll')" @click.stop="playPlaylist(p)">
-                  <MfIcon name="ListMusic" :size="22" class="ic-idle" />
-                  <MfIcon name="Play" :size="22" class="ic-play" />
-                </span>
-                <div class="pl-info">
-                  <div class="pl-name">{{ p.name }}</div>
-                  <div class="pl-meta">{{ playlistMeta(p) }}</div>
-                </div>
-                <span class="card-more" :title="t('songTable.moreActions')" @click.stop="openContextMenu($event, playlistMenuActions(p), p.name, playlistMeta(p))">
-                  <MfIcon name="MoreHorizontal" :size="16" />
-                </span>
-              </div>
-            </div>
-            <div v-if="!loadingPlaylists && folders.length === 0 && rootPlaylists.length === 0" class="empty">
-              {{ t("study.playlistEmpty") }}
-            </div>
-          </template>
-
-          <!-- 文件夹内部:可拖回根目录 -->
-          <template v-else>
+          <!-- 当前层:子文件夹 + 本级歌单 -->
+          <div v-if="childFolders.length > 0" class="folder-grid playlists">
             <div
-              class="folder-card root-drop"
-              :class="{ 'drop-active': dragOverFolder === '__root__' }"
-              @dragover.prevent="dragOverFolder = '__root__'"
-              @dragleave="onFolderDragLeave('__root__')"
-              @drop.prevent="dropPlaylistOnFolder('')"
+              v-for="f in childFolders"
+              :key="f"
+              class="folder-card"
+              :class="{ 'drop-active': dragOverFolder === f }"
+              @click="currentFolder = f"
+              @contextmenu="openContextMenu($event, playlistFolderMenuActions(f), folderBase(f), t('study.folderPlaylistCount', { count: folderCount(f) }))"
+              v-longpress="() => openActionSheet(playlistFolderMenuActions(f), folderBase(f), t('study.folderPlaylistCount', { count: folderCount(f) }))"
+              @dragover.prevent="dragOverFolder = f"
+              @dragleave="onFolderDragLeave(f)"
+              @drop.prevent="dropPlaylistOnFolder(f)"
             >
-              <div class="folder-icon"><MfIcon name="Home" :size="24" /></div>
+              <div class="folder-icon"><MfIcon name="FolderOpen" :size="26" /></div>
               <div class="folder-info">
-                <div class="folder-name">{{ t("study.rootFolder") }}</div>
-                <div class="folder-meta">{{ t("study.dropToRootHint") }}</div>
+                <div class="folder-name">{{ folderBase(f) }}</div>
+                <div class="folder-meta">{{ t("study.folderPlaylistCount", { count: folderCount(f) }) }}</div>
               </div>
+              <span class="card-more" :title="t('songTable.moreActions')" @click.stop="openContextMenu($event, playlistFolderMenuActions(f), folderBase(f), t('study.folderPlaylistCount', { count: folderCount(f) }))">
+                <MfIcon name="MoreHorizontal" :size="16" />
+              </span>
             </div>
-            <div v-if="currentFolderPlaylists.length === 0" class="empty">{{ t("study.folderEmpty") }}</div>
-            <div v-else class="playlist-grid">
-              <div
-                v-for="p in currentFolderPlaylists"
-                :key="p.id"
-                class="playlist-card"
-                :class="{ selected: playlistSelection.has(p.id) }"
-                draggable="true"
-                @dragstart="onPlaylistDragStart(p, $event)"
-                @click="onPlaylistCardClick(p)"
-                @contextmenu="openContextMenu($event, playlistMenuActions(p), p.name, playlistMeta(p))"
-                v-longpress="() => openActionSheet(playlistMenuActions(p), p.name, playlistMeta(p))"
-              >
-                <span class="pl-icon pl-play" :title="t('playlists.playAll')" @click.stop="playPlaylist(p)">
-                  <MfIcon name="ListMusic" :size="22" class="ic-idle" />
-                  <MfIcon name="Play" :size="22" class="ic-play" />
-                </span>
-                <div class="pl-info">
-                  <div class="pl-name">{{ p.name }}</div>
-                  <div class="pl-meta">{{ playlistMeta(p) }}</div>
-                </div>
-                <span class="card-more" :title="t('songTable.moreActions')" @click.stop="openContextMenu($event, playlistMenuActions(p), p.name, playlistMeta(p))">
-                  <MfIcon name="MoreHorizontal" :size="16" />
-                </span>
+          </div>
+          <div v-if="currentFolderPlaylists.length > 0" class="playlist-grid">
+            <div
+              v-for="p in currentFolderPlaylists"
+              :key="p.id"
+              class="playlist-card"
+              :class="{ selected: playlistSelection.has(p.id) }"
+              draggable="true"
+              @dragstart="onPlaylistDragStart(p, $event)"
+              @click="onPlaylistCardClick(p)"
+              @contextmenu="openContextMenu($event, playlistMenuActions(p), p.name, playlistMeta(p))"
+              v-longpress="() => openActionSheet(playlistMenuActions(p), p.name, playlistMeta(p))"
+            >
+              <span class="pl-icon pl-play" :title="t('playlists.playAll')" @click.stop="playPlaylist(p)">
+                <MfIcon name="ListMusic" :size="22" class="ic-idle" />
+                <MfIcon name="Play" :size="22" class="ic-play" />
+              </span>
+              <div class="pl-info">
+                <div class="pl-name">{{ p.name }}</div>
+                <div class="pl-meta">{{ playlistMeta(p) }}</div>
               </div>
+              <span class="card-more" :title="t('songTable.moreActions')" @click.stop="openContextMenu($event, playlistMenuActions(p), p.name, playlistMeta(p))">
+                <MfIcon name="MoreHorizontal" :size="16" />
+              </span>
             </div>
-          </template>
+          </div>
+          <div v-if="!loadingPlaylists && childFolders.length === 0 && currentFolderPlaylists.length === 0" class="empty">
+            {{ currentFolder ? t("study.folderEmpty") : t("study.playlistEmpty") }}
+          </div>
 
           <!-- 空白区域:右键 / 长按新建歌单与文件夹 -->
           <div
@@ -1135,12 +1108,30 @@ const playlists = ref<StudyPlaylist[]>([]);
 const folders = ref<string[]>([]);
 const loadingPlaylists = ref(false);
 const currentFolder = ref("");
-const rootPlaylists = computed(() => playlists.value.filter((p) => !p.folder));
+/** 文件夹以 "父/子" 路径存储:这里只取当前层级的直接子目录。 */
+function folderParent(path: string) {
+  const i = path.lastIndexOf("/");
+  return i >= 0 ? path.slice(0, i) : "";
+}
+function folderBase(path: string) {
+  const i = path.lastIndexOf("/");
+  return i >= 0 ? path.slice(i + 1) : path;
+}
+const childFolders = computed(() =>
+  folders.value
+    .filter((f) => folderParent(f) === currentFolder.value)
+    .sort((a, b) => folderBase(a).localeCompare(folderBase(b), "zh-CN")),
+);
+/** 面包屑:每一级都可点击/接收拖拽,拖动歌单到哪一级就归到哪一级。 */
+const crumbItems = computed(() => {
+  const segs = currentFolder.value.split("/").filter(Boolean);
+  return segs.map((label, i) => ({ label, path: segs.slice(0, i + 1).join("/") }));
+});
 const currentFolderPlaylists = computed(() =>
   playlists.value.filter((p) => (p.folder || "") === currentFolder.value),
 );
-function folderCount(name: string) {
-  return playlists.value.filter((p) => p.folder === name).length;
+function folderCount(path: string) {
+  return playlists.value.filter((p) => p.folder === path).length;
 }
 function playlistMeta(p: StudyPlaylist) {
   return p.folder
@@ -1182,23 +1173,28 @@ async function createFolder() {
       inputPlaceholder: t("study.folderNamePlaceholder"),
       inputValidator: (v: string) => (String(v || "").trim() ? true : t("study.nameRequired")),
     });
-    await createStudyPlaylistFolder(String(value).trim());
+    // 当前在哪个文件夹,就新建它的子目录;根目录则建一级文件夹。
+    await createStudyPlaylistFolder(String(value).trim(), currentFolder.value);
     await loadPlaylists();
     ElMessage.success(t("study.folderCreated"));
   } catch { /* 取消 */ }
 }
 
-async function renameFolder(name: string) {
+async function renameFolder(path: string) {
+  const base = folderBase(path);
   try {
     const { value } = await ElMessageBox.prompt(t("study.folderRenameTip"), t("study.renameFolder"), {
       confirmButtonText: t("common.confirm"), cancelButtonText: t("common.cancel"),
-      inputValue: name,
+      inputValue: base,
       inputValidator: (v: string) => (String(v || "").trim() ? true : t("study.nameRequired")),
     });
     const next = String(value || "").trim();
-    if (!next || next === name) return;
-    await renameStudyPlaylistFolder(name, next);
-    if (currentFolder.value === name) currentFolder.value = next;
+    if (!next || next === base) return;
+    await renameStudyPlaylistFolder(path, next);
+    const parent = folderParent(path);
+    const newPath = parent ? `${parent}/${next}` : next;
+    const cur = currentFolder.value;
+    if (cur === path || cur.startsWith(path + "/")) currentFolder.value = newPath + cur.slice(path.length);
     await loadPlaylists();
     ElMessage.success(t("study.folderRenamed"));
   } catch (e: any) {
@@ -1206,15 +1202,16 @@ async function renameFolder(name: string) {
   }
 }
 
-async function removeFolder(name: string) {
+async function removeFolder(path: string) {
   try {
-    await ElMessageBox.confirm(t("study.deleteFolderConfirm", { name }), t("study.deleteFolder"), {
+    await ElMessageBox.confirm(t("study.deleteFolderConfirm", { name: folderBase(path) }), t("study.deleteFolder"), {
       type: "warning", confirmButtonText: t("common.confirm"), cancelButtonText: t("common.cancel"),
     });
   } catch { return; }
   try {
-    await deleteStudyPlaylistFolder(name);
-    if (currentFolder.value === name) currentFolder.value = "";
+    await deleteStudyPlaylistFolder(path);
+    const cur = currentFolder.value;
+    if (cur === path || cur.startsWith(path + "/")) currentFolder.value = folderParent(path);
     await loadPlaylists();
     ElMessage.success(t("study.folderDeleted"));
   } catch (e: any) {
@@ -1678,7 +1675,6 @@ onBeforeUnmount(() => {
   background: rgba(84, 160, 255, 0.18);
   border-color: rgba(84, 160, 255, 0.65);
 }
-.folder-card.root-drop { margin-bottom: 12px; }
 .folder-grid.playlists { margin-bottom: 12px; }
 .playlist-card.selected {
   background: rgba(84, 160, 255, 0.14);
@@ -1742,10 +1738,15 @@ onBeforeUnmount(() => {
   font: inherit; color: inherit; cursor: pointer; white-space: normal; overflow-wrap: anywhere;
   text-align: left;
   &:hover { background: rgba(255, 255, 255, 0.08); color: var(--fnos-text-primary); }
+  &.drop-active {
+    background: rgba(84, 160, 255, 0.25); color: #fff;
+    box-shadow: inset 0 0 0 1px rgba(84, 160, 255, 0.7);
+  }
 }
 .crumb-home { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
-.crumb-seg.current { color: var(--fnos-text-primary); font-weight: 700; cursor: default; }
+.crumb-seg.current { color: var(--fnos-text-primary); font-weight: 700; }
 .crumb-sep { opacity: 0.5; flex-shrink: 0; }
+.crumb-hint { margin: -4px 0 12px; font-size: 12px; color: var(--fnos-text-tertiary); }
 .empty {
   display: flex; flex-direction: column; align-items: center; gap: 8px;
   padding: 56px 0; color: var(--fnos-text-tertiary); font-size: 13px;

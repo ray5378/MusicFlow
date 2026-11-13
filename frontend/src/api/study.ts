@@ -158,16 +158,16 @@ export async function fetchStudyPlaylistFolders(): Promise<string[]> {
   return res.data.items || [];
 }
 
-export async function createStudyPlaylistFolder(name: string): Promise<void> {
-  await api.post("/rest/api/v1/study/playlist-folders", { name });
+export async function createStudyPlaylistFolder(name: string, parent = ""): Promise<void> {
+  await api.post("/rest/api/v1/study/playlist-folders", { name, parent });
 }
 
-export async function renameStudyPlaylistFolder(name: string, next: string): Promise<void> {
-  await api.put(`/rest/api/v1/study/playlist-folders/${encodeURIComponent(name)}`, { name: next });
+export async function renameStudyPlaylistFolder(path: string, next: string): Promise<void> {
+  await api.post("/rest/api/v1/study/playlist-folders/rename", { path, name: next });
 }
 
-export async function deleteStudyPlaylistFolder(name: string): Promise<void> {
-  await api.delete(`/rest/api/v1/study/playlist-folders/${encodeURIComponent(name)}`);
+export async function deleteStudyPlaylistFolder(path: string): Promise<void> {
+  await api.post("/rest/api/v1/study/playlist-folders/delete", { path });
 }
 
 /** 清掉某学习源的目录缓存(源配置/远端内容变化后强制重新列目录)。 */
