@@ -376,6 +376,22 @@ describe("学习 API", () => {
     expect(tracks.body.items.map((i: any) => i.id)).toEqual(["st2"]);
   });
 
+  it("在歌单文件夹内导入:歌单直接归入该文件夹,同名歌单跟随移动", async () => {
+    const payload = { name: "子目录课程", tracks: [{ songId: "st1", title: "第01课" }] };
+    const first = await call("POST", "/v1/study/playlists/import", { native: payload, folder: "高数" });
+    expect(first.res.status).toBe(200);
+    expect(first.body.created).toBe(1);
+    const id = first.body.playlists[0].id as string;
+    let list = await call("GET", "/v1/study/playlists");
+    expect(list.body.folders).toContain("高数");
+    expect(list.body.items.find((p: any) => p.id === id)?.folder).toBe("高数");
+
+    // 同名歌单再次从根目录导入:不应把它从文件夹里拖出来
+    await call("POST", "/v1/study/playlists/import", { native: payload });
+    list = await call("GET", "/v1/study/playlists");
+    expect(list.body.items.find((p: any) => p.id === id)?.folder).toBe("高数");
+  });
+
   it("导入学习歌单:非法文件返回 400,空曲目也允许建空歌单", async () => {
     const bad = await call("POST", "/v1/study/playlists/import", { native: { foo: 1 } });
     expect(bad.res.status).toBe(400);

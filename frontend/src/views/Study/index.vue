@@ -37,6 +37,9 @@
           <el-button size="small" type="primary" @click="openBatchMoveDialog">
             <MfIcon name="Folder" :size="14" />{{ t("study.moveToFolder") }}
           </el-button>
+          <el-button size="small" type="danger" plain @click="deleteSelectedPlaylists">
+            <MfIcon name="Trash2" :size="14" />{{ t("study.deleteSelected") }}
+          </el-button>
           <el-button size="small" text @click="clearPlaylistSelection">{{ t("study.clearSelection") }}</el-button>
         </div>
 
@@ -1362,6 +1365,26 @@ async function removePlaylist(p: StudyPlaylist) {
     ElMessage.error(e?.response?.data?.error || t("common.operationFailed"));
   }
 }
+async function deleteSelectedPlaylists() {
+  const targets = selectedPlaylists();
+  if (targets.length === 0) return;
+  try {
+    await ElMessageBox.confirm(
+      t("study.deleteSelectedConfirm", { count: targets.length }),
+      t("study.deletePlaylist"),
+      { type: "warning", confirmButtonText: t("common.confirm"), cancelButtonText: t("common.cancel") },
+    );
+  } catch { return; }
+  try {
+    for (const p of targets) await deleteStudyPlaylist(p.id);
+    const count = targets.length;
+    clearPlaylistSelection();
+    await loadPlaylists();
+    ElMessage.success(t("study.deleteSelectedDone", { count }));
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.error || t("common.operationFailed"));
+  }
+}
 async function renamePlaylist(p: StudyPlaylist) {
   try {
     const { value } = await ElMessageBox.prompt(t("study.newPlaylistTip"), t("playlists.rename"), {
@@ -1434,7 +1457,8 @@ async function confirmImport() {
   }
   importing.value = true;
   try {
-    const res = await importStudyPlaylists(importFile.value);
+    // 在某个歌单文件夹内导入时,新歌单直接归入该文件夹。
+    const res = await importStudyPlaylists(importFile.value, currentFolder.value);
     importDialogOpen.value = false;
     clearImportFile();
     await loadPlaylists();

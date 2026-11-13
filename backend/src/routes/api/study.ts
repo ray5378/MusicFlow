@@ -395,6 +395,8 @@ export function registerStudy(app: Hono): void {
     if (list.length > STUDY_IMPORT_MAX_PLAYLISTS) {
       return fail(c, new StudyError(400, `单次最多导入 ${STUDY_IMPORT_MAX_PLAYLISTS} 个学习歌单`));
     }
+    // 在子目录(文件夹)内发起导入时,歌单直接归入该文件夹;根目录导入不改变已有歌单归属。
+    const targetFolder = ensureStudyFolder(user.id, body?.folder);
 
     let created = 0;
     let merged = 0;
@@ -417,10 +419,14 @@ export function registerStudy(app: Hono): void {
         const id = `pl-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 6)}`;
         db.insert(playlists).values({
           id, name, ownerId: user.id, kind: "study",
-          isPublic: 0, comment: String(rawPl?.comment || ""),
+          isPublic: 0, comment: String(rawPl?.comment || ""), folder: targetFolder,
         }).run();
         pl = db.select().from(playlists).where(eq(playlists.id, id)).get()!;
         isNew = true;
+      } else if (targetFolder && (pl.folder || "") !== targetFolder) {
+        // 同名歌单已存在时,跟随本次导入位置移入目标文件夹。
+        db.update(playlists).set({ folder: targetFolder, updatedAt: new Date().toISOString() })
+          .where(eq(playlists.id, pl.id)).run();
       }
       const existing = new Set(
         db.select({ sid: playlistSongs.songId }).from(playlistSongs)

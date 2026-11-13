@@ -190,10 +190,11 @@ export async function removeStudyPlaylistTracks(id: string, remove: string[]): P
   await api.post(`/rest/api/v1/study/playlists/${encodeURIComponent(id)}/tracks`, { remove });
 }
 
-/** 导入学习歌单文件:同名歌单合并,其余新建;返回逐歌单的导入结果。 */
+/** 导入学习歌单文件:同名歌单合并,其余新建;folder 非空时导入到该文件夹。 */
 export async function importStudyPlaylists(
   native: StudyPlaylistExportFile,
+  folder = "",
 ): Promise<StudyPlaylistImportResult> {
-  const res = await api.post("/rest/api/v1/study/playlists/import", { native });
+  const res = await api.post("/rest/api/v1/study/playlists/import", { native, folder });
   return res.data;
 }
