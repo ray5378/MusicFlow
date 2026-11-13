@@ -34,7 +34,9 @@
           @contextmenu="openContextMenu($event, trackMenuActions(s, i), s.title, s.relDir || '')"
           v-longpress="() => openActionSheet(trackMenuActions(s, i), s.title, s.relDir || '')"
         >
-          <span class="row-index">{{ i + 1 }}</span>
+          <span class="row-play" :title="t('layout.play')" @click.stop="playAt(i)">
+            <MfIcon name="Play" :size="14" />
+          </span>
           <span class="row-title">{{ s.title }}</span>
           <span class="row-dir" :title="s.relDir || s.album || ''">{{ s.relDir || s.album || "—" }}</span>
           <span class="row-dur">{{ fmtTime(s.duration) }}</span>
@@ -185,7 +187,17 @@ onMounted(load);
   align-items: center; gap: 10px; padding: 9px 12px; border-radius: 10px; cursor: pointer;
   transition: background 0.18s ease;
   &:hover { background: rgba(255, 255, 255, 0.07); }
-  .row-index { font-size: 12px; color: var(--fnos-text-tertiary); text-align: center; }
+  .row-play {
+    width: 24px; height: 24px; border-radius: 50%; margin: 0 auto; flex-shrink: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: rgba(255, 255, 255, 0.08); color: var(--fnos-text-secondary);
+    transition: background 0.18s ease, color 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
+    /* 与学习内容列表一致:悬停二次高亮,明确此处可点击播放。 */
+    &:hover {
+      background: #409eff; color: #fff; transform: scale(1.12);
+      box-shadow: 0 0 0 3px rgba(64, 158, 255, 0.25);
+    }
+  }
   .row-title { font-size: 14px; color: var(--fnos-text-primary); line-height: 1.35; overflow-wrap: anywhere; }
   .row-dir { font-size: 12px; color: var(--fnos-text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .row-dur { font-size: 12px; color: var(--fnos-text-tertiary); text-align: right; }
