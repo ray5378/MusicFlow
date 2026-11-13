@@ -15,7 +15,7 @@
 import { computed } from "vue";
 import {
   Airplay, ArrowLeft, AudioLines, BookOpen, Box, Cable, Check, ChevronDown, ChevronRight, ChevronUp, CircleCheck, CircleSlash,
-  Clock, Copy, Disc3, Download, FolderOpen, Globe, Headphones, Heart, Home, Info,
+  Clock, Copy, Disc3, Download, Folder, FolderOpen, Globe, Headphones, Heart, Home, Info,
   KeyRound, Laptop, Library, Link2Off, List, ListMusic, ListOrdered, Loader2, Menu,
   MessageCircle, Monitor, MoreHorizontal, Pause, Pencil, Pin, Play, Plus, Radar, RefreshCw,
   Repeat, Repeat1, RotateCcw, Search, Settings, Shuffle, SkipBack, SkipForward,
@@ -71,7 +71,7 @@ const ALIAS: Record<string, string> = {
 // pulling in every icon like the old `import * from lucide-vue-next`.
 const ICONS: Record<string, any> = {
   Airplay, ArrowLeft, AudioLines, BookOpen, Box, Cable, Check, ChevronDown, ChevronRight, ChevronUp, CircleCheck, CircleSlash,
-  Clock, Copy, Disc3, Download, FolderOpen, Globe, Headphones, Heart, Home, Info,
+  Clock, Copy, Disc3, Download, Folder, FolderOpen, Globe, Headphones, Heart, Home, Info,
   KeyRound, Laptop, Library, Link2Off, List, ListMusic, ListOrdered, Loader2, Menu,
   MessageCircle, Monitor, MoreHorizontal, Pause, Pencil, Pin, Play, Plus, Radar, RefreshCw,
   Repeat, Repeat1, RotateCcw, Search, Settings, Shuffle, SkipBack, SkipForward,
