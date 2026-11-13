@@ -344,6 +344,7 @@
     "unlike": "取消喜欢",
     "favoritesMusic": "我喜欢的音乐",
     "volume": "音量",
+    "playbackRate": "播放倍速",
     "notPlaying": "未在播放",
     "selectSongToPlay": "选择一首歌曲开始播放",
     "dragToSeek": "拖动以定位播放进度",
