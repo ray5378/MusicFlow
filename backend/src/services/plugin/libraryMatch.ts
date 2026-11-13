@@ -73,7 +73,7 @@ function tight(s: string): string {
 
 /** 归一化标题 → 候选行索引(从 group_key 前缀拆出标题)。 */
 function buildTitleIndex(): Map<string, LibCandidate[]> {  const rows = sqlite
-    .prepare("SELECT id, type, artist, album, duration, group_key FROM songs WHERE group_key IS NOT NULL AND group_key != ''")
+    .prepare("SELECT id, type, artist, album, duration, group_key FROM songs WHERE kind = 'music' AND group_key IS NOT NULL AND group_key != ''")
     .all() as { id: string; type: string | null; artist: string | null; album: string | null; duration: number | null; group_key: string }[];
   const idx = new Map<string, LibCandidate[]>();
   for (const r of rows) {

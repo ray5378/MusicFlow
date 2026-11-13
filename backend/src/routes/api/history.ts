@@ -3,6 +3,7 @@ import type { Hono } from "hono";
 import {
   PERM,
   albums,
+  and,
   db,
   desc,
   eq,
@@ -26,7 +27,7 @@ app.get("/v1/history", permMiddleware(PERM.HISTORY_MANAGE), (c) => {
   const pageRows = all.slice((page - 1) * pageSize, page * pageSize);
   const songIds = pageRows.map((h) => h.songId).filter((x): x is string => !!x);
   const songMap = songIds.length
-    ? new Map(db.select().from(songs).where(inArray(songs.id, songIds)).all().map((s) => [s.id, s]))
+    ? new Map(db.select().from(songs).where(and(inArray(songs.id, songIds), eq(songs.kind, "music"))).all().map((s) => [s.id, s]))
     : new Map<string, any>();
   const albumIds: string[] = [];
   for (const s of songMap.values()) if (s.albumId) albumIds.push(s.albumId as string);

@@ -103,7 +103,7 @@ function playableSongCount(filters?: RandomSongsConfig): number {
   const row = sqlite
     .prepare(
       `SELECT COUNT(*) AS n FROM songs LEFT JOIN albums ON songs.album_id = albums.id
-       WHERE songs.suffix IS NOT NULL AND songs.path IS NOT NULL${f.where}`,
+       WHERE songs.suffix IS NOT NULL AND songs.path IS NOT NULL AND songs.kind = 'music'${f.where}`,
     )
     .get(...f.params) as { n: number };
   return row?.n || 0;
@@ -152,7 +152,7 @@ function pickRandomPlayableSongs(
   const filterParams = f.params;
   const baseFrom =
     `FROM songs LEFT JOIN albums ON songs.album_id = albums.id ` +
-    `WHERE songs.suffix IS NOT NULL AND songs.path IS NOT NULL${f.where}`;
+    `WHERE songs.suffix IS NOT NULL AND songs.path IS NOT NULL AND songs.kind = 'music'${f.where}`;
 
   const meta = sqlite
     .prepare(`SELECT COUNT(*) AS n, MIN(songs.rowid) AS minR, MAX(songs.rowid) AS maxR ${baseFrom}`)

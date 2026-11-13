@@ -624,7 +624,7 @@ export async function runDailyRecommendJob(opts?: { force?: boolean; seedSalt?: 
   // Fresh installs have no local library yet; generating "今日推荐" from empty
   // would only create a playlist full of non-playable remote stubs. Skip until
   // the user actually has songs.
-  const localCount = sqlite.prepare("SELECT COUNT(*) AS n FROM songs WHERE suffix IS NOT NULL AND path IS NOT NULL").get() as { n: number };
+  const localCount = sqlite.prepare("SELECT COUNT(*) AS n FROM songs WHERE suffix IS NOT NULL AND path IS NOT NULL AND kind = 'music'").get() as { n: number };
   if (!localCount || localCount.n === 0) {
     log.info("[DAILY-RECOMMEND] local library empty, skipping today's recommendation");
     return null;

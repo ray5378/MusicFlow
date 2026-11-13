@@ -1768,6 +1768,7 @@ export class QueueController extends EventEmitter {
         mime: item.mime || suffixToMime(s.suffix || ""),
         coverArt: item.coverArt ?? s.coverArt ?? undefined,
         duration: typeof item.duration === "number" ? item.duration : typeof s.duration === "number" ? s.duration : undefined,
+        kind: item.kind ?? s.kind ?? undefined,
         // 0 / 空串在库里代表"未知",归一成 undefined —— 否则 HA 会老老实实
         // 显示出「第 0 轨」「0 年」。
         track: item.track ?? (s.track || undefined),

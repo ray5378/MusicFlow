@@ -74,7 +74,8 @@ export function buildSongsPage(qp: {
   const sortCol = (SORT_COLUMNS[sortField] || songs.title) as any;
   const orderBy = sortOrder === "desc" ? desc(sortCol) : asc(sortCol);
   // SQL-level filtering + pagination (avoids loading the whole table into memory)
-  const conds = [];
+  // 分区隔离:音乐面恒带 kind='music',学习内容只在学习入口出现。
+  const conds: any[] = [eq(songs.kind, "music")];
   if (genre) conds.push(eq(songs.genre, genre));
   if (query) {
     const q = `%${query}%`;
@@ -211,7 +212,7 @@ app.use("/v1/artist-search", permMiddleware(PERM.LIBRARY_SEARCH));
 app.use("/v1/album-search", permMiddleware(PERM.LIBRARY_SEARCH));
 
 app.get("/v1/stats", (c) => {
-  const songCount = db.select().from(songs).all().length;
+  const songCount = db.select({ n: sql<number>`count(*)` }).from(songs).where(eq(songs.kind, "music")).get()?.n ?? 0;
   const albumCount = db.select().from(albums).all().length;
   const artistCount = db.select().from(artists).all().length;
   const userCount = db.select().from(users).all().length;
@@ -311,7 +312,7 @@ app.get("/v1/genres", (c) => {
     name: songs.genre,
     songCount: sql<number>`count(*)`,
   }).from(songs)
-    .where(sql`genre != ''`)
+    .where(and(sql`genre != ''`, eq(songs.kind, "music")))
     .groupBy(songs.genre)
     .orderBy(sql`count(*) DESC`)
     .all();

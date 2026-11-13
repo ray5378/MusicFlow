@@ -181,7 +181,7 @@ function pickCandidateSongs(profile: TasteProfile, date: Date, excludeRecent: bo
     const placeholders = artistIds.map(() => "?").join(",");
     const rows = sqlite.prepare(`
       SELECT id FROM songs
-      WHERE artist_id IN (${placeholders}) AND suffix IS NOT NULL AND path IS NOT NULL
+      WHERE artist_id IN (${placeholders}) AND suffix IS NOT NULL AND path IS NOT NULL AND kind = 'music'
     `).all(...artistIds) as { id: string }[];
     for (const r of rows) {
       if (excludeIds.has(r.id) || seen.has(r.id)) continue;
@@ -195,7 +195,7 @@ function pickCandidateSongs(profile: TasteProfile, date: Date, excludeRecent: bo
     const placeholders = albumIds.map(() => "?").join(",");
     const rows = sqlite.prepare(`
       SELECT id FROM songs
-      WHERE album_id IN (${placeholders}) AND suffix IS NOT NULL AND path IS NOT NULL
+      WHERE album_id IN (${placeholders}) AND suffix IS NOT NULL AND path IS NOT NULL AND kind = 'music'
     `).all(...albumIds) as { id: string }[];
     for (const r of rows) {
       if (excludeIds.has(r.id) || seen.has(r.id)) continue;
@@ -209,7 +209,7 @@ function pickCandidateSongs(profile: TasteProfile, date: Date, excludeRecent: bo
     const placeholders = genres.map(() => "?").join(",");
     const rows = sqlite.prepare(`
       SELECT id FROM songs
-      WHERE genre IN (${placeholders}) AND suffix IS NOT NULL AND path IS NOT NULL
+      WHERE genre IN (${placeholders}) AND suffix IS NOT NULL AND path IS NOT NULL AND kind = 'music'
     `).all(...genres) as { id: string }[];
     for (const r of rows) {
       if (excludeIds.has(r.id) || seen.has(r.id)) continue;
@@ -237,10 +237,10 @@ function pickCandidateSongs(profile: TasteProfile, date: Date, excludeRecent: bo
 // Fallback: when there's no history, pull ALL songs from the library with a
 // deterministic shuffle (no size cap).
 function pickRandomSample(date: Date): string[] {
-  const total = sqlite.prepare("SELECT COUNT(*) AS n FROM songs WHERE suffix IS NOT NULL AND path IS NOT NULL").get() as { n: number };
+  const total = sqlite.prepare("SELECT COUNT(*) AS n FROM songs WHERE suffix IS NOT NULL AND path IS NOT NULL AND kind = 'music'").get() as { n: number };
   if (!total.n) return [];
   // Fetch all song ids and shuffle deterministically by date seed.
-  const rows = sqlite.prepare("SELECT id FROM songs WHERE suffix IS NOT NULL AND path IS NOT NULL").all() as { id: string }[];
+  const rows = sqlite.prepare("SELECT id FROM songs WHERE suffix IS NOT NULL AND path IS NOT NULL AND kind = 'music'").all() as { id: string }[];
   const rng = mulberry32(dateSeed(date, 40503, 1));
   // Fisher-Yates shuffle with the seeded RNG.
   for (let i = rows.length - 1; i > 0; i--) {
@@ -264,14 +264,14 @@ function pickRandomSample(date: Date): string[] {
 // This avoids both `ORDER BY RANDOM()` (full scan + sort) and loading all ids
 // into memory.
 export function pickRandomLibrarySongs(date: Date, limit: number): string[] {
-  const meta = sqlite.prepare("SELECT COUNT(*) AS n, MAX(rowid) AS maxR FROM songs WHERE suffix IS NOT NULL AND path IS NOT NULL").get() as { n: number; maxR: number | null };
+  const meta = sqlite.prepare("SELECT COUNT(*) AS n, MAX(rowid) AS maxR FROM songs WHERE suffix IS NOT NULL AND path IS NOT NULL AND kind = 'music'").get() as { n: number; maxR: number | null };
   if (!meta.n || !meta.maxR) return [];
   const rng = mulberry32(dateSeed(date, 774631, 7));
   const maxRowid = meta.maxR;
 
   // Small library: just return everything shuffled (cheap enough).
   if (meta.n <= limit) {
-    const rows = sqlite.prepare("SELECT id FROM songs WHERE suffix IS NOT NULL AND path IS NOT NULL").all() as { id: string }[];
+    const rows = sqlite.prepare("SELECT id FROM songs WHERE suffix IS NOT NULL AND path IS NOT NULL AND kind = 'music'").all() as { id: string }[];
     for (let i = rows.length - 1; i > 0; i--) {
       const j = Math.floor(rng() * (i + 1));
       [rows[i], rows[j]] = [rows[j], rows[i]];
@@ -296,7 +296,7 @@ export function pickRandomLibrarySongs(date: Date, limit: number): string[] {
       const batch = idArr.slice(i, i + 500);
       const placeholders = batch.map(() => "?").join(",");
       const rows = sqlite.prepare(
-        `SELECT id FROM songs WHERE rowid IN (${placeholders}) AND suffix IS NOT NULL AND path IS NOT NULL`
+        `SELECT id FROM songs WHERE rowid IN (${placeholders}) AND suffix IS NOT NULL AND path IS NOT NULL AND kind = 'music'`
       ).all(...batch) as { id: string }[];
       for (const r of rows) {
         if (ids.size < limit) ids.add(r.id);
