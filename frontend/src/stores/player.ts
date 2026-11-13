@@ -613,8 +613,15 @@ export const usePlayerStore = defineStore("player", () => {
     // Howler 的 html5 rate() 会重挂基于 duration 的结束定时器并移除 native ended
     // 监听;而 /rest/stream 是实时管道流,duration 常为 Infinity/NaN,结果是播完
     // 不触发 onend、下一首永远不开始。写原生属性不会动 ended 绑定,切歌链路保持原样。
+    // 注意:Howler 实例上没有 _node,音频节点在 howl._sounds[0]._node。
+    const localAudioNode = () => {
+      const node = (howl as any)?._sounds?.[0]?._node;
+      return node && typeof node.playbackRate === "number"
+        ? (node as HTMLAudioElement)
+        : null;
+    };
     const applyLocalRate = () => {
-      const node = (howl as any)?._node as HTMLAudioElement | undefined;
+      const node = localAudioNode();
       if (node) node.playbackRate = playbackRate.value;
     };
     if (playbackRate.value !== 1) {
