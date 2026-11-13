@@ -717,12 +717,14 @@ export async function extractMetadataHeader(headerBuf: Buffer, fileName: string,
 
     // MP3 的时长陷阱：parseBuffer 只拿到截断头时，music-metadata 会按「到手字节 /
     // 码率」算出假时长(实测 256KB 头 + 128kbps = 16s，全库学习音频都变成 0:16)。
-    // 只有解析值≈截断缓冲对应时长、且真实文件明显更大时，才改用 fileSize 换算；
+    // duration=0 时无论缓冲是否就是整个文件都按 fileSize 估算(两者相等时结果一致)；
+    // 解析值≈截断缓冲对应时长、且真实文件明显更大时，才改用 fileSize 换算；
     // 带 Xing/VBR 头能给出完整时长的情况下解析值与缓冲估算差得远，保持原值。
-    if (ext === ".mp3" && bitRate > 0 && fileSize > headerBuf.length * 1.5) {
+    if (ext === ".mp3" && bitRate > 0) {
       const fromSize = Math.round((fileSize * 8) / (bitRate * 1000));
       const headerSeconds = (headerBuf.length * 8) / (bitRate * 1000);
-      if (duration === 0 || Math.abs(duration - headerSeconds) <= Math.max(2, headerSeconds * 0.02)) {
+      const truncated = fileSize > headerBuf.length * 1.5;
+      if (duration === 0 || (truncated && Math.abs(duration - headerSeconds) <= Math.max(2, headerSeconds * 0.02))) {
         duration = fromSize;
       }
     }
@@ -964,11 +966,13 @@ export async function extractMetadataLocal(filePath: string): Promise<MusicMetad
     const common = metadata.common || {};
     let duration = Math.round(format.duration || 0);
     let bitRate = Math.round((format.bitrate || 0) / 1000);
-    // 同 extractMetadataHeader：截断缓冲会被算成假时长，真实文件更大时按文件大小换算。
-    if (ext === ".mp3" && bitRate > 0 && stat.size > buf.length * 1.5) {
+    // 同 extractMetadataHeader：duration=0 一律按文件大小估算；截断缓冲算出的假时长
+    // 只在真实文件更大且解析值≈缓冲时长时才改写。
+    if (ext === ".mp3" && bitRate > 0) {
       const fromSize = Math.round((stat.size * 8) / (bitRate * 1000));
       const headerSeconds = (buf.length * 8) / (bitRate * 1000);
-      if (duration === 0 || Math.abs(duration - headerSeconds) <= Math.max(2, headerSeconds * 0.02)) {
+      const truncated = stat.size > buf.length * 1.5;
+      if (duration === 0 || (truncated && Math.abs(duration - headerSeconds) <= Math.max(2, headerSeconds * 0.02))) {
         duration = fromSize;
       }
     }

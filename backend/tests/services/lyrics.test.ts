@@ -61,11 +61,19 @@ describe("parseLrc", () => {
   });
 
   it("元数据行 / 空行跳过;2 位与 3 位小数都按千分之一秒补齐", () => {
-    const out = parseLrc("[ti:x]\n[offset:-500]\n\n[00:12.5]词\n[01:02.345]句\n");
+    const out = parseLrc("[ti:x]\n[ar:y]\n\n[00:12.5]词\n[01:02.345]句\n");
     expect(out.length).toBe(2);
     expect(out[0]).toEqual({ time: 12.5, text: "词" });
     expect(out[1].text).toBe("句");
     expect(out[1].time).toBeCloseTo(62.345, 6);
+  });
+
+  it("[offset:N] 毫秒全局偏移:正值提前、负值延后,且不小于 0", () => {
+    // LRC 规范:time - offset/1000。
+    expect(parseLrc("[offset:500]\n[00:12.5]词")).toEqual([{ time: 12, text: "词" }]);
+    expect(parseLrc("[offset:-500]\n[00:12.5]词")).toEqual([{ time: 13, text: "词" }]);
+    // 偏移把时间推到负数时钳到 0。
+    expect(parseLrc("[offset:30000]\n[00:01.0]词")).toEqual([{ time: 0, text: "词" }]);
   });
 
   it("lrcToStructured 输出毫秒整数,且只包一份 line 数组", () => {
