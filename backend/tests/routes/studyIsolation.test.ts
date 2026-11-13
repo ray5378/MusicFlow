@@ -32,9 +32,12 @@ app.route("/rest", restRoutes);
 const PLAIN = "hunter2";
 const CLIENT_SALT = "clientsalt123";
 const authQS = () => `u=alice&t=${md5(PLAIN + CLIENT_SALT)}&s=${CLIENT_SALT}`;
-const url = (p: string) => `/rest/api${p}${p.includes("?") ? "&" : "?"}${authQS()}`;
 async function call(method: string, p: string, body?: any) {
-  const res = await app.request(url(p), {
+  return callAs("alice", method, p, body);
+}
+async function callAs(username: string, method: string, p: string, body?: any) {
+  const qs = `u=${username}&t=${md5(PLAIN + CLIENT_SALT)}&s=${CLIENT_SALT}`;
+  const res = await app.request(`/rest/api${p}${p.includes("?") ? "&" : "?"}${qs}`, {
     method,
     headers: { "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -54,6 +57,10 @@ beforeAll(() => {
   db.insert(users).values({
     id: "u1", username: "alice", password: "", salt: "salt", subsonicSalt: "subsalt",
     passEnc: encryptPassword(PLAIN), isAdmin: 1, isActive: 1, email: "a@b.c",
+  }).run();
+  db.insert(users).values({
+    id: "u3", username: "carol", password: "", salt: "salt3", subsonicSalt: "subsalt3",
+    passEnc: encryptPassword(PLAIN), isAdmin: 1, isActive: 1, email: "c@b.c",
   }).run();
 
   // 学习源(本地目录):两层课程目录 + 一个非音频文件
@@ -279,6 +286,33 @@ describe("学习 API", () => {
     list = await call("GET", "/v1/study/playlists");
     expect(list.body.folders).not.toContain("高等数学");
     expect(list.body.items.some((p: any) => p.id === id)).toBe(true);
+  });
+
+  it("学习歌单文件夹按用户隔离:列表与歌单归属都不串用户", async () => {
+    await call("POST", "/v1/study/playlist-folders", { name: "Alice课程" });
+    const pub = await call("POST", "/v1/study/playlists", { name: "Alice公开课", folder: "Alice课程", public: true });
+
+    // carol 创建自己的文件夹
+    const bobFolder = await callAs("carol", "POST", "/v1/study/playlist-folders", { name: "Bob笔记" });
+    expect(bobFolder.res.status).toBe(200);
+
+    let bobList = await callAs("carol", "GET", "/v1/study/playlists");
+    expect(bobList.body.folders).not.toContain("Alice课程");
+    expect(bobList.body.folders).toEqual(expect.arrayContaining(["Bob笔记"]));
+    // 非本人歌单的文件夹归属不暴露,统一显示在根目录
+    expect(bobList.body.items.find((p: any) => p.id === pub.body.id)?.folder).toBe("");
+
+    // alice(管理员)列表同样不混入 carol 的文件夹
+    const aliceList = await call("GET", "/v1/study/playlists");
+    expect(aliceList.body.folders).toEqual(expect.arrayContaining(["Alice课程"]));
+    expect(aliceList.body.folders).not.toContain("Bob笔记");
+
+    // carol 不能改名/删除 alice 的文件夹
+    const renamed = await callAs("carol", "PUT", `/v1/study/playlist-folders/${encodeURIComponent("Alice课程")}`, { name: "被改掉" });
+    expect(renamed.res.status).toBe(404);
+    const removed = await callAs("carol", "DELETE", `/v1/study/playlist-folders/${encodeURIComponent("Alice课程")}`);
+    expect(removed.res.status).toBe(200);
+    expect((await call("GET", "/v1/study/playlists")).body.folders).toContain("Alice课程");
   });
 
   it("导出学习歌单:带 songId 与相对路径,可跨库重入库", async () => {

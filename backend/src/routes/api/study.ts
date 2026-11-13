@@ -192,15 +192,16 @@ function ensureStudyFolder(ownerId: string, rawName: unknown): string {
   return name;
 }
 
-/** 当前用户可见的文件夹名:自己的文件夹 + 可见歌单上出现的文件夹(防御历史数据)。 */
-function listStudyFolderNames(userId: string, isAdmin: boolean, rows: Array<{ folder?: string | null }>): string[] {
+/** 当前用户自己的文件夹名:仅本人可见,管理员的列表也不混入他人文件夹。 */
+function listStudyFolderNames(userId: string, rows: Array<{ ownerId?: string; folder?: string | null }>): string[] {
   const names = new Set<string>();
   const own = userId
     ? db.select().from(studyPlaylistFolders)
-        .where(isAdmin ? undefined : eq(studyPlaylistFolders.ownerId, userId)).all()
+        .where(eq(studyPlaylistFolders.ownerId, userId)).all()
     : [];
   for (const f of own) if (f.name) names.add(f.name);
-  for (const row of rows) if (row.folder) names.add(row.folder);
+  // 防御历史数据:歌单上出现过、但文件夹行缺失时也补上(仍限本人)。
+  for (const row of rows) if (row.ownerId === userId && row.folder) names.add(row.folder);
   return [...names].sort((a, b) => a.localeCompare(b, "zh-CN"));
 }
 
@@ -472,10 +473,11 @@ export function registerStudy(app: Hono): void {
         id: p.id, name: p.name, owner: p.ownerId, public: !!p.isPublic,
         songCount: p.songCount || 0, duration: p.duration || 0,
         coverArt: `pl-${p.id}`, comment: p.comment || "",
-        folder: p.folder || "",
+        // 文件夹按用户隔离:非本人歌单即使管理员可见,也不暴露其文件夹归属。
+        folder: p.ownerId === user?.id ? (p.folder || "") : "",
         created: p.createdAt, changed: p.updatedAt,
       })),
-      folders: listStudyFolderNames(user?.id || "", !!user?.isAdmin, rows),
+      folders: listStudyFolderNames(user?.id || "", rows),
     });
   });
 

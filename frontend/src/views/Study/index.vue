@@ -21,7 +21,7 @@
           </el-tabs>
           <el-input
             v-model="query"
-            :placeholder="mode === 'playlists' ? t('study.searchPlaylistsPlaceholder') : t('study.searchPlaceholder')"
+            :placeholder="t('study.searchBothPlaceholder')"
             clearable
             class="search-input"
             @keyup.enter="doSearch"
@@ -31,62 +31,144 @@
           </el-input>
         </div>
 
+        <!-- 学习歌单多选工具条:右键/长按「多选」后出现,可批量拖动或移动到文件夹 -->
+        <div v-if="mode === 'playlists' && playlistSelection.size > 0" class="sel-bar">
+          <span class="sel-count">{{ t("study.selected", { count: playlistSelection.size }) }}</span>
+          <el-button size="small" type="primary" @click="openBatchMoveDialog">
+            <MfIcon name="Folder" :size="14" />{{ t("study.moveToFolder") }}
+          </el-button>
+          <el-button size="small" text @click="clearPlaylistSelection">{{ t("study.clearSelection") }}</el-button>
+        </div>
+
         <!-- ===== 搜索 ===== -->
         <div v-if="searchResults !== null || playlistResults !== null" class="search-block">
-          <template v-if="playlistResults !== null">
-            <div class="block-head">
-              <span class="block-title">{{ t("study.playlistSearchResult", { count: playlistResults.length }) }}</span>
+          <div class="block-head">
+            <span class="block-title">
+              {{ t("study.unifiedSearchResult", { playlists: sortedPlaylists.length, songs: sortedSongs.length }) }}
+            </span>
+            <div class="search-sort">
+              <span class="sort-label">{{ t("study.sortBy") }}</span>
+              <el-select v-model="searchSort" size="small" class="sort-select">
+                <el-option :label="t('study.sortPlaylistFirst')" value="playlist-first" />
+                <el-option :label="t('study.sortContentFirst')" value="content-first" />
+                <el-option :label="t('study.sortByName')" value="name" />
+              </el-select>
               <el-button text size="small" @click="clearSearch">{{ t("study.clearSearch") }}</el-button>
             </div>
-            <div v-if="playlistResults.length === 0" class="empty">{{ t("study.noResult") }}</div>
-            <div v-else class="playlist-grid">
-              <div
-                v-for="p in playlistResults"
-                :key="p.id"
-                class="playlist-card"
-                draggable="true"
-                @dragstart="onPlaylistDragStart(p, $event)"
-                @click="onPlaylistClick(p)"
-                @contextmenu="openContextMenu($event, playlistMenuActions(p), p.name, playlistMeta(p))"
-                v-longpress="() => openActionSheet(playlistMenuActions(p), p.name, playlistMeta(p))"
-              >
-                <div class="pl-icon"><MfIcon name="ListMusic" :size="26" /></div>
-                <div class="pl-info">
-                  <div class="pl-name">{{ p.name }}</div>
-                  <div class="pl-meta">{{ playlistMeta(p) }}</div>
-                </div>
-                <span class="card-more" :title="t('songTable.moreActions')" @click.stop="openContextMenu($event, playlistMenuActions(p), p.name, playlistMeta(p))">
-                  <MfIcon name="MoreHorizontal" :size="16" />
-                </span>
-              </div>
-            </div>
-          </template>
-          <template v-else-if="searchResults !== null">
-            <div class="block-head">
-              <span class="block-title">{{ t("study.searchResult", { count: searchResults.length }) }}</span>
-              <el-button text size="small" @click="clearSearch">{{ t("study.clearSearch") }}</el-button>
-            </div>
-            <div v-if="searchResults.length === 0" class="empty">{{ t("study.noResult") }}</div>
-            <div v-else class="study-list">
-              <div
-                v-for="(s, i) in searchResults"
-                :key="s.id"
-                class="study-row"
-                @click="onSearchClick(i)"
-                @contextmenu="openContextMenu($event, songMenuActions(s), s.title, s.relDir || '')"
-                v-longpress="() => openActionSheet(songMenuActions(s), s.title, s.relDir || '')"
-              >
-                <span class="row-play"><MfIcon name="Play" :size="14" /></span>
-                <span class="row-title">{{ s.title }}</span>
-                <span class="row-dir" :title="s.relDir || s.album || ''">{{ s.relDir || s.album || "—" }}</span>
-                <span class="row-dur">{{ fmtTime(s.duration) }}</span>
-                <span class="row-actions" @click.stop>
-                  <span class="row-btn" :title="t('songTable.moreActions')" @click="openContextMenu($event, songMenuActions(s), s.title, s.relDir || '')">
-                    <MfIcon name="MoreHorizontal" :size="15" />
+          </div>
+
+          <div v-if="sortedPlaylists.length === 0 && sortedSongs.length === 0" class="empty">{{ t("study.noResult") }}</div>
+
+          <!-- 歌单优先(默认):歌单组在内容组之前 -->
+          <template v-if="playlistsFirst">
+            <template v-if="sortedPlaylists.length > 0">
+              <div class="result-subhead">{{ t("study.playlists") }} · {{ sortedPlaylists.length }}</div>
+              <div class="playlist-grid">
+                <div
+                  v-for="p in sortedPlaylists"
+                  :key="p.id"
+                  class="playlist-card"
+                  :class="{ selected: playlistSelection.has(p.id) }"
+                  draggable="true"
+                  @dragstart="onPlaylistDragStart(p, $event)"
+                  @click="onSearchPlaylistClick(p)"
+                  @contextmenu="openContextMenu($event, playlistMenuActions(p), p.name, playlistMeta(p))"
+                  v-longpress="() => openActionSheet(playlistMenuActions(p), p.name, playlistMeta(p))"
+                >
+                  <div class="pl-icon"><MfIcon name="ListMusic" :size="26" /></div>
+                  <div class="pl-info">
+                    <div class="pl-name">{{ p.name }}</div>
+                    <div class="pl-meta">{{ playlistMeta(p) }}</div>
+                  </div>
+                  <span class="card-more" :title="t('songTable.moreActions')" @click.stop="openContextMenu($event, playlistMenuActions(p), p.name, playlistMeta(p))">
+                    <MfIcon name="MoreHorizontal" :size="16" />
                   </span>
-                </span>
+                </div>
               </div>
-            </div>
+            </template>
+
+            <template v-if="sortedSongs.length > 0">
+              <div class="result-subhead">{{ t("study.searchContent") }} · {{ sortedSongs.length }}</div>
+              <div class="study-list">
+                <div
+                  v-for="(s, i) in sortedSongs"
+                  :key="s.id"
+                  class="study-row"
+                  @click="jumpToSongDir(s)"
+                  @contextmenu="openContextMenu($event, songMenuActions(s), s.title, s.relDir || '')"
+                  v-longpress="() => openActionSheet(songMenuActions(s), s.title, s.relDir || '')"
+                >
+                  <span class="row-play" :title="t('layout.play')" @click.stop="onSearchPlay(s, i)"><MfIcon name="Play" :size="14" /></span>
+                  <span class="row-title">{{ s.title }}</span>
+                  <span class="row-dir" :title="s.relDir || s.album || ''">{{ s.relDir || s.album || "—" }}</span>
+                  <span class="row-dur">{{ fmtTime(s.duration) }}</span>
+                  <span class="row-actions" @click.stop>
+                    <span class="row-btn" :title="t('study.openDir')" @click="jumpToSongDir(s)">
+                      <MfIcon name="Folder" :size="15" />
+                    </span>
+                    <span class="row-btn" :title="t('songTable.moreActions')" @click="openContextMenu($event, songMenuActions(s), s.title, s.relDir || '')">
+                      <MfIcon name="MoreHorizontal" :size="15" />
+                    </span>
+                  </span>
+                </div>
+              </div>
+            </template>
+          </template>
+
+          <!-- 内容优先 -->
+          <template v-else>
+            <template v-if="sortedSongs.length > 0">
+              <div class="result-subhead">{{ t("study.searchContent") }} · {{ sortedSongs.length }}</div>
+              <div class="study-list">
+                <div
+                  v-for="(s, i) in sortedSongs"
+                  :key="s.id"
+                  class="study-row"
+                  @click="jumpToSongDir(s)"
+                  @contextmenu="openContextMenu($event, songMenuActions(s), s.title, s.relDir || '')"
+                  v-longpress="() => openActionSheet(songMenuActions(s), s.title, s.relDir || '')"
+                >
+                  <span class="row-play" :title="t('layout.play')" @click.stop="onSearchPlay(s, i)"><MfIcon name="Play" :size="14" /></span>
+                  <span class="row-title">{{ s.title }}</span>
+                  <span class="row-dir" :title="s.relDir || s.album || ''">{{ s.relDir || s.album || "—" }}</span>
+                  <span class="row-dur">{{ fmtTime(s.duration) }}</span>
+                  <span class="row-actions" @click.stop>
+                    <span class="row-btn" :title="t('study.openDir')" @click="jumpToSongDir(s)">
+                      <MfIcon name="Folder" :size="15" />
+                    </span>
+                    <span class="row-btn" :title="t('songTable.moreActions')" @click="openContextMenu($event, songMenuActions(s), s.title, s.relDir || '')">
+                      <MfIcon name="MoreHorizontal" :size="15" />
+                    </span>
+                  </span>
+                </div>
+              </div>
+            </template>
+
+            <template v-if="sortedPlaylists.length > 0">
+              <div class="result-subhead">{{ t("study.playlists") }} · {{ sortedPlaylists.length }}</div>
+              <div class="playlist-grid">
+                <div
+                  v-for="p in sortedPlaylists"
+                  :key="p.id"
+                  class="playlist-card"
+                  :class="{ selected: playlistSelection.has(p.id) }"
+                  draggable="true"
+                  @dragstart="onPlaylistDragStart(p, $event)"
+                  @click="onSearchPlaylistClick(p)"
+                  @contextmenu="openContextMenu($event, playlistMenuActions(p), p.name, playlistMeta(p))"
+                  v-longpress="() => openActionSheet(playlistMenuActions(p), p.name, playlistMeta(p))"
+                >
+                  <div class="pl-icon"><MfIcon name="ListMusic" :size="26" /></div>
+                  <div class="pl-info">
+                    <div class="pl-name">{{ p.name }}</div>
+                    <div class="pl-meta">{{ playlistMeta(p) }}</div>
+                  </div>
+                  <span class="card-more" :title="t('songTable.moreActions')" @click.stop="openContextMenu($event, playlistMenuActions(p), p.name, playlistMeta(p))">
+                    <MfIcon name="MoreHorizontal" :size="16" />
+                  </span>
+                </div>
+              </div>
+            </template>
           </template>
         </div>
 
@@ -286,9 +368,10 @@
                 v-for="p in rootPlaylists"
                 :key="p.id"
                 class="playlist-card"
+                :class="{ selected: playlistSelection.has(p.id) }"
                 draggable="true"
                 @dragstart="onPlaylistDragStart(p, $event)"
-                @click="onPlaylistClick(p)"
+                @click="onPlaylistCardClick(p)"
                 @contextmenu="openContextMenu($event, playlistMenuActions(p), p.name, playlistMeta(p))"
                 v-longpress="() => openActionSheet(playlistMenuActions(p), p.name, playlistMeta(p))"
               >
@@ -328,9 +411,10 @@
                 v-for="p in currentFolderPlaylists"
                 :key="p.id"
                 class="playlist-card"
+                :class="{ selected: playlistSelection.has(p.id) }"
                 draggable="true"
                 @dragstart="onPlaylistDragStart(p, $event)"
-                @click="onPlaylistClick(p)"
+                @click="onPlaylistCardClick(p)"
                 @contextmenu="openContextMenu($event, playlistMenuActions(p), p.name, playlistMeta(p))"
                 v-longpress="() => openActionSheet(playlistMenuActions(p), p.name, playlistMeta(p))"
               >
@@ -436,7 +520,7 @@
     <!-- ===== 移动歌单到文件夹 ===== -->
     <el-dialog
       v-model="moveDialogOpen"
-      :title="t('study.moveToFolderTitle', { name: moveTarget?.name || '' })"
+      :title="moveDialogTitle"
       width="420px"
     >
       <div class="add-dialog">
@@ -488,7 +572,7 @@ import { ref, computed, onMounted, onBeforeUnmount } from "vue";
 import { useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { Play, Folder, RefreshCw, ListMusic, Plus, Info, Pencil, Trash2, Download } from "lucide-vue-next";
+import { Play, Folder, RefreshCw, ListMusic, Plus, Info, Pencil, Trash2, Download, Check } from "lucide-vue-next";
 import api from "@/api";
 import { usePlayerStore } from "@/stores/player";
 import { useItemActions, type MenuAction } from "@/composables/useItemActions";
@@ -875,6 +959,9 @@ function playlistMenuActions(p: StudyPlaylist): MenuAction[] {
     { label: t("playlists.playAll"), icon: Play, onClick: () => playPlaylist(p) },
     { label: t("playlists.viewPlaylist"), icon: Folder, onClick: () => openPlaylist(p) },
     { label: t("study.exportPlaylist"), icon: Download, onClick: () => exportPlaylist(p) },
+    ...(playlistSelection.value.size === 0
+      ? [{ label: t("study.multiSelect"), icon: Check, onClick: () => enterPlaylistSelection(p) }]
+      : []),
     { divider: true },
     { label: t("study.moveToFolder"), icon: Folder, onClick: () => openMoveDialog(p) },
     ...(p.folder
@@ -947,31 +1034,85 @@ function resume(index: number) {
 function onTabChange(name: any) {
   searchResults.value = null;
   playlistResults.value = null;
+  clearPlaylistSelection();
   if (name === "continue") loadContinue();
   else if (name === "recent") loadRecent();
   else if (name === "playlists") loadPlaylists();
   else if (name === "dir" && currentDir.value && dirEntries.value.length === 0) loadDir();
 }
 
-// ==================== 搜索 ====================
+// ==================== 搜索(内容 + 歌单统一) ====================
 const query = ref("");
 const searchResults = ref<StudySong[] | null>(null);
 const playlistResults = ref<StudyPlaylist[] | null>(null);
+/** 搜索结果排序:默认歌单在前,可切换内容在前或按名称。 */
+const searchSort = ref<"playlist-first" | "content-first" | "name">("playlist-first");
+const playlistsFirst = computed(() => searchSort.value !== "content-first");
+const sortedPlaylists = computed(() => {
+  const list = playlistResults.value || [];
+  if (searchSort.value !== "name") return list;
+  return [...list].sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
+});
+const sortedSongs = computed(() => {
+  const list = searchResults.value || [];
+  if (searchSort.value !== "name") return list;
+  return [...list].sort((a, b) => a.title.localeCompare(b.title, "zh-CN"));
+});
 async function doSearch() {
   const q = query.value.trim();
   if (!q) return;
-  if (mode.value === "playlists") {
-    searchResults.value = null;
-    playlistResults.value = (await fetchStudyPlaylists(q).catch(() => ({ items: [], folders: [] }))).items;
-    return;
-  }
-  playlistResults.value = null;
-  searchResults.value = await searchStudy(q, 100).catch(() => []);
+  // 统一搜索:一次同时查学习内容与学习歌单,结果分组展示。
+  const [songs, playlists] = await Promise.all([
+    searchStudy(q, 100).catch(() => [] as StudySong[]),
+    fetchStudyPlaylists(q).catch(() => ({ items: [] as StudyPlaylist[], folders: [] as string[] })),
+  ]);
+  searchResults.value = songs;
+  playlistResults.value = playlists.items;
 }
 function clearSearch() {
   query.value = "";
   searchResults.value = null;
   playlistResults.value = null;
+}
+
+/** 内容结果:点击跳转到该文件所在目录(总目录内定位)。 */
+async function jumpToSongDir(s: StudySong) {
+  const sourceId = s.sourceId || "";
+  if (!sourceId) return;
+  let sourceName = sources.value.find((x) => x.id === sourceId)?.name || "";
+  if (!sourceName) {
+    await loadSources();
+    sourceName = sources.value.find((x) => x.id === sourceId)?.name || "";
+  }
+  clearSearch();
+  mode.value = "dir";
+  currentDir.value = { sourceId, sourceName, relDir: s.relDir || "" };
+  await loadDir();
+}
+
+/** 歌单结果:点击跳转到该歌单所在的学习歌单文件夹。 */
+function jumpToPlaylistFolder(p: StudyPlaylist) {
+  clearSearch();
+  mode.value = "playlists";
+  currentFolder.value = p.folder || "";
+  loadPlaylists();
+}
+
+function onSearchPlaylistClick(p: StudyPlaylist) {
+  if (menuGuard()) return;
+  if (playlistSelection.value.size > 0) {
+    const next = new Set(playlistSelection.value);
+    if (next.has(p.id)) next.delete(p.id);
+    else next.add(p.id);
+    playlistSelection.value = next;
+    return;
+  }
+  jumpToPlaylistFolder(p);
+}
+
+/** 内容结果的播放按钮:只播这一条,不影响结果列表。 */
+function onSearchPlay(s: StudySong, _index: number) {
+  playSongs([s], 0);
 }
 
 // ==================== 学习歌单 ====================
@@ -1066,25 +1207,69 @@ async function removeFolder(name: string) {
   }
 }
 
-// ---- 拖拽歌单到文件夹 ----
+// ---- 多选:右键/长按「多选」进入,再点卡片勾选;选中后可整体拖入文件夹 ----
+const playlistSelection = ref<Set<string>>(new Set());
+function enterPlaylistSelection(p: StudyPlaylist) {
+  playlistSelection.value = new Set([p.id]);
+}
+function onPlaylistCardClick(p: StudyPlaylist) {
+  if (menuGuard()) return;
+  if (playlistSelection.value.size > 0) {
+    const next = new Set(playlistSelection.value);
+    if (next.has(p.id)) next.delete(p.id);
+    else next.add(p.id);
+    playlistSelection.value = next;
+    return;
+  }
+  openPlaylist(p);
+}
+function clearPlaylistSelection() {
+  if (playlistSelection.value.size === 0) return;
+  playlistSelection.value = new Set();
+}
+function selectedPlaylists(): StudyPlaylist[] {
+  return playlists.value.filter((p) => playlistSelection.value.has(p.id));
+}
+
+// ---- 拖拽歌单到文件夹(支持多选批量) ----
 const draggedPlaylistId = ref("");
+const draggedPlaylistIds = ref<string[]>([]);
 const dragOverFolder = ref("");
 function onPlaylistDragStart(p: StudyPlaylist, ev: DragEvent) {
+  const ids = playlistSelection.value.has(p.id) && playlistSelection.value.size > 1
+    ? [...playlistSelection.value]
+    : [p.id];
+  draggedPlaylistIds.value = ids;
   draggedPlaylistId.value = p.id;
-  ev.dataTransfer?.setData("text/plain", p.id);
+  ev.dataTransfer?.setData("text/plain", ids.join(","));
   if (ev.dataTransfer) ev.dataTransfer.effectAllowed = "move";
 }
 function onFolderDragLeave(name: string) {
   if (dragOverFolder.value === name) dragOverFolder.value = "";
 }
 async function dropPlaylistOnFolder(folder: string) {
-  const id = draggedPlaylistId.value;
+  const ids = draggedPlaylistIds.value.length
+    ? [...draggedPlaylistIds.value]
+    : (draggedPlaylistId.value ? [draggedPlaylistId.value] : []);
   draggedPlaylistId.value = "";
+  draggedPlaylistIds.value = [];
   dragOverFolder.value = "";
-  if (!id) return;
-  const p = playlists.value.find((x) => x.id === id);
-  if (!p || (p.folder || "") === folder) return;
-  await movePlaylistToFolder(p, folder);
+  const targets = playlists.value.filter((p) => ids.includes(p.id) && (p.folder || "") !== folder);
+  if (targets.length === 0) return;
+  try {
+    for (const p of targets) await updateStudyPlaylist(p.id, { folder });
+    await loadPlaylists();
+    clearPlaylistSelection();
+    ElMessage.success(
+      targets.length > 1
+        ? t("study.movedSelectedToFolder", { count: targets.length, name: folder || t("study.rootFolder") })
+        : folder
+          ? t("study.movedToFolder", { name: folder })
+          : t("study.removedFromFolder"),
+    );
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.error || t("common.operationFailed"));
+  }
 }
 async function movePlaylistToFolder(p: StudyPlaylist, folder: string) {
   try {
@@ -1096,29 +1281,50 @@ async function movePlaylistToFolder(p: StudyPlaylist, folder: string) {
   }
 }
 
-// ---- 右键菜单「移动到文件夹」 ----
+// ---- 右键菜单「移动到文件夹」(单个/多选共用) ----
 const moveDialogOpen = ref(false);
-const moveTarget = ref<StudyPlaylist | null>(null);
+const moveTargets = ref<StudyPlaylist[]>([]);
 const moveFolder = ref("");
 const moveNewFolder = ref("");
 const moving = ref(false);
+const moveDialogTitle = computed(() =>
+  moveTargets.value.length > 1
+    ? t("study.moveSelectedToFolderTitle", { count: moveTargets.value.length })
+    : t("study.moveToFolderTitle", { name: moveTargets.value[0]?.name || "" }),
+);
 function openMoveDialog(p: StudyPlaylist) {
-  moveTarget.value = p;
+  moveTargets.value = [p];
   moveFolder.value = p.folder || "";
   moveNewFolder.value = "";
   moveDialogOpen.value = true;
   if (folders.value.length === 0) loadPlaylists();
 }
+function openBatchMoveDialog() {
+  const targets = selectedPlaylists();
+  if (targets.length === 0) return;
+  moveTargets.value = targets;
+  moveFolder.value = "";
+  moveNewFolder.value = "";
+  moveDialogOpen.value = true;
+  if (folders.value.length === 0) loadPlaylists();
+}
 async function confirmMove() {
-  const p = moveTarget.value;
-  if (!p) return;
+  if (moveTargets.value.length === 0) return;
+  const targets = [...moveTargets.value];
   moving.value = true;
   try {
     const folder = moveNewFolder.value.trim() || moveFolder.value;
-    await updateStudyPlaylist(p.id, { folder });
+    for (const p of targets) await updateStudyPlaylist(p.id, { folder });
     moveDialogOpen.value = false;
+    clearPlaylistSelection();
     await loadPlaylists();
-    ElMessage.success(folder ? t("study.movedToFolder", { name: folder }) : t("study.removedFromFolder"));
+    ElMessage.success(
+      targets.length > 1
+        ? t("study.movedSelectedToFolder", { count: targets.length, name: folder || t("study.rootFolder") })
+        : folder
+          ? t("study.movedToFolder", { name: folder })
+          : t("study.removedFromFolder"),
+    );
   } catch (e: any) {
     ElMessage.error(e?.response?.data?.error || t("common.operationFailed"));
   } finally {
@@ -1283,14 +1489,8 @@ async function exportPlaylist(p: StudyPlaylist) {
 // ---- 点击入口:长按弹出菜单后,吞掉随后触发的那次 click ----
 function onSourceClick(s: StudySource) { if (menuGuard()) return; openSource(s); }
 function onFolderClick(d: StudyDirEntry) { if (menuGuard()) return; enterSubdir(d); }
-function onPlaylistClick(p: StudyPlaylist) { if (menuGuard()) return; openPlaylist(p); }
 function onResumeClick(i: number) { if (menuGuard()) return; resume(i); }
 function onRecentClick(i: number) { if (menuGuard()) return; playSongs(recentItems.value, i); }
-function onSearchClick(i: number) {
-  if (menuGuard() || !searchResults.value) return;
-  playSongs(searchResults.value, i);
-}
-
 // ==================== 加入学习歌单(单首 / 多选 / 整目录) ====================
 interface AddTarget {
   songIds: string[];
@@ -1444,6 +1644,18 @@ onBeforeUnmount(() => {
 }
 .folder-card.root-drop { margin-bottom: 12px; }
 .folder-grid.playlists { margin-bottom: 12px; }
+.playlist-card.selected {
+  background: rgba(84, 160, 255, 0.14);
+  outline: 2px solid rgba(84, 160, 255, 0.55);
+  outline-offset: -2px;
+}
+.search-sort { display: flex; align-items: center; gap: 8px; }
+.search-sort .sort-label { font-size: 12px; color: var(--fnos-text-tertiary); }
+.search-sort .sort-select { width: 132px; }
+.result-subhead {
+  margin: 12px 0 8px; font-size: 12px; font-weight: 600;
+  color: var(--fnos-text-secondary);
+}
 .study-body { display: block; }
 .content-panel { min-width: 0; }
 
