@@ -518,7 +518,7 @@
     </div>
 
     <!-- ===== 加入学习歌单 ===== -->
-    <el-dialog v-model="addDialogOpen" :title="t('study.addToPlaylist')" width="420px">
+    <el-dialog v-model="addDialogOpen" :title="t('study.addToPlaylist')" width="420px" :append-to-body="true">
       <div class="add-dialog">
         <el-select v-model="addPlaylistId" :placeholder="t('study.pickPlaylist')" class="add-select" :loading="loadingPlaylists">
           <el-option v-for="p in playlists" :key="p.id" :label="`${p.name} (${p.songCount})`" :value="p.id" />
@@ -536,6 +536,7 @@
       v-model="moveDialogOpen"
       :title="moveDialogTitle"
       width="420px"
+      :append-to-body="true"
     >
       <div class="add-dialog">
         <el-select v-model="moveFolder" :placeholder="t('study.pickFolder')" class="add-select">
