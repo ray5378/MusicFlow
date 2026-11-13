@@ -63,3 +63,8 @@ mfos_v4/
 mfos_v5/
 player_check/
 backend/scripts-local/
+
+# 构建产物与本地临时脚本目录
+backend/public/
+_dev/
+_p6b/
