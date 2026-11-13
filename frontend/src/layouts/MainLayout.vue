@@ -264,7 +264,8 @@
           <el-tooltip :content="t('layout.nextTrack')" placement="top">
             <el-button circle @click="playerStore.next" class="ctrl-btn"><MfIcon name="SkipForward" :size="20" /></el-button>
           </el-tooltip>
-          <el-select v-if="playerStore.isStudyPlaying" :model-value="playerStore.studyRate" size="small" class="study-rate" @change="onStudyRate">
+          <!-- 倍速:音乐与学习音频统一生效,常驻在播放控件最右侧 -->
+          <el-select :model-value="playerStore.studyRate" size="small" class="study-rate" @change="onStudyRate">
             <el-option v-for="r in studyRates" :key="r" :label="`${r}x`" :value="r" />
           </el-select>
         </div>
@@ -1247,7 +1248,8 @@ watch(controlsDrawerOpen, (open) => {
   bottom: 18px;
   left: 50%;
   transform: translateX(-50%);
-  width: min(870px, calc(100% - 200px));
+  /* 常驻倍速选择器后,播放条整体加宽一个倍速按钮的宽度,避免控件挤压重叠 */
+  width: min(958px, calc(100% - 160px));
   height: 84px;
   border-radius: 999px;
   background: rgba(15, 14, 22, 0.92);
@@ -1256,8 +1258,8 @@ watch(controlsDrawerOpen, (open) => {
   overflow: hidden;
   display: flex;
   align-items: center;
-  padding: 0 26px 0 40px;
-  gap: 14px;
+  padding: 0 22px 0 32px;
+  gap: 12px;
   z-index: 50;
 
   .player-left {
@@ -1354,7 +1356,7 @@ watch(controlsDrawerOpen, (open) => {
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    .player-controls { display: flex; align-items: center; justify-content: center; gap: 12px; }
+    .player-controls { display: flex; align-items: center; justify-content: center; gap: 8px; white-space: nowrap; }
   }
   .player-right {
     display: flex; align-items: center; gap: 8px;
@@ -1440,9 +1442,9 @@ watch(controlsDrawerOpen, (open) => {
   }
 }
 .ctrl-btn .playback-icon { display: block; }
-/* 学习音频:前进 15 秒图标左右翻转;倍速选择器跟随播放条 */
+/* 学习音频:前进 15 秒图标左右翻转;倍速选择器常驻播放条 */
 .flip-x { transform: scaleX(-1); }
-.study-rate { width: 84px; margin-left: 4px; }
+.study-rate { width: 78px; margin-left: 2px; }
 .study-rate :deep(.el-select__wrapper) { min-height: 28px; }
 /* 主播放按钮：保留红色实心（无边框） */
 .ctrl-btn.play-btn {

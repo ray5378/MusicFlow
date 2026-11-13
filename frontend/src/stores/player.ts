@@ -226,8 +226,11 @@ export const usePlayerStore = defineStore("player", () => {
   const localCurrentTime = ref(0);
   const localDuration = ref(0);
   const localPlayMode = ref<PlayMode>((localStorage.getItem("playMode") as PlayMode) || "shuffle");
-  // 学习模块倍速:只对 kind='study' 的音频生效(音乐恒 1.0,避免影响普通听歌)。
-  const studyRate = ref(Number(localStorage.getItem("studyRate") || "1") || 1);
+  // 播放倍速:对音乐与学习音频都生效;沿用旧键 studyRate 做一次兼容读取。
+  const playbackRate = ref(
+    Number(localStorage.getItem("playback_rate") || localStorage.getItem("studyRate") || "1") || 1,
+  );
+  const studyRate = playbackRate;
   const localLyrics = ref<LyricLine[]>([]);
   const localCurrentLyricLine = ref("");
   const localCurrentLyricIndex = ref(-1);
@@ -606,8 +609,8 @@ export const usePlayerStore = defineStore("player", () => {
       onloaderror: () => { localHandlePlaybackError(song.id); },
       onplayerror: () => { localHandlePlaybackError(song.id); },
     });
-    // 学习音频恢复用户上次选择的倍速;音乐恒 1.0(studyRate 不作用于普通歌曲)。
-    if (song.kind === "study" && studyRate.value !== 1) howl.rate(studyRate.value);
+    // 音乐与学习音频统一恢复用户上次选择的倍速。
+    if (playbackRate.value !== 1) howl.rate(playbackRate.value);
     if (!autoplay) {
       // 暂停态下拖动：只重建流、不自动播（管道有背压，不会空跑），保持暂停外观。
       localIsPlaying.value = false;
@@ -1157,13 +1160,13 @@ export const usePlayerStore = defineStore("player", () => {
   }
   /** 当前是否在学习音频上(供学习页控制条显示)。 */
   const isStudyPlaying = computed(() => !!currentStudySong());
-  /** 倍速:仅学习音频生效;写入 localStorage 记住用户上次选择。 */
+  /** 播放倍速:音乐/学习音频统一生效;写入 localStorage 记住用户上次选择。 */
   function setStudyRate(rate: number): void {
     const r = Math.min(2, Math.max(0.5, Number(rate) || 1));
-    if (r === studyRate.value) return;
-    studyRate.value = r;
-    localStorage.setItem("studyRate", String(r));
-    if (!howl || !currentStudySong()) return;
+    if (r === playbackRate.value) return;
+    playbackRate.value = r;
+    localStorage.setItem("playback_rate", String(r));
+    if (!howl || !currentSong.value) return;
     // 不能直接 howl.rate():Howler 对 html5 音频会把 native `ended` 监听删掉,
     // 改装一个按 duration 计算的 setTimeout;而 /rest/stream 是实时管道,duration
     // 常为 Infinity/NaN → 播完不触发 onend,下一首永远不开始。暂停时同样会中招
