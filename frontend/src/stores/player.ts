@@ -242,6 +242,27 @@ export const usePlayerStore = defineStore("player", () => {
   // 起算，需加回该偏移才是逻辑位置（进度显示 / 歌词 / 时长）。换歌 / 正常起播时归 0。
   const localStreamOffset = ref(0);
   let howl: Howl | null = null;
+  /**
+   * 把倍速写进 Howler 内部状态与原生 audio 节点,立即生效。
+   * - howl._rate / sound._rate:Howler 的 html5 play()(playHtml5)每次都会用
+   *   sound._rate 重置 node.playbackRate,只写节点的话「暂停→恢复」「重复 play()」
+   *   就丢倍速(用户看到的现象就是倍速失效);
+   * - node.playbackRate:当前正在播的节点立即生效。
+   * 刻意不调用 howl.rate():它会用 duration 重挂结束定时器(实时管道流 duration
+   * 常为 Infinity/NaN),导致播完不触发 onend、下一首不开始。
+   */
+  function applyPlaybackRate(): void {
+    const h = howl as any;
+    if (!h) return;
+    const r = playbackRate.value;
+    h._rate = r;
+    const sounds: any[] = h._sounds || [];
+    for (const s of sounds) {
+      s._rate = r;
+      const node = s?._node;
+      if (node && typeof node.playbackRate === "number") node.playbackRate = r;
+    }
+  }
   // 当前 Howl 对应的歌曲:换歌瞬间 localIndex 已前进,但旧流还没 unload ——
   // 上报学习进度必须按「流对应的歌」写,不能按队列当前项写(否则会把上一首的
   // 进度写成下一首的,直接把下一首标记成已学完)。
@@ -609,26 +630,13 @@ export const usePlayerStore = defineStore("player", () => {
       onloaderror: () => { localHandlePlaybackError(song.id); },
       onplayerror: () => { localHandlePlaybackError(song.id); },
     });
-    // 倍速:直接写原生 audio.playbackRate,不要用 howl.rate()。
-    // Howler 的 html5 rate() 会重挂基于 duration 的结束定时器并移除 native ended
-    // 监听;而 /rest/stream 是实时管道流,duration 常为 Infinity/NaN,结果是播完
-    // 不触发 onend、下一首永远不开始。写原生属性不会动 ended 绑定,切歌链路保持原样。
-    // 注意:Howler 实例上没有 _node,音频节点在 howl._sounds[0]._node。
-    const localAudioNode = () => {
-      const node = (howl as any)?._sounds?.[0]?._node;
-      return node && typeof node.playbackRate === "number"
-        ? (node as HTMLAudioElement)
-        : null;
-    };
-    const applyLocalRate = () => {
-      const node = localAudioNode();
-      if (node) node.playbackRate = playbackRate.value;
-    };
-    if (playbackRate.value !== 1) {
-      applyLocalRate();
-      // 重新 play() 后(如暂停态重建)再补一次,避免节点重建丢失倍速。
-      howl.once("play", applyLocalRate);
-    }
+    // 倍速:统一走 applyPlaybackRate(Howler 内部 rate + 原生节点),不要用 howl.rate()。
+    // 见 applyPlaybackRate 注释:howl.rate() 会破坏管道流的 ended,只写节点又会被
+    // Howler 的 play() 重置回 1。
+    applyPlaybackRate();
+    // playHtml5 在每次 play() 时会先按 sound._rate 写节点,再 emit play ——
+    // 这里再补一次兜底(节点重建 / 暂停恢复都覆盖到)。
+    howl.on("play", applyPlaybackRate);
     if (!autoplay) {
       // 暂停态下拖动：只重建流、不自动播（管道有背压，不会空跑），保持暂停外观。
       localIsPlaying.value = false;
@@ -1184,18 +1192,9 @@ export const usePlayerStore = defineStore("player", () => {
     if (r === playbackRate.value) return;
     playbackRate.value = r;
     localStorage.setItem("playback_rate", String(r));
-    if (!howl || !currentSong.value) return;
-    // 不能直接 howl.rate():Howler 对 html5 音频会把 native `ended` 监听删掉,
-    // 改装一个按 duration 计算的 setTimeout;而 /rest/stream 是实时管道,duration
-    // 常为 Infinity/NaN → 播完不触发 onend,下一首永远不开始。暂停时同样会中招
-    // (上一轮播放留下的 _endTimers 还在)。
-    // 统一改为带当前位置重建流:新 Howl 在 play 前应用 rate(走 Howler 的 load
-    // queue),继续使用 native ended,切歌链路保持原样。
-    if (localSeekTimer) { clearTimeout(localSeekTimer); localSeekTimer = null; }
-    localSeekActive = false;
-    const wasPlaying = howl.playing();
-    const target = seekTargetFromLogical(Math.max(0, localCurrentTime.value));
-    startLocalPlayback({ timeOffsetSec: target.serverOffset, autoplay: wasPlaying });
+    // 直接改内部 rate + 原生节点,立即生效:不重建流(不打断播放/不重新缓冲),
+    // 也不走 howl.rate()(会把结束定时器改成基于 duration 的 setTimeout → 切歌失效)。
+    applyPlaybackRate();
   }
   /** 快进/快退(学习页的 ±15 秒)。走统一 seek:本机带 timeOffset 重拉,投屏走 castSeek。 */
   function skipBy(seconds: number): void {
