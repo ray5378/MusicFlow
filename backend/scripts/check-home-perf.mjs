@@ -497,6 +497,34 @@ mustMatch(
   "歌单池响应不含 coverArt，Home 必须按 pl-<id> 派生封面（否则首屏封面整块消失）",
 );
 
+// ---------- R9 下半屏懒挂载占位高度（方案 B，2026-11-14） ----------
+// 病灶：LazyMount 未挂载时外层 div 高度恒为 0，首屏之后所有分区的触发点塌缩成同一条线，
+// 表现为「必须滚到固定推荐最下面，榜单/本地随机才一起出现」。修法：用首屏已有元素实测
+// 卡高/列数/间距，反推每个分区占位高度传给 LazyMount 做 min-height。
+// 三条断言分别钉住：占位接线（少一处就等于没修）、测量失败退化（不得用 0 高度占位）、
+// 运行时测量（不得退化成写死断点常量）。
+const LAZYMOUNT = "frontend/src/components/LazyMount.vue";
+mustMatch(
+  HOME,
+  /:reserve="reserveFor\(group\.playlists\.length\)"/,
+  "下半屏 LazyMount 必须传 reserve 占位高度（不传则未挂载分区高度为 0，触发点塌缩回同一条线）",
+);
+mustMatch(
+  HOME,
+  /if \(lzCardH\.value <= 0\) return 0;/,
+  "占位测量失败（隐藏页/首帧未布局）必须退化为不占位，不得用 0 或负高度占位",
+);
+mustMatch(
+  HOME,
+  /const cols = cs\.gridTemplateColumns\.split/,
+  "占位几何必须运行时测量列数（写死 4/3/2 会在断点漂移后算出错误的行数）",
+);
+mustMatch(
+  LAZYMOUNT,
+  /shown\.value \|\| !props\.reserve \? undefined : \{ minHeight:/,
+  "LazyMount 未挂载时必须按 reserve 输出 min-height，且挂载/无 reserve 时不得残留",
+);
+
 if (errors.length) {
   console.error(`✗ 首页性能优化链路守卫失败：${errors.length} 项违规（共 ${checks} 条断言）`);
   for (const e of errors) console.error("  ✗ " + e);

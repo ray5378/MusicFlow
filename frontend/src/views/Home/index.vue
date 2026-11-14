@@ -81,7 +81,11 @@
     </div>
 
     <!-- ===== 首页推荐分区（按 sortOrder 排序，go-music-dl 推荐 + 本地随机混合排列） ===== -->
-    <LazyMount v-for="group in sortedAllGroups" :key="group.type + '-' + group.source + '-' + (group._pluginId || '')">
+    <LazyMount
+      v-for="group in sortedAllGroups"
+      :key="group.type + '-' + group.source + '-' + (group._pluginId || '')"
+      :reserve="reserveFor(group.playlists.length)"
+    >
     <section class="section">
       <template v-if="group.type === 'recommend'">
         <div class="section-title">
@@ -514,6 +518,62 @@ async function loadRecommend() {
   }
 }
 
+// ==================== 下半屏懒挂载占位高度（2026-11-14，方案 B） ====================
+// LazyMount 未挂载时外层 div 高度为 0，首屏之后所有分区的触发点会塌缩成同一条线：
+// 实测表现为「必须滚到固定推荐最下面，榜单/本地随机才一起出现」。这里用首屏已有元素
+// 反推每个分区的预估高度（块标题 + N 行卡片 + 分区外边距），交给 LazyMount 做 min-height
+// 占位。硬编码常量会随断点(4/3/2 列)与 SCSS 漂移，故行高/列数/间距全部运行时测量。
+const LZ_FALLBACK_GAP = 16;
+const lzCardH = ref(0);
+const lzTitleH = ref(0);
+const lzSectionMb = ref(0);
+const lzGap = ref(LZ_FALLBACK_GAP);
+const lzCols = ref(4);
+
+function measureLazyGeom(): void {
+  const topRow = document.querySelector(".home-page .top-row") as HTMLElement | null;
+  const card = topRow?.querySelector(".card") as HTMLElement | null;
+  const title = document.querySelector(".home-page .section-title") as HTMLElement | null;
+  const section = document.querySelector(".home-page .section") as HTMLElement | null;
+  // keep-alive 隐藏 / 首帧尚未布局时 offsetHeight 为 0：保留上一次量值，不清空。
+  if (!card || card.offsetHeight <= 0) return;
+  lzCardH.value = card.offsetHeight;
+  if (topRow) {
+    const cs = getComputedStyle(topRow);
+    const cols = cs.gridTemplateColumns.split(" ").filter((s) => s && s !== "none").length;
+    if (cols > 0) lzCols.value = cols;
+    const gap = parseFloat(cs.rowGap || cs.gap || "");
+    lzGap.value = Number.isFinite(gap) && gap >= 0 ? gap : LZ_FALLBACK_GAP;
+  }
+  if (title) {
+    const mb = parseFloat(getComputedStyle(title).marginBottom || "0");
+    lzTitleH.value = title.offsetHeight + (Number.isFinite(mb) ? mb : 0);
+  }
+  if (section) {
+    const mb = parseFloat(getComputedStyle(section).marginBottom || "0");
+    lzSectionMb.value = Number.isFinite(mb) ? mb : 0;
+  }
+}
+
+/** 单个分区未挂载时的占位高度：块标题 + rows 行卡片 + 分区下外边距。
+ *  必须含 .section 的 margin-bottom：空 wrapper 没有子元素就没有外边距，挂载后
+ *  这条 38px 的间隙才出现。少算它的话，每挂载一块页面就长 38px，滚到后面总高
+ *  从 13254 一路涨到 13862（实测），滚动条与位置都会漂。 */
+function reserveFor(count: number): number {
+  if (lzCardH.value <= 0) return 0; // 测量失败 → 不占位，退化为原行为
+  const rows = Math.max(1, Math.ceil((count || 1) / lzCols.value));
+  return lzTitleH.value + rows * (lzCardH.value + lzGap.value) - lzGap.value + lzSectionMb.value;
+}
+
+let lzResizeTimer: ReturnType<typeof setTimeout> | null = null;
+function onResizeMeasure(): void {
+  if (lzResizeTimer) clearTimeout(lzResizeTimer);
+  lzResizeTimer = setTimeout(() => {
+    lzResizeTimer = null;
+    measureLazyGeom();
+  }, 150);
+}
+
 // ==================== 首屏外呼分层（2026-10-19） ====================
 // 首屏只有 3 路是真关键:歌单(loadPlaylists,并排随机卡直接由它派生)、首页配置
 // (loadHomeConfig)、固定推荐卡(loadHomeCards)。平台精选(loadRecommend)与本地随机
@@ -556,6 +616,11 @@ onUnmounted(() => {
     clearTimeout(lowerTimer);
     lowerTimer = null;
   }
+  if (lzResizeTimer) {
+    clearTimeout(lzResizeTimer);
+    lzResizeTimer = null;
+  }
+  window.removeEventListener("resize", onResizeMeasure);
 });
 
 // Home 位于 MainLayout 的 keep-alive(max=10)内:切走后 onUnmounted 不触发,轮询定时器
@@ -575,6 +640,8 @@ onDeactivated(() => {
 // 分区自愈(keep-alive 命中的是旧实例,onMounted 不会重跑)。
 onActivated(() => {
   localRecommendPaused = false;
+  // 返回缓存页时布局可能已变(窗口尺寸/侧栏/断点),重测占位几何。
+  measureLazyGeom();
   // 首次进入:下半屏由 onMounted 排期,这里不得抢跑(抢跑会让「延迟拉」当场失效)。
   if (!lowerStarted) return;
   if (localRandomChannels.value.length === 0) void loadLocalRandom();
@@ -596,6 +663,8 @@ onMounted(async () => {
   ]);
   loading.value = false;
   await nextTick(); // 让上半屏先完成一次渲染提交,再放行下半屏外呼
+  measureLazyGeom(); // 首屏卡片已布局:量出真实卡高/列数/间距,给下半屏占位
+  window.addEventListener("resize", onResizeMeasure);
   scheduleLowerSections();
 });
 </script>
