@@ -31,17 +31,17 @@
           :key="(s.entryId || s.id) + '-' + i"
           class="study-row"
           @click="onRowClick(i)"
-          @contextmenu="openContextMenu($event, trackMenuActions(s, i), s.title, s.relDir || '')"
-          v-longpress="() => openActionSheet(trackMenuActions(s, i), s.title, s.relDir || '')"
+          @contextmenu="openContextMenu($event, trackMenuActions(s, i), s.fileName || s.title, s.relDir || '')"
+          v-longpress="() => openActionSheet(trackMenuActions(s, i), s.fileName || s.title, s.relDir || '')"
         >
           <span class="row-play" :title="t('layout.play')" @click.stop="playAt(i)">
             <MfIcon name="Play" :size="14" />
           </span>
-          <span class="row-title">{{ s.title }}</span>
+          <span class="row-title">{{ s.fileName || s.title }}</span>
           <span class="row-dir" :title="s.relDir || s.album || ''">{{ s.relDir || s.album || "—" }}</span>
           <span class="row-dur">{{ fmtTime(s.duration) }}</span>
           <span class="row-actions" @click.stop>
-            <span class="row-btn" :title="t('songTable.moreActions')" @click="openContextMenu($event, trackMenuActions(s, i), s.title, s.relDir || '')">
+            <span class="row-btn" :title="t('songTable.moreActions')" @click="openContextMenu($event, trackMenuActions(s, i), s.fileName || s.title, s.relDir || '')">
               <MfIcon name="MoreHorizontal" :size="15" />
             </span>
           </span>

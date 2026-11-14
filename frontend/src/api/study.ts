@@ -212,7 +212,13 @@ export async function fetchStudyPlaylistTracks(
   id: string,
 ): Promise<{ name: string; items: StudySong[] }> {
   const res = await api.get(`/rest/api/v1/study/playlists/${encodeURIComponent(id)}/tracks`);
-  return { name: res.data.name || "", items: res.data.items || [] };
+  const items: StudySong[] = (res.data.items || []).map((s: StudySong) => ({
+    ...s,
+    // 学习歌单曲目统一显示源文件名(含扩展名),与客户端行为一致;
+    // 文件名为空时回退元数据标题(如某些源无法回溯路径)。
+    title: s.fileName || s.title,
+  }));
+  return { name: res.data.name || "", items };
 }
 
 export async function addStudyPlaylistTracks(id: string, add: string[]): Promise<void> {
