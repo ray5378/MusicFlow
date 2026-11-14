@@ -147,7 +147,9 @@ export async function announceOnPeer(opts: AnnounceOptions): Promise<{ targets: 
     if (wasActive && anyWasPlaying) {
       const resumeAt = Math.max(...saved.map(s => s.position), 0);
       const baseUrl = getEffectiveBaseUrl();
+      const studyOwner = qc.getOwnerUserId(peerId);
       await qc.playFrom(peerId, snap.items, snap.currentIndex, baseUrl);
+      qc.setOwnerUserId(peerId, studyOwner);
       if (resumeAt > 2) {
         // 起播后设备需要一点时间就绪才吃得下 seek。
         await new Promise(r => setTimeout(r, 1200));
@@ -200,7 +202,9 @@ async function announceAirPlay(opts: AnnounceOptions): Promise<{ targets: number
     }
     if (wasActive && saved.wasPlaying) {
       const baseUrl = getEffectiveBaseUrl();
+      const studyOwner = qc.getOwnerUserId(peerId);
       await qc.playFrom(peerId, snap.items, snap.currentIndex, baseUrl);
+      qc.setOwnerUserId(peerId, studyOwner);
       if (saved.position > 2) {
         await new Promise(r => setTimeout(r, 1200));
         await qc.transport(peerId, "seek", saved.position).catch(() => {});
@@ -275,7 +279,9 @@ async function announceSendspin(opts: AnnounceOptions): Promise<{ targets: numbe
     }
     if (wasActive && probe.wasPlaying) {
       const baseUrl = getEffectiveBaseUrl();
+      const studyOwner = qc.getOwnerUserId(peerId);
       await qc.playFrom(peerId, snap.items, snap.currentIndex, baseUrl);
+      qc.setOwnerUserId(peerId, studyOwner);
       if (probe.savedPos > 2000) {
         await new Promise((r) => setTimeout(r, 1200));
         await qc.transport(peerId, "seek", Math.floor(probe.savedPos / 1000)).catch(() => {});

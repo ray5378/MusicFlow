@@ -283,7 +283,7 @@ app.post("/v1/peers/:peerId/queue/play", async (c) => {
     // 成员被显式指派播放 → 先脱离活跃组再独立播(MA ensure_player_ungrouped)。
     await detachFromActiveGroups(parsed);
     try {
-      await getQueueManager().playFrom(parsed.id, items, start, getDlnaBaseUrl(c));
+      await getQueueManager().playFrom(parsed.id, items, start, getDlnaBaseUrl(c), undefined, undefined, c.get("user")?.id);
     } catch (e: any) { return c.json(apiInternalError(e), 500); }
     let landed: number | null = null;
     if (askPosition !== null && await seekPeerToSeconds(peerId, askPosition)) landed = askPosition;
@@ -492,6 +492,7 @@ app.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
       startedIdx = await getQueueManager().playFrom(
         parsedTo.id, items, start, getDlnaBaseUrl(c), undefined,
         inCastPos !== null && inCastPos > 0 ? Math.round(inCastPos * 1000) : undefined,
+        c.get("user")?.id,
       );
     } catch (e: any) { return c.json(apiInternalError(e), 500); }
     // 移交只在「目标端真的起播了源端那一首」且**确实落位**时才成立。任一不成立都走
@@ -576,7 +577,7 @@ app.post("/v1/peers/:peerId/queue/enqueue", async (c) => {
   if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
   if (isCastPeer(parsed)) {
     try {
-      await getQueueManager().enqueue(parsed.id, items, getDlnaBaseUrl(c));
+      await getQueueManager().enqueue(parsed.id, items, getDlnaBaseUrl(c), c.get("user")?.id);
       return c.json({ success: true });
     } catch (e: any) { return c.json(apiInternalError(e), 500); }
   }

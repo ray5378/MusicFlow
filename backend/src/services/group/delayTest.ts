@@ -43,6 +43,8 @@ interface PrevQueueState {
   index: number;
   playMode: PlayMode;
   contentContext?: string;
+  /** 起测时的队列归属用户(学习记录按用户隔离,恢复时必须原样带回)。 */
+  ownerUserId?: string;
   /** 起测时的播放进度(秒),停止后恢复用。 */
   positionSec: number;
   /** 起测时该组是否真在出声(PLAYING)。 */
@@ -181,6 +183,7 @@ export async function startGroupDelayTest(groupId: string, baseUrl: string): Pro
     index: snap.currentIndex,
     playMode: snap.playMode,
     contentContext: qc.getContentContext(groupId),
+    ownerUserId: qc.getOwnerUserId(groupId),
     positionSec: 0,
     wasPlaying: false,
     wasPaused: false,
@@ -235,11 +238,13 @@ async function restorePrevQueue(
     // 先切 "one":playFrom 对 startIndex=0 的 shuffle 队列会随机挑首,直接按原下标恢复会被打乱。
     qc.setPlayMode(groupId, "one");
     await qc.playFrom(groupId, prev.items, index, baseUrl, prev.contentContext);
+    qc.setOwnerUserId(groupId, prev.ownerUserId);
     qc.setPlayMode(groupId, prev.playMode);
     if (prev.wasPaused) await qc.transport(groupId, "pause");
     else if (prev.positionSec > 0) await qc.transport(groupId, "seek", prev.positionSec);
   } else {
     qc.setQueue(groupId, prev.items, index, baseUrl, prev.contentContext);
+    qc.setOwnerUserId(groupId, prev.ownerUserId);
     qc.setPlayMode(groupId, prev.playMode);
     qc.stopPlayback(groupId); // setQueue 会置 isActive=true,这里还原成「停止」现场
   }

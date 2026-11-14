@@ -48,6 +48,10 @@ const h = vi.hoisted(() => {
     getContentContext() {
       return "ctx" as string | undefined;
     },
+    getOwnerUserId() {
+      return undefined as string | undefined;
+    },
+    setOwnerUserId() { /* 归属用户:测试里无需真实恢复 */ },
     async playFrom(_id: string, items: any[], index: number) {
       calls.push(["playFrom", items, index]);
       if (state.playFromThrowsOnce) {

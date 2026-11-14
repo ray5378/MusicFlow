@@ -81,12 +81,13 @@ app.post("/v1/play", async (c) => {
   let landedPosition: number | null = null;
   if (isCastPeer(parsed)) {
     try {
-      if (enqueue) { await getQueueManager().enqueue(parsed.id, items, baseUrl); effectiveStart = 0; }
+      if (enqueue) { await getQueueManager().enqueue(parsed.id, items, baseUrl, user?.id); effectiveStart = 0; }
       // 第 5 参 contentContext 必须传:它是 QueueData 上唯一的「这条队列来自哪个内容」
       // 标记,runPlaylistAutoMatch 靠它与 opts.contentContext 严格比对来确认队列没被换掉。
       // 漏传 => 队列上 contentContext 恒 undefined => 比对恒失败 => 补齐永远不执行。
+      // 第 6 参 ownerUserId:本次播放归属用户(服务端据此写学习记录,按用户隔离)。
       else effectiveStart = await getQueueManager()
-        .playFrom(parsed.id, items, start, baseUrl, type === "playlist" ? `playlist:${id}` : undefined);
+        .playFrom(parsed.id, items, start, baseUrl, type === "playlist" ? `playlist:${id}` : undefined, undefined, user?.id);
     } catch (e: any) { return c.json(apiError(BusinessErrorCode.UPSTREAM_ERROR, e.message || "errors.player.playFailed"), apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR)); }
     if (!enqueue && askPosition !== null && await seekPeerToSeconds(peerId, askPosition)) landedPosition = askPosition;
   } else {

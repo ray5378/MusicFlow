@@ -15,7 +15,7 @@ import { cleanupOrphans } from "./scanner.js";
 /** 每批删除条数:400 个绑定参数远低于 SQLite 变量上限,事务也不会过大。 */
 export const BATCH = 400;
 /** 依赖 songs 的表(都靠 song_id/row_id 外键,先删)。 */
-const DEP_TABLES = ["playlist_songs", "user_favorite_songs", "play_history", "study_progress"] as const;
+const DEP_TABLES = ["playlist_songs", "user_favorite_songs", "play_history", "study_progress", "study_playlist_progress"] as const;
 const WHERE = "(path >= ? AND path < ?) OR (path >= ? AND path < ?) OR (path >= ? AND path < ?)";
 
 /** LIKE 前缀 → 范围区间 [lo, hi);hi 用 ';' 是因为 ':' 的下一个 ASCII 就是 ';'。 */

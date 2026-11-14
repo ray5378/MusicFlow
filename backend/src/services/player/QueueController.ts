@@ -27,6 +27,7 @@ import { createLogger } from "../../utils/logger.js";
 import { markSeekIssued, withinSeekSettle, logSeekSettleSuppressed, clearSeekSettle } from "./seekSettle.js";
 import { withinPauseStopSettle, clearPauseStop } from "./pauseStopSettle.js";
 import { getPlaybackSpeed, setPlaybackSpeed, normalizePlaybackSpeed } from "./playbackSpeed.js";
+import { noteStudyPlayback } from "../study/progress.js";
 
 const log = createLogger("QueueController");
 
@@ -93,6 +94,10 @@ interface QueueData {
    *  「队列长度 + 首曲 id」快照去猜会误判(用户中途加一首就对不上;两个同长度的
    *  歌单还会撞车)。内存标记则天然精确,且**进程重启即失效 = 绝不补错队列**。 */
   contentContext?: string;
+  /** **本次播放归属用户**(纯内存,不持久化)。学习音频播放到远端(DLNA/组/AirPlay/
+   *  sendspin)时,服务端据此把学习记录写到该用户名下;为空则跳过(如设备队列没有
+   *  登录用户上下文,由控制端上报)。记录按用户隔离,不同用户互不可见。 */
+  ownerUserId?: string;
   /** 洗牌序(一轮内不重复的队列 index 序列)与位置;随队列重建,不持久化。
    *  与 web 端播放器(v1.7.43 洗牌序)语义对齐:随机播放 = 固定序列一轮不重复。 */
   shuffleOrder?: number[];
@@ -331,6 +336,9 @@ export class QueueController extends EventEmitter {
   private notePositionAdvance(playerId: string, posSec: number, durSec: number): void {
     try {
       const id = stripPlayerPrefix(playerId);
+      // 学习记录(服务端权威写入):与曲末预热无关,flow 会话也要记 ——
+      // 投屏/群组/网页控制时控制端可能根本不活着,只能由服务端落库。
+      this.noteStudyProgress(id, posSec, durSec);
       // flow 会话驱动的设备：它拉的是一条**多曲连续流**，设备侧 position/duration 不对应
       // 单曲（见 handleDecision 入口的 flowOwned 拦截），「下一首」由出流侧在曲目边界
       // 自己推进 —— 这里的预解析没有意义，且会把整队里不该播的歌提前探一遍。
@@ -340,6 +348,64 @@ export class QueueController extends EventEmitter {
       log.debug(
         `[QueueController][drain-preheat] ${playerId}: 预热排程异常（已忽略）: ${String(e?.message || e).slice(0, 120)}`,
       );
+    }
+  }
+
+  /** 学习歌单来源 id（`playlist:<id>`）；其它来源返回 undefined。 */
+  private studyPlaylistIdOf(q: QueueData): string | undefined {
+    const ctx = q.contentContext;
+    return ctx?.startsWith("playlist:") ? ctx.slice("playlist:".length) : undefined;
+  }
+
+  /**
+   * 服务端上报一条学习进度（节流/入库都在 services/study/progress）。
+   *
+   * 归属：队列的 `ownerUserId`（起播请求的登录用户）。记录按用户隔离，
+   * 不写音乐播放历史。拿不到用户（纯设备队列）就不写，交给控制端上报。
+   * 纯旁路：任何异常都吞掉，绝不打断播放。
+   */
+  private noteStudyProgress(id: string, posSec: number, durSec: number, force = false): void {
+    try {
+      const q = this.queues.get(id);
+      if (!q || !q.isActive || q.currentIndex < 0 || !q.ownerUserId) return;
+      const item = q.items[q.currentIndex];
+      if (!item || item.kind !== "study") return;
+      // 位置口径与预热一致：协议层 pollState 已把 flow 的流出流秒换算成当前曲
+      // 内容秒（见 dlna/control.ts getDeviceStatus），这里直接用，不能二次换算。
+      const dur = this.knownDuration(item) || durSec || 0;
+      noteStudyPlayback({
+        userId: q.ownerUserId,
+        songId: item.songId,
+        positionSec: posSec,
+        durationSec: dur,
+        playlistId: this.studyPlaylistIdOf(q),
+        force,
+      });
+    } catch (e: any) {
+      log.debug(`[QueueController][study] ${id}: 学习进度忽略: ${String(e?.message || e).slice(0, 120)}`);
+    }
+  }
+
+  /** 切曲/暂停/停止/清队列时把**当前曲的最后位置**强制落库。 */
+  private flushStudyProgress(id: string): void {
+    try {
+      const q = this.queues.get(id);
+      if (!q || q.currentIndex < 0) return;
+      const item = q.items[q.currentIndex];
+      if (!item || item.kind !== "study" || !q.ownerUserId) return;
+      const dur = this.knownDuration(item) || this.lastPlaying.get(id)?.dur || 0;
+      const raw = Math.max(this.lastPos.get(id) ?? 0, this.lastPlaying.get(id)?.pos ?? 0);
+      const pos = dur > 0 ? Math.min(dur, raw) : raw;
+      noteStudyPlayback({
+        userId: q.ownerUserId,
+        songId: item.songId,
+        positionSec: pos,
+        durationSec: dur,
+        playlistId: this.studyPlaylistIdOf(q),
+        force: true,
+      });
+    } catch (e: any) {
+      log.debug(`[QueueController][study] ${id}: 学习进度补报忽略: ${String(e?.message || e).slice(0, 120)}`);
     }
   }
 
@@ -565,8 +631,8 @@ export class QueueController extends EventEmitter {
           });
         }
       }
-      else if (op === "pause") { await player.pause(); this.queueClock.delete(playerId); }
-      else if (op === "stop") { await player.stop(); this.queueClock.delete(playerId); }
+      else if (op === "pause") { await player.pause(); this.queueClock.delete(playerId); this.flushStudyProgress(playerId); }
+      else if (op === "stop") { await player.stop(); this.queueClock.delete(playerId); this.flushStudyProgress(playerId); }
       else if (op === "seek") await player.seek(arg!);
       else if (op === "volume") await player.setVolume(arg!);
     } catch (e: any) {
@@ -964,6 +1030,7 @@ export class QueueController extends EventEmitter {
         } else {
           this.clearDisplayHold(id, true);
         }
+        this.flushStudyProgress(id);
         q.currentIndex = nextIdx;
         q.ended = false;
         await this.playCurrent(id, baseUrl, undefined, "auto-advance");
@@ -1032,6 +1099,7 @@ export class QueueController extends EventEmitter {
           this.stallCounters.delete(id);
           this.advancing.add(id);
           try {
+            this.flushStudyProgress(id);
             q.currentIndex = nextIdx;
             q.ended = false;
             await this.playCurrent(id, baseUrl, undefined, "stall-frozen");
@@ -1916,7 +1984,7 @@ export class QueueController extends EventEmitter {
   /** 仅设数据,不触发播放(供测试 + playFrom 复用)。
    *  `contentContext` 可选:不传表示**清空**来源(点播单曲等无来源队列),
    *  播放触发的后台自动匹配据此跳过补齐。 */
-  setQueue(playerId: string, items: QueueItem[], startIndex: number, baseUrl: string, contentContext?: string): void {
+  setQueue(playerId: string, items: QueueItem[], startIndex: number, baseUrl: string, contentContext?: string, ownerUserId?: string): void {
     playerId = stripPlayerPrefix(playerId);
     // 整队替换 = 用户新意图,放开旧的显示延迟。
     this.clearDisplayHold(playerId);
@@ -1927,6 +1995,11 @@ export class QueueController extends EventEmitter {
     let q = this.queues.get(playerId);
     if (!q) { q = { items: [], currentIndex: -1, playMode: "shuffle", isActive: false, ended: false }; this.queues.set(playerId, q); }
     q.contentContext = contentContext ?? undefined;
+    // 严格按用户隔离:归属用户随**每一次整队替换**一起确定,不保留上一条队列的
+    // 归属(否则上一用户的播放可能把记录记到下一个播放入口上)。
+    // 内部续播/恢复(DLNA 重新 announce、flow 接管、延迟测试)必须显式带上
+    // getOwnerUserId(id) 原样回传,保证会话延续时归属不丢。
+    q.ownerUserId = ownerUserId;
     q.items = items;
     q.currentIndex = Math.max(-1, Math.min(items.length - 1, startIndex));
     if (q.playMode === "shuffle" && items.length > 1) this.rebuildShuffle(q, { keepCurrent: true });
@@ -1944,6 +2017,18 @@ export class QueueController extends EventEmitter {
    *  歌单吗」——只有标记一致才允许把新匹配到的曲目补进队尾,避免补错队列。 */
   getContentContext(playerId: string): string | undefined {
     return this.queues.get(stripPlayerPrefix(playerId))?.contentContext;
+  }
+
+  /** 读队列的**归属用户**(学习记录按用户隔离;无则 undefined)。
+   *  内部续播/恢复(announce/flow/延迟测试)用它把归属原样带回 setQueue。 */
+  getOwnerUserId(playerId: string): string | undefined {
+    return this.queues.get(stripPlayerPrefix(playerId))?.ownerUserId;
+  }
+
+  /** 恢复队列归属用户(内部续播/恢复路径在 playFrom/setQueue 之后回填)。 */
+  setOwnerUserId(playerId: string, userId?: string): void {
+    const q = this.queues.get(stripPlayerPrefix(playerId));
+    if (q) q.ownerUserId = userId;
   }
 
   /**
@@ -1980,6 +2065,8 @@ export class QueueController extends EventEmitter {
      *  不再「先起播、再 seek」。AirPlay 的 seek 是完整重建会话,对 HiVi 这类
      *  单会话设备连续两次建会话会让第二次 RECORD 永久等待(2026-10-21 真机)。 */
     startPositionMs?: number,
+    /** 本次播放归属用户(学习记录按用户隔离;不传则沿用队列已有归属)。 */
+    ownerUserId?: string,
   ): Promise<number> {
     playerId = stripPlayerPrefix(playerId);
     this.clearDisplayHold(playerId);
@@ -2003,7 +2090,7 @@ export class QueueController extends EventEmitter {
       if (dur > 0 && startSec > 0) this.lastPlaying.set(playerId, { pos: startSec, dur, at: Date.now() });
       else this.lastPlaying.delete(playerId);
     }
-    this.setQueue(playerId, items, idx, baseUrl, contentContext);
+    this.setQueue(playerId, items, idx, baseUrl, contentContext, ownerUserId);
     if (!this.advancing.has(playerId)) {
       this.advancing.add(playerId);
       try { await this.playCurrent(playerId, baseUrl, startPositionMs); }
@@ -2029,6 +2116,7 @@ export class QueueController extends EventEmitter {
     if (this.advancing.has(playerId)) return;
     this.advancing.add(playerId);
     try {
+      this.flushStudyProgress(playerId);
       q.currentIndex = index;
       q.isActive = true;
       q.ended = false;
@@ -2067,7 +2155,7 @@ export class QueueController extends EventEmitter {
     if (idx === -1) { this.markEnded(playerId); return; }
     if (this.advancing.has(playerId)) return;
     this.advancing.add(playerId);
-    try { q.currentIndex = idx; q.ended = false; q.isActive = true; await this.playCurrent(playerId, baseUrl, undefined, "direct", true); this.persist(playerId); this.emit("queue_changed", playerId, this.snapshot(playerId)); this.schedulePreProbe(playerId); this.schedulePrefetch(playerId); }
+    try { this.flushStudyProgress(playerId); q.currentIndex = idx; q.ended = false; q.isActive = true; await this.playCurrent(playerId, baseUrl, undefined, "direct", true); this.persist(playerId); this.emit("queue_changed", playerId, this.snapshot(playerId)); this.schedulePreProbe(playerId); this.schedulePrefetch(playerId); }
     finally { this.advancing.delete(playerId); }
   }
 
@@ -2078,6 +2166,7 @@ export class QueueController extends EventEmitter {
     if (this.advancing.has(playerId)) return;
     this.advancing.add(playerId);
     try {
+      this.flushStudyProgress(playerId);
       q.isActive = true; q.ended = false;
       if (q.playMode === "one") { await this.playCurrent(playerId, baseUrl, undefined, "direct", true); }
       else if (q.playMode === "shuffle") {
@@ -2102,6 +2191,8 @@ export class QueueController extends EventEmitter {
   clear(playerId: string, opts?: { skipDeviceStop?: boolean }): void {
     playerId = stripPlayerPrefix(playerId);
     this.clearDisplayHold(playerId);
+    // 清队列前把当前学习音频的最后位置落库(记录不依赖控制端是否还活着)。
+    this.flushStudyProgress(playerId);
     this.flowOwned.delete(playerId); // 队列清空 → 进行中的 flow 会话作废
     this.queueClock.delete(playerId); // 队列侧时钟随队列一起作废
     const q = this.queues.get(playerId); if (!q) return;
@@ -2111,6 +2202,7 @@ export class QueueController extends EventEmitter {
       this.players.get(playerId)?.stop().catch(() => {});
     }
     q.items = []; q.currentIndex = -1; q.isActive = false; q.ended = false;
+    q.ownerUserId = undefined; // 队列清空 → 归属用户一并失效,避免下次队列串记录
     q.shuffleOrder = []; q.shufflePos = -1; q.shuffleLen = 0;
     // 清队列同时清掉设备端的媒体缓存,避免 status 返回上一首残留(组场景清各成员)。
     const group = getGroupManager().get(playerId);
@@ -2297,13 +2389,14 @@ export class QueueController extends EventEmitter {
 
   /** Append items without switching playback. If the queue was empty, start
    *  playing from the first appended item. 对照原 QueueManager.enqueue。 */
-  async enqueue(playerId: string, items: QueueItem[], baseUrl: string): Promise<void> {
+  async enqueue(playerId: string, items: QueueItem[], baseUrl: string, ownerUserId?: string): Promise<void> {
     playerId = stripPlayerPrefix(playerId);
     let q = this.queues.get(playerId);
     if (!q) {
       q = { items: [], currentIndex: -1, playMode: "shuffle", isActive: false, ended: false };
       this.queues.set(playerId, q);
     }
+    if (ownerUserId) q.ownerUserId = ownerUserId;
     q.items.push(...items);
     if (q.currentIndex < 0 && q.items.length > 0) {
       q.currentIndex = 0;
@@ -2329,6 +2422,7 @@ export class QueueController extends EventEmitter {
     this.clearDisplayHold(playerId);
     const q = this.queues.get(playerId); if (!q) return;
     if (index < 0 || index >= q.items.length) return;
+    if (index === q.currentIndex) this.flushStudyProgress(playerId);
     q.items.splice(index, 1);
     if (index < q.currentIndex) {
       q.currentIndex--;

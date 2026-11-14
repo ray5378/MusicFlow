@@ -357,7 +357,7 @@ app.post("/v1/dlna/devices/:deviceId/queue/play", async (c) => {
   const { items, startIndex } = await c.req.json().catch(() => ({} as any));
   if (!Array.isArray(items)) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsItemsArray"), 400);
   try {
-    await getQueueManager().playFrom(deviceId, items, startIndex || 0, getDlnaBaseUrl(c));
+    await getQueueManager().playFrom(deviceId, items, startIndex || 0, getDlnaBaseUrl(c), undefined, undefined, c.get("user")?.id);
     return c.json({ success: true });
   } catch (e: any) { return c.json(apiInternalError(e), 500); }
 });
@@ -370,7 +370,7 @@ app.post("/v1/dlna/devices/:deviceId/queue/enqueue", async (c) => {
   const { items } = await c.req.json().catch(() => ({} as any));
   if (!Array.isArray(items)) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsItemsArray"), 400);
   try {
-    await getQueueManager().enqueue(deviceId, items, getDlnaBaseUrl(c));
+    await getQueueManager().enqueue(deviceId, items, getDlnaBaseUrl(c), c.get("user")?.id);
     return c.json({ success: true });
   } catch (e: any) { return c.json(apiInternalError(e), 500); }
 });

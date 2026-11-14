@@ -76,6 +76,8 @@ function mkQc() {
     })),
     deactivate: vi.fn(() => { callLog.push("deactivate"); }),
     playFrom: vi.fn(async () => { callLog.push("playFrom"); return 0; }),
+    getOwnerUserId: vi.fn(() => undefined),
+    setOwnerUserId: vi.fn(),
     transport: vi.fn(async (_id: string, op: string, arg?: number) => {
       callLog.push(`transport:${op}:${arg}`);
     }),
