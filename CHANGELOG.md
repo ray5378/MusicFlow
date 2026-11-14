@@ -2,6 +2,27 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.14.8] - 2026-11-15
+
+### 修复 / 标签修复：无解曲目收敛终态不可得 + 内嵌封面不落库 + ffmpeg 写封面静默丢弃
+
+- **平台与文件都拿不到的歌进终态，不再每轮重探**（240 实测待修 220 → 0，单轮 ~21 分钟 → ~10 秒）。
+  新增 `isTagRepairTerminal()`：只认 `outcome=unobtainable`，且要求文件 `size` / `mtime` 未变、30 天
+  TTL 未过期；文件一旦被改写即作废标记并重新入选，不会把真修好的曲永久锁死。新增
+  `getTagRepairTerminalPaths()` 走纯 DB 批量查询供 `pending` 口径使用（不逐首 stat）。常规扫跳过终态
+  并计入 `skipped`，全量扫先判终态再决定是否探针。新增 `force` 透传与管理页「强制重试终态不可得」
+  按钮，需要时可一键重探。
+- **修复内嵌封面永远不写回 `albums.cover_art`**。`syncAlbumCoverFromEmbedded` 原先只挂在「写标签
+  成功」分支，走 `unobtainable` 提前返回时被跳过 → 本轮 21 首封面缺口中 14 首文件内嵌本已有图、专辑行
+  却恒空 → 下一轮又被预筛重选，形成死循环。现改为探针后**无条件**回写（并删掉齐备分支里的重复调用），
+  封面缺口 21 → 2（余下 2 首文件与平台均无封面，属真无解）。
+- **修复 ffmpeg 写封面静默丢弃**。封面源为 WebP（被存成 `.jpg`）时，flac muxer 对无已知 mimetype 的
+  图像流只打印 `No mimetype is known for stream 1, cannot write an attached picture.` 却返回
+  `exit=0`，产物与源文件逐字节一致。现改为有封面时 `-c:a copy -c:v mjpeg`：音频仍零转码，封面强制转
+  jpeg。240 真机 5 首全部落盘 `pics=1` 并出现 `METADATA_BLOCK_PICTURE`。
+- `check-tag-repair.mjs` 72 → 79 条（含终态收敛钉子）；5 处变异（删终态跳过 / 全量不判终态 /
+  `pending` 不剔终态 / 终态误吞 `fixed` / 封面回写退回写成功后）实测均可拦红。
+
 ## [4.14.7] - 2026-11-14
 
 ### 性能 / 首页加载卡顿：本地随机接口同步阻塞事件循环 + 下半屏必须滚到固定推荐底部才出现
