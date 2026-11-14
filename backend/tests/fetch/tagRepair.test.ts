@@ -57,7 +57,12 @@ import {
   resumeInterruptedTagRepair,
 } from "../../src/services/fetch/tagRepair.js";
 import type { TagRepairRunSnapshot } from "../../src/services/fetch/tagRepair.js";
-import { markTagRepairDone, isTagRepairMarked, getTagRepairPlatformCounts } from "../../src/services/fetch/tagRepairMarker.js";
+import {
+  markTagRepairDone,
+  isTagRepairMarked,
+  isTagRepairTerminal,
+  getTagRepairPlatformCounts,
+} from "../../src/services/fetch/tagRepairMarker.js";
 import type { FetchConfig } from "../../src/services/fetch/config.js";
 
 // 退避重试测试加速：单元测试无需真等 3s / 6s / 12s（见 tagRepair.ts 的 tagRetryDelaysMs）。
@@ -392,6 +397,36 @@ describe("repairSongTags", () => {
     expect(existsSync(join(getDataDir(), "covers", "alb1.jpg"))).toBe(true);
   });
 
+  it("修正2b（2026-11-15）：内嵌已有封面、歌词各来源都拿不到（走 unobtainable 提前 return）→ 仍回写 albums.cover_art", async () => {
+    const p = join(root, "alb2.flac");
+    db.insert(albums).values({ id: "alb2", name: "专辑", coverArt: null, updatedAt: "" }).run();
+    insertSong("s-alb2", p, { albumId: "alb2", album: "专辑", hasLyrics: 0 });
+    // 文件内嵌封面在、歌词缺 → needCover=false、needLyric=true、provider 无词 → unobtainable。
+    // 此前封面回写只在「写标签成功」后调用，这条路径提前 return → 专辑封面永远空 →
+    // 第一档预筛每轮又把它当「缺封面」重选（实测 14 首死循环、回写日志 0 次）。
+    parseFileMock.mockResolvedValue({
+      common: {
+        picture: [{ format: "image/jpeg", data: Buffer.from("fake-jpeg-bytes") }],
+        lyrics: [],
+        album: "专辑",
+        title: "测试歌",
+        artist: "测试歌手",
+        albumartist: "测试专辑艺术家",
+        track: { no: 3, of: 12 },
+        year: 2024,
+        genre: ["Pop"],
+      },
+    });
+    searchLyricsMock.mockResolvedValue(null);
+
+    const r = await repairSongTags("s-alb2", cfg());
+    expect(r.outcome).toBe("unobtainable");
+    expect(writeTagsMock).not.toHaveBeenCalled();
+    const alb = sqlite.prepare("SELECT cover_art FROM albums WHERE id='alb2'").get() as { cover_art: string };
+    expect(alb.cover_art).toBe("alb2.jpg");
+    expect(existsSync(join(getDataDir(), "covers", "alb2.jpg"))).toBe(true);
+  });
+
   it("修正1：真写入后登记完成标记（src=命中的 provider id）；2026-11-12 起标记不再阻止重试", async () => {
     const p = join(root, "mark-after.flac");
     insertSong("s-ma", p, { hasLyrics: 0 });
@@ -409,7 +444,7 @@ describe("repairSongTags", () => {
     expect(r2.outcome).toBe("skip");
   });
 
-  it("修正6（选项C）：unobtainable（真缺但拿不到）→ 仍登记标记，但每轮强制重试", async () => {
+  it("修正6（选项C）：unobtainable（真缺但拿不到）→ 登记标记；单首函数不判终态（终态在扫描候选层收敛）", async () => {
     const p = join(root, "mark-none.flac");
     insertSong("s-mn", p, { hasLyrics: 0 });
     parseFileMock.mockResolvedValue(probe({ lyric: false }));
@@ -425,7 +460,8 @@ describe("repairSongTags", () => {
     expect(getTagRepairStats().unobtainableTotal).toBe(1);
     // 该行不计入「已修复」
     expect(getTagRepairRepairedTotal()).toBe(0);
-    // 2026-11-12：标记不再跳过 —— 第二轮仍会重新探针并重试
+    // 2026-11-15：终态收敛落在 sweep 候选层（见「终态收敛」describe），
+    // repairSongTags 自身不判终态 —— 队列挡位显式入队的歌仍照跑，这里第二轮仍会探针重试。
     parseFileMock.mockClear();
     const r2 = await repairSongTags("s-mn", cfg());
     expect(parseFileMock).toHaveBeenCalled();
@@ -678,21 +714,25 @@ describe("tagRepair stats/progress", () => {
     expect(getTagRepairStats().repaired).toBe(1); // 运行结束已清缓存，重算拿到新值
   });
 
-  it("修正7（2026-11-12 调整）：pending 不再剔除已落标记的歌（强制重试口径）", () => {
-    const p = join(root, "pend-mk.flac");
-    insertSong("s-pmk", p, { hasLyrics: 0, albumId: null });
+  it("修正7（2026-11-15 终态收敛）：pending 剔除终态不可得，TTL 超期的行重新计入", () => {
+    const fresh = join(root, "pend-fresh.flac");
+    const expired = join(root, "pend-expired.flac");
+    insertSong("s-pfresh", fresh, { hasLyrics: 0, albumId: null });
+    insertSong("s-pexp", expired, { hasLyrics: 0, albumId: null });
     cfg();
-    // 直接登记一行完成标记：stats 口径为纯 DB 判定，不要求文件真实存在、不 stat。
-    sqlite
-      .prepare(
-        "INSERT INTO tag_repair_done (fs_path, size, mtime_ms, src, platform, outcome, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      )
-      .run(p, 1, 1, "tag-repair", "qq", "unobtainable", new Date().toISOString());
+    // 直接登记标记行：stats 口径为纯 DB 判定，不要求文件真实存在、不 stat。
+    const ins = sqlite.prepare(
+      "INSERT INTO tag_repair_done (fs_path, size, mtime_ms, src, platform, outcome, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    );
+    ins.run(fresh, 1, 1, "tag-repair", "qq", "unobtainable", new Date().toISOString());
+    ins.run(expired, 1, 1, "tag-repair", "qq", "unobtainable", new Date(Date.now() - 31 * 24 * 3_600_000).toISOString());
     // beforeEach 已清 statsCache → 首次计算即为最新值（无缓存干扰）。
     const s = getTagRepairStats();
-    expect(s.total).toBe(1);
-    expect(s.pending).toBe(1); // 标记不再阻止重试 → 该歌仍计入待修
-    expect(s.unobtainableTotal).toBe(1);
+    expect(s.total).toBe(2);
+    // 判死且未超 30 天 TTL → 进终态，不再计入待修（否则数字永远压不下去）。
+    // 超期行视为自愈窗口开启 → 重新计入待修。
+    expect(s.pending).toBe(1);
+    expect(s.unobtainableTotal).toBe(2);
   });
 
   it("progress：运行中非空（phase=repair），结束后归 null", async () => {
@@ -1191,6 +1231,62 @@ import { eq } from "drizzle-orm";
 function eqId(id: string) {
   return eq(songs.id, id);
 }
+
+// ---- 终态收敛（2026-11-15）：判死的歌不再每轮重探 ----
+
+describe("终态收敛（2026-11-15）", () => {
+  it("isTagRepairTerminal：只认 unobtainable；fixed 标记不算终态", () => {
+    const p = join(root, "term-fixed.flac");
+    insertSong("s-term1", p, { hasLyrics: 0 });
+    markTagRepairDone(p, "tag-provider");
+    expect(isTagRepairMarked(p)).toBe(true);
+    expect(isTagRepairTerminal(p)).toBe(false); // 已达标 ≠ 判死
+  });
+
+  it("isTagRepairTerminal：文件被改写（size/mtime 变）→ 终态作废", () => {
+    const p = join(root, "term-touch.flac");
+    insertSong("s-term2", p, { hasLyrics: 0 });
+    markTagRepairDone(p, "tag-repair", null, "unobtainable");
+    expect(isTagRepairTerminal(p)).toBe(true);
+    writeFileSync(p, "fLaC-fake-audio-bytes-CHANGED");
+    expect(isTagRepairTerminal(p)).toBe(false);
+  });
+
+  it("isTagRepairTerminal：超过 30 天 TTL → 允许重探（自愈窗口）", () => {
+    const p = join(root, "term-ttl.flac");
+    insertSong("s-term3", p, { hasLyrics: 0 });
+    markTagRepairDone(p, "tag-repair", null, "unobtainable");
+    sqlite
+      .prepare("UPDATE tag_repair_done SET at = ? WHERE fs_path = ?")
+      .run(new Date(Date.now() - 31 * 24 * 3_600_000).toISOString(), p);
+    expect(isTagRepairTerminal(p)).toBe(false);
+  });
+
+  it("常规扫：终态不可得不进候选、计入跳过、不联网；force=true 时强制重探", async () => {
+    const dead = join(root, "dead.flac");
+    const live = join(root, "live.flac");
+    insertSong("s-dead", dead, { hasLyrics: 0, albumId: null });
+    insertSong("s-live", live, { hasLyrics: 0, albumId: null });
+    cfg();
+    markTagRepairDone(dead, "tag-repair", null, "unobtainable");
+    parseFileMock.mockResolvedValue(probe({ lyric: false, cover: false }));
+    searchLyricsMock.mockResolvedValue(null);
+
+    const first = await runTagRepairOnce("media", cfg());
+    expect(first.busy).toBe(false);
+    // 判死的那首被跳过（计入 skipped），只有 live 真正进修复 → 探针只应发生在 live 上。
+    expect(first.result!.skipped).toBe(1);
+    expect(first.result!.unobtainable).toBe(1);
+    // DB 里判死行仍在（没被当候选重写）：TTL 未到、内容未变。
+    expect(isTagRepairTerminal(dead)).toBe(true);
+
+    // force=true：忽略终态，把它们再探一遍（判死行重新进候选）。
+    parseFileMock.mockClear();
+    const forced = await runTagRepairOnce("media", cfg(), "both", null, true);
+    expect(forced.busy).toBe(false);
+    expect(parseFileMock.mock.calls.length).toBe(2);
+  });
+});
 
 // ---- 18. 续跑快照 / 立刻停止 ------------------------------------------------------
 //

@@ -90,6 +90,10 @@ describe("writeTags — mp3", () => {
     const withCover = buildTagArgs({ src: "in.flac", out: "o.flac", container: "flac", tags: {}, coverPath: "/tmp/c.jpg" });
     expect(withCover).toContain("1:v");
     expect(withCover).not.toContain("0:v?");
+    // 2026-11-15：新封面必须转 mjpeg —— 无已知 mimetype 的图（webp/avif）会被 flac muxer
+    // 静默丢弃（exit=0 且无图）；音频仍 copy，不重新编码。
+    expect(withCover[withCover.indexOf("-c:a") + 1]).toBe("copy");
+    expect(withCover[withCover.indexOf("-c:v") + 1]).toBe("mjpeg");
     const keep = buildTagArgs({ src: "in.flac", out: "o.flac", container: "flac", tags: {}, keepSourceCover: true });
     expect(keep).toContain("0:v?");
     expect(keep).not.toContain("1:v");

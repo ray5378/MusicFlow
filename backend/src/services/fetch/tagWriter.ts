@@ -150,7 +150,18 @@ export function buildTagArgs(opts: {
     // 在「本次不换封面」时必须显式保留源封面。
     args.push("-map", "0:v?");
   }
-  args.push("-c", "copy");
+  // 封面必须**真的**落成 attached picture：flac muxer 对「没有已知 mimetype」的图像流会
+  // 静默丢弃 —— 2026-11-15 实测：go-music-dl 返回的封面是 webp（被存成 .jpg），ffmpeg 只打
+  // 一行 `[flac] No mimetype is known for stream 1, cannot write an attached picture.`
+  // 就 exit=0，产物大小与源文件逐字节一致、无图，而链路照报「+封面」→ 这些歌每轮被预筛重选，
+  // 永远修不完（实测 5 首反复「修复成功」但文件始终无图）。
+  // 有新封面时只把这条封面视频流转 mjpeg（image/jpeg 是 flac/mp3 的 muxer 与 DLNA/车机都认的
+  // 格式，webp/png/avif 一律可转），音频始终 -c copy，绝不重新编码。
+  if (opts.coverPath) {
+    args.push("-c:a", "copy", "-c:v", "mjpeg");
+  } else {
+    args.push("-c", "copy");
+  }
   // mp3 专属：写 ID3v2.3（车机/DLNA 兼容）。flac 是 Vorbis Comment，不加。
   if (opts.container === "mp3") args.push("-id3v2_version", "3");
 

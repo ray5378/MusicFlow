@@ -713,7 +713,8 @@ export function registerFetch(app: Hono): void {
       activeRun: getTagRepairActiveRun(),
     });
   });
-  // 手动触发一轮：body { mode?: TagRepairMode; full?: boolean; scope?: TagRepairScope }。
+  // 手动触发一轮：body { mode?: TagRepairMode; full?: boolean; scope?: TagRepairScope;
+  //   force?: boolean }。force=true 忽略「终态不可得」标记（已判死的歌也重探，排查/自愈用）。
   //   mode="queue"=只清到期队列；"media"=第一档常规（仅 DB 预筛，不读文件头，便宜）；
   //   "all"=第二档全量（逐首精探文件头，跑完再清一轮队列）。
   //   scope=本次扫描目录范围（download/lossless/both），缺省沿用已保存的 cfg.tagRepairScope；
@@ -725,6 +726,8 @@ export function registerFetch(app: Hono): void {
       mode?: TagRepairMode;
       full?: boolean;
       scope?: TagRepairScope;
+      /** 强制重试：忽略「终态不可得」标记（已判死的歌也重新探一遍），供管理端手动入口。 */
+      force?: boolean;
     };
     const requested = body.mode;
     const mode: TagRepairMode =
@@ -738,10 +741,11 @@ export function registerFetch(app: Hono): void {
     if (isTagRepairRunning()) return c.json({ success: false, busy: true }, 409);
     // 不 await：后台跑，前端轮询状态。挂 catch：runTagRepairOnce 抛错（DB/settings 异常等）
     // 否则会变成 unhandled rejection（Node 默认会终止进程），与「重启后续跑」的可用性目标相悖。
-    void runTagRepairOnce(mode, undefined, scope).catch((e: any) => {
+    const force = body.force === true;
+    void runTagRepairOnce(mode, undefined, scope, null, force).catch((e: any) => {
       log.error(`标签修复一轮（${mode}）触发失败: ${e?.message || e}`);
     });
-    return c.json({ success: true, started: true, mode, scope });
+    return c.json({ success: true, started: true, mode, scope, force });
   });
   // 立刻停止一轮标签修复（协作式）：置停止标志，正在处理的那首跑完后不再开始下一首。
   // 未完成的候选保留在快照里，但该快照会被标记为「已停止」，重启容器后**不会**自动续跑

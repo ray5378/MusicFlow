@@ -1965,6 +1965,8 @@
         "allTitle": "Tier 2 · Full",
         "allDesc": "Every song is probed header by header and any missing tag is backfilled. Most thorough but the slowest.",
         "allBtn": "Start full repair",
+        "forceBtn": "Retry terminal-unobtainable",
+        "forceHint": "Songs whose tags could not be found anywhere are marked terminal and no longer re-probed every run (auto-retried after 30 days or when the file changes). This ignores the terminal state and probes their cover/lyrics again.",
         "allStarted": "Full scan started (may take minutes)",
         "allWarn": "Full repair touches many files; prefer running it during idle hours.",
         "resultLine": "{mode}: fixed {fixed} (cover {cover}/lyrics {lyric}/album {album}/tags {meta}), unobtainable {miss}",

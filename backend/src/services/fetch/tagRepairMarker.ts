@@ -144,6 +144,58 @@ export function clearTagRepairMark(fsPath: string): void {
   deleteMarker(fsPath);
 }
 
+/**
+ * 终态不可得判定（2026-11-15·终态口径）：标记 outcome='unobtainable' **且** 文件未变
+ * **且** 未超 30 天 TTL。
+ *
+ * 与 isTagRepairMarked 的区别：只认「已判死」，不认「已修复」。
+ * 「已达标(fixed)」标记不阻止重扫（文件后来可能又缺了别的维度，例如只补到歌词、封面仍空），
+ * 只有判死的行才进终态、不再重探。
+ */
+export function isTagRepairTerminal(fsPath: string): boolean {
+  if (!fsPath) return false;
+  const row = loadMarker(fsPath);
+  if (!row) return false;
+  if (String(row.outcome ?? "") !== "unobtainable") return false;
+  let st;
+  try {
+    if (!existsSync(fsPath)) {
+      deleteMarker(fsPath); // 文件没了，判死结论失去意义
+      return false;
+    }
+    st = statSync(fsPath);
+  } catch {
+    deleteMarker(fsPath);
+    return false;
+  }
+  const size = Number(st.size) || 0;
+  const mtimeMs = Math.floor(Number(st.mtimeMs) || 0);
+  if (size !== Number(row.size) || mtimeMs !== Number(row.mtime_ms)) {
+    deleteMarker(fsPath); // 内容变了 → 判死结论作废，允许重探
+    return false;
+  }
+  const at = Date.parse(String(row.at ?? ""));
+  if (Number.isFinite(at) && Date.now() - at > UNOBTAINABLE_TTL_MS) return false;
+  return true;
+}
+
+/**
+ * 终态不可得 fs_path 全集（DB-only + 30 天 TTL，供「待修复」口径剔除；不做 stat）。
+ * 与 isTagRepairTerminal 的关系同 getTagRepairMarkedPaths 与 isTagRepairMarked：
+ * 这里给「稳定口径」的批量视图，逐首的 size/mtime 失效判定交给扫描阶段的 isTagRepairTerminal。
+ */
+export function getTagRepairTerminalPaths(): string[] {
+  try {
+    const cutoff = new Date(Date.now() - UNOBTAINABLE_TTL_MS).toISOString();
+    const rows = sqlite
+      .prepare("SELECT fs_path FROM tag_repair_done WHERE outcome = 'unobtainable' AND at >= ?")
+      .all(cutoff) as Array<{ fs_path: string }>;
+    return rows.map((r) => String(r.fs_path));
+  } catch {
+    return [];
+  }
+}
+
 /** 已达标(已修复)标记行数:供「已修复」统计。**排除** outcome='unobtainable' 的终态不可得行。 */
 export function getTagRepairMarkedCount(): number {
   try {

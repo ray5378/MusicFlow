@@ -467,8 +467,14 @@ export async function getTagRepairStatus(): Promise<TagRepairStatus> {
 export async function runTagRepair(
   mode: TagRepairMode,
   scope?: TagRepairScope,
-): Promise<{ success: boolean; busy?: boolean; mode?: string; scope?: TagRepairScope }> {
-  const res = await api.post(`${BASE}/tag-repair/run`, scope ? { mode, scope } : { mode });
+  /** 强制重试：忽略「终态不可得」标记（已判死的歌也重新探一遍）。 */
+  force?: boolean,
+): Promise<{ success: boolean; busy?: boolean; mode?: string; scope?: TagRepairScope; force?: boolean }> {
+  const res = await api.post(`${BASE}/tag-repair/run`, {
+    mode,
+    ...(scope ? { scope } : {}),
+    ...(force ? { force: true } : {}),
+  });
   return res.data ?? { success: false };
 }
 

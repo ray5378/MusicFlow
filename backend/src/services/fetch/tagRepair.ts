@@ -10,10 +10,10 @@
 //      下载目录（downloadRoot + losslessRoot，即 songs.path 前缀 `l:` 且落在两根内），
 //      文件头精探（music-metadata）内嵌封面/歌词/专辑标签，只修真缺的。
 //
-// 修复目标与取值来源（产品定调 2026-10-11；**2026-11-12 收窄并强制重试**）：
+// 修复目标与取值来源（产品定调 2026-10-11；**2026-11-15 终态收敛**）：
 //   修复维度固定为 **专辑 / 封面 / 歌词 / 歌名 / 歌手** 五项（不再补 albumArtist / 轨号 /
-//   年份 / 流派）；候选 = 文件头或 DB 任一维度缺失，**一律强制尝试**（下载期完成标记、
-//   终态不可得标记都不再跳过），每轮全量修复都会重试。
+//   年份 / 流派）；候选 = 文件头或 DB 任一维度缺失。**已判死（终态不可得）的不再重探**，
+//   其余一律强制尝试（「已达标」标记不阻止重扫）；管理端「强制重试」可临时忽略终态。
 //   - 封面 / 歌词：**先探测、拿得到才写**——searchCover/searchLyrics 拿不到就不碰
 //     文件（绝不写空值/占位图）。
 //   - 专辑：文件内嵌 album 为空而 DB 行有声明值（下载时 provider 元数据入库）→
@@ -34,14 +34,16 @@
 //   50 首却全部无标记、下轮仍被当候选重扫。现改为：一次修复**真正写入**（outcome=fixed）后
 //   登记标记（src=命中的来源 provider id，无 provider 命中时回落 "tag-repair"）。
 //
-// 【2026-10-17 修正 6·终态不可得（选项 C）；2026-11-12 起仅保留统计意义】
-//   真缺标签但各来源都拿不到的歌（unobtainable）仍登记 outcome='unobtainable' 标记，
-//   但**不再作为跳过依据**（产品要求强制重试）：每轮扫描仍会重新探测/重试。
+// 【2026-10-17 修正 6·终态不可得（选项 C）；2026-11-15 恢复为真终态】
+//   真缺标签但各来源都拿不到的歌（unobtainable）登记 outcome='unobtainable' 标记后
+//   **进终态、不再重探**：扫描跳过、不计入「待修复」（否则数字永远压不下去——实测
+//   220 = 215 判死 + 5 本轮真修，每轮白跑 21 分钟、白打平台 215 次）。
+//   安全阀仍是 30 天 TTL + 文件变化失效（见 isTagRepairTerminal），管理端「强制重试」可绕过。
 //   unobtainable 行**不计入**「已修复」，也**不参与**来源分布聚合。
 //
-// 【2026-10-17 修正 7·「待修复」口径；2026-11-12 调整】待修复 = 范围内 DB 预筛
-//   「缺专辑 / 封面 / 歌词 / 歌名 / 歌手」的行，**不再剔除已落标记的歌** —— 标记不再阻止
-//   重试，若继续剔除会让「待修复」小于实际处理量。
+// 【2026-10-17 修正 7·「待修复」口径；2026-11-15 调整】待修复 = 范围内 DB 预筛
+//   「缺专辑 / 封面 / 歌词 / 歌名 / 歌手」的行，**剔除终态不可得**（判死的本轮不会再处理，
+//   计入待修会让数字与实际处理量脱节）。「已达标(fixed)」标记不剔除：文件可能又缺别的维度。
 //
 // 【2026-10-17 修正 2·专辑封面回写】第一档 DB 预筛按 `songs.cover_art 空 且 albums.cover_art 空`
 //   判定缺封面，而修复只回写 `songs.has_lyrics`、**不刷新 `albums.cover_art`** → 实测 19 首
@@ -81,7 +83,9 @@ import type { FetchConfig, TagRepairScope } from "./config.js";
 import {
   getTagRepairMarkedCount,
   getTagRepairPlatformCounts,
+  getTagRepairTerminalPaths,
   getTagRepairUnobtainableCount,
+  isTagRepairTerminal,
   markTagRepairDone,
   _resetTagRepairMarkersForTest,
 } from "./tagRepairMarker.js";
@@ -322,11 +326,14 @@ function dbStats(): { total: number; pending: number } {
     const fsPath = fsPathOf(r.path);
     if (fsPath && inDownloadRoots(fsPath, cfg)) total++;
   }
-  // 待修口径（2026-11-12）：范围内 DB 预筛「缺专辑 / 封面 / 歌词 / 歌名 / 歌手」的歌。
-  // 标记不再阻止重试，故这里**不剔除已落标记的歌**（剔除会让待修数小于实际处理量）。
+  // 待修口径（2026-11-15·终态收敛）：范围内 DB 预筛「缺专辑 / 封面 / 歌词 / 歌名 / 歌手」的歌，
+  // **剔除终态不可得**（outcome='unobtainable' 且未超 30 天 TTL）——它们已被判死、本轮不会再
+  // 处理，计入待修会让数字永远压不下去（实测 220 = 215 判死 + 5 本轮真修）。
+  // 「已达标(fixed)」标记不剔除：文件后来可能又缺别的维度，仍应被选中重扫。
+  const terminal = new Set(getTagRepairTerminalPaths());
   const pending = selectMediaMissingRows().filter((r) => {
     const fsPath = fsPathOf(r.path);
-    return Boolean(fsPath && inDownloadRoots(fsPath, cfg));
+    return Boolean(fsPath && inDownloadRoots(fsPath, cfg) && !terminal.has(fsPath));
   }).length;
   statsCache = { at: now, total, pending };
   return statsCache;
@@ -718,6 +725,12 @@ export async function repairSongTags(songId: string, cfg: FetchConfig): Promise<
   const embedded = await probeEmbedded(fsPath);
   if (!embedded) return none; // 不可解析的文件不动（保守）
 
+  // 内嵌已有封面 → **无论本轮修复结果如何**先把专辑行封面补上（2026-11-15 实测病灶）。
+  // 此前只在「写标签成功」之后调用回写，一旦「只缺歌词、而歌词各来源都拿不到」走
+  // unobtainable 提前 return，回写就被整段跳过 → albums.cover_art 永远空 → 第一档预筛
+  // 每轮又把它当「缺封面」重选（实测 14 首死循环，「专辑封面回写」日志 0 次）。
+  if (embedded.cover) await syncAlbumCoverFromEmbedded(fsPath, row.album_id);
+
   const dbAlbumRaw = String(row.album ?? "").trim();
   // scanner 对「无专辑标签文件」写入的占位值（Unknown Album）视同空：既不作为兜底写进文件
   // （否则把「无专辑」变成假专辑名），也不作为 needMeta 的「DB 已有值」依据（转为走网络补全）。
@@ -772,9 +785,8 @@ export async function repairSongTags(songId: string, cfg: FetchConfig): Promise<
         songId,
       );
     }
-    // 文件已内嵌封面、专辑行却无封面 → 落盘内嵌封面并回写 albums.cover_art，否则第一档
-    // DB 预筛每轮都按「缺封面」把这首歌选中重扫（实测 19 首、pending 恒高）。
-    if (embedded.cover) await syncAlbumCoverFromEmbedded(fsPath, row.album_id);
+    // 专辑封面回写已在本函数入口按 embedded.cover 统一做过（见上方 2026-11-15 注释），
+    // 这里不再重复 stat/落盘。
     // 【2026-10-17 修正 4】文件内嵌标签已齐（各维度都在）→ 登记完成标记：与下载期标记同义
     // （「这首歌已达标」），既让「已修复」统计把它计入、又让后续扫描直接跳过不探针。
     // 注意只在**探针确认齐备**时才会走到这里；文件缺失/不可解析的路径在前面已 return，绝不打标记。
@@ -1049,13 +1061,16 @@ export function selectMediaMissingRows(): Array<{ id: string; path: string }> {
  * scope "media"=第一档常规：纯 DB 预筛（selectMediaMissingRows），不读文件头，成本远低于全量；
  *   候选 = DB 缺专辑 / 封面 / 歌词 / 歌名 / 歌手（2026-11-12 收窄）。
  * scope "all"=第二档全量：文件头精探 + DB 双口径，缺上述五项任一即候选。
- * 两档都**强制尝试**：不再因下载期完成标记 / 终态不可得标记跳过。
+ * 终态收敛（2026-11-15）：已判死（outcome='unobtainable'、文件未变、未超 30 天 TTL）的歌
+ *   **不再重探**，计入「跳过」；force=true 时忽略终态强制重探（管理端「强制重试」入口）。
+ *   「已达标(fixed)」标记仍不阻止重扫。
  * dirScope=扫描目录范围（download/lossless/both）。
  */
 export async function sweepTagRepair(
   cfg: FetchConfig,
   scope: "media" | "all" = "all",
   dirScope: TagRepairScope = cfg.tagRepairScope ?? "both",
+  force = false,
 ): Promise<TagRepairResult> {
   const result = emptyResult();
   const snap = activeSnapshot;
@@ -1107,10 +1122,18 @@ export async function sweepTagRepair(
     for (const r of rows) {
       const fsPath = fsPathOf(r.path);
       if (!fsPath || !inScopeRoots(fsPath, cfg, dirScope)) continue;
-      // 2026-11-12：强制尝试 —— 不再因完成/终态不可得标记跳过。
+      // 终态收敛（2026-11-15）：已判死且文件未变（+ 未超 TTL）→ 不再重探，计入「跳过」。
+      // 判定含 stat（与标记行的 size/mtime 比对），故只能逐首判，不能复用 DB-only 的批量口径。
+      if (!force && isTagRepairTerminal(fsPath)) {
+        markedSkipped++;
+        continue;
+      }
       candidates.push({ id: r.id, fsPath });
     }
-    log.info(`[TAG-REPAIR] 常规扫描完成（范围 ${dirScope}）：候选中 DB 缺专辑/封面/歌词/歌名/歌手 ${candidates.length} 首`);
+    log.info(
+      `[TAG-REPAIR] 常规扫描完成（范围 ${dirScope}）：候选中 DB 缺专辑/封面/歌词/歌名/歌手 ${candidates.length} 首` +
+        (markedSkipped > 0 ? `，跳过终态不可得 ${markedSkipped} 首` : ""),
+    );
     // 进入 repair 前把候选清单写进快照：中断后续跑可直接取用，不再重跑本次预筛。
     if (snap) {
       snap.phase = "repair";
@@ -1178,7 +1201,11 @@ export async function sweepTagRepair(
       if (stopRequested) break;
       probed++;
       progressSetChecked(probed);
-      const embedded = await probeEmbedded(fsPath);
+      // 终态收敛（2026-11-15）：已判死且文件未变（+ 未超 TTL）→ 不探针、不联网，直接进终态。
+      // 用 embedded=null 落地，下面的「快照出队 + 断点」尾巴照常执行。
+      const terminal = !force && isTagRepairTerminal(fsPath);
+      if (terminal) markedSkipped++;
+      const embedded = terminal ? null : await probeEmbedded(fsPath);
       const embeddedShort =
         !!embedded &&
         (!embedded.cover || !embedded.lyric || !embedded.album || !embedded.title || !embedded.artist);
@@ -1201,7 +1228,8 @@ export async function sweepTagRepair(
     }
     log.info(
       `[TAG-REPAIR] 全量扫描${resumedScan ? "续跑" : ""}完成（范围 ${dirScope}）：范围 ${probed} 首，` +
-        `待修复候选 ${candidates.length} 首（强制尝试，无标记跳过）`,
+        `待修复候选 ${candidates.length} 首` +
+        (markedSkipped > 0 ? `（跳过终态不可得 ${markedSkipped} 首）` : "（无终态跳过）"),
     );
     // scan 结束（未停止）→ 进入 repair：候选清单转 pendingIds、清空 candidateIds 并立即落盘。
     if (snap && !stopRequested) {
@@ -1273,6 +1301,8 @@ export async function runTagRepairOnce(
   cfgOver?: FetchConfig,
   dirScopeOver?: TagRepairScope,
   resume: TagRepairRunSnapshot | null = null,
+  /** 强制重试：忽略「终态不可得」标记，把已判死的歌也重新探一遍（管理端手动入口）。 */
+  force = false,
 ): Promise<{ busy: boolean; result?: TagRepairResult; stopped?: boolean }> {
   if (repairing) return { busy: true };
   repairing = true;
@@ -1292,7 +1322,7 @@ export async function runTagRepairOnce(
     }
     let result: TagRepairResult;
     if (mode === "all") {
-      const sweep = await sweepTagRepair(cfg, "all", dirScope);
+      const sweep = await sweepTagRepair(cfg, "all", dirScope, force);
       result = sweep;
       // 收到停止请求则不再清队列（半轮不再叠加额外工作）。
       if (!stopRequested) {
@@ -1309,7 +1339,7 @@ export async function runTagRepairOnce(
       }
     } else if (mode === "media") {
       // 第一档常规：仅 DB 预筛，不清队列。
-      result = await sweepTagRepair(cfg, "media", dirScope);
+      result = await sweepTagRepair(cfg, "media", dirScope, force);
     } else {
       result = await processTagRepairQueue(cfg);
     }

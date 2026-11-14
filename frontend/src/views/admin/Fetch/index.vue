@@ -423,6 +423,15 @@
             <div class="tag-repair-actions">
               <el-button type="primary" :loading="tagRepairBusyAll" :disabled="tagRepairStatus.running" @click="onTagRepairAll">{{ t('admin.fetch.tagRepair.allBtn') }}</el-button>
             </div>
+            <div class="tag-repair-actions">
+              <el-button
+                size="small"
+                :loading="tagRepairBusyForce"
+                :disabled="tagRepairStatus.running"
+                @click="onTagRepairForce"
+              >{{ t('admin.fetch.tagRepair.forceBtn') }}</el-button>
+            </div>
+            <div class="hint tag-repair-hint">{{ t('admin.fetch.tagRepair.forceHint') }}</div>
 
             <div class="hint tag-repair-write-hint">{{ t('admin.fetch.tagRepair.writeHint') }}</div>
           </el-form>
@@ -547,6 +556,7 @@ const tagRepairStatus = ref<TagRepairStatus>({ enabled: false, intervalHours: 16
 const tagRepairSaving = ref(false);
 const tagRepairBusyMedia = ref(false);
 const tagRepairBusyAll = ref(false);
+const tagRepairBusyForce = ref(false);
 const tagRepairBusyStop = ref(false);
 let tagRepairPoll: ReturnType<typeof setInterval> | null = null;
 // 组件是否已卸载：卸载瞬间仍在途的 loadTagRepairStatus 落地后不得再写状态或重建轮询定时器
@@ -686,11 +696,11 @@ async function loadTagRepairStatus() {
 }
 
 // 两个入口共用：统一的 loading 管理 + 409「忙」识别（避免重复处理）。
-async function runTagRepairMode(mode: TagRepairMode, busy: Ref<boolean>): Promise<void> {
+async function runTagRepairMode(mode: TagRepairMode, busy: Ref<boolean>, force = false): Promise<void> {
   busy.value = true;
   try {
     // 本次扫描范围沿用当前选择（未保存也即时生效）；保存设置则持久化给定时常规扫用。
-    await runTagRepair(mode, config.tagRepairScope);
+    await runTagRepair(mode, config.tagRepairScope, force);
     if (mode === "media") ElMessage.success(t("admin.fetch.tagRepair.mediaStarted"));
     else ElMessage.success(t("admin.fetch.tagRepair.allStarted"));
   } catch (e: any) {
@@ -708,6 +718,10 @@ function onTagRepairMedia(): void {
 }
 function onTagRepairAll(): void {
   void runTagRepairMode("all", tagRepairBusyAll);
+}
+/** 强制重试：走常规挡位 + force（忽略终态不可得标记，把已判死的歌重新探一遍）。 */
+function onTagRepairForce(): void {
+  void runTagRepairMode("media", tagRepairBusyForce, true);
 }
 
 async function onTagRepairStop(): Promise<void> {

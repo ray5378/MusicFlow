@@ -206,8 +206,48 @@ mustMatch(
 );
 mustMatch(
   TAGREPAIR,
-  /return Boolean\(fsPath && inDownloadRoots\(fsPath, cfg\)\);/,
-  "pending 必须按下载根目录过滤（范围外的歌不计入待修，否则数字永远降不下来）",
+  /return Boolean\(fsPath && inDownloadRoots\(fsPath, cfg\) && !terminal\.has\(fsPath\)\);/,
+  "pending 必须按下载根目录过滤并剔除终态不可得（范围外 / 已判死的不计入待修，否则数字永远降不下来）",
+);
+mustMatch(
+  TAGREPAIR,
+  /const terminal = new Set\(getTagRepairTerminalPaths\(\)\);/,
+  "pending 剔除必须来自 DB-only 的终态全集（getTagRepairTerminalPaths：unobtainable + TTL）",
+);
+mustMatch(
+  MARKER,
+  /export function getTagRepairTerminalPaths\(\): string\[\] \{/,
+  "必须提供「终态不可得 fs_path」批量读取（pending 口径的数据源，纯 DB 不 stat）",
+);
+
+// ---------- R5b 终态收敛（2026-11-15）：判死的歌不再每轮重探 ----------
+// 值：215 首判死歌每轮白跑 21 分钟、白打平台 215 次，待修数永远压不下去。
+mustMatch(
+  MARKER,
+  /export function isTagRepairTerminal\(fsPath: string\): boolean \{/,
+  "必须提供逐首终态判定（unobtainable + 文件未变 + 30 天 TTL）",
+);
+mustMatch(
+  MARKER,
+  /if \(String\(row\.outcome \?\? ""\) !== "unobtainable"\) return false;/,
+  "终态判定只认 unobtainable ——「已达标(fixed)」标记不得阻止重扫（文件可能又缺别的维度）",
+);
+mustMatch(
+  TAGREPAIR,
+  /if \(!force && isTagRepairTerminal\(fsPath\)\) \{/,
+  "常规扫候选必须跳过终态不可得（force=管理端强制重试时可绕过）",
+);
+mustMatch(
+  TAGREPAIR,
+  /const embedded = terminal \? null : await probeEmbedded\(fsPath\);/,
+  "全量扫必须先判终态再探针（判死的歌不做文件头精探）",
+);
+// 封面回写：内嵌已有封面必须在**探针后无条件**回写专辑行，不能只在「写标签成功」后回写
+// （只缺歌词且各来源都拿不到时会提前 return，回写被整段跳过 → 每轮又被当「缺封面」重选）。
+mustMatch(
+  TAGREPAIR,
+  /if \(embedded\.cover\) await syncAlbumCoverFromEmbedded\(fsPath, row\.album_id\);/,
+  "内嵌已有封面必须在探针后无条件回写 albums.cover_art（否则 unobtainable 提前 return 会把回写整个跳过）",
 );
 
 // ---------- R6 写入安全 ----------
