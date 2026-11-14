@@ -2,6 +2,19 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.14.2] - 2026-11-14
+
+### Bugfix / 组倍速切换后从头播放；Linkplay 重投后进度冻结
+
+- **从头播放**：组的 `playMedia` 形参一直是 `_startMs`（从未使用），变速重投/流转到
+  组时起点恒为 0。现把 startMs 透传给组泵、DLNA 成员与 solo AirPlay；
+  240 实测组切 1.5x/0.75x/1x 位置连续（19→41→52），泵日志 `startMs=50250`。
+- **进度冻结**：MUZO/Linkplay 播转码流恒回 RelTime=0，重投后
+  `castContentOffsetSec` 被误当"设备可信读数"冻住。改为只认设备真报的正 RelTime，
+  仅由偏移得到的正值走墙钟外推。
+- **DLNA 变速姿势**：撤回"从 0 cast + 原生 Seek"（该设备 SOAP Seek 被判不可靠，
+  会转 reseekByRecast 等于多一次从头），恢复带位置重投。
+
 ## [4.14.1] - 2026-11-14
 
 ### Bugfix / 纯 AirPlay 桥组点播放 500(无在线 sendspin 成员)

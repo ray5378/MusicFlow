@@ -670,9 +670,9 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
     async playMedia(
       item: QueueItem,
       baseUrl: string,
-      _startMs = 0,
+      startMs = 0,
       _bridge?: unknown,
-      opts?: { manual?: boolean },
+      opts?: { manual?: boolean; speed?: number; nextSongId?: string; resolvedRowId?: string },
     ) {
       const dlnaOnline = getOnlineMemberIds(groupId);
       const apOnline = await getOnlineAirplayIdsTolerant(groupId);
@@ -734,7 +734,7 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
         jobs.push((async () => {
           const { createSendspinGroupPlayer } = await import("../sendspin/protocolPlayer.js");
           return createSendspinGroupPlayer(groupId).playMedia(
-            item, baseUrl, 0,
+            item, baseUrl, startMs,
             bridgeRoute ? { sockets: bridgeRoute.sockets } : undefined,
             // S1:下一首预取提示原样透传(桥边界连续性靠泵侧预解码,见 streamEngine)。
             opts,
@@ -745,7 +745,7 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
       // sendspin 组泵在 sendspin/protocolPlayer 里按 groupId 读同一份注册表;DLNA 成员
       // 逐台扇出,必须**显式**传(它们自己也有独立偏好,自动读会各放各的)。
       const groupSpeed = getPlaybackSpeed(groupId);
-      for (const d of dlnaOnline) jobs.push(createDlnaProtocolPlayer(d).playMedia(item, baseUrl, 0, undefined, { speed: groupSpeed }));
+      for (const d of dlnaOnline) jobs.push(createDlnaProtocolPlayer(d).playMedia(item, baseUrl, startMs, undefined, { speed: groupSpeed }));
       // D2/D7：桥开关开时，任何 AirPlay 成员都不允许 solo cast —— prepare 失败者
       // 仅该台本次不播放（原因记入 bridgeUnavailable），由调用方/状态面给出可读错误。
       // `MUSICFLOW_AIRPLAY_BRIDGE=0` 时 bridgeRoute 必为 null，走原有 legacy 扇出（整体回滚）。
@@ -757,7 +757,7 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
           log.warn(`[group][bridge] ${groupId}: ${failedDevices.length} 台 AirPlay 桥不可用，本曲不播放(D7): ${failedDevices.join(",")}`);
         }
       }
-      for (const d of apSolo) jobs.push(createAirPlayPlayerForDevice(d).playMedia(item, baseUrl));
+      for (const d of apSolo) jobs.push(createAirPlayPlayerForDevice(d).playMedia(item, baseUrl, startMs));
       const results = await Promise.allSettled(jobs);
       const ok = results.find(r => r.status === "fulfilled");
       if (!ok) {

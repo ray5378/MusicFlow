@@ -599,6 +599,10 @@ export class QueueController extends EventEmitter {
    * 而重复进入 playCurrent 会互相打断（历史上造成过窗口互掐）。
    */
   async setPlaybackSpeed(playerId: string, speed: number): Promise<number> {
+    // 重投姿势按协议分派：DLNA 设备（Linkplay/MUZO 实测）对「同一 URI 仅 timeOffset
+    // 变化」的重投会停在旧位置不动（PLAYING 但 RelTime 恒等），而「从 0 cast + 原生
+    // Seek」可靠 —— 与 recoverInPlace 同款姿势。组/桥走原路径（泵能按 offset 重起）。
+    const rawPlayerId = playerId;
     playerId = stripPlayerPrefix(playerId);
     const next = setPlaybackSpeed(playerId, speed);
     log.info(`[QueueController][speed] ${playerId}: 倍速 → ${next}x`);
@@ -642,6 +646,8 @@ export class QueueController extends EventEmitter {
     log.info(`[QueueController][speed] ${playerId}: 以 ${next}x 从 ${posSec.toFixed(2)}s 重投`);
     this.advancing.add(playerId);
     try {
+      // 一律带位置重投:Linkplay 的 SOAP Seek 被判不可靠会转成 reseekByRecast,
+      // 「从 0 cast + seek」等于多一次从头,反而更差(240 实测)。
       await this.playCurrent(playerId, getEffectiveBaseUrl(), Math.round(posSec * 1000), "speed");
     } catch (e: any) {
       // 重投失败不能静默：用户会看到「选了倍速但没动静」。

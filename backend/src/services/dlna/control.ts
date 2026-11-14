@@ -1657,6 +1657,9 @@ export async function getDeviceStatus(deviceId: string): Promise<DeviceStatus> {
   // 设备**原始**输出流位置（秒）。flow 的可听时钟必须吃这个值（与 itemStartSec 同轴），
   // 而对外 state.position 是内容秒，两者不可混用。
   let rawStreamPos = 0;
+  // 设备是否**真的**报了一个正位置。MUZO/Linkplay 播转码流恒回 RelTime=0；
+  // 此时 state.position 只由 castContentOffsetSec 贡献，绝不能当可信读数。
+  let devicePosReported = false;
 
   // 三个查询互不依赖 → 并发 + 各自 1.2s 硬顶。串行时一台离线设备会把每次
   // HA 轮询拖到 9.4~18.2s(2026-11-04 240 实测,/status 预算 1s)。
@@ -1692,6 +1695,7 @@ export async function getDeviceStatus(deviceId: string): Promise<DeviceStatus> {
       // 内容时间再参与任何判断：1.5x 时 60s 歌的 TrackDuration 只有 40s。
       if (relTime && relTime !== "NOT_IMPLEMENTED") {
         rawStreamPos = parseHms(relTime);
+        if (rawStreamPos > 0) devicePosReported = true;
         // RelTime 是**本次 URI 起点**的相对秒 ⇒ 内容位置 = 起播偏移 + 流秒×倍速。
         state.position = castContentOffsetSec + streamToContentSec(rawStreamPos, speed);
       }
@@ -1785,7 +1789,7 @@ export async function getDeviceStatus(deviceId: string): Promise<DeviceStatus> {
   }
 
   if (state.state === "PLAYING") {
-    if (state.position > 0) {
+    if (devicePosReported && state.position > 0) {
       // 本次 SOAP 采样可信 -> 作为新基线(顺带记下 duration 用于封顶/兜底)。
       positionEstimates.set(deviceId, { pos: state.position, at: sampledAt, dur: state.duration || durCap, trackUri: state.trackUri });
     } else if (base) {
@@ -1809,7 +1813,8 @@ export async function getDeviceStatus(deviceId: string): Promise<DeviceStatus> {
     } else {
       // 从未有过基线(非 castToDevice 起播,如设备自播/播报):就地播种,
       // 让进度至少开始单调前进,而不是永远卡 0。
-      positionEstimates.set(deviceId, { pos: 0, at: sampledAt, dur: state.duration || durCap, trackUri: state.trackUri });
+      // 有起播偏移(重投/seek)时以偏移为锚，否则重投后又会冻在偏移值上。
+      positionEstimates.set(deviceId, { pos: Math.max(0, state.position), at: sampledAt, dur: state.duration || durCap, trackUri: state.trackUri });
     }
     // duration 缺失(设备不报 TrackDuration)时用已知时长兜底,
     // 否则前端 tickTimer 因 duration<=0 不本地插值,进度只能靠 2s 轮询跳进。
