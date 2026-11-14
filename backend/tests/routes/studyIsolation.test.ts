@@ -521,6 +521,34 @@ describe("学习 API", () => {
     expect(db.select().from(studyPlaylistProgress).where(eq(studyPlaylistProgress.userId, "u1")).all()).toHaveLength(0);
   });
 
+  it("播放学习歌单时「继续学习」只显示歌单一条", async () => {
+    const base = Date.now();
+    // 同一轮播放:单曲记录 + 歌单记录,指向同一首、同一位置
+    db.insert(studyProgress).values({
+      userId: "u1", songId: "st1", positionSec: 100, durationSec: 600, finished: 0,
+      updatedAt: new Date(base).toISOString(),
+    }).run();
+    db.insert(studyPlaylistProgress).values({
+      userId: "u1", playlistId: "pl-study", songId: "st1", positionSec: 100, durationSec: 600,
+      updatedAt: new Date(base + 1000).toISOString(),
+    }).run();
+
+    const cont = await call("GET", "/v1/study/continue");
+    expect(cont.body.items.find((i: any) => i.id === "st1")).toBeUndefined();
+    expect(cont.body.playlistItems.some((i: any) => i.playlistId === "pl-study")).toBe(true);
+
+    // 单曲记录明显更新(超过 2 分钟窗口)=> 视为之后单独播放,两条都保留
+    db.update(studyProgress)
+      .set({ updatedAt: new Date(base + 10 * 60_000).toISOString() })
+      .where(and(eq(studyProgress.userId, "u1"), eq(studyProgress.songId, "st1"))).run();
+    const cont2 = await call("GET", "/v1/study/continue");
+    expect(cont2.body.items.some((i: any) => i.id === "st1")).toBe(true);
+    expect(cont2.body.playlistItems.some((i: any) => i.playlistId === "pl-study")).toBe(true);
+
+    db.delete(studyProgress).where(and(eq(studyProgress.userId, "u1"), eq(studyProgress.songId, "st1"))).run();
+    db.delete(studyPlaylistProgress).where(and(eq(studyPlaylistProgress.userId, "u1"), eq(studyPlaylistProgress.playlistId, "pl-study"))).run();
+  });
+
   it("学习记录只保留最新 50 条", async () => {
     const ids = Array.from({ length: 60 }, (_, i) => `cap${i}`);
     db.insert(songs).values(ids.map((id) => ({

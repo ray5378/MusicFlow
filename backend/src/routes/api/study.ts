@@ -461,8 +461,27 @@ export function registerStudy(app: Hono): void {
       ))
       .orderBy(desc(studyPlaylistProgress.updatedAt))
       .limit(limit).all();
+    // 「继续学习」去重:播放学习歌单时同一轮会同时写单曲进度与整单进度,
+    // 客户端又原样渲染两组数据 => 会看到「歌单 + 当前学习内容」两条。
+    // 这里把**同一轮播放产生的单曲条目**藏掉,只留歌单一条;若用户之后单独
+    // 又播了这首歌(单曲记录明显更新,超出窗口),仍按两条展示。
+    const SESSION_WINDOW_MS = 120_000;
+    const playlistAtBySong = new Map<string, number>();
+    for (const r of playlistRows) {
+      const at = Date.parse(r.p.updatedAt || "");
+      if (!Number.isFinite(at)) continue;
+      const prev = playlistAtBySong.get(r.p.songId);
+      if (prev === undefined || at > prev) playlistAtBySong.set(r.p.songId, at);
+    }
+    const items = rows.filter((r) => {
+      const plAt = playlistAtBySong.get(r.p.songId);
+      if (plAt === undefined) return true;
+      const songAt = Date.parse(r.p.updatedAt || "");
+      if (!Number.isFinite(songAt)) return false;
+      return songAt > plAt + SESSION_WINDOW_MS;
+    });
     return c.json({
-      items: rows.map((r) => studySongPayload(r.s, {
+      items: items.map((r) => studySongPayload(r.s, {
         positionSec: r.p.positionSec || 0,
         durationSec: r.p.durationSec || r.s.duration || 0,
         progress: r.p.durationSec ? Math.min(1, (r.p.positionSec || 0) / r.p.durationSec) : 0,
