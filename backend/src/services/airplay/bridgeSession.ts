@@ -413,6 +413,29 @@ export function raopBridgeGapFillEnabled(): boolean {
  *  背景:自动换歌(track 且非手动)本应是同一时间线的纯内容替换 —— 旧曲余料已经在
  *  桥队列里、ts 全部合法,清掉只会把「旧曲尾巴 + 新曲开头」整段砍掉(§8.5 实测
  *  0.41–1.26s);保留后旧余料自然播完,新代次帧按 ts 接在其后。 */
+// ==================== 可听位置校正 ====================
+// tick 的 commandedLeadUs = 「已写入 RAOP、但设备还要这么久才出声」的音频量。
+// 对外上报/队列推进必须减掉它，否则进度恒领先声音（240 实测 ~2.05s，与倍速无关）。
+const bridgeLeadByDevice = new Map<string, { ms: number; at: number }>();
+const BRIDGE_LEAD_TTL_MS = 5_000;
+
+/** 记录并回填 tick 的 leadUs（保持原日志字段语义）。 */
+function recordBridgeLead(deviceId: string, leadUs: bigint | number | null): number | null {
+  if (leadUs === null || leadUs === undefined) return null;
+  const n = Number(leadUs);
+  if (!Number.isFinite(n) || n < 0) return null;
+  bridgeLeadByDevice.set(deviceId, { ms: n / 1000, at: Date.now() });
+  return n;
+}
+
+/** 该设备当前「写入未出声」的毫秒数；过期(>5s 无 tick)按 0 处理。 */
+export function getBridgeLeadMs(deviceId: string): number {
+  const v = bridgeLeadByDevice.get(deviceId);
+  if (!v) return 0;
+  if (Date.now() - v.at > BRIDGE_LEAD_TTL_MS) return 0;
+  return v.ms;
+}
+
 export function bridgeTrackKeepQueueEnabled(): boolean {
   const v = process.env.MF_BRIDGE_TRACK_KEEP_QUEUE;
   return !(v === "0" || v === "false" || v === "off");
@@ -2100,7 +2123,7 @@ export class BridgeSession {
       deltaP95Us: p95,
       samples: this.deltaSamples.length,
       anchorUs: this.anchorUs !== null ? Number(this.anchorUs) : null,
-      leadUs: this.commandedLeadUs !== null ? Number(this.commandedLeadUs) : null,
+      leadUs: recordBridgeLead(this.deviceId, this.commandedLeadUs),
     })}`);
   }
 

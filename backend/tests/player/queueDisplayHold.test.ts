@@ -3,6 +3,7 @@ import { QueueController } from "../../src/services/player/QueueController.js";
 import { PlaybackState } from "../../src/services/player/types.js";
 import type { UniversalPlayer } from "../../src/services/player/UniversalPlayer.js";
 import { sqlite } from "../../src/db/index.js";
+import { setPlaybackSpeed } from "../../src/services/player/playbackSpeed.js";
 
 // 预探测关闭(与 QueueController.test.ts 同口径):避免异步扫描污染 snapshot。
 const PRE_PROBE_DISABLED_CFG = {
@@ -142,6 +143,29 @@ describe("QueueController 可听显示延迟(4.11.12 A 方案)", () => {
       expect(qc.displayHoldState("d1")).toBeUndefined();
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it("倍速持有:内容剩余 10s 在 2x 下按 5s 墙钟走完,进度也按 2x 外推", () => {
+    const item = { songId: "s1", title: "t1", mime: "audio/mpeg", duration: 200 };
+    qc.setQueue("d1", [item, { songId: "s2", title: "t2", mime: "audio/mpeg" }], 1, "http://base");
+    setPlaybackSpeed("d1", 2);
+    vi.useFakeTimers();
+    try {
+      (qc as any).setDisplayHold("d1", 0, item, 200, 10, 190, -1);
+      vi.advanceTimersByTime(2000);
+      // 2s 墙钟 × 2x = 4s 内容 → 190 + 4 ≈ 194(不是 1x 口径的 192)。
+      const hold = qc.displayHoldState("d1");
+      expect(hold).toBeTruthy();
+      expect(hold!.position).toBeGreaterThanOrEqual(193.8);
+      expect(hold!.position).toBeLessThanOrEqual(194.2);
+      // 内容 10s 在 2x 下 5s 墙钟即播完(定时器到 until,硬顶再 +5s 兜底)。
+      vi.advanceTimersByTime(8200);
+      expect(qc.snapshot("d1").currentIndex).toBe(1);
+      expect(qc.displayHoldState("d1")).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+      setPlaybackSpeed("d1", 1);
     }
   });
 });

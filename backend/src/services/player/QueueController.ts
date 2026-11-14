@@ -121,6 +121,10 @@ interface DisplayHold {
   releaseAt: number;
   /** 设持有时设备上报的位置(秒):新曲 position 从 0 重新走 ⇒ `< 该值` 即已换曲。 */
   posAtSet: number;
+  /** 设持有时的绝对时刻(ms):外推旧曲显示位置用。 */
+  setAt: number;
+  /** 设持有时的倍速:旧曲尾按 speed 倍速播完,墙钟剩余 = 内容剩余 / speed。 */
+  speed: number;
   /** 设持有时洗牌位置,快照回显与之对齐。 */
   shufflePos: number;
   timer: ReturnType<typeof setTimeout> | null;
@@ -936,6 +940,14 @@ export class QueueController extends EventEmitter {
             let holdRemain = 0;
             if (holdDur > 0 && sample) {
               holdPosAtSet = Math.min(holdDur, sample.pos + (Date.now() - sample.at) / 1000);
+              // ★ 用「本轮 poll 刚上报的位置」钳住外推值(2026-11-14 240 混合组实测)。
+              //   泵在曲末会一次推满(位置从 190 跳到 202),而 lastPlaying 只在 PLAYING
+              //   采样里刷新,最多落后一个采样周期 ⇒ 按外推值算 remain 会多按 ~10s:
+              //   声音已进下一首,显示还停在旧曲(用户反馈的「进度还在上一首」)。
+              //   本次决策正是这轮 poll 触发的,lastPos 已是同一时刻的真实读数 ——
+              //   设备都报「到曲尾」了就不该再按旧曲显示。
+              const livePos = this.lastPos.get(id) ?? 0;
+              if (livePos > holdPosAtSet) holdPosAtSet = Math.min(holdDur, livePos);
               holdRemain = holdDur - holdPosAtSet;
             }
             if (holdRemain > 1) {
@@ -2162,7 +2174,12 @@ export class QueueController extends EventEmitter {
   ): void {
     this.clearDisplayHold(id, true); // 先摘旧持有(不发事件)
     const now = Date.now();
-    const until = now + Math.max(0, remainSec) * 1000;
+    // 倍速:remainSec 是**内容秒**,设备按 speed 倍速播完这段尾料,墙钟时长 = 内容秒/speed。
+    // 不折算的直接后果(2026-11-14 240 巡检):2x 下按 1x 时长持有,声音早进下一首,
+    // 进度条还在旧曲爬 —— 倍速越高滞后越大。
+    const speed = getPlaybackSpeed(id);
+    const wallRemainMs = (Math.max(0, remainSec) * 1000) / (speed > 0 ? speed : 1);
+    const until = now + wallRemainMs;
     const hold: DisplayHold = {
       index,
       item,
@@ -2170,6 +2187,8 @@ export class QueueController extends EventEmitter {
       until,
       releaseAt: until + 5000,
       posAtSet,
+      setAt: now,
+      speed,
       shufflePos,
       timer: null,
     };
@@ -2220,8 +2239,10 @@ export class QueueController extends EventEmitter {
     const id = stripPlayerPrefix(playerId);
     const hold = this.displayHold.get(id);
     if (!hold) return undefined;
-    const remain = Math.max(0, hold.until - Date.now()) / 1000;
-    const position = Math.max(0, Math.min(hold.duration, hold.duration - remain));
+    // 位置按「设持有时的位置 + 已流逝墙钟 × 倍速」外推(内容秒)。
+    // 用 until/remain 反推只适用于 1x;倍速下旧曲尾按 speed 播,进度也必须按 speed 走。
+    const elapsedSec = (Date.now() - hold.setAt) / 1000;
+    const position = Math.max(0, Math.min(hold.duration, hold.posAtSet + elapsedSec * hold.speed));
     return {
       media: {
         songId: hold.item.songId,
