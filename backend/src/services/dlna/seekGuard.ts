@@ -39,9 +39,12 @@ export function seekGuardExpired(guard: SeekGuard, sampledAt: number, windowMs =
  * (停在目标上等用户继续)——后者若也外推,会把暂停中的拖动判成"陈旧",
  * 反而拒掉唯一正确的读数。
  */
-export function seekExpectedPosition(guard: SeekGuard, sampledAt: number, playing: boolean): number {
+export function seekExpectedPosition(guard: SeekGuard, sampledAt: number, playing: boolean, speed = 1): number {
   const elapsed = Math.max(0, sampledAt - guard.at) / 1000;
-  return guard.target + (playing ? elapsed : 0);
+  // 倍速(2026-11-14):护栏位置是**内容秒**,墙钟每过 1s 内容前进 speed 秒;
+  // 不乘 speed 时 1.5x 的期望值会落后 1/3,超出容差 → 合法读数被误判成陈旧。
+  const rate = Number.isFinite(speed) && speed > 0 ? speed : 1;
+  return guard.target + (playing ? elapsed * rate : 0);
 }
 
 /**
@@ -57,7 +60,8 @@ export function isSeekReadingStale(
   reported: number,
   playing: boolean,
   toleranceSec = SEEK_SETTLE_TOLERANCE_SEC,
+  speed = 1,
 ): boolean {
   if (reported <= 0) return false;
-  return Math.abs(reported - seekExpectedPosition(guard, sampledAt, playing)) > toleranceSec;
+  return Math.abs(reported - seekExpectedPosition(guard, sampledAt, playing, speed)) > toleranceSec;
 }

@@ -12,6 +12,7 @@
 // castSession / QueueController / PlayerController 都是**主进程状态**,两种模式都留在本侧。
 import { PlaybackState, type PlayerState, type ProtocolPlayer, type QueueItem } from "../player/types.js";
 import { createCastSession, getEffectiveBaseUrl } from "../dlna/control.js";
+import { getPlaybackSpeed } from "../player/playbackSpeed.js";
 import { getServer } from "./runtime.js";
 import { isForkMode } from "./mode.js";
 import {
@@ -90,7 +91,7 @@ export function createSendspinGroupPlayer(userGroupId: string): ProtocolPlayer {
   const groupName = sendspinGroupName(userGroupId);
   return {
     playerId,
-    async playMedia(item: QueueItem, baseUrl: string, startMs = 0, bridge?: { sockets: BridgeSocketSpec[] }, opts?: { manual?: boolean; nextSongId?: string; resolvedRowId?: string }) {
+    async playMedia(item: QueueItem, baseUrl: string, startMs = 0, bridge?: { sockets: BridgeSocketSpec[] }, opts?: { manual?: boolean; nextSongId?: string; resolvedRowId?: string; speed?: number }) {
       const members = await onlineSendspinMembers(userGroupId);
       // v4.9.3 方向 A:纯 AirPlay 桥组(无直连 sendspin 成员)也起泵 —— 桥是唯一
       // 消费者;带 bridge 规格时空成员放行,不再抛「无在线 sendspin 成员」。
@@ -106,7 +107,10 @@ export function createSendspinGroupPlayer(userGroupId: string): ProtocolPlayer {
       // Phase 3:bridge 规格原样透传(index.ts fork/in-proc 双路都不丢弃)。
       // S1:下一首预取提示同样透传(泵在曲末 ≤5s 预解码下一首,见 streamEngine)。
       // 2026-11-04:主进程裁决出的可播行也一并透传,子进程泵据此跳过二次探测。
-      await sendspinGroupPlay(groupName, members, item, startMs, bridge, opts?.nextSongId, opts?.resolvedRowId);
+      // 倍速:组内一律按组倍速;单机桥(`__bridge_solo:<dev>`)由桥 player 显式传设备倍速
+      // (它的组名不是设备 id,直接读注册表会恒取到 1x)。
+      const playSpeed = typeof opts?.speed === "number" ? opts.speed : getPlaybackSpeed(userGroupId);
+      await sendspinGroupPlay(groupName, members, item, startMs, bridge, opts?.nextSongId, opts?.resolvedRowId, playSpeed);
       schedulePlayingReport(playerId, item.duration ?? 0);
       return { mediaUri: streamUrl };
     },
@@ -262,7 +266,7 @@ function createSendspinInprocPlayer(clientId: string): ProtocolPlayer {
       emitMediaChanged(clientId, item);
       playCore(srv, clientId, item, (cid, songId, message) => {
         srv.log("warn", `sendspin play ${songId} failed(client=${cid}): ${message}`);
-      }, startMs, undefined, undefined, opts?.nextSongId, opts?.resolvedRowId);
+      }, startMs, undefined, undefined, opts?.nextSongId, opts?.resolvedRowId, getPlaybackSpeed(clientId));
       schedulePlayingReport(playerId, item.duration ?? 0);
       return { mediaUri: streamUrl };
     },
@@ -341,6 +345,8 @@ function createSendspinProxyPlayer(clientId: string): ProtocolPlayer {
         ...(opts?.nextSongId ? { nextSongId: opts.nextSongId } : {}),
         // 2026-11-04 P2:主进程已裁决的源行透传子进程,避免 fork 侧二次完整探测。
         ...(opts?.resolvedRowId ? { preferRowId: opts.resolvedRowId } : {}),
+        // 倍速(2026-11-14):子进程据此给解码 af 追加 atempo,并把泵时间轴按输出流口径推进。
+        ...(getPlaybackSpeed(clientId) !== 1 ? { speed: getPlaybackSpeed(clientId) } : {}),
       });
       schedulePlayingReport(playerId, item.duration ?? 0);
       return { mediaUri: streamUrl };

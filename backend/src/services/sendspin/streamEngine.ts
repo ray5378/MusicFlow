@@ -211,7 +211,7 @@ export const BRIDGE_NEXT_PREFETCH_WAIT_MS = 2_000;
 export type PumpSource = (
   songId: string,
   startMs?: number,
-  opts?: { preferRowId?: string; dspFilters?: string[] },
+  opts?: { preferRowId?: string; dspFilters?: string[]; speed?: number },
 ) => Promise<GroupAudio>;
 
 let injectedSource: PumpSource | null = null;
@@ -310,13 +310,13 @@ export function maxSilentDegradeUs(): number {
 async function defaultSource(
   songId: string,
   startMs = 0,
-  opts?: { preferRowId?: string; dspFilters?: string[] },
+  opts?: { preferRowId?: string; dspFilters?: string[]; speed?: number },
 ): Promise<GroupAudio> {
   const { resolvePlayableRow } = await import("../source/resolveAudio.js");
   const r = await resolvePlayableRow(songId, { preferRowId: opts?.preferRowId });
   if (!r.row) throw new Error(`no playable stream for ${songId} (${r.reason})`);
   const sourceRowId = r.row.id;
-  return { ...(await streamingSource(r.row as any, startMs, opts?.dspFilters, songId)), sourceRowId };
+  return { ...(await streamingSource(r.row as any, startMs, opts?.dspFilters, songId, opts?.speed)), sourceRowId };
 }
 
 /** 流式音源:行 → ffmpeg 直读输入 → 滑动窗口。首帧只等 2 秒预缓冲,
@@ -340,6 +340,8 @@ async function streamingSource(
   dspFilters?: string[],
   /** 曲目 id:透传给 PcmWindow.meta,debug 日志取证「哪首歌播到哪挂了」用。 */
   songId?: string,
+  /** 倍速(2026-11-14):进 decode af 的 atempo;窗口/os 游标因此是**输出流时间轴**。 */
+  speed: number = 1,
 ): Promise<GroupAudio> {
   const { resolveRowInput } = await import("../source/resolveAudio.js");
   const direct = resolveRowInput(row as any);
@@ -351,13 +353,16 @@ async function streamingSource(
   // 歌长 > 上限 → 滑动窗口(背压+淘汰),照样播完。duration 未知(0/null)时保守走滑动。
   const windowSec = await readStreamWindowSeconds();
   const durSec = typeof row.duration === "number" && row.duration > 0 ? row.duration : 0;
-  const retainWholeSong = durSec > 0 && durSec <= windowSec;
-  log.debug(`[window] 上限=${windowSec}s 整曲保留=${retainWholeSong} 歌长=${durSec}s`);
+  // 倍速下"整曲保留"的判据是**输出流时长**(内容/speed):60s 的歌 1.5x 只有 40s,
+  // 用内容时长判断会白留 20s 窗口(内存/背压都按错的口径算)。
+  const retainWholeSong = durSec > 0 && durSec / speed <= windowSec;
+  log.debug(`[window] 上限=${windowSec}s 整曲保留=${retainWholeSong} 歌长=${durSec}s speed=${speed}x`);
   const window = new PcmWindow(
     {
       ...source,
       ...(typeof row.id === "string" ? { rowId: row.id } : {}),
       ...(dspFilters && dspFilters.length > 0 ? { dspFilters } : {}),
+      ...(speed !== 1 ? { speed } : {}),
     },
     startMs,
     { highSec: windowSec, retainWholeSong, meta: { songId, durationSec: durSec } },
@@ -595,6 +600,26 @@ export class GroupPump {
   private dspFilters: string[] = [];
   /** 本轮音源工厂(预取复用同一工厂;测试注入音源同样走它)。 */
   private srcFn: PumpSource | null = null;
+  /**
+   * 播放倍速(2026-11-14;1 = 原速)。
+   *
+   * 与 `this.speed`(SENDSPIN_PUSH_SPEED,推流 pacing 倍速)是**两件事**:
+   *  - `speed`   :把帧推给设备的节奏倍率(压测用,通常 1);
+   *  - `rate`    :音频内容本身的播放倍率(atempo)。音频已在解码段被压缩,
+   *                因此泵内部**全部时间轴(playCursorMs/durationMs/positionMs/
+   *                pendingSeekMs)统一是输出流毫秒**,对外只在 poll / seek 边界换算。
+   */
+  private rate = 1;
+
+  /** 设置播放倍速(下一次 play 生效;运行中变速由 QueueController 重投实现)。 */
+  setPlaybackRate(rate: number): void {
+    const r = Number(rate);
+    this.rate = Number.isFinite(r) && r > 0 ? r : 1;
+  }
+
+  get playbackRate(): number {
+    return this.rate;
+  }
 
   constructor(server: SendspinServer, group: SendspinGroup) {
     this.server = server;
@@ -707,7 +732,7 @@ export class GroupPump {
     try {
       const srcPromise = (async () => {
         try {
-          return await source(songId, startMsForSource, { preferRowId: reuseRowId, dspFilters });
+          return await source(songId, startMsForSource, { preferRowId: reuseRowId, dspFilters, speed: this.rate });
         } catch (e) {
           // 复用命中却出不了流(源行已失效/被删/上游不可达):清掉记账,回退**完整解析**
           // 重试一次。只重试一次 —— 再失败就交给既有 onPlayFailed 愈合(跳过/换源),
@@ -720,7 +745,7 @@ export class GroupPump {
           );
           this.srcRowId = null;
           this.srcRowSongId = "";
-          return await source(songId, startMsForSource, { dspFilters });
+          return await source(songId, startMsForSource, { dspFilters, speed: this.rate });
         }
       })();
       srcResult = NEED_FUSE
@@ -779,7 +804,7 @@ export class GroupPump {
     this.paused = false;
     this.pcm = pcm;
     this.window = stream ?? null;
-    this.durationMs = durationMs;
+    this.durationMs = Math.round(durationMs / this.rate);
     this.songId = songId;
     // 记下本轮生效源行,供同曲 seek 重建复用(见 srcRowId 字段说明)。
     // 注入音源(测试)可不回带 → 记为 null,下次重建照旧走完整裁决。
@@ -887,7 +912,7 @@ export class GroupPump {
     this.paused = false;
     this.pcm = pf.audio.pcm;
     this.window = pf.audio.stream ?? null;
-    this.durationMs = pf.audio.durationMs;
+    this.durationMs = Math.round(pf.audio.durationMs / this.rate);
     this.songId = songId;
     this.srcRowId = pf.audio.sourceRowId ?? null;
     this.srcRowSongId = songId;
@@ -1027,7 +1052,7 @@ export class GroupPump {
     void (async () => {
       let audio: GroupAudio | null = null;
       try {
-        audio = await source(next, 0, { dspFilters: this.dspFilters });
+        audio = await source(next, 0, { dspFilters: this.dspFilters, speed: this.rate });
         const wantSamples = Math.floor((SAMPLE_RATE * CHANNELS * BRIDGE_NEXT_PREFETCH_CONTENT_MS) / 1000);
         let buf: Float32Array;
         if (audio.stream) {
@@ -1871,7 +1896,7 @@ export class GroupPump {
             // 冻结到组上 —— pollCore 的 durationMs 兜底读它,让曲终的 UI 停在
             // 「当前时间 4:22 / 总时长 4:22」,而非清 current 后总时长归 0:00。
             // 位置(positionMs)本就不在此清零,故「冻结」只需补时长这一个维度。
-            this.group.frozenDurationMs = this.group.current?.durationMs ?? this.durationMs;
+            this.group.frozenDurationMs = this.group.current?.durationMs ?? Math.round(this.durationMs * this.rate);
             // ★ S1(2026-11-01 真机):自然播完时把上报位置**钉到时长**。
             //   「曲末排空跳过」会在设备真正播完前若干秒收尾,此时 positionMs 仍停在
             //   起播点(实测 seek 到 67s / 时长 76s ⇒ 一直上报 pos=67)。PlaybackTracker
@@ -1917,7 +1942,7 @@ export class GroupPump {
         // MA 对齐:异常终止同样只做「过渡复位」—— 只发 stream/end 收尾旧流,**不报**
         // stopped(silentState),避免固件把 group/update→stopped 镜像成 IDLE 闩锁;
         // 终态(队列放完)仍由 stopCore 走默认 finishPlayback(带 stopped)。
-        this.group.frozenDurationMs = this.group.current?.durationMs ?? this.durationMs;
+        this.group.frozenDurationMs = this.group.current?.durationMs ?? Math.round(this.durationMs * this.rate);
         this.group.current = null;
         this.group.finishPlayback({ silentState: true });
       } catch { /* 最小 stub 组无 finishPlayback 时忽略 */ }
@@ -1964,7 +1989,8 @@ export class GroupPump {
    *       调 playCore/playGroupCore 完成;pump 只负责 ① 与空闲态的位置记忆。
    *  MA 没有「帧边界无缝换流」;设备端缓冲自然耗尽后接新流,听感即 MA 真机行为。 */
   seek(seconds: number, opts?: { clamp?: boolean }): void {
-    const wantMs = Math.max(0, Math.round(seconds * 1000));
+    // 入参是**内容秒**（QueueController/客户端语义），泵内部是输出流毫秒 ⇒ 除以倍速。
+    const wantMs = Math.max(0, Math.round((seconds * 1000) / this.rate));
     // opts.clamp=false 时**不做时长钳制**:起播窗口内 `durationMs` 可能还是上一首的
     // (新歌的 play 尚未提交),据此钳制会把目标裁短 —— 240 实测:切歌后拖到 140s,
     // 被上一首的 114s 裁成了 114s。此时先记原始位置,由本轮 play() 拿到新歌时长后收口
@@ -1999,8 +2025,8 @@ export class GroupPump {
    *  (stop 会清 pendingSeekMs —— 那是"旧上下文丢弃"语义,MA 的 seek_position
    *  属于新流,必须在其后装填)。 */
   armSeek(ms: number): void {
-    // 同样按帧栅格对齐(seekCore 传进来的是毫秒精度的目标,见 alignFrameMs)。
-    const alignedMs = alignFrameMs(Math.max(0, Math.round(ms)));
+    // 入参是**内容毫秒**；内部时间轴是输出流毫秒 ⇒ 除以倍速后再按帧栅格对齐。
+    const alignedMs = alignFrameMs(Math.max(0, Math.round(ms / this.rate)));
     // ★ S1(2026-11-01 真机):`0` 不是 seek,是「从头起播」。QueueController 每次
     //   playMedia 都把 startMs=0 一并下发(auto-advance/手动 next 全是 0),旧实现
     //   在这里无条件丢预取 ⇒ **下一首起播那一拍**恰好把刚预解好的帧扔掉(日志

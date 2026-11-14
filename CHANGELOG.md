@@ -2,6 +2,37 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.13.0] - 2026-11-14
+
+### Feature / 推流播放器与群组倍速播放（服务端权威）
+
+- 新增 `services/player/playbackSpeed.ts`：档位与客户端一致（0.75 / 1 / 1.25 / 1.5 /
+  1.75 / 2），归一 + `atempo` 链尾注入 + 内容时间 ↔ 输出流时间换算；偏好持久化到
+  settings（`playback_speed:<id>`）。
+- DLNA 单曲与 flow 连续流：逐曲 af 追加 `atempo`；设备 `RelTime / TrackDuration`
+  与 `timeOffset / SOAP Seek` 在协议层按倍速换算；flow 的累计位置按当前曲起点归零
+  （新增 `services/player/flowProgress.ts`）。
+- sendspin 单机泵 / 用户组泵：解码 af 追加 `atempo`，泵内部时间轴统一为输出流毫秒
+  （`durationMs = 内容/speed`），`pollCore` 对外换算回内容时间；seek/armSeek 入参
+  内容秒；倍速非 1 时禁用借流（源端流速率可能不同）。
+- AirPlay 桥继承泵倍速；直连路径按会话倍速换算位置、`timeOffset` 用内容/speed。
+- 组与混合组：以组为单位生效（组泵统一；DLNA 历史成员扇出时显式传组倍速）。
+- 控制面：`POST /v1/peers/:peerId/speed`，`/status` 与队列快照新增 `speed`。
+- 变速语义 = 以当前内容位置重投当前曲（出流在 cast 时生成，无法运行中改滤镜）。
+- 实测修复（230，2026-11-14）：
+  1. 变速重投的落点改取播放器**实时状态**（`lastPos / lastPlaying` 只在 5s 轮询里
+     更新，起播几秒内切倍速时两者皆空 ⇒ 曾从 0 重放）；
+  2. 设备 `RelTime` 以**本次 URI 起点**计数，`getDeviceStatus` 的内容位置补上本次
+     cast 的起播偏移（`castContentOffsetSec`，SOAP Seek 成功后清零、清媒体时复位），
+     否则变速/带进度重投后进度从 0 重新爬；
+  3. flow 的「相对当前曲归零」移到 `getDeviceStatus`（`/peers/:id/status` 直连它，
+     原先只有协议 player 的 `pollState` 做换算 ⇒ REST/Web 读到的位置越过单曲时长）；
+  4. 暂停中改倍速后恢复播放，若 `appliedSpeed ≠ 当前偏好` 则以当前位置重投新流
+     （含 DLNA `/play` 的直连 `playDevice` 分支），不再继续播旧速率的编码流。
+- 文档：新增 `docs/播放链路与队列流转权威文档-20261114.md`（含 §10 倍速现状与实测证据）。
+- 测试：`tests/player/playbackSpeed.test.ts`、`tests/sendspin/playbackSpeed.sendspin.test.ts`；
+  230 真实 DLNA 模拟渲染器 + 真实 ffmpeg 实测 1.5x / 0.75x / seek / 跨曲。
+
 ## [4.12.44] - 2026-11-14
 
 ### Fix / MfIcon 守卫与部署流程

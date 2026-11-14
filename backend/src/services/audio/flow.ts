@@ -131,6 +131,15 @@ export interface FlowOptions {
   fade?: Partial<FadeConfig> | null;
   /** 是否启用交叉淡入。false = 逐首直通（**仍走管道**，D9）—— 关闭开关的等价物。 */
   crossfade?: boolean;
+  /**
+   * 倍速（2026-11-14；0.75~2，1 = 原速）。
+   *
+   * 只用于**解码段的时长口径换算**：`atempo` 由调用方写进每曲 af 链（`FlowItem.af`），
+   * 会话内部看到的是已压缩的输出流。`itemStartSec` / `streamSec` / `emittedFrames`
+   * 全部按输出流秒记录（与设备 RelTime 同轴、与编码器实际产出同轴）。
+   * 唯一需要它的是「内容时长 → 输出字节数」的预取点换算（`durationSec / speed`）。
+   */
+  speed?: number;
   /** 每曲起播回调（队列推进 / ICY 曲目边界）。 */
   onItemStart?: (index: number, item: FlowItem) => void;
   /** 每曲结束回调，带该曲解码 stderr（P0-4 边播边测的唯一落点）。ok=false 表示该曲空流/失败。 */
@@ -357,6 +366,11 @@ export async function startFlowSession(items: FlowItem[], opts: FlowOptions = {}
   const channels = Math.max(1, Math.round(opts.channels ?? FLOW_DEFAULT_CHANNELS));
   const codec = opts.codec ?? FLOW_DEFAULT_CODEC;
   const crossfade = opts.crossfade === true;
+  // 倍速：只用于节流口径与「曲长 → 输出字节数」的换算（见 FlowOptions.speed）。
+  const speed = (() => {
+    const s = Number(opts.speed);
+    return Number.isFinite(s) && s > 0 ? s : 1;
+  })();
   const fade = normalizeFadeConfig(opts.fade ?? null);
   const frameBytes = frameBytesOf(channels);
   // 过渡窗口的**配置上限**：按配置时长算出采样数（已帧对齐），再换成字节。
@@ -454,6 +468,9 @@ export async function startFlowSession(items: FlowItem[], opts: FlowOptions = {}
     if (paceStartAt === 0) paceStartAt = Date.now();
     const leadMs = flowRealtimeLeadMs();
     if (leadMs > 0) {
+      // `emittedFrames/sampleRate` 是**输出流秒**（设备按 1× 墙钟消费它），与倍速无关：
+      // atempo 已经在解码段把音频压短，帧数口径没有变化 ⇒ 节流不能再除 speed，
+      // 否则 1.5x 时会把"已产出"低估 1/3，设备被灌到远超 LEAD 的缓冲。
       const dueMs = (stats.emittedFrames / sampleRate) * 1000 - (Date.now() - paceStartAt) - leadMs;
       if (dueMs > 0) {
         await paceSleep(dueMs);
@@ -585,6 +602,8 @@ export async function startFlowSession(items: FlowItem[], opts: FlowOptions = {}
         if (startMarked) return;
         itemStartSec[index] = stats.emittedFrames / sampleRate;
         startMarked = true;
+        // 排障(2026-11-14 倍速实测):边界落在**输出流秒**上,1.5x 时应为 16s 而不是 24s。
+        log.debug(`[flow] itemStart[${index}]=${itemStartSec[index].toFixed(2)}s (speed=${speed}x)`);
       };
       opts.onItemStart?.(index, item);
       // 起播时就把**下一首**放进后台解析：整首歌的时间足够完成 WebDAV 探测/换链，
@@ -698,7 +717,9 @@ export async function startFlowSession(items: FlowItem[], opts: FlowOptions = {}
       // 预取点：距本曲结束还有「过渡窗口 + margin」时。没有时长信息则为 -1（不预取，
       // 退化到下一环开头的"过渡那一刻才拉"）。
       const totalBytes = typeof item.durationSec === "number" && item.durationSec > 0
-        ? item.durationSec * sampleRate * frameBytes
+        // durationSec 是**内容秒**；输出流被 atempo 压短 ⇒ 字节数按 内容/speed 算，
+        // 否则 1.5x 下预取点永远到不了（曲尾直接断粮换歌）。
+        ? (item.durationSec / speed) * sampleRate * frameBytes
         : -1;
       const prefetchAtBytes = totalBytes > 0
         ? Math.max(0, totalBytes - (fadeBytes + FLOW_PREFETCH_MARGIN_SEC * sampleRate * frameBytes))

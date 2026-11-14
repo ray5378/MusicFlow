@@ -805,7 +805,7 @@ console.log("===== R25 同设备双协议流转(AirPlay <-> DLNA):落点/互斥/
   );
   check(
     "DLNA playMedia 把 startMs 编进 timeOffset(起播即落位)",
-    /async playMedia\(item: QueueItem, baseUrl: string, startMs = 0\)/.test(dlnaG)
+    /async playMedia\(item: QueueItem, baseUrl: string, startMs = 0[),]/.test(dlnaG)
       && /timeOffset: startSec/.test(dlnaG),
     "DLNA 忽略 startMs:流转/续播只能从 0 秒拉流",
   );

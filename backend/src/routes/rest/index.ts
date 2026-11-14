@@ -16,6 +16,8 @@ import { fetchCoverForSong } from "../../services/covers.js";
 import { isImportedPlaylist, isPluginSyncPlaylist } from "../../utils/playlist.js";
 import { songSourceInfo, attachGroupSources, resolveSongCover } from "../../utils/songSource.js";
 import { getSetting } from "../../services/settings.js";
+import { withAtempo, contentToStreamSec } from "../../services/player/playbackSpeed.js";
+import { setFlowProgress, clearFlowProgress } from "../../services/player/flowProgress.js";
 import { isFixedRecommendPlaylist } from "../../services/plugin/fixedRecommend.js";
 import { maybeRefreshRandomSongs, RANDOM_PLAYLIST_ID, getRandomSongsConfig } from "../../services/plugin/randomSongs.js";
 import { readCoverFile } from "../../services/coverCache.js";
@@ -47,7 +49,7 @@ import type { FlowItem, FlowItemResolved } from "../../services/audio/flow.js";
 import type { PipelineChannel } from "../../services/audio/pipelineSwitches.js";
 import { createLogger } from "../../utils/logger.js";
 import { sendToUser } from "../../services/ws/index.js";
-import { notePeerActivity } from "../../services/dlna/control.js";
+import { notePeerActivity, getCastPlaybackSpeed } from "../../services/dlna/control.js";
 
 const log = createLogger("REST-STREAM");
 
@@ -1923,11 +1925,14 @@ async function serveFlowQueue(
     dspPeerId?: string;
     /** 本会话的管道通道（P5-1/P5-2）：每曲 af 链的开关判定用它，`null` = 不带滤镜链。 */
     flowChannel?: PipelineChannel | null;
+    /** 倍速（2026-11-14）：逐曲 af 追加 atempo，并把节流口径按倍速换算（见 flow.ts）。 */
+    speed?: number;
   },
 ): Promise<Response | null> {
   const { getQueueManager } = await import("../../services/dlna/queue.js");
   const { selectFlowCandidates, icyMetadataBlock } = await import("../../services/audio/flowSource.js");
   const qm = getQueueManager();
+  const speed = opts.speed && opts.speed > 0 ? opts.speed : 1;
   const snapshot = qm.snapshot(opts.deviceId);
   const candidates = selectFlowCandidates(snapshot, opts.songId, opts.maxItems);
   if (candidates.length < 2) return null; // 只此一首 → 会话无意义，交回单曲管道
@@ -1953,7 +1958,7 @@ async function serveFlowQueue(
     return {
       input: input.source,
       ...(input.headers ? { headers: input.headers } : {}),
-      af: await resolveFlowAf(resolved, opts.dspPeerId, flowChannel),
+      af: withAtempo(await resolveFlowAf(resolved, opts.dspPeerId, flowChannel), speed),
       key: resolved.id,
     };
   };
@@ -1999,6 +2004,7 @@ async function serveFlowQueue(
     targetBits: flowTargetBits,
     crossfade: true,
     fade: opts.fade,
+    speed,
     onItemStart: (_i, item) => {
       // ICY 传输流里的曲目边界必须与**音频写入**同步（流内消费者会自动准时），
       // 所以元数据仍留在这里；队列/UI 的 currentIndex 不能跟它 —— 见下面的可听时钟。
@@ -2034,14 +2040,23 @@ async function serveFlowQueue(
   // 与旧行为一致（不回归）。
   const flowStartedAt = Date.now();
   const audibleClock = createAudibleClock(flowStartedAt, () => session.streamSec());
+  let flowDbgTick = 0;
   const advanceByAudibleClock = () => {
     try {
       const reported = getLastReportedPlaybackSec(opts.deviceId);
       if (reported) audibleClock.sample(reported.sec, reported.at);
       // 设备不报进度/尚未采到 ⇒ 回退「编码器已出流位置」（与旧行为一致）。
       const sec = audibleClock.sec() ?? session.streamSec();
-      const idx = pickItemIndexAtSec(session.itemStartSec(), sec);
+      const starts = session.itemStartSec();
+      const idx = pickItemIndexAtSec(starts, sec);
+      // 对外登记可听边界(2026-11-14):DLNA pollState 用它把连续流的累计位置
+      // 换算成「相对当前曲」的内容秒;倍速下必须带上 speed 才能换回内容轴。
+      setFlowProgress(opts.deviceId, { starts: starts.slice(), startIndex, speed });
       qm.flowAdvance(opts.deviceId, startIndex + Math.min(idx, items.length - 1));
+      if (flowDbgTick++ % 25 === 0) {
+        // 1s 一条:实测时可直接看到「设备流秒 / 各曲边界 / 队列下标」三者关系。
+        log.debug(`[flow][advance] dev=${opts.deviceId} sec=${sec.toFixed(2)} starts=${JSON.stringify(starts.map((v) => (typeof v === "number" ? +v.toFixed(2) : v)))} -> idx=${idx} reported=${reported ? reported.sec.toFixed(2) : "none"}`);
+      }
     } catch { /* 队列已被改 / 会话已收敛，忽略 */ }
   };
   const audibleClockTimer = setInterval(advanceByAudibleClock, 200);
@@ -2058,6 +2073,7 @@ async function serveFlowQueue(
     clearInterval(audibleClockTimer);
     signal.removeEventListener("abort", onAbort);
     qm.setFlowOwned(opts.deviceId, false);
+    clearFlowProgress(opts.deviceId);
     if (activeFlowAborts.get(opts.deviceId) === onAbort) activeFlowAborts.delete(opts.deviceId);
   });
 
@@ -2674,7 +2690,15 @@ async function serveCastStream(
   // 队列/状态仍按原行上报,只影响音箱实际拉到的流。
   const resolvedSong = await resolvePreferredSong(song);
 
-  const timeOffset = parseTimeOffset(c);
+  // 倍速(2026-11-14):同一条管道对 DLNA / AirPlay 都按该设备的倍速生成音频
+  // （af 末尾 atempo）。**timeOffset 是内容秒**（设备/解码器按内容时间 seek），
+  // 而 ffmpeg 的 -ss 吃的是输出流秒 ⇒ 必须除以倍速；否则 1.5x 拖到 60s 会
+  // 从内容 90s 起播（表现为「拖过头/直接结束」）。
+  // 倍速(2026-11-14):取本次 cast 实际下发的倍速(组内成员由组倍速覆盖),
+  // 与 castToDevice 的记账同源,避免「进度按 A 倍速换算、音频按 B 倍速生成」。
+  const playbackSpeed = getCastPlaybackSpeed(ctx.deviceId);
+  const timeOffsetContent = parseTimeOffset(c);
+  const timeOffset = contentToStreamSec(timeOffsetContent, playbackSpeed);
   const requestedFormat = getParam(c, "format");
   const maxBitRate = parseInt(getParam(c, "maxBitRate") || "0") || null;
   // P4-2:per-player DSP 用 `<通道>:<deviceId>` 作查键 —— 播放端自己不会自报,
@@ -2715,7 +2739,7 @@ async function serveCastStream(
         format: transcode.format,
         bitrateKbps: transcode.bitrateKbps,
         timeOffset,
-        af: await resolveRequestAf(resolvedSong, dspPeerId, channel),
+        af: withAtempo(await resolveRequestAf(resolvedSong, dspPeerId, channel), playbackSpeed),
         songId: resolvedSong.id,
       });
     }
@@ -2774,6 +2798,7 @@ async function serveCastStream(
           extraHeaders,
           dspPeerId,
           flowChannel: channel,
+          speed: playbackSpeed,
           ...(icyRequested ? { icyMetaint: 16384 } : {}),
         });
         if (flowResp) return flowResp;
@@ -2782,7 +2807,7 @@ async function serveCastStream(
 
     return servePipelinedSong(c, resolvedSong, input, {
       timeOffset,
-      af: await resolveRequestAf(resolvedSong, dspPeerId, channel),
+      af: withAtempo(await resolveRequestAf(resolvedSong, dspPeerId, channel), playbackSpeed),
       codecOverride: castCodec,
       extraHeaders,
       ...(icyRequested ? { icyMetaint: 16384 } : {}),

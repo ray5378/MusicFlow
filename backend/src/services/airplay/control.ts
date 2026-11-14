@@ -13,6 +13,7 @@ import { type ChildProcessWithoutNullStreams } from "child_process";
 import { randomBytes } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { PlaybackState } from "../player/types.js";
+import { getPlaybackSpeed } from "../player/playbackSpeed.js";
 import { RaopPlayer, type RaopSession, type RaopRealtimeStats } from "./raop.js";
 import { makeProducer, spawnDecoder, degreesToDb, killDecoder } from "./decoder.js";
 import { isAirPlayForkMode } from "./mode.js";
@@ -108,6 +109,17 @@ interface ActiveSession {
 // 判活不靠 IPC:镜像里有 sessions 的键集合,`hasActiveSession()` 同步可答。
 
 const sessions = new Map<string, ActiveSession>();
+/**
+ * 直连会话的倍速元数据（2026-11-14）。
+ *
+ * 为什么不能从 RAOP 的 `positionSec` 直接读内容位置：RAOP 的 positionSec 是「已发送
+ * 的 PCM 秒数」—— 音频在服务端出流时就已被 atempo 压短（1.5x 时 60s 内容 = 40s PCM），
+ * 它每秒只走 1s。换算只能在这里做：`内容 = seekStart + (流位置 - seekStart) × speed`。
+ *
+ * 只服务**直连**（`MUSICFLOW_AIRPLAY_BRIDGE=0` 回滚专线）；默认桥路径的 PCM 来自
+ * sendspin 组泵，位置已由 pollCore 换算（见 sendspin/playerCore.pollCore）。
+ */
+const sessionSpeedMeta = new Map<string, { seekStart: number; speed: number }>();
 const volumeState = new Map<string, { volume: number; muted: boolean; supportsRsa: boolean }>();
 
 /** 取设备音量状态:**内存优先,缺失时用持久值播种**。
@@ -471,12 +483,14 @@ async function stopSession(deviceId: string): Promise<void> {
     try {
       await airplaySupervisor.rpc("stopSession", { deviceId });
     } catch { /* 子进程没跑 → 本来就没有会话 */ }
+    sessionSpeedMeta.delete(deviceId);
     return;
   }
   const s = sessions.get(deviceId);
   if (!s) return;
   log.debug(`[AirPlay][cast] stopSession: 收尾旧会话 ${deviceId}`);
   sessions.delete(deviceId);
+  sessionSpeedMeta.delete(deviceId);
   s.ended = true;
   try { killDecoder(s.ffmpeg); } catch { /* ignore */ }
   await s.player.stop().catch(() => {});
@@ -712,6 +726,11 @@ async function startSession(opts: AirPlayCastOptions, seekSec?: number): Promise
   // 旧实现先建一份又丢弃(变量未使用),但那个 producer 的 stdout data 监听器仍在,
   // 会把整首歌的 PCM 再缓存一份且无人消费(内存翻倍),还会与真 producer 争抢
   // pause/resume 背压 → 间歇性卡顿。
+  // 倍速元数据:本次会话的 PCM 是服务端按该倍速压缩过的(见 sessionSpeedMeta)。
+  sessionSpeedMeta.set(opts.deviceId, {
+    seekStart: Math.max(0, Number(seekSec) || 0),
+    speed: getPlaybackSpeed(opts.deviceId),
+  });
   const active: ActiveSession = {
     deviceId: opts.deviceId,
     player,
@@ -779,6 +798,7 @@ function runStream(active: ActiveSession, session: RaopSession): void {
       const stillCurrent = sessions.get(active.deviceId) === active;
       if (stillCurrent) {
         sessions.delete(active.deviceId);
+        sessionSpeedMeta.delete(active.deviceId);
       }
       try { killDecoder(ff); } catch { /* ignore */ }
       // 会话自然结束(整首播完 / 失败)也必须拆掉 RTP socket 并发 TEARDOWN,
@@ -1758,6 +1778,19 @@ interface SessionView {
 }
 
 function sessionView(deviceId: string): SessionView | null {
+  const view = sessionViewRaw(deviceId);
+  if (!view) return null;
+  // 倍速换算(2026-11-14):RAOP 的 positionSec 是**已发送 PCM 秒**,已按倍速压缩。
+  // 对外一律内容秒:`内容 = seekStart + (流位置 - seekStart) × speed`。
+  const meta = sessionSpeedMeta.get(deviceId);
+  if (meta && meta.speed !== 1) {
+    const content = meta.seekStart + (view.positionSec - meta.seekStart) * meta.speed;
+    view.positionSec = Math.max(0, Math.min(content, view.durationSec > 0 ? view.durationSec : content));
+  }
+  return view;
+}
+
+function sessionViewRaw(deviceId: string): SessionView | null {
   if (isAirPlayForkMode()) {
     const r = airplaySupervisor.mirror.sessions.get(deviceId);
     if (!r) return null;

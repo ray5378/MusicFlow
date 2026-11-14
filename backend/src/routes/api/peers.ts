@@ -663,6 +663,31 @@ app.post("/v1/peers/:peerId/play-mode", async (c) => {
   return c.json({ success: true });
 });
 
+/**
+ * 设置播放倍速（2026-11-14）。档位与客户端一致：0.75 / 1 / 1.25 / 1.5 / 1.75 / 2。
+ *
+ * 语义（服务端权威）：写注册表 + settings 持久化，然后由 QueueController
+ * 用新倍速**从当前位置重投当前曲**（出流在 cast 时生成，不能运行中改滤镜）。
+ * 未在播时只记偏好，下一次起播生效。
+ *
+ * `local:*`（浏览器 / 客户端本机播放）不走这里：本地倍速由客户端播放器自己负责，
+ * 服务端只回 400 提示用错了端点 —— 静默 success 会让"网页变速没反应"无从排查。
+ */
+app.post("/v1/peers/:peerId/speed", async (c) => {
+  const peerId = decodePeerId(c);
+  const parsed = parsePeerId(peerId);
+  if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
+  const body = await c.req.json().catch(() => ({} as any));
+  const raw = body?.speed;
+  if (typeof raw !== "number" || !Number.isFinite(raw)) {
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.needsSpeed"), 400);
+  }
+  if (parsed.kind === "local") {
+    return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.localSpeedUnsupported"), 400);
+  }
+  const speed = await getQueueController().setPlaybackSpeed(parsed.id, raw);
+  return c.json({ success: true, speed });
+});
 // 本机洗牌序列(轻量端点:只回序列与游标,不拖全队列 items)。
 // SPEC(player/types.ts):洗牌序列唯一权威在服务端,客户端只做镜像;
 // 客户端 shuffle 推进前 GET 一次,epoch 变了就重新定位当前曲位置。
@@ -778,7 +803,15 @@ app.post("/v1/peers/:peerId/play", async (c) => {
     try {
       await detachFromActiveGroups(parsed);
       getQueueController().resumePlayback(parsed.id);
-      await playDevice(parsed.id);
+      // 暂停期间改过倍速：设备上那条流还是旧速率编码，直连 playDevice 只会让设备
+      // 继续拉旧流（听到旧速率、进度却按新速率走）。改走 transport("play") ——
+      // QueueController 会以当前内容位置用新倍速重投一条流。
+      const qc = getQueueController();
+      if (Math.abs(qc.getPlaybackSpeed(parsed.id) - qc.getAppliedSpeed(parsed.id)) > 1e-9) {
+        await qc.transport(parsed.id, "play");
+      } else {
+        await playDevice(parsed.id);
+      }
       return c.json({ success: true });
     }
     catch (e: any) { return c.json(apiInternalError(e), 500); }
@@ -1164,7 +1197,7 @@ app.get("/v1/peers/:peerId/status", async (c) => {
       }
       // 队列版本号(4.12.9):客户端据此判断队列是否真的变了,只有变了才拉 /queue。
       // 此前客户端每 2s 无条件整包重拉(4216 首的群组队列 404,654 B)。
-      return c.json({ ...status, queueRevision: getQueueController().queueRevision(deviceId) });
+      return c.json({ ...status, queueRevision: getQueueController().queueRevision(deviceId), speed: getQueueController().getPlaybackSpeed(deviceId) });
     } catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   if (parsed.kind === "group") {
@@ -1191,7 +1224,7 @@ app.get("/v1/peers/:peerId/status", async (c) => {
         status.position = hold.position;
         status.duration = hold.duration;
       }
-      return c.json({ ...status, queueRevision: getQueueController().queueRevision(parsed.id) });
+      return c.json({ ...status, queueRevision: getQueueController().queueRevision(parsed.id), speed: getQueueController().getPlaybackSpeed(parsed.id) });
     } catch (e: any) { return c.json(apiInternalError(e), 500); }
   }
   if (parsed.kind === "airplay") {
@@ -1215,7 +1248,7 @@ app.get("/v1/peers/:peerId/status", async (c) => {
     // 可听显示延迟(桥路径:新旧曲交叉窗口)—— 显示按住旧曲(4.11.12)。
     const hold = getQueueController()?.displayHoldState?.(parsed.id);
     if (hold) { st.media = hold.media; st.position = hold.position; st.duration = hold.duration; }
-    return c.json({ ...st, queueRevision: getQueueController().queueRevision(parsed.id) });
+    return c.json({ ...st, queueRevision: getQueueController().queueRevision(parsed.id), speed: getQueueController().getPlaybackSpeed(parsed.id) });
   }
   // sendspin:进程内播放器的实时状态(Position/Duration 由推流引擎驱动)。
   if (parsed.kind === "sendspin") {
@@ -1239,6 +1272,8 @@ app.get("/v1/peers/:peerId/status", async (c) => {
         updatedAt: st.updatedAt,
         // 队列版本号(4.12.9):客户端只在它变化时才拉 /queue 窗口。
         queueRevision: getQueueController().queueRevision(parsed.id),
+        // 倍速(2026-11-14):各端下拉框回显用;权威在服务端注册表。
+        speed: getQueueController().getPlaybackSpeed(parsed.id),
         volume: vol.volume,
         muted: vol.muted,
         // 当前曲:各端靠 media.songId 变化刷新歌词/封面,缺了切歌后还挂第一首。

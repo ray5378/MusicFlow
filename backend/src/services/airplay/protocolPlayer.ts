@@ -12,6 +12,7 @@ import { randomBytes } from "node:crypto";
 import { PlaybackState, type PlayerState, type ProtocolPlayer, type QueueItem } from "../player/types.js";
 import { createAirPlaySession } from "./session.js";
 import { bridgeSocketPath } from "./bridgeChannel.js";
+import { getPlaybackSpeed } from "../player/playbackSpeed.js";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("AirPlay");
@@ -133,7 +134,7 @@ export function createAirPlayBridgePlayer(deviceId: string): ProtocolPlayer {
       baseUrl: string,
       startMs = 0,
       _bridge?: unknown,
-      opts?: { manual?: boolean; nextSongId?: string },
+      opts?: { manual?: boolean; nextSongId?: string; resolvedRowId?: string; speed?: number },
     ) {
       const prev = soloBridgeRoutes.get(deviceId);
       // D6/P1:用户手动 next/prev ⇒ 给**已存在**的桥会话打 sticky 标记;
@@ -159,7 +160,12 @@ export function createAirPlayBridgePlayer(deviceId: string): ProtocolPlayer {
       const gp = await sendspinSoloGroup(deviceId);
       // opts 必须透传：nextSongId 是 S1「下一首预解码」的唯一触发链
       // (QueueController 只对桥路径下传；漏传 ⇒ 组泵 nextSongId 恒空 ⇒ 预取永不启动)。
-      const r = await gp.playMedia(item, baseUrl, startMs, { sockets: [spec] }, opts);
+      // 倍速(2026-11-14):单机桥的 PCM 来自单机伪组泵(`__bridge_solo:<dev>`),
+      // 组名不是设备 id ⇒ 必须在这里显式把**设备倍速**传下去,泵才会在解码 af 追加 atempo。
+      const r = await gp.playMedia(item, baseUrl, startMs, { sockets: [spec] }, {
+        ...opts,
+        speed: typeof opts?.speed === "number" ? opts.speed : getPlaybackSpeed(deviceId),
+      });
       lastMediaUri = r.mediaUri;
       log.info(`[bridge-solo] ${deviceId} 起播 protocol=${protocol} warm=${warm} start=${Math.round(startMs / 1000)}s`);
       return r;

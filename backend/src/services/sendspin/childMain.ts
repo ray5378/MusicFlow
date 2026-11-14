@@ -132,7 +132,9 @@ export class SendspinChildController extends ChildRpcHost<SendspinChildToParent,
           this.emit({ t: "songUnplayable", clientId, songId, reason });
         }, typeof p.nextSongId === "string" && p.nextSongId ? p.nextSongId : undefined,
         // 2026-11-04 P2:主进程已裁决的源行,泵侧直接复用(零探测)。
-        typeof p.preferRowId === "string" && p.preferRowId ? p.preferRowId : undefined);
+        typeof p.preferRowId === "string" && p.preferRowId ? p.preferRowId : undefined,
+        // 倍速(2026-11-14):解码 af 末尾 atempo + 泵时间轴按输出流毫秒(见 GroupPump.rate)。
+        typeof p.speed === "number" && p.speed > 0 ? p.speed : undefined);
         this.requestSnapshot(true); // current 元数据变化立即可见(前端歌词/封面跟随)
         return null; // pump 异步起播,不等待解码
       }
@@ -195,7 +197,9 @@ export class SendspinChildController extends ChildRpcHost<SendspinChildToParent,
           this.emit({ t: "songUnplayable", clientId: String(p.group), songId, reason });
         }, typeof p.nextSongId === "string" && p.nextSongId ? p.nextSongId : undefined,
         // 2026-11-04 P2:同上,组起播也复用主进程裁决行。
-        typeof p.preferRowId === "string" && p.preferRowId ? p.preferRowId : undefined);
+        typeof p.preferRowId === "string" && p.preferRowId ? p.preferRowId : undefined,
+        // 倍速(2026-11-14):同 playMedia,组泵同样按倍速解码并推进时间轴。
+        typeof p.speed === "number" && p.speed > 0 ? p.speed : undefined);
         this.requestSnapshot(true);
         return null;
       }

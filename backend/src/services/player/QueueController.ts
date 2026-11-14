@@ -26,6 +26,7 @@ import type { TrackDecision } from "./PlaybackTracker.js";
 import { createLogger } from "../../utils/logger.js";
 import { markSeekIssued, withinSeekSettle, logSeekSettleSuppressed, clearSeekSettle } from "./seekSettle.js";
 import { withinPauseStopSettle, clearPauseStop } from "./pauseStopSettle.js";
+import { getPlaybackSpeed, setPlaybackSpeed, normalizePlaybackSpeed } from "./playbackSpeed.js";
 
 const log = createLogger("QueueController");
 
@@ -212,6 +213,10 @@ export class QueueController extends EventEmitter {
    *     而不是从头播(= 用户眼里的"归零");
    *  ② frozen 判定后重投的落点。 */
   private lastPos = new Map<string, number>();
+  /** 最近一次**成功 cast** 实际使用的倍速（裸 id）。出流（DLNA flow/单曲、sendspin 泵、
+   *  AirPlay 桥 PCM）都是 cast 时由 ffmpeg 一次性编码的，运行中改不了 —— 恢复播放前
+   *  必须据此判断「设备上那条流是不是按当前偏好编码的」，不同就得重投。 */
+  private appliedSpeed = new Map<string, number>();
   /** 最后一次**PLAYING**采样(位置/时长/时刻),供 advance 时外推旧曲还能听多久。
    *  与 lastPos 分开:lastPos 只记位置(链路恢复/冻结用),这里还要时长与时间戳。 */
   private lastPlaying = new Map<string, { pos: number; dur: number; at: number }>();
@@ -519,6 +524,27 @@ export class QueueController extends EventEmitter {
     if (op === "stop" || op === "play") { clearSeekSettle(playerId); clearPauseStop(playerId); }
     try {
       if (op === "play") {
+        // 暂停期间改倍速：设备上那条流仍是旧速率编码，直接 resume 会「听到旧速率、
+        // 进度按新速率走」。按当前内容位置用新倍速重投一条流（与 setPlaybackSpeed 同语义）。
+        const qPlay = this.queues.get(playerId);
+        const wantSpeed = getPlaybackSpeed(playerId);
+        const appliedSpeed = this.appliedSpeed.get(playerId) ?? 1;
+        const speedChanged = Math.abs(wantSpeed - appliedSpeed) > 1e-9;
+        if (speedChanged && qPlay && qPlay.isActive && qPlay.currentIndex >= 0 && !this.advancing.has(playerId)) {
+          const resumeSec = Math.max(0, this.lastPos.get(playerId) ?? this.lastPlaying.get(playerId)?.pos ?? 0);
+          log.info(
+            `[QueueController][speed] ${playerId}: 恢复时倍速 ${appliedSpeed}x→${wantSpeed}x，`
+            + `以新倍速从 ${resumeSec.toFixed(2)}s 重投`,
+          );
+          this.advancing.add(playerId);
+          try {
+            await this.playCurrent(playerId, getEffectiveBaseUrl(), Math.round(resumeSec * 1000), "speed");
+          } finally {
+            this.advancing.delete(playerId);
+          }
+          log.debug(`[QueueController][transport] ${playerId} op=play(重投) 完成 ${Date.now() - t0}ms`);
+          return;
+        }
         await player.resume();
         // F1:复播也注入本曲已知时长(否则 tracker.expectedDuration 恒 0 → 曲末预热 C 与
         // overrun 本地节拍结束兜底算不出窗口 → 换歌只能等 5s 轮询)。与 playCurrent 同口径:
@@ -545,6 +571,90 @@ export class QueueController extends EventEmitter {
       throw e;
     }
     log.debug(`[QueueController][transport] ${playerId} op=${op} arg=${arg} 完成 ${Date.now() - t0}ms`);
+  }
+
+  /** 读取当前倍速（裸 id / 带前缀 id 均可）。 */
+  getPlaybackSpeed(playerId: string): number {
+    return getPlaybackSpeed(stripPlayerPrefix(playerId));
+  }
+
+  /** 最近一次成功 cast 实际编码使用的倍速（从未 cast 过按 1 计）。
+   *  出流速率不可运行中改变，调用方据此判断「设备上那条流还是不是当前偏好的速率」。 */
+  getAppliedSpeed(playerId: string): number {
+    return this.appliedSpeed.get(stripPlayerPrefix(playerId)) ?? 1;
+  }
+
+  /**
+   * 设置倍速（2026-11-14）。**语义 = 用新倍速从当前位置重投当前曲**：
+   *
+   * 为什么不是「运行中改变量」：所有出流（DLNA flow / sendspin 泵 / AirPlay 桥的
+   * PCM）都是在 cast 时由 ffmpeg 一次性生成的，atempo 只能落在生成参数里。改倍速
+   * 必须重建这条流，否则设备侧听到的还是旧速率（进度换算却已按新速率走 = 音画不同步）。
+   *
+   * 落点取 **内容时间** 的当前位置：`lastPos` / `lastPlaying` 都是内容秒（各协议的
+   * pollState 已在协议层把输出流秒换算回内容秒，见 playbackSpeed.ts 注释）。
+   *
+   * 队列未激活 / 当前无曲 ⇒ 只记偏好，下一次 cast 自然生效（与客户端行为一致）。
+   * `advancing` 在途时同样只记偏好 —— 正在起播的那次 cast 会读取注册表，
+   * 而重复进入 playCurrent 会互相打断（历史上造成过窗口互掐）。
+   */
+  async setPlaybackSpeed(playerId: string, speed: number): Promise<number> {
+    playerId = stripPlayerPrefix(playerId);
+    const next = setPlaybackSpeed(playerId, speed);
+    log.info(`[QueueController][speed] ${playerId}: 倍速 → ${next}x`);
+    this.emit("queue_changed", playerId, this.snapshot(playerId));
+    const q = this.queues.get(playerId);
+    if (!q || !q.isActive || q.currentIndex < 0) return next;
+    if (this.advancing.has(playerId)) {
+      log.info(`[QueueController][speed] ${playerId}: 起播在途，${next}x 由本次 cast 生效`);
+      return next;
+    }
+    // 落点取「真实现场」：lastPos / lastPlaying 只在 5s 一轮的 poll 里更新，用户
+    // 起播几秒内就切倍速时两者都还是空的 ⇒ 落点 0 = 从头重放（2026-11-14 230 实测
+    // `[DLNA][cast] BEGIN ... seek=0s`，设备收到的 URI 也没有 timeOffset）。
+    // 这里向播放器要一次实时状态：position 已是**内容秒**，且能区分「暂停/停止」——
+    // 那两种情况下重投会把用户暂停的设备强行拉起，故只记偏好、不重投。
+    let posSec = Math.max(
+      0,
+      this.lastPos.get(playerId) ?? 0,
+      this.lastPlaying.get(playerId)?.pos ?? 0,
+    );
+    const livePlayer = this.players.get(playerId);
+    if (livePlayer) {
+      try {
+        const live = await livePlayer.pollState();
+        if ((live as any)?.unavailable) {
+          log.info(`[QueueController][speed] ${playerId}: 链路不可用，${next}x 于链路恢复后生效`);
+          return next;
+        }
+        if (live && live.playbackState !== PlaybackState.PLAYING) {
+          log.info(`[QueueController][speed] ${playerId}: 当前 ${live.playbackState}，${next}x 于下次起播生效`);
+          return next;
+        }
+        if (live && typeof live.position === "number" && live.position >= 0) posSec = live.position;
+      } catch {
+        /* 读不到现场就退回缓存读数（不因一次读失败放弃变速） */
+      }
+    }
+    // 夹紧到当前曲时长内：位置已到曲尾时按原值重投会立刻 EOF。
+    const curDurSec = this.knownDuration(q.items[q.currentIndex]);
+    if (curDurSec > 0) posSec = Math.min(posSec, Math.max(0, curDurSec - 1));
+    log.info(`[QueueController][speed] ${playerId}: 以 ${next}x 从 ${posSec.toFixed(2)}s 重投`);
+    this.advancing.add(playerId);
+    try {
+      await this.playCurrent(playerId, getEffectiveBaseUrl(), Math.round(posSec * 1000), "speed");
+    } catch (e: any) {
+      // 重投失败不能静默：用户会看到「选了倍速但没动静」。
+      log.warn(`[QueueController][speed] ${playerId}: 以 ${next}x 重投失败: ${e?.message || e}`);
+    } finally {
+      this.advancing.delete(playerId);
+    }
+    return next;
+  }
+
+  /** 归一化倍速（路由层入参校验用，避免把 0.9 这类值直接下发）。 */
+  static normalizeSpeed(value: unknown): number {
+    return normalizePlaybackSpeed(value);
   }
 
   /** 读取已注册播放器的实时状态(供 /status 路由;sendspin 等无 SOAP 的设备)。
@@ -1672,6 +1782,8 @@ export class QueueController extends EventEmitter {
       log.debug(`[QueueController][cast] ${playerId} 完成 ${Date.now() - castT0}ms mediaUri=${mediaUri}`);
       // cast 命令已送达 → 断开连续失败链(下面的 catch 才计失败)。
       this.castFailStreak.delete(deviceId);
+      // 记下本次出流实际编码用的倍速（恢复播放时据此判断要不要重投，见 transport(play)）。
+      this.appliedSpeed.set(deviceId, getPlaybackSpeed(deviceId));
       // 乐观窗口阶段 2:命令已送达,现在才起 5s「等设备确认 PLAYING」计时。
       // 拆开的理由见 PlayerController 文件头 —— 合在一起时那 5s 会被 Stop→SetURI→Play
       // 三次 SOAP 往返吃掉,判出的 stalled 只是「命令还没发出去」。
@@ -2025,6 +2137,8 @@ export class QueueController extends EventEmitter {
       shufflePos: hold ? hold.shufflePos : (q?.shufflePos ?? -1),
       // 预探测状态位(仅 Web 端消费;HA 卡片不读该字段 → 天然不显示)。
       preProbe: getPreProbeScheduler().status(playerId),
+      // 倍速(2026-11-14):权威在服务端注册表,下发仅供各端回显。
+      speed: getPlaybackSpeed(playerId),
     };
   }
 

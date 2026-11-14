@@ -17,6 +17,7 @@ import { nowUs } from "./clock.js";
 import { SAMPLE_RATE, CHANNELS, decodeToF32 } from "./encoding.js";
 import { saveDeviceVolumeState } from "./deviceState.js";
 import { DEFAULT_SENDSPIN_VOLUME } from "./deviceState.js";
+import { normalizePlaybackSpeed } from "../player/playbackSpeed.js";
 import { createLogger } from "../../utils/logger.js";
 import { markPauseStopIssued } from "../player/pauseStopSettle.js";
 
@@ -286,23 +287,35 @@ export function playCore(
   /** 2026-11-04 P2:主进程 `judgePlayable` 已裁决出的源行(仅**本次新曲**复用;
    *  同曲 seek 重建仍以泵自己的记账优先)。undefined = 走完整解析(旧行为)。 */
   preferRowId?: string,
+  /** 倍速(2026-11-14;0.75~2,缺省 1)。缺省时行为与引入前逐字节一致。
+   *
+   *  语义:泵内所有时间轴(playCursor/duration/position/pendingSeek)统一是
+   *  **输出流毫秒**(音频已在解码段 atempo 压缩),`seekPositionMs` 仍是**内容毫秒**,
+   *  由 `armSeek` 除以倍速后落到泵时间轴。 */
+  speed?: number,
 ): void {
   clearPauseState(srv, clientId);
   if (!srv) return; // 无 server 时无推流可言(原 playMedia 在 !srv 时 throw,由调用方处理)
   const conn = srv.clients.get(clientId);
   // 同一时间线推流:组 = 以 clientId 命名的组(多客户端场景由注册层归并)。
   const g = srv.group(clientId);
+  const rate = normalizePlaybackSpeed(speed ?? 1);
+  (g as any).playbackRate = rate;
   // 桥同步(§2.1 并行集合,绝不进 members):先于借流/起播注册,组泵首帧即可投递。
   if (bridge) syncGroupBridges(g, bridge);
   // ★ 借流:这一首若正好是源端**正在播**的那首,就把源端那条已解码的流整体接过来
   //   —— 目标端不启 ffmpeg、不 seek、不预缓冲,首帧现成即出声。不成立即静默回退。
-  const arm = borrowFor(g, item);
+  //   ⚠️ 倍速(2026-11-14):借来的流是按**源端倍速**生成的 PCM，与目标端倍速不一致时
+  //   直接借会"声音快慢不对但进度按目标倍速走"。倍速非 1 一律不借，走完整起播。
+  const arm = rate === 1 ? borrowFor(g, item) : null;
   if (arm) {
     const r = handoverCore(srv, arm, g.name, item, conn ? [conn] : []);
     if (r.ok) return;
     log.info(`[Sendspin][handover] ${clientId} ← ${arm.fromGroup} 借流放弃(${r.reason}),走完整起播`);
   }
   const pump = pumpFor(srv, g, onUnplayable);
+  // 可选调用:单测的泵替身没有该方法(倍速只是新增维度,缺省 1 时行为不变)。
+  pump.setPlaybackRate?.(rate);
   pump.stop(); // 打断上一首,避免重叠推流(MA:track change 丢弃旧 PushStream)
   // MA seek_position 属于**新**流:stop 之后装填,play() 起流即带 -ss 起点。
   if (seekPositionMs != null) pump.armSeek(seekPositionMs);
@@ -336,7 +349,8 @@ export function playCore(
     // (silentState)—— 避免固件把 group/update→stopped 镜像成 IDLE 锁死后续 stream/start。
     g.finishPlayback({ silentState: true });
   }
-  g.positionMs = seekPositionMs ?? 0;
+  // 发布位置:入参是**内容毫秒**,泵时间轴是输出流毫秒(倍速已压缩音频)⇒ 除以 rate。
+  g.positionMs = seekPositionMs != null ? Math.max(0, Math.round(seekPositionMs / rate)) : 0;
   g.audibleStarted = false; // 起播即回可听前,poll 报 buffering 至首帧可听
   // 当前曲元数据进组状态:status.media / queue currentMedia 据此上报,
   // 前端与 HA 靠 media.songId 变化触发歌词/封面刷新(缺了就卡在第一首)。
@@ -422,15 +436,20 @@ export function playGroupCore(
   nextSongId?: string,
   /** 2026-11-04 P2:语义同 playCore(主进程裁决行透传给泵,跨进程零探测复用)。 */
   preferRowId?: string,
+  /** 倍速(2026-11-14;语义同 playCore:入参内容毫秒 → 泵内输出流毫秒)。 */
+  speed?: number,
 ): void {
   clearPauseState(srv, groupName);
   if (!srv) return;
   const g = srv.group(groupName);
+  const rate = normalizePlaybackSpeed(speed ?? 1);
+  (g as any).playbackRate = rate;
   // 桥同步(§2.1 并行集合):幂等,规格未变热复用(seek 重建不拆桥,BLK-02)。
   // ⚠️ 借流/重建路径都先到这里 —— 组泵照搬,桥挂在本组,原样跟随。
   if (bridge) syncGroupBridges(g, bridge);
   // ★ 借流(见 playCore 同名段落):用户组作目标时同样适用 —— 泵照搬,成员原样。
-  const arm = borrowFor(g, item);
+  //   倍速非 1 不借(源端流的 PCM 速率与目标端不一致,见 playCore 说明)。
+  const arm = rate === 1 ? borrowFor(g, item) : null;
   if (arm) {
     const conns = memberIds
       .map((id) => srv.clients.get(id))
@@ -440,6 +459,7 @@ export function playGroupCore(
     log.info(`[Sendspin][handover] ${groupName} ← ${arm.fromGroup} 借流放弃(${r.reason}),走完整起播`);
   }
   const pump = pumpFor(srv, g, onUnplayable);
+  pump.setPlaybackRate?.(rate);
   // ★ P2/P3(2026-11-02)接续判定必须在 stop() **之前**取:
   //  - `interrupted` = 泵还在跑 ⇒ 这次起播是**手动 next/prev/seek** 打断,旧曲没播完,
   //    天然不接续(与 D6 手动语义一致,无需把 manual 透传到泵);
@@ -479,7 +499,8 @@ export function playGroupCore(
     `[Sendspin][continuity] group=${groupName} song=${item.songId} interrupted=${interrupted} ` +
       `continuity=${continuity} keepPrefetch=${keepQueueForPrefetch}`,
   );
-  g.positionMs = seekPositionMs ?? 0;
+  // 发布位置:入参是**内容毫秒**,泵时间轴是输出流毫秒(倍速已压缩音频)⇒ 除以 rate。
+  g.positionMs = seekPositionMs != null ? Math.max(0, Math.round(seekPositionMs / rate)) : 0;
   g.audibleStarted = false; // 起播即回可听前,poll 报 buffering 至首帧可听
   g.current = { songId: item.songId, title: item.title, artist: item.artist, album: item.album, coverArt: item.coverArt, mime: item.mime, durationMs: (item.duration ?? 0) * 1000 };
   // ★ P2 接续:对**已是成员**的直连播放器不能再推 stream/start(那会重开会话/清缓冲,
@@ -859,9 +880,9 @@ export function seekCore(srv: SendspinServer | null, clientId: string, seconds: 
       // syncGroupBridges 对未变规格热复用句柄(不重连,BLK-02)。
       // 可选读取:最小组桩(单测)没有 bridgeSpecs 字段 —— 与流引擎对 stub 组的可选调用风格一致
       const bridgeSpecs = g.bridgeSpecs?.length > 0 ? g.bridgeSpecs : undefined;
-      playGroupCore(srv, clientId, memberIds, item, onFailed, clampedMs, bridgeSpecs);
+      playGroupCore(srv, clientId, memberIds, item, onFailed, clampedMs, bridgeSpecs, undefined, undefined, (g as any).playbackRate ?? 1);
     } else {
-      playCore(srv, clientId, item, onFailed, clampedMs, g.bridgeSpecs?.length > 0 ? g.bridgeSpecs : undefined);
+      playCore(srv, clientId, item, onFailed, clampedMs, g.bridgeSpecs?.length > 0 ? g.bridgeSpecs : undefined, undefined, undefined, undefined, (g as any).playbackRate ?? 1);
     }
     // 暂停中 seek:重建流后立刻恢复暂停(playCore 会把 pump 的 paused 置回 false)。
     if (wasPaused) pauseCore(srv, clientId);
@@ -935,10 +956,16 @@ export function pollCore(srv: SendspinServer | null, clientId: string): { playin
       log.info(`[conn-group-diag] pollCore client=${clientId} conn.group=${diagConnGrp} trueUg=${diagTrueUg} playing=${!!g.current} posMs=${g.positionMs}`);
     }
   }
+  // 倍率以**泵**为准（它才是真正解码/推进时间轴的那一方）；组上的字段仅作
+  // 泵尚未建立时的兜底（如进程启动后还没起播就查状态）。两者不一致会让
+  // 「音频按 A 倍速生成、进度按 B 倍速显示」—— 这类错不抛异常，只能靠单一口径规避。
+  const rate = normalizePlaybackSpeed(peekPump(g)?.playbackRate ?? (g as any).playbackRate ?? 1);
   return {
     playing: !!g.current,
     paused: !!g.paused,
-    positionMs: g.positionMs,
+    // 泵时间轴是输出流毫秒(倍速已压缩音频)⇒ 换算回内容毫秒再对外。
+    positionMs: Math.round(g.positionMs * rate),
+    // durationMs 本身就是内容时长(current.durationMs / frozenDurationMs 均在写入时保留内容口径)。
     durationMs: (g as any).current?.durationMs ?? (g as any).frozenDurationMs ?? 0,
     // 可听前(静默预填充/seek 重建)报 buffering:stub 组无此字段(undefined)退化 false。
     buffering: !!g.current && !g.paused && (g as any).audibleStarted === false,

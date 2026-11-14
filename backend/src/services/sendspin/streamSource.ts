@@ -29,6 +29,7 @@ import { SAMPLE_RATE, CHANNELS } from "./encoding.js";
 import { resolveFfmpeg } from "../transcode.js";
 import { WINDOW_DEFAULT_SEC, normalizeWindowSeconds } from "./windowConfig.js";
 import { createLogger } from "../../utils/logger.js";
+import { withAtempo } from "../player/playbackSpeed.js";
 
 const log = createLogger("Sendspin");
 import {
@@ -79,6 +80,14 @@ export interface WindowSource {
    *  与 MA/plan §3.3 一致:成员各自的音色在成组时自动停用(由 `playerDspFilters`
    *  内部的 `isPeerGrouped` 判据负责整体返回空链)。 */
   dspFilters?: string[];
+  /**
+   * 倍速（2026-11-14；0.75~2，1 = 原速）。
+   *
+   * 落在 decode af 末尾的 `atempo`：解码出的 PCM 已是**压缩后**的时间轴
+   * （60s 内容在 1.5x 下只有 40s 样本）。窗口 / 游标 / seekTo 的口径因此全部是
+   * 「输出流样本」，调用方（GroupPump）负责内容时间 ↔ 输出流时间的换算。
+   */
+  speed?: number;
 }
 
 /**
@@ -93,17 +102,19 @@ export interface WindowSource {
  *   本函数只负责把片段传进去,不自行拼接)。
  * 输出 48k 立体声恒定(P1-4 确认结论,见 spawn):编码层/时间线全是 48k 硬编码。
  */
-export function resolveSendspinAf(source: Pick<WindowSource, "rowId" | "loudness" | "dspFilters">): string[] {
+export function resolveSendspinAf(source: Pick<WindowSource, "rowId" | "loudness" | "dspFilters" | "speed">): string[] {
   // P5-1:通道开关。判定放在本函数里而不是调用点，是为了让"哪条通道被关"只有一处真相。
   if (!isChannelEnabled("sendspin")) return [];
   const extraFilters = source.dspFilters ?? [];
-  return resolveLoudnessAf({
+  const af = resolveLoudnessAf({
     ...(source.rowId ? { rowId: source.rowId } : {}),
     ...(source.loudness?.enabled !== undefined ? { enabled: source.loudness.enabled } : {}),
     ...(source.loudness?.targetLoudness !== undefined ? { targetLoudness: source.loudness.targetLoudness } : {}),
     escapeEnvVar: "SENDSPIN_LOUDNESS",
     ...(extraFilters.length > 0 ? { extraFilters } : {}),
   });
+  // 倍速放链尾：loudnorm 必须按原始时长积分响度，先变速会让测量与 DSP 全部失真。
+  return withAtempo(af, source.speed ?? 1);
 }
 
 export class WindowEvictedError extends Error {

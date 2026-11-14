@@ -76,6 +76,12 @@ export const queueController = {
   // /status 出口的队列版本号(4.12.9 新增)。测试里默认 0 即可,
   // 需要验证透传的用例用 mockReturnValueOnce 覆盖。
   queueRevision: vi.fn(() => 0 as Any),
+  // /status 与队列快照的倍速字段(4.13.0 新增)。默认 1x,需要验证透传的用例
+  // 用 mockReturnValueOnce 覆盖。
+  getPlaybackSpeed: vi.fn(() => 1 as Any),
+  getAppliedSpeed: vi.fn(() => 1 as Any),
+  // 倍速写入(4.13.0)。默认原样回显入参,用例可 mockResolvedValueOnce 覆盖归一结果。
+  setPlaybackSpeed: vi.fn(async (_id: string, s: number) => s as Any),
 };
 
 export const eventManager = {
@@ -186,6 +192,9 @@ const MANAGER_DEFAULTS: Array<[Any, string, Any]> = [
   [queueController, "clear", () => undefined],
   [queueController, "getPlayerState", async () => null as Any],
   [queueController, "queueRevision", () => 0 as Any],
+  [queueController, "getPlaybackSpeed", () => 1 as Any],
+  [queueController, "getAppliedSpeed", () => 1 as Any],
+  [queueController, "setPlaybackSpeed", async (_id: string, s: number) => s],
   [eventManager, "getEventState", () => null as Any],
 ];
 

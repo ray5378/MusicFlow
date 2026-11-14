@@ -8,6 +8,7 @@
 //   - 成员离线自动跳过;成员增删实时读取 GroupManager,无需重新注册
 import { getGroupManager, splitMemberId } from "./index.js";
 import { createDlnaProtocolPlayer, getDevice, getDeviceStatus, isDeviceAvailable } from "../dlna/control.js";
+import { getPlaybackSpeed } from "../player/playbackSpeed.js";
 import { createAirPlayPlayerForDevice } from "../airplay/protocolPlayer.js";
 import { getAirPlayStatus, isAirPlayDeviceDisabled, isAirplayBridgeEnabled, isBridgeOwned, hasActiveSession, bridgePrepareDevice, bridgeStopDevice, bridgeManualDevice, selectAirPlayBridgeProtocol } from "../airplay/control.js";
 import { bridgeSocketPath } from "../airplay/bridgeChannel.js";
@@ -737,7 +738,11 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
           );
         })());
       }
-      for (const d of dlnaOnline) jobs.push(createDlnaProtocolPlayer(d).playMedia(item, baseUrl));
+      // 组倍速(2026-11-14):组内所有成员必须同速(同一首歌在不同成员上不能两种音高/时长)。
+      // sendspin 组泵在 sendspin/protocolPlayer 里按 groupId 读同一份注册表;DLNA 成员
+      // 逐台扇出,必须**显式**传(它们自己也有独立偏好,自动读会各放各的)。
+      const groupSpeed = getPlaybackSpeed(groupId);
+      for (const d of dlnaOnline) jobs.push(createDlnaProtocolPlayer(d).playMedia(item, baseUrl, 0, undefined, { speed: groupSpeed }));
       // D2/D7：桥开关开时，任何 AirPlay 成员都不允许 solo cast —— prepare 失败者
       // 仅该台本次不播放（原因记入 bridgeUnavailable），由调用方/状态面给出可读错误。
       // `MUSICFLOW_AIRPLAY_BRIDGE=0` 时 bridgeRoute 必为 null，走原有 legacy 扇出（整体回滚）。

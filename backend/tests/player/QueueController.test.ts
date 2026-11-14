@@ -149,6 +149,8 @@ describe("QueueController", () => {
       shuffleOrder: [], shufflePos: -1,
       preProbe: { ready: 0, scanned: 0, misses: 0, exhausted: false, cooldownUntil: null, at: 0 },
       revision: expect.any(Number),
+      // 倍速(2026-11-14):快照新增 speed 字段,clear 后回到缺省 1x。
+      speed: 1,
     });
   });
 

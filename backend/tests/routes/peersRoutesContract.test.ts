@@ -1041,6 +1041,29 @@ describe("GET /v1/peers/:peerId", () => {
 
 // ==================== GET /v1/peers/:peerId/status ====================
 
+describe("POST /v1/peers/:peerId/speed", () => {
+  it("投屏端:透传给 QueueController 并回显归一后的倍速", async () => {
+    queueController.setPlaybackSpeed.mockResolvedValueOnce(1.25);
+    const b = await json(await post("/v1/peers/dlna:dev1/speed", { speed: 1.25 }));
+    expect(b).toEqual({ success: true, speed: 1.25 });
+    expect(queueController.setPlaybackSpeed).toHaveBeenCalledWith("dev1", 1.25);
+  });
+
+  it("缺参 / 非数字 → 400 INVALID_PARAM(needsSpeed)", async () => {
+    const r = await post("/v1/peers/dlna:dev1/speed", {});
+    expect(r.status).toBe(400);
+    expect((await json(r)).code).toBe("INVALID_PARAM");
+    expect(queueController.setPlaybackSpeed).not.toHaveBeenCalled();
+  });
+
+  it("本机(local)→ 400,且绝不写服务端倍速注册表", async () => {
+    const r = await post("/v1/peers/local:u1/speed", { speed: 1.5 });
+    expect(r.status).toBe(400);
+    expect((await json(r)).code).toBe("INVALID_PARAM");
+    expect(queueController.setPlaybackSpeed).not.toHaveBeenCalled();
+  });
+});
+
 describe("GET /v1/peers/:peerId/status", () => {
   it("peerId 非法 → 400", async () => {
     expect((await get("/v1/peers/bare/status")).status).toBe(400);
@@ -1051,7 +1074,7 @@ describe("GET /v1/peers/:peerId/status", () => {
     eventManager.getEventState.mockReturnValueOnce(null);
     const b = await json(await get("/v1/peers/dlna:dev1/status"));
     // queueRevision:4.12.9 起 /status 一律带队列版本号(此处 mock 默认 0)
-    expect(b).toEqual({ state: "PLAYING", position: 12, duration: 200, volume: 30, muted: false, queueRevision: 0 });
+    expect(b).toEqual({ state: "PLAYING", position: 12, duration: 200, volume: 30, muted: false, queueRevision: 0, speed: 1 });
   });
 
   it("dlna:GENA 事件覆盖 state/volume/muted/updatedAt,但绝不覆盖 position/duration", async () => {
@@ -1122,7 +1145,7 @@ describe("GET /v1/peers/:peerId/status", () => {
 
   it("airplay:直接回传 peer 状态", async () => {
     fns.getAirPlayPeerStatus.mockReturnValueOnce({ state: "PLAYING", media: { songId: "s" } });
-    expect(await json(await get("/v1/peers/airplay:ap1/status"))).toEqual({ state: "PLAYING", media: { songId: "s" }, queueRevision: 0 });
+    expect(await json(await get("/v1/peers/airplay:ap1/status"))).toEqual({ state: "PLAYING", media: { songId: "s" }, queueRevision: 0, speed: 1 });
   });
 
   it("airplay:PAUSED / IDLE 在 API 出口归一成统一词表(客户端只认 UPnP 三态)", async () => {

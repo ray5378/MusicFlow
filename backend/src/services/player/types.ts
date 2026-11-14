@@ -37,6 +37,14 @@ export interface PlayerState {
    *   · 它只表示"这次读不到",不表示"设备在 IDLE"。
    */
   unavailable?: boolean;
+  /**
+   * 当前生效的倍速（2026-11-14）。1 = 原速。
+   *
+   * 语义：**内容时间**下的倍率。设备/泵按 `position/duration` 换算后上报，
+   * 因此该字段只用于展示（下拉框回显），不参与任何时间换算 —— 换算的唯一
+   * 来源是 services/player/playbackSpeed.ts 的注册表。
+   */
+  speed?: number;
 }
 
 /** 状态迁移比较快照。对照 MA CompareState。PlaybackTracker 据此判断。 */
@@ -105,7 +113,16 @@ export interface ProtocolPlayer {
     baseUrl: string,
     startMs?: number,
     bridge?: { sockets: Array<{ deviceId: string; socketPath: string; token: string; protocol: string }> },
-    opts?: { manual?: boolean; nextSongId?: string; resolvedRowId?: string },
+    opts?: {
+      manual?: boolean;
+      nextSongId?: string;
+      resolvedRowId?: string;
+      /** 倍速(2026-11-14;0.75~2)。缺省 = 各协议读自己的注册表:
+       *  DLNA/AirPlay 按设备 id、sendspin 单机按 clientId、用户组按 groupId。
+       *  组内 DLNA 成员由组 player 显式传入组倍速 —— 组内所有成员必须同速,
+       *  否则同一首歌在不同成员上是两种音高/时长(比不同步更难接受)。 */
+      speed?: number;
+    },
   ): Promise<{ mediaUri: string }>;
   stop(): Promise<void>;
   pause(): Promise<void>;
@@ -197,4 +214,12 @@ export interface QueueSnapshot {
    * 提示随状态消失，不留一条与事实不符的告警。
    */
   preProbe?: PreProbeStatus;
+  /**
+   * 该队列/播放器当前生效的倍速（2026-11-14；0.75/1/1.25/1.5/1.75/2）。
+   *
+   * 权威在服务端（`services/player/playbackSpeed.ts` 注册表 + settings 持久化），
+   * 随快照下发仅供客户端回显与本地预判；客户端**不得**据此自行变速（本地播放的
+   * 倍速由客户端播放器自己负责，服务端字段只描述「远端设备」）。
+   */
+  speed?: number;
 }

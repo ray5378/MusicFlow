@@ -23,6 +23,8 @@ import { getEventManager } from "./eventing.js";
 import { PlaybackState, type ProtocolPlayer, type PlayerState, type QueueItem } from "../player/types.js";
 import { sqlite } from "../../db/index.js";
 import { getSetting, setSetting } from "../settings.js";
+import { getPlaybackSpeed, normalizePlaybackSpeed, contentToStreamSec, streamToContentSec } from "../player/playbackSpeed.js";
+import { getFlowProgress, flowRelativeContentSec } from "../player/flowProgress.js";
 import { createLogger } from "../../utils/logger.js";
 import {
   type SeekGuard,
@@ -239,8 +241,29 @@ interface DeviceRuntime {
   /** 上次投屏参数。seek 需要**重建流**时复用它(songId/标题/mime/封面),避免
    *  重投时丢元数据 —— 重投必须是完整的一次 SetAVTransportURI。 */
   lastCastOptions?: CastOptions;
+  /** 当前这条**实际在出流**音频的倍速(2026-11-14;1=原速)。
+   *
+   *  为什么记在运行时而不是每次读注册表:注册表是「偏好」,用户可能已经改了偏好
+   *  但这次 cast 还没重建(起播在途) —— 此刻设备放着的仍是旧倍速的流,进度换算
+   *  必须按**实际流**换算,否则会超前/滞后。castToDevice 每次都会覆写它。 */
+  castSpeed?: number;
+  /** 本次 cast 的**内容秒**起播偏移（timeOffset）。设备 RelTime 从本次 URI 起点
+   *  计数（0 起），换算内容位置时必须补上它，否则变速/流转重投后进度从 0 重爬。 */
+  castContentOffsetSec?: number;
 }
 const runtimes = new Map<string, DeviceRuntime>();
+
+/**
+ * 出流侧应采用的倍速（2026-11-14）。
+ *
+ * 优先 `castSpeed`（本次 cast 实际下发的倍速），否则回退到设备偏好。
+ * 为什么出流必须读 castSpeed：组内 DLNA 成员由组 player **显式**传组倍速 cast，
+ * 若出流侧仍按设备自己的偏好生成音频，就会出现「cast 记的是 1.5x（进度按 1.5x 换算），
+ * 实际音频却是 1x」—— 组内同速也直接破功。
+ */
+export function getCastPlaybackSpeed(deviceId: string): number {
+  return runtimeOf(deviceId).castSpeed ?? getPlaybackSpeed(deviceId);
+}
 
 // ==================== 活跃出流登记（存活判定的硬证据）====================
 // 「设备正在拉我们的流」比 SSDP / SOAP 都硬：字节真的在往外走。出流侧每写一块就
@@ -739,6 +762,9 @@ export interface CastOptions {
    * 直接失联(240 真机:5 连拖后全 500)。调用方 reseekByRecast 负责世代号。
    */
   shouldAbort?: () => boolean;
+  /** 倍速(2026-11-14;0.75~2)。缺省读注册表;组内扇出时由组 player 显式传入
+   *  —— 组内所有成员必须同速(见 ProtocolPlayer.playMedia opts.speed)。 */
+  speed?: number;
 }
 
 /** 本次重投已被更新的重投取代(哨兵错误,不记为失败;新重投会给出最终结果)。 */
@@ -849,11 +875,18 @@ export async function castToDevice(opts: CastOptions): Promise<{ mediaUri: strin
     log.warn("[cast] 双协议互斥:停止同 host AirPlay 会话失败(忽略)", { deviceId: opts.deviceId, err: e?.message || e });
   }
   const { token, streamUrl: castUrl } = createCastSession(opts.songId, opts.deviceId, opts.baseUrl);
+  // 倍速(2026-11-14):出流由 ffmpeg 的 atempo 生成,1.5x 时 60s 内容只占 40s 输出流。
+  // 因此 **URL 里的 timeOffset 必须换成输出流秒**(内容秒 / 倍速),否则 1.5x 下
+  // 从 60s 起播会落到内容 90s(越界/直接结束)。设备侧看到的仍是它自己的流时间轴。
+  const speed = normalizePlaybackSpeed(opts.speed ?? getPlaybackSpeed(opts.deviceId));
+  // 记账本次**实际出流**的倍速:进度换算/seek 用它,而不是用"偏好"(可能已改)。
+  runtimeOf(opts.deviceId).castSpeed = speed;
   // MA 语义:起播位置直接编码进流 URL,让设备**从新起点拉一条新流**,而不是
   // 「先播到一半再 Seek」—— 后者在实时转码管道上永远不会生效(见 CastOptions.timeOffset)。
+  const streamOffsetSec = contentToStreamSec(Math.max(0, Number(opts.timeOffset) || 0), speed);
   const streamUrl =
-    opts.timeOffset && opts.timeOffset > 0
-      ? `${castUrl}${castUrl.includes("?") ? "&" : "?"}timeOffset=${Math.round(opts.timeOffset)}`
+    streamOffsetSec > 0
+      ? `${castUrl}${castUrl.includes("?") ? "&" : "?"}timeOffset=${Math.round(streamOffsetSec)}`
       : castUrl;
   const albumArtUri = opts.coverArt ? `${opts.baseUrl}/rest/getCoverArt?id=${encodeURIComponent(opts.coverArt)}&size=500` : undefined;
   const metadata = buildDidlLite({ title: opts.title, artist: opts.artist, album: opts.album, uri: streamUrl, mime: opts.mime, albumArtUri });
@@ -926,6 +959,9 @@ export async function castToDevice(opts: CastOptions): Promise<{ mediaUri: strin
   // 设备又不报 RelTime(HiVi/MUZO 恒回 0)时,进度会从 0 重新爬 —— 用户看到
   // 「流转后在播 17 秒外的音频,进度条却从 0 开始」。
   const startOffsetSec = Math.max(0, Math.round(Number(opts.timeOffset) || 0));
+  // 设备 RelTime 轴 = 本次 URI 起点（0 起）。换算对外内容位置时要补上这个偏移，
+  // 否则「变速重投 / 流转带进度起播」后进度从 0 重新爬（2026-11-14 230 实测）。
+  runtimeOf(opts.deviceId).castContentOffsetSec = startOffsetSec;
   positionEstimates.set(opts.deviceId, {
     pos: startOffsetSec,
     at: Date.now(),
@@ -1018,7 +1054,14 @@ export function getCurrentMedia(deviceId: string): CurrentMedia | undefined {
 /** Clear the currently-loaded media (e.g. when the queue is cleared). */
 export function clearCurrentMedia(deviceId: string): void {
   const rt = runtimes.get(deviceId);
-  if (rt) rt.currentMedia = undefined;
+  if (rt) {
+    rt.currentMedia = undefined;
+    // 倍速(2026-11-14):本次 cast 的音频已经结束/让出 ⇒ 必须清掉"实际出流倍速"。
+    // 否则设备被别的 App 接管后，poll 仍按上一次的 1.5x 换算它的 RelTime，
+    // 表现为「外部播放时进度条也快 1.5 倍」——这类跨场景串味极难排查。
+    rt.castSpeed = 1;
+  rt.castContentOffsetSec = 0;
+  }
 }
 
 /** 停止设备的当前播放(SOAP Stop + 清内存态 + 通知客户端刷新)。
@@ -1256,14 +1299,17 @@ export async function seekDevice(deviceId: string, seconds: number, opts?: { ver
       log.warn(`[DLNA][seek] ${deviceId} 重投流失败,回退 SOAP Seek: ${e?.message || e}`);
     }
   }
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = Math.floor(seconds % 60);
+  // SOAP Seek 的 REL_TIME 是**设备流时间轴**：倍速下必须换成输出流秒(内容秒/speed)，
+  // 否则 1.5x 拖到 60s 会让设备真的跳到内容 90s（甚至直接越过曲尾）。
+  const seekStreamSec = contentToStreamSec(seconds, runtimeOf(deviceId).castSpeed ?? getPlaybackSpeed(deviceId));
+  const h = Math.floor(seekStreamSec / 3600);
+  const m = Math.floor((seekStreamSec % 3600) / 60);
+  const s = Math.floor(seekStreamSec % 60);
   const target = `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
   // debug:SOAP Seek 的实际下发与往返耗时。连续拖动时的并发重投在这里看得最清楚
   // (同一设备短时间内多条 seek 起点、耗时参差,就是重投风暴的现场)。
   const t0 = Date.now();
-  log.debug(`[DLNA][seek] ${deviceId} 发起 REL_TIME=${target}(入参 ${seconds}s)`);
+  log.debug(`[DLNA][seek] ${deviceId} 发起 REL_TIME=${target}(入参 ${seconds}s,流 ${seekStreamSec.toFixed(1)}s)`);
   try {
     await soapCall(device.avTransportUrl, AV_TRANSPORT, "Seek", { InstanceID: "0", Unit: "REL_TIME", Target: target });
     markOk(deviceId);
@@ -1276,6 +1322,9 @@ export async function seekDevice(deviceId: string, seconds: number, opts?: { ver
     const prevBase = positionEstimates.get(deviceId);
     const dur = prevBase && prevBase.dur > 0 ? prevBase.dur : (mediaDuration.get(deviceId) || 0);
     positionEstimates.set(deviceId, { pos: seconds, at: Date.now(), dur, trackUri: prevBase?.trackUri });
+    // SOAP Seek 生效后设备的 RelTime 轴已与内容轴对齐(目标即内容秒),旧起播偏移作废,
+    // 否则「补偏移」会把 seek 后的读数整体抬高一个偏移量(进度跳变)。
+    runtimeOf(deviceId).castContentOffsetSec = 0;
     // ③ 开保护窗 + 递增代际(让上一次 seek 派出的校验协程作废)。
     seekGuards.set(deviceId, { target: seconds, at: Date.now() });
     const gen = (seekGeneration.get(deviceId) ?? 0) + 1;
@@ -1324,6 +1373,9 @@ async function verifySeekLanding(deviceId: string, target: number, gen: number):
     if (seekGeneration.get(deviceId) !== gen) return; // 已被更新的 seek 取代
     const raw = await readRawPosition(deviceId);
     if (raw === null) return;
+    // 倍速(2026-11-14):设备报的是输出流秒,目标(内容秒)必须换算到同一轴再比,
+    // 否则 1.5x 下「目标 60s / 设备报 40s」会被判成未落位,进而无限重发 seek。
+    const targetStream = contentToStreamSec(target, runtimeOf(deviceId).castSpeed ?? getPlaybackSpeed(deviceId));
     // ---- 设备不报位置 → 落位校验**无从进行**,必须在此放弃 ----
     // HiVi/MUZO 播转码 chunked 流时 RelTime 恒为 0。若把 0 当"未落位"处理,重发会派生
     // 新的 gen 校验,新校验又失败再重发 …… 形成每秒一次的无限 seek 风暴;更糟的是
@@ -1347,13 +1399,13 @@ async function verifySeekLanding(deviceId: string, target: number, gen: number):
       log.debug(`[DLNA][seek-verify] ${deviceId} 设备恒报 0(不报位置)→ 放弃落位校验(目标 ${Math.round(target)}s)`);
       return;
     }
-    if (raw >= target - 3 && raw <= target + 6) {
+    if (raw >= targetStream - 3 && raw <= targetStream + 6) {
       // 设备确实报了位置且落在目标附近 → Seek 是可靠的,清掉"不报位置"计数。
       runtimeOf(deviceId).seekNoReportCount = 0;
-      log.debug(`[DLNA][seek-verify] ${deviceId} 已落位:目标 ${Math.round(target)}s,设备报 ${Math.round(raw)}s`);
+      log.debug(`[DLNA][seek-verify] ${deviceId} 已落位:目标 ${Math.round(targetStream)}s(内容 ${Math.round(target)}s),设备报 ${Math.round(raw)}s`);
       return;
     }
-    log.warn(`[DLNA][seek-verify] ${deviceId} 未落位:目标 ${Math.round(target)}s,设备报 ${Math.round(raw)}s → 重发一次`);
+    log.warn(`[DLNA][seek-verify] ${deviceId} 未落位:目标 ${Math.round(targetStream)}s(内容 ${Math.round(target)}s),设备报 ${Math.round(raw)}s → 重发一次`);
     if (seekGeneration.get(deviceId) !== gen) return;
     // 重发**恰好一次**:关闭 seekDevice 自身的校验派生,链条到此终止。
     await seekDevice(deviceId, target, { verify: false });
@@ -1597,6 +1649,14 @@ export async function getDeviceStatus(deviceId: string): Promise<DeviceStatus> {
   const renderingControlUrl = device?.renderingControlUrl;
   if (!avTransportUrl) return { state: "STOPPED", position: 0, duration: 0, volume: 0, muted: false, media: getCurrentMedia(deviceId), updatedAt: sampledAt };
   const state: DeviceStatus = { state: "STOPPED", position: 0, duration: 0, volume: 0, muted: false, media: getCurrentMedia(deviceId), updatedAt: sampledAt };
+  // 倍速换算系数（见 playbackSpeed.ts）：设备时间轴 ↔ 内容时间轴。
+  // 读**实际出流**倍速（castSpeed），而不是偏好注册表 —— 见 DeviceRuntime.castSpeed。
+  const speed = runtimeOf(deviceId).castSpeed ?? getPlaybackSpeed(deviceId);
+  // 本次 cast 的内容秒起播偏移（见 DeviceRuntime.castContentOffsetSec）。
+  const castContentOffsetSec = runtimeOf(deviceId).castContentOffsetSec ?? 0;
+  // 设备**原始**输出流位置（秒）。flow 的可听时钟必须吃这个值（与 itemStartSec 同轴），
+  // 而对外 state.position 是内容秒，两者不可混用。
+  let rawStreamPos = 0;
 
   // 三个查询互不依赖 → 并发 + 各自 1.2s 硬顶。串行时一台离线设备会把每次
   // HA 轮询拖到 9.4~18.2s(2026-11-04 240 实测,/status 预算 1s)。
@@ -1628,8 +1688,16 @@ export async function getDeviceStatus(deviceId: string): Promise<DeviceStatus> {
       const relTime = xml.match(/<RelTime>([^<]*)<\/RelTime>/i)?.[1].trim();
       const trackDur = xml.match(/<TrackDuration>([^<]*)<\/TrackDuration>/i)?.[1].trim();
       const trackUri = xml.match(/<TrackURI>([^<]*)<\/TrackURI>/i)?.[1].trim();
-      if (relTime && relTime !== "NOT_IMPLEMENTED") state.position = parseHms(relTime);
-      if (trackDur && trackDur !== "NOT_IMPLEMENTED") state.duration = parseHms(trackDur);
+      // 设备上报的是**输出流时间轴**(RelTime / TrackDuration)。倍速下必须换算回
+      // 内容时间再参与任何判断：1.5x 时 60s 歌的 TrackDuration 只有 40s。
+      if (relTime && relTime !== "NOT_IMPLEMENTED") {
+        rawStreamPos = parseHms(relTime);
+        // RelTime 是**本次 URI 起点**的相对秒 ⇒ 内容位置 = 起播偏移 + 流秒×倍速。
+        state.position = castContentOffsetSec + streamToContentSec(rawStreamPos, speed);
+      }
+      if (trackDur && trackDur !== "NOT_IMPLEMENTED") {
+        state.duration = streamToContentSec(parseHms(trackDur), speed);
+      }
       if (trackUri && trackUri !== "") state.trackUri = trackUri;
     } catch {}
   })();
@@ -1679,8 +1747,11 @@ export async function getDeviceStatus(deviceId: string): Promise<DeviceStatus> {
   const rawPos = state.position;
   const rawDur = state.duration;
   // flow 可听时钟原料：只登记设备**真的报过**的正位置（0 表示"不报"，见 lastReportedPosition）。
-  if (state.state === "PLAYING" && rawPos > 0) {
-    lastReportedPosition.set(deviceId, { sec: rawPos, at: sampledAt });
+  // ⚠️ 必须用**输出流**位置（rawStreamPos），不能用手上已换算成内容秒的 rawPos ——
+  // flow 会话的 itemStartSec / streamSec 都在输出流时间轴上，混轴会让倍速下的
+  // 队列推进提前 speed 倍（1.5x 时第 1 首播到 2/3 就被判成第 2 首）。
+  if (state.state === "PLAYING" && rawStreamPos > 0) {
+    lastReportedPosition.set(deviceId, { sec: rawStreamPos, at: sampledAt });
   }
   // 切歌(TrackURI 变化)则重置基线,避免用上一首的进度外推。
   const cachedBaseline = positionEstimates.get(deviceId);
@@ -1703,8 +1774,8 @@ export async function getDeviceStatus(deviceId: string): Promise<DeviceStatus> {
     if (seekGuardExpired(guard, sampledAt)) {
       seekGuards.delete(deviceId);
       log.debug(`[DLNA][seek-guard] ${deviceId} 保护窗到期(目标 ${Math.round(guard.target)}s),恢复采纳设备读数`);
-    } else if (isSeekReadingStale(guard, sampledAt, state.position, state.state === "PLAYING")) {
-      const expected = seekExpectedPosition(guard, sampledAt, state.state === "PLAYING");
+    } else if (isSeekReadingStale(guard, sampledAt, state.position, state.state === "PLAYING", undefined, speed)) {
+      const expected = seekExpectedPosition(guard, sampledAt, state.state === "PLAYING", speed);
       log.debug(
         `[DLNA][seek-guard] ${deviceId} 丢弃陈旧读数 reported=${Math.round(state.position)}s`
         + ` vs 预期=${Math.round(expected)}s(目标 ${Math.round(guard.target)}s,窗内剩 ${Math.round(SEEK_GUARD_MS - ageMs)}ms)`,
@@ -1725,7 +1796,9 @@ export async function getDeviceStatus(deviceId: string): Promise<DeviceStatus> {
         positionEstimates.set(deviceId, { pos: base.pos, at: sampledAt, dur: base.dur || durCap, trackUri: base.trackUri });
         state.position = base.pos;
       } else {
-        let adv = base.pos + (sampledAt - base.at) / 1000;
+        // 外推按**内容时间**走：设备不报位置时，墙钟每过 1s 内容前进 speed 秒
+        // （1.5x 下 60s 的歌 40s 播完；不乘 speed 会让进度条比声音慢 1/speed）。
+        let adv = base.pos + ((sampledAt - base.at) / 1000) * speed;
         // 封顶到已知时长:不报位置的设备(实测 HiVi)全靠外推,不封顶就会
         // 无限涨(631s / 346s 的歌),前端进度离谱且永远等不到结束。
         if (durCap > 0) adv = Math.min(adv, durCap);
@@ -1746,7 +1819,7 @@ export async function getDeviceStatus(deviceId: string): Promise<DeviceStatus> {
     // 恢复播放后外推从 0 重爬,前端表现为进度反复回滚到前几秒。
     if (base && !base.pausedAt && state.position <= 0) {
       // 进入暂停:把当前外推读数冻结为基线。
-      let frozen = base.pos + (sampledAt - base.at) / 1000;
+      let frozen = base.pos + ((sampledAt - base.at) / 1000) * speed;
       if (durCap > 0) frozen = Math.min(frozen, durCap);
       positionEstimates.set(deviceId, { pos: frozen, at: sampledAt, dur: base.dur || durCap, trackUri: base.trackUri, pausedAt: sampledAt });
       state.position = frozen;
@@ -1763,7 +1836,7 @@ export async function getDeviceStatus(deviceId: string): Promise<DeviceStatus> {
     // 声音其实从 170s 播)。保护窗内保留基线并回填预期位置。
     const recastGuard = seekGuards.get(deviceId);
     if (recastGuard && !seekGuardExpired(recastGuard, sampledAt)) {
-      const expected = seekExpectedPosition(recastGuard, sampledAt, false);
+      const expected = seekExpectedPosition(recastGuard, sampledAt, false, speed);
       log.debug(`[DLNA][seek-guard] ${deviceId} 重投间隙 STOPPED,保留基线并回填预期 ${Math.round(expected)}s`);
       state.position = expected;
     } else {
@@ -1773,6 +1846,17 @@ export async function getDeviceStatus(deviceId: string): Promise<DeviceStatus> {
 
   // debug:设备侧真相的完整落地结果。raw=SOAP 原始读数,pos/dur=经外推·封顶·兜底后的
   // 最终值(两者不同即"设备不报位置,走了本地估计");前端进度再与之对不上就是上层的事了。
+  // flow(2026-11-14):连续流不会在换曲时把 RelTime 归零 ⇒ 对外位置必须减去
+  // **当前曲在流里的起点**（起点由 flow 会话按编码器实际产出登记，见
+  // services/player/flowProgress.ts）。放在这里而不是协议 player 的 pollState：
+  // `/api/v1/peers/:id/status` 直接调本函数，那条路才是 Web/客户端/HA 的读数来源。
+  if (state.state === "PLAYING") {
+    const fp = getFlowProgress(deviceId);
+    if (fp) {
+      const rel = flowRelativeContentSec(fp, state.position);
+      if (rel !== null) state.position = rel;
+    }
+  }
   log.debug(`[DLNA][status] ${deviceId} state=${state.state} rawPos=${rawPos} pos=${Math.round(state.position)} rawDur=${rawDur} dur=${Math.round(state.duration)} uri=${state.trackUri ? "y" : "n"}`);
   return state;
 }
@@ -1799,7 +1883,7 @@ export function createDlnaProtocolPlayer(deviceId: string): ProtocolPlayer {
   const playerId = `dlna:${deviceId}`;
   return {
     playerId,
-    async playMedia(item: QueueItem, baseUrl: string, startMs = 0) {
+    async playMedia(item: QueueItem, baseUrl: string, startMs = 0, _bridge?: unknown, opts?: { speed?: number }) {
       // ★ 起播即落位:QueueController 传的是**毫秒**起点(流转 / 带进度起播),
       //   必须编进流 URL 的 timeOffset(秒),否则设备从 0 秒拉流 ——
       //   真机表现就是「从 AirPlay 流转回主卧后,歌从头开始 / 进度回到 0」。
@@ -1809,6 +1893,8 @@ export function createDlnaProtocolPlayer(deviceId: string): ProtocolPlayer {
         songId: item.songId, title: item.title, artist: item.artist, album: item.album,
         mime: item.mime, deviceId, baseUrl, coverArt: item.coverArt,
         ...(startSec > 0 ? { timeOffset: startSec } : {}),
+        // 组内扇出显式传组倍速;单机不传 = castToDevice 读本设备偏好(见 CastOptions.speed)。
+        ...(opts?.speed ? { speed: opts.speed } : {}),
       });
       return { mediaUri };
     },
@@ -1830,13 +1916,19 @@ export function createDlnaProtocolPlayer(deviceId: string): ProtocolPlayer {
       // 注意判据必须是「是否在发现缓存里」(isDeviceKnown)而不是 `isDeviceAvailable`
       // (runtimes 的 available 位,对未知设备乐观返回 true),后者在这里会漏判。
       const unknownDevice = !isDeviceKnown(deviceId);
+      // flow(2026-11-14):连续流不会在换曲时把 RelTime 归零 ⇒ 对外位置必须减去
+      // **当前曲在流里的起点**（起点由 flow 会话按编码器实际产出登记，见
+      // services/player/flowProgress.ts）。不换算时 1.5x 下第 2 首一开始就显示 25s，
+      // 进度条直接越过 duration。
+      const position = st.position;
       return {
         playerId,
         playbackState: mapTransportState(st.state),
-        position: st.position,
+        position,
         duration: st.duration,
         mediaUri: st.trackUri, // 来自 GetPositionInfo 的 TrackURI,供 track_changed 检测
         updatedAt: Date.now(),
+        speed: getPlaybackSpeed(deviceId),
         ...(unknownDevice ? { unavailable: true } : {}),
       };
     },
