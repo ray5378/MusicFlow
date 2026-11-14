@@ -51,4 +51,18 @@ describe("coldStartResume 续播落点门禁", () => {
     await expect(coldStartResume(self, "client-2", () => {})).resolves.toBeUndefined();
     expect(captured).toEqual([0]);
   });
+
+  it("桥路由原样透传:纯 AirPlay 桥组续播不能丢 bridge(否则空成员被拒)", async () => {
+    const bridge = { sockets: [{ deviceId: "ap-1", token: "tk", protocol: "raop" }] };
+    let seen: any;
+    const self: any = {
+      async pollState() { return { position: 12, paused: true, playing: false, duration: 200 }; },
+      async playMedia(_item: any, _base: string, _startMs = 0, gotBridge?: any) {
+        seen = gotBridge;
+        return { mediaUri: "x" };
+      },
+    };
+    await coldStartResume(self, "group-1", () => {}, bridge as any);
+    expect(seen).toBe(bridge);
+  });
 });

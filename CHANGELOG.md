@@ -2,6 +2,20 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.14.1] - 2026-11-14
+
+### Bugfix / 纯 AirPlay 桥组点播放 500(无在线 sendspin 成员)
+
+- **现象**：只有 AirPlay 成员的组（全屋等）暂停在曲末后点播放，接口 500
+  `组 … 无在线 sendspin 成员,无法播放`，组泵不重启、设备只剩静音。
+- **根因**：泵排空后组走 `coldStartResume` 冷启，调用
+  `createSendspinGroupPlayer.playMedia` 时**没带 bridge 规格**，而纯桥组的
+  sendspin 成员为空，被起播门禁直接拒绝；`activeBridgeRoutes` 里桥还是活的。
+- **修复**：`coldStartResume` 增加可选 `bridge` 并透传给 `playMedia`；
+  `createSendspinGroupPlayer` 接受构造期默认桥路由；组的 `spinOp` 从
+  `activeBridgeRoutes` 取出活跃路由交给组泵（暂停/续播/seek/音量同一入口）。
+- 回归用例：`coldStartResume.test.ts` 断言桥规格原样到达 `playMedia`。
+
 ## [4.14.0] - 2026-11-14
 
 ### Feature / 客户端与 Web：复用本机倍速控件遥控远端播放器

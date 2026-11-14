@@ -86,13 +86,20 @@ async function onlineSendspinMembers(userGroupId: string): Promise<string[]> {
 }
 
 /** 用户组抽象成一个 ProtocolPlayer(仅覆盖组内 sendspin 成员;dlna 成员由组 player 另行扇出)。 */
-export function createSendspinGroupPlayer(userGroupId: string): ProtocolPlayer {
+export function createSendspinGroupPlayer(
+  userGroupId: string,
+  /** 活跃桥路由(纯 AirPlay 桥组用):冷启/续播时必须带给泵,否则空 sendspin
+   *  成员会被判成「无在线成员」而拒绝起播(240 实测:暂停在曲末 → 点播放 500)。 */
+  defaultBridge?: { sockets: BridgeSocketSpec[] },
+): ProtocolPlayer {
   const playerId = `group:${userGroupId}`;
   const groupName = sendspinGroupName(userGroupId);
   return {
     playerId,
     async playMedia(item: QueueItem, baseUrl: string, startMs = 0, bridge?: { sockets: BridgeSocketSpec[] }, opts?: { manual?: boolean; nextSongId?: string; resolvedRowId?: string; speed?: number }) {
       const members = await onlineSendspinMembers(userGroupId);
+      // 调用方没带桥规格时用构造期登记的活跃路由(续播路径没有 bridge 参数)。
+      bridge = bridge ?? defaultBridge;
       // v4.9.3 方向 A:纯 AirPlay 桥组(无直连 sendspin 成员)也起泵 —— 桥是唯一
       // 消费者;带 bridge 规格时空成员放行,不再抛「无在线 sendspin 成员」。
       if (members.length === 0 && !bridge) {
@@ -134,9 +141,10 @@ export function createSendspinGroupPlayer(userGroupId: string): ProtocolPlayer {
         return;
       }
       await coldStartResume(
-        createSendspinGroupPlayer(userGroupId),
+        createSendspinGroupPlayer(userGroupId, defaultBridge),
         userGroupId,
         (msg) => console.warn(`[Sendspin] ${msg}`),
+        defaultBridge,
       );
     },
     async seek(seconds: number) {
@@ -227,7 +235,13 @@ function schedulePlayingReport(playerId: string, durationSec: number): void {
 
 /** resume 的冷起播段(两种模式共用):无推流在跑 = 真正起播,从 QC 队列取当前曲
  *  → playMedia。原地恢复(暂停中)的判定与动作由各模式自己先做。 */
-export async function coldStartResume(self: ProtocolPlayer, clientId: string, warn: (msg: string) => void): Promise<void> {
+export async function coldStartResume(
+  self: ProtocolPlayer,
+  clientId: string,
+  warn: (msg: string) => void,
+  /** 桥路由:纯 AirPlay 桥组(无直连 sendspin 成员)续播时必须带,否则泵拒绝起播。 */
+  bridge?: { sockets: BridgeSocketSpec[] },
+): Promise<void> {
   const qc = getQueueController();
   const snap = qc.snapshot(clientId);
   const item = snap.currentIndex >= 0 ? snap.items[snap.currentIndex] : undefined;
@@ -248,7 +262,7 @@ export async function coldStartResume(self: ProtocolPlayer, clientId: string, wa
   if (startMs > 0) {
     log.debug(`[Sendspin] coldStartResume ${clientId} 从 ${startMs}ms 续播(暂停位置)`);
   }
-  await self.playMedia(fullItem, getEffectiveBaseUrl(), startMs);
+  await self.playMedia(fullItem, getEffectiveBaseUrl(), startMs, bridge);
 }
 
 // ==================== in-proc 模式(单测/子进程自身) ====================

@@ -517,7 +517,10 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
     // 动态导入:QC → 本文件 → sendspin/protocolPlayer → player/index → QC 成环,
     // 静态边会 TDZ,沿用 emitMediaChanged 同构。
     const { createSendspinGroupPlayer } = await import("../sendspin/protocolPlayer.js");
-    await op(createSendspinGroupPlayer(groupId));
+    // 把活跃桥路由交给组泵:纯 AirPlay 桥组冷启续播时,泵必须知道「桥是消费者」,
+    // 否则空 sendspin 成员会被判成不可播放(240 实测 500)。
+    const route = activeBridgeRoutes.get(groupId);
+    await op(createSendspinGroupPlayer(groupId, route ? { sockets: route } : undefined));
   }
 
   // ---- Phase 3:桥接路由(§5.1 路由快照 + §5.5 owner token + MAJ-07 降级) ----
