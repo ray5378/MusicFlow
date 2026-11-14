@@ -318,7 +318,7 @@ describe("POST /v1/peers/:peerId/queue/play", () => {
     fns.seekPeerToSeconds.mockResolvedValueOnce(true);
     const b = await json(await post("/v1/peers/dlna:dev1/queue/play", { items: [{ songId: "s1" }], startIndex: 3, position: 12.5 }));
     expect(fns.detachFromActiveGroups).toHaveBeenCalled();
-    expect(queueManager.playFrom).toHaveBeenCalledWith("dev1", [{ songId: "s1" }], 3, "http://127.0.0.1:46400");
+    expect(queueManager.playFrom).toHaveBeenCalledWith("dev1", [{ songId: "s1" }], 3, "http://127.0.0.1:46400", undefined, undefined, "u1");
     expect(fns.seekPeerToSeconds).toHaveBeenCalledWith("dlna:dev1", 12.5);
     expect(b).toEqual({ success: true, position: 12.5 });
   });
@@ -533,7 +533,7 @@ describe("队列变更端点", () => {
   it("enqueue:items 非数组 → 400;cast/local 分流", async () => {
     expect((await post("/v1/peers/dlna:dev1/queue/enqueue", { items: {} })).status).toBe(400);
     await post("/v1/peers/dlna:dev1/queue/enqueue", { items: [{ songId: "a" }] });
-    expect(queueManager.enqueue).toHaveBeenCalledWith("dev1", [{ songId: "a" }], "http://127.0.0.1:46400");
+    expect(queueManager.enqueue).toHaveBeenCalledWith("dev1", [{ songId: "a" }], "http://127.0.0.1:46400", "u1");
     resetPeersFakes();
     await post("/v1/peers/local:u1/queue/enqueue", { items: [{ songId: "a" }] });
     expect(pm.localEnqueue).toHaveBeenCalledWith("local:u1", "u1", [{ songId: "a" }]);

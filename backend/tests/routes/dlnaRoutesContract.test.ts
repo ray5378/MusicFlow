@@ -633,13 +633,13 @@ describe("DLNA 队列端点", () => {
 
     const r = await post("/v1/dlna/devices/dev1/queue/play", { items: [{ songId: "s1" }], startIndex: 3 });
     expect(r.status).toBe(200);
-    expect(qm.playFrom).toHaveBeenCalledWith("dev1", [{ songId: "s1" }], 3, "http://127.0.0.1:46400");
+    expect(qm.playFrom).toHaveBeenCalledWith("dev1", [{ songId: "s1" }], 3, "http://127.0.0.1:46400", undefined, undefined, "u-admin");
   });
 
   it("POST queue/play:startIndex 缺省为 0;上游抛错 → 500", async () => {
     const qm = fakeQueueManager();
     await post("/v1/dlna/devices/dev1/queue/play", { items: [] });
-    expect(qm.playFrom).toHaveBeenCalledWith("dev1", [], 0, "http://127.0.0.1:46400");
+    expect(qm.playFrom).toHaveBeenCalledWith("dev1", [], 0, "http://127.0.0.1:46400", undefined, undefined, "u-admin");
     qm.playFrom.mockRejectedValue(new Error("x"));
     expect((await post("/v1/dlna/devices/dev1/queue/play", { items: [] })).status).toBe(500);
   });
@@ -648,7 +648,7 @@ describe("DLNA 队列端点", () => {
     const qm = fakeQueueManager();
     expect((await post("/v1/dlna/devices/dev1/queue/enqueue", {})).status).toBe(400);
     expect((await post("/v1/dlna/devices/dev1/queue/enqueue", { items: [] })).status).toBe(200);
-    expect(qm.enqueue).toHaveBeenCalledWith("dev1", [], "http://127.0.0.1:46400");
+    expect(qm.enqueue).toHaveBeenCalledWith("dev1", [], "http://127.0.0.1:46400", "u-admin");
     qm.enqueue.mockRejectedValue(new Error("x"));
     expect((await post("/v1/dlna/devices/dev1/queue/enqueue", { items: [] })).status).toBe(500);
   });
