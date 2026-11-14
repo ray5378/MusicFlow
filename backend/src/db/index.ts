@@ -491,6 +491,12 @@ export function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_play_history_user ON play_history(user_id);
     CREATE INDEX IF NOT EXISTS idx_play_history_played_at ON play_history(played_at);
     CREATE INDEX IF NOT EXISTS idx_playlist_songs_playlist ON playlist_songs(playlist_id);
+    -- 歌单内按 position 取头部若干首(首页封面回落 / 预取列表)是高频路径。
+    -- 只有 (playlist_id) 索引时 ORDER BY position 必须把该歌单**全部**行取出排序:
+    -- 240 生产实测 4142 首的大歌单单次 16.7ms(260 个歌单累计 4.3s,直接把首页
+    -- /v1/local-recommend 拖到 0.9~5.2s)。补 (playlist_id, position) 后走索引有序扫描,
+    -- LIMIT 只读前 N 行,实测 <1ms。
+    CREATE INDEX IF NOT EXISTS idx_playlist_songs_playlist_pos ON playlist_songs(playlist_id, position);
 
     CREATE TABLE IF NOT EXISTS dlna_devices (
       id TEXT PRIMARY KEY,

@@ -32,6 +32,7 @@ import {
   startAsyncTask,
   touch,
 } from "./shared.js";
+import { warmPlatformPoolOnBoot } from "../../services/plugin/localPlatformRecommend.js";
 
 // ==================== stale-while-revalidate(SWR) ====================
 // 原状:TTL(5min)过期后下一个请求阻塞式重调所有外网插件(冷 900ms+,插件慢时更久)。
@@ -438,6 +439,7 @@ function kickProviderInvoke(pluginId: string, p: any): Promise<any> {
 // 此时 getEnabledByCapability 为空 —— 原实现会直接顺延到 60s 周期,首轮等于丢失;故新增
 // 「未就绪短重试」:连续若干轮仍无声明 TTL 的插件则退回 60s,避免空转。
 const LOCAL_PROVIDER_WARMER_INITIAL_MS = 1 * 1000;
+const LOCAL_PLATFORM_POOL_WARM_MS = 2 * 1000; // 内置「本地随机」池/封面快照预热延迟
 const LOCAL_PROVIDER_WARMER_MAX_INTERVAL_MS = 60 * 1000;
 const LOCAL_PROVIDER_WARMER_NOT_READY_RETRY_MS = 2 * 1000;
 const LOCAL_PROVIDER_WARMER_NOT_READY_MAX_TRIES = 10; // ≈20s 内插件仍不出现则退回 60s 周期
@@ -497,6 +499,13 @@ export function __warmLocalProvidersOnceForTest(): Promise<void> {
  *  之后按 min(60s, ttl/2) 周期;首轮插件尚未注册时按 2s 短重试,最多 10 次。 */
 export function startLocalProviderWarmer(): void {
   if (localProviderWarmerTimer) return;
+  // 内置「本地随机」的候选池 + 封面快照预热(一次性):它不声明 recommendCacheTtlSeconds
+  // (每次都要重洗),上面的 provider 预热覆盖不到它。首页首个 /v1/local-recommend 若撞上
+  // 冷池,要同步建池 + 解析上百个歌单封面(240 实测串行 8 次 5.22→0.81s、并发时把
+  // /ping 堵到 1.48s)。挪到服务起来后的无人等待窗口做掉,首屏请求直接命中。
+  // 延迟 2s:错开 provider 预热的 1s 首轮,避免启动期争抢主线程。
+  const poolWarmTimer = setTimeout(() => warmPlatformPoolOnBoot(), LOCAL_PLATFORM_POOL_WARM_MS);
+  (poolWarmTimer as any)?.unref?.();
   const tick = (delayMs: number) => {
     localProviderWarmerTimer = setTimeout(() => {
       warmLocalProvidersOnce()

@@ -19,7 +19,7 @@
 import { sqlite } from "../../db/index.js";
 import { createLogger } from "../../utils/logger.js";
 import type { PluginManifest } from "../../plugins/types.js";
-import { resolveCoverFile, listPlayableCoverRefs } from "../playlistCover.js";
+import { resolveCoverFile, firstPlayableCoverRef } from "../playlistCover.js";
 import { SCHEDULE_FIELDS } from "./scheduleFields.js";
 
 const log = createLogger("LOCAL-PLATFORM-REC");
@@ -84,22 +84,20 @@ export interface LocalPlatformChannel {
   }[];
 }
 
-// ==================== P0-3:候选池 + 封面解析缓存 ====================
-// 首页「本地随机」稳态下每次刷新都要跨库取全部平台歌单 + 逐歌单探测封面文件,
-// 240 个歌单时 DB/fs 往返是主要耗时。此处做进程内候选池缓存:
+// ==================== P0-3:候选池缓存(SWR) ====================
+// 首页「本地随机」稳态下每次刷新都要跨库取全部平台歌单。此处做进程内候选池:
 //   - 主 SQL 一次读出全部带平台歌单,按平台分组存入 bySource;
-//   - 每个歌单的最终 coverArt 惰性解析并 memo 到 coverMemo(避免重复探测);
-//   - TTL(PLATFORM_POOL_TTL_MS)内**直接复用候选集合与封面**,但**每次请求仍重新洗牌**
+//   - TTL(PLATFORM_POOL_TTL_MS)内直接复用候选集合,但**每次请求仍重新洗牌**
 //     (随机性 100% 保留 —— 这是与「整体缓存」的本质区别);
-//   - 显式失效(invalidatePlatformPool,冷池加固 2026-10-16):由「置 null」改为
-//     **置脏 + 后台单飞重建** —— 保留旧 warm 池继续服务在途请求,后台重建后原子替换,
-//     使「歌单增删/导入」后的首页请求**不再触发同步全量扫描**(偶发卡死的残留慢脚);
-//     新数据在后台重建落地后的下一轮请求即可见(微任务级延迟,等价于原「立即重建」)。
-//   - TTL 过期 → SWR(2026-10-15 B4):旧池继续供本轮洗牌(不阻塞请求),后台单飞
-//     重建一次 —— 消除「每 120s 一次的同步 DB+封面探测慢脚」。下一轮请求拿到新池。
-//   - 冷启动(进程内首次、无任何 warm 池)仍须同步建一次(否则首页无数据);
-//     空闲回收经 registerCacheCleaner 走 dropPlatformPool 硬清空(不做后台重建)。
-// 内存占用 ≈ 平台歌单行数,可忽略。
+//   - 显式失效(invalidatePlatformPool):置脏 + 后台单飞重建 —— 保留旧 warm 池继续
+//     服务在途请求,后台重建后原子替换;
+//   - TTL 过期 → SWR:旧池继续供本轮洗牌(不阻塞请求),后台单飞重建一次;
+//   - 冷启动(进程内首次、无任何 warm 池)同步建一次(否则首页无数据);
+//     空闲回收经 registerCacheCleaner 走 dropPlatformPool 硬清空。
+//
+// 注意:**封面解析不在这里**。历史实现把封面 memo 挂在池对象上(coverMemo),池每
+// 120s TTL 重建、每次 invalidate 也重建 → memo 跟着清空,封面成本周期性回到 0,
+// 永远热不起来(240 实测稳态单请求仍 0.9s)。现已抽成独立快照,见下方 P0-3b。
 const PLATFORM_POOL_TTL_MS = 120_000; // 120 秒
 
 interface PlatformPoolRow {
@@ -113,7 +111,6 @@ interface PlatformPoolRow {
 interface PlatformPool {
   ts: number;
   bySource: Map<string, PlatformPoolRow[]>;
-  coverMemo: Map<string, string | null>;
 }
 
 let platformPoolCache: PlatformPool | null = null;
@@ -127,7 +124,9 @@ export function invalidatePlatformPool(): void {
 }
 
 /** 硬清空候选池缓存(空闲内存回收专用):回收要真正释放内存,不做后台重建;
- *  下一次请求走冷启动同步建池。 */
+ *  下一次请求走冷启动同步建池。
+ *  **封面快照不在此清空** —— 它独立于池、868 条 <50KB,清掉只会让下一次首页请求
+ *  重新解析全部歌单封面(240 实测 +0.9s),是「丢了能重建」里唯一不该丢的一项。 */
 export function dropPlatformPool(): void {
   platformPoolCache = null;
   poolDirty = false;
@@ -142,17 +141,16 @@ export function dropPlatformPool(): void {
  * 同一列 cover_art + 同扩展名门(/\.(jpg|jpeg|png|gif)$/i)+ 同 resolveCoverFile;
  * 自身可解析时统一返回不带扩展名的 `pl-<id>`(不能直接透传 DB 的 `pl-<id>.jpg`,
  * 否则 getCoverArt 会把 `.jpg` 混进歌单 id 查库失败 → 封面空白),否则回落到
- * 歌单内可播歌曲的封面随机一张;都没有返回 null(前端占位符)。
+ * 歌单内可播歌曲的第一张封面。都没有返回 null(前端占位符)。
+ *
+ * 回落走 firstPlayableCoverRef 而非 listPlayableCoverRefs:首页每张卡片只需要一个
+ * 封面,后者为收集全部候选会扫 50 行且逐行 fs 探测(240 实测大歌单 16.7ms)。
  */
 function resolveRowCover(r: PlatformPoolRow): string | null {
   if (r.cover_art && /\.(jpg|jpeg|png|gif)$/i.test(r.cover_art) && resolveCoverFile(r.cover_art)) {
     return `pl-${r.id}`;
   }
-  const candidates = listPlayableCoverRefs(r.id);
-  if (candidates.length > 0) {
-    return candidates[Math.floor(Math.random() * candidates.length)];
-  }
-  return null;
+  return firstPlayableCoverRef(r.id);
 }
 
 /** 后台重建 single-flight 标志:防止过期/失效窗口内并发请求重复重建。 */
@@ -161,7 +159,7 @@ let poolRebuildInflight = false;
 /** 显式失效标记(冷池加固 2026-10-16):为 true 时保留旧池服务本轮请求、后台重建。 */
 let poolDirty = false;
 
-/** 全量重建候选池(主 SQL + 新 coverMemo;不做增量合并,保持产物确定性)。 */
+/** 全量重建候选池(主 SQL;不做增量合并,保持产物确定性)。 */
 function buildPool(now: number): PlatformPool {
   const rows = sqlite
     .prepare(
@@ -178,7 +176,7 @@ function buildPool(now: number): PlatformPool {
     list.push(r);
     bySource.set(src, list);
   }
-  return { ts: now, bySource, coverMemo: new Map() };
+  return { ts: now, bySource };
 }
 
 /** 后台单飞重建候选池(不阻塞调用方):重建成功原子替换并清脏;
@@ -192,6 +190,7 @@ function schedulePoolRebuild(): void {
       platformPoolCache = buildPool(Date.now());
       poolDirty = false;
       log.info("本地随机候选池后台重建完成");
+      scheduleCoverPrewarm(); // 新池有哪些歌单缺快照,后台补齐
     } catch (e: any) {
       log.warn("本地随机候选池后台重建失败(保持旧池,下轮重试)", { err: e?.message || e });
     } finally {
@@ -213,22 +212,201 @@ function getPool(): PlatformPool {
   }
   platformPoolCache = buildPool(now);
   poolDirty = false;
+  scheduleCoverPrewarm();
   return platformPoolCache;
 }
 
-/** 取(惰性解析 + memo)某歌单的封面 ref。 */
-function memoCover(pool: PlatformPool, r: PlatformPoolRow): string | null {
-  const hit = pool.coverMemo.get(r.id);
-  if (hit !== undefined) return hit;
-  const cover = resolveRowCover(r);
-  pool.coverMemo.set(r.id, cover);
-  return cover;
+// ==================== P0-3b:封面 ref 快照(独立于池 + 落盘) ====================
+// 为什么独立:旧实现把封面 memo 挂在池对象上,池 TTL 重建 / invalidate 重建都会把
+// memo 清空 → 每次「重建后的第一个请求」都要重新解析全部歌单封面。240 生产实测
+// (868 个带平台歌单、其中 260 个需回落扫歌单歌曲):
+//   - 主 SQL 3ms(不是瓶颈)
+//   - 798 个 resolveCoverFile 285ms
+//   - 260 个 listPlayableCoverRefs 4344ms  ← 真凶(单歌单 16.7ms)
+// 表现为串行 8 次 5.22/2.18/1.19/1.19/1.89/0.81/0.94/0.91s、并发 3 个时 /ping
+// 被同步阻塞到 1.48s(点其它标题栏页面卡住的直接原因)。
+//
+// 现在:快照 Map<playlistId,{ref,ts}> 生命周期比池长,并落盘 settings 表
+// (key=localrec:cover-snapshot:v1) —— 进程重启 / 空闲回收后首个首页请求直接复用,
+// 不必重新解析。内存 868 条 <50KB。
+//
+// 一致性:条目 30 分钟软过期。过期条目**仍服务请求**(不回退到占位符),由后台预热器
+// 重算覆盖;歌单增删经 invalidatePlatformPool → 后台重建 → 预热补齐/清孤儿。
+interface CoverEntry {
+  ref: string | null;
+  ts: number;
+}
+
+const COVER_SNAPSHOT_KEY = "localrec:cover-snapshot:v1";
+const COVER_SNAPSHOT_TTL_MS = 30 * 60_000;
+const COVER_PERSIST_DEBOUNCE_MS = 3_000;
+const COVER_PREWARM_SLICE_MS = 12; // 单分片预算:超过即让出事件循环
+
+let coverEntries: Map<string, CoverEntry> | null = null;
+let coverPersistTimer: ReturnType<typeof setTimeout> | null = null;
+let coverPrewarmRunning = false;
+
+/** 惰性加载快照(首次用时读一次 settings;解析失败按空表继续)。 */
+function loadCoverEntries(): Map<string, CoverEntry> {
+  if (coverEntries) return coverEntries;
+  const map = new Map<string, CoverEntry>();
+  coverEntries = map;
+  try {
+    const row = sqlite.prepare("SELECT value FROM settings WHERE key = ?").get(COVER_SNAPSHOT_KEY) as
+      | { value: string }
+      | undefined;
+    if (row?.value) {
+      const parsed = JSON.parse(row.value) as Record<string, [string | null, number]>;
+      for (const [id, v] of Object.entries(parsed)) {
+        if (Array.isArray(v)) map.set(id, { ref: v[0] ?? null, ts: Number(v[1]) || 0 });
+      }
+      log.info("本地随机封面快照已加载", { entries: map.size });
+    }
+  } catch (e: any) {
+    log.warn("本地随机封面快照加载失败(按空表继续)", { err: e?.message || e });
+  }
+  return map;
+}
+
+/** 落盘(去抖 3s):只在有变化时写,失败仅告警,绝不影响请求路径。 */
+function markCoverSnapshotDirty(): void {
+  if (coverPersistTimer) return;
+  coverPersistTimer = setTimeout(() => {
+    coverPersistTimer = null;
+    try {
+      const map = loadCoverEntries();
+      const obj: Record<string, [string | null, number]> = {};
+      for (const [id, e] of map) obj[id] = [e.ref, e.ts];
+      sqlite
+        .prepare(
+          `INSERT INTO settings(key, value, updated_at) VALUES(?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+        )
+        .run(COVER_SNAPSHOT_KEY, JSON.stringify(obj), new Date().toISOString());
+    } catch (e: any) {
+      log.warn("本地随机封面快照落盘失败", { err: e?.message || e });
+    }
+  }, COVER_PERSIST_DEBOUNCE_MS);
+  // 持久化定时器不该把进程钉住(容器 stop 时立刻退出)
+  (coverPersistTimer as any)?.unref?.();
+}
+
+/** 清掉池里已不存在的孤儿条目(歌单被删),避免快照无限增长。 */
+function pruneCoverSnapshot(map: Map<string, CoverEntry>, rows: PlatformPoolRow[]): void {
+  const live = new Set(rows.map((r) => r.id));
+  let removed = 0;
+  for (const k of map.keys()) {
+    if (!live.has(k)) {
+      map.delete(k);
+      removed++;
+    }
+  }
+  if (removed > 0) markCoverSnapshotDirty();
+}
+
+/** 后台补/刷新快照:按 ≤12ms 分片让出事件循环,不与请求抢主线程。 */
+function scheduleCoverPrewarm(): void {
+  if (coverPrewarmRunning) return;
+  coverPrewarmRunning = true;
+  setTimeout(runCoverPrewarmSlice, 0);
+}
+
+function runCoverPrewarmSlice(): void {
+  const pool = platformPoolCache;
+  if (!pool) {
+    coverPrewarmRunning = false;
+    return;
+  }
+  const rows: PlatformPoolRow[] = [];
+  for (const list of pool.bySource.values()) rows.push(...list);
+  const map = loadCoverEntries();
+  const now = Date.now();
+  const todo = rows.filter((r) => {
+    const e = map.get(r.id);
+    return !e || now - e.ts >= COVER_SNAPSHOT_TTL_MS;
+  });
+  if (todo.length === 0) {
+    pruneCoverSnapshot(map, rows);
+    coverPrewarmRunning = false;
+    return;
+  }
+  let i = 0;
+  const step = () => {
+    const start = Date.now();
+    while (i < todo.length && Date.now() - start < COVER_PREWARM_SLICE_MS) {
+      const r = todo[i++];
+      map.set(r.id, { ref: resolveRowCover(r), ts: Date.now() });
+    }
+    if (i < todo.length) {
+      setTimeout(step, 0); // 让出事件循环,HTTP 请求可插队
+      return;
+    }
+    pruneCoverSnapshot(map, rows);
+    markCoverSnapshotDirty();
+    coverPrewarmRunning = false;
+    log.info("本地随机封面快照预热完成", { total: rows.length, refreshed: todo.length });
+  };
+  setTimeout(step, 0);
+}
+
+/** 取某歌单封面 ref:快照命中直接返回(过期也用,并触发后台刷新);未命中同步算一次。 */
+function coverOf(r: PlatformPoolRow): string | null {
+  const map = loadCoverEntries();
+  const now = Date.now();
+  const hit = map.get(r.id);
+  if (hit) {
+    if (now - hit.ts >= COVER_SNAPSHOT_TTL_MS) scheduleCoverPrewarm();
+    return hit.ref;
+  }
+  const ref = resolveRowCover(r);
+  map.set(r.id, { ref, ts: now });
+  markCoverSnapshotDirty();
+  scheduleCoverPrewarm(); // 顺带把池里其它缺失项在后台补齐
+  return ref;
+}
+
+/** 启动预热(供 HTTP 服务起来后调用):先把候选池建好、封面快照补齐,让用户
+ *  首个首页请求直接命中。任何失败都静默 —— 下一次请求照样会自己建。 */
+export function warmPlatformPoolOnBoot(): void {
+  try {
+    // 插件被禁用时不必预热(直查 DB,不依赖插件注册时序)
+    const row = sqlite
+      .prepare("SELECT enabled FROM plugins WHERE name = ?")
+      .get(LOCAL_PLATFORM_REC_PLUGIN_ID) as { enabled: number } | undefined;
+    if (row && !row.enabled) return;
+    getPool();
+    scheduleCoverPrewarm();
+  } catch (e: any) {
+    log.warn("本地随机启动预热失败(不影响请求路径)", { err: e?.message || e });
+  }
+}
+
+/**
+ * 清空封面快照。`dropPersisted=false` 只清内存(模拟「进程重启、快照仍在库里」);
+ * 默认连 settings 行一起删。
+ *
+ * 用途:① 测试用例隔离(dropPlatformPool 已刻意**不**清快照,跨用例会串味);
+ * ② 运维/配置重置时彻底重建快照。
+ */
+export function clearCoverSnapshot(dropPersisted = true): void {
+  coverEntries = null;
+  if (coverPersistTimer) {
+    clearTimeout(coverPersistTimer);
+    coverPersistTimer = null;
+  }
+  if (!dropPersisted) return;
+  try {
+    sqlite.prepare("DELETE FROM settings WHERE key = ?").run(COVER_SNAPSHOT_KEY);
+  } catch (e: any) {
+    log.warn("清空封面快照失败", { err: e?.message || e });
+  }
 }
 
 /**
  * 从本地库按平台分组随机选歌单。纯函数,不报错;库里无任何带平台歌单时返回空。
  * 每组随机洗牌 → 每次调用结果不同(首页刷新即动态变化)。
- * 稳态下候选集合与封面解析走进程内缓存(TTL 内),但洗牌每次照做 → 刷新仍变。
+ * 稳态下候选集合走 SWR 池、封面走持久化快照,但洗牌每次照做 → 刷新仍变。
+ * 请求路径只做「读快照 + 洗牌 + 拼装」,不含任何 fs 探测与歌单歌曲 JOIN。
  */
 export function recommendLocalPlatforms(): { channels: LocalPlatformChannel[] } {
   try {
@@ -249,7 +427,8 @@ export function recommendLocalPlatforms(): { channels: LocalPlatformChannel[] } 
           name: r.name,
           // 与 playlistCover.getPlaylistCover 语义一致:自身可解析 → `pl-<id>`;
           // 否则回落歌单内可播歌曲封面;都没有 → null(前端占位符)。
-          coverArt: memoCover(pool, r),
+          // 走独立封面快照(P0-3b):不是每个请求现算,也不随候选池重建清空。
+          coverArt: coverOf(r),
           songCount: r.song_count || 0,
           imported: true,
         })),

@@ -236,6 +236,40 @@ export function listPlayableCoverRefs(playlistId: string, opts?: CoverPickOption
   return result;
 }
 
+/**
+ * 只取「第一张可用封面」的快速路径(首页卡片专用)。
+ *
+ * 与 `listPlayableCoverRefs(...)[0]` 的区别:后者为收集**全部**候选会扫 50 行,
+ * 且对每一行都调 resolveCoverFile(单歌单最坏 50 次 fs.existsSync)。首页每张卡片
+ * 只需要一个封面 ref,这里改成「取前 maxProbe 行候选 + 命中即返回」。
+ *
+ * 240 生产实测(4142 首的大歌单):listPlayableCoverRefs 16.7ms → 本函数 <1ms
+ * (索引 idx_playlist_songs_playlist_pos 就位后 LIMIT 只读前 N 行)。
+ *
+ * maxProbe 默认 8:头部 8 首里连一张封面都没有的歌单极少;真有则返回 null,
+ * 由调用方回落占位符(比继续扫 50 行更划算)。
+ */
+export function firstPlayableCoverRef(playlistId: string, maxProbe = 8): string | null {
+  const rows = sqlite.prepare(`
+    SELECT
+      CASE
+        WHEN s.cover_art IS NOT NULL AND s.cover_art <> '' THEN s.cover_art
+        WHEN a.cover_art IS NOT NULL AND a.cover_art <> '' THEN a.cover_art
+        ELSE NULL END AS coverFile
+    FROM playlist_songs ps
+    JOIN songs s ON ps.song_id = s.id
+    LEFT JOIN albums a ON a.id = s.album_id
+    WHERE ps.playlist_id = ? AND ps.playable = 1 AND ps.song_id IS NOT NULL
+    ORDER BY ps.position ASC
+    LIMIT ?
+  `).all(playlistId, maxProbe) as { coverFile: string | null }[];
+  for (const r of rows) {
+    if (!r.coverFile) continue;
+    if (resolveCoverFile(r.coverFile)) return r.coverFile;
+  }
+  return null;
+}
+
 /** 取歌单自身可播条目中「第一首有封面」的歌曲封面**文件名**(列表首项)。 */
 export function firstPlayableCoverFile(playlistId: string, opts?: CoverPickOptions): string | null {
   return listPlayableCoverRefs(playlistId, opts)[0] ?? null;
