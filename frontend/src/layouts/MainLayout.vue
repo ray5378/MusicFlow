@@ -265,7 +265,13 @@
             <el-button circle @click="playerStore.next" class="ctrl-btn"><MfIcon name="SkipForward" :size="20" /></el-button>
           </el-tooltip>
           <!-- 倍速:音乐与学习音频统一生效,常驻在播放控件最右侧 -->
-          <el-select :model-value="playerStore.studyRate" size="small" class="study-rate" @change="onStudyRate">
+          <el-select
+            v-if="playerStore.canSetPlaybackRate"
+            :model-value="playerStore.uiPlaybackRate"
+            size="small"
+            class="study-rate"
+            @change="onPlaybackRate"
+          >
             <el-option v-for="r in studyRates" :key="r" :label="`${r}x`" :value="r" />
           </el-select>
         </div>
@@ -483,7 +489,13 @@
           <!-- 移动端:倍速放在最底部一行(添加到歌单下方),与桌面播放条一致 -->
           <div v-if="isMobile" class="pm-extra">
             <span class="pm-extra-label">{{ t("layout.playbackRate") }}</span>
-            <el-select :model-value="playerStore.studyRate" size="small" class="study-rate pm-rate" @change="onStudyRate">
+            <el-select
+              v-if="playerStore.canSetPlaybackRate"
+              :model-value="playerStore.uiPlaybackRate"
+              size="small"
+              class="study-rate pm-rate"
+              @change="onPlaybackRate"
+            >
               <el-option v-for="r in studyRates" :key="r" :label="`${r}x`" :value="r" />
             </el-select>
           </div>
@@ -745,7 +757,8 @@ const playModeIconName = computed(() => {
 });
 // 学习音频倍速(复用同一播放条,只在播放学习内容时出现)
 const studyRates = [0.75, 1, 1.25, 1.5, 1.75, 2];
-function onStudyRate(v: any) { playerStore.setStudyRate(Number(v) || 1); }
+// 倍速:同一控件同时服务本机播放与远端遥控(投屏播放器/群组/混合群组)。
+function onPlaybackRate(v: any) { playerStore.setPlaybackRate(Number(v) || 1); }
 const playModeTooltip = computed(() => {
   switch (playerStore.playMode) {
     case "one": return t("layout.playMode.one");

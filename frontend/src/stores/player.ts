@@ -312,6 +312,9 @@ export const usePlayerStore = defineStore("player", () => {
     isPlaying: boolean;
     currentTime: number;
     duration: number;
+    /** 服务端当前出流倍速(0.75~2,缺省 1)。设备型目标由 /peers/:id/speed 下发;
+     *  local:* 目标不支持(它自己就是播放端,自带倍速)。 */
+    speed: number;
     playMode: PlayMode;
     lyrics: LyricLine[];
     currentLyricLine: string;
@@ -373,6 +376,7 @@ export const usePlayerStore = defineStore("player", () => {
         isPlaying: false,
         currentTime: 0,
         duration: 0,
+        speed: 1,
         playMode: "shuffle" as PlayMode,
         lyrics: [],
         currentLyricLine: "",
@@ -412,6 +416,31 @@ export const usePlayerStore = defineStore("player", () => {
     const id = activeRemotePeerId.value;
     return id ? remoteStates.get(id) : undefined;
   });
+
+  // ==================== 倍速:本机 / 远端统一入口 ====================
+  // 出流在 cast 时按倍速一次性编码(atempo),运行中改不了 —— 服务端收到
+  // /peers/:id/speed 后会以「当前内容位置 + 新倍速」重投当前曲,进度连续。
+  // 本机实例(local:*)由它自己解码,服务端会 400,故 canSetPlaybackRate 关掉控件。
+  const canSetPlaybackRate = computed(
+    () => !isRemotePeer.value || !currentPeerId.value.startsWith("local:"),
+  );
+  /** UI 显示用的倍速:远端态显示远端档位(轮询同步),本机态显示本地档位。 */
+  const uiPlaybackRate = computed(() =>
+    isRemotePeer.value ? (activeRemote.value?.speed ?? 1) : playbackRate.value,
+  );
+  function setRemotePlaybackRate(rate: number) {
+    const st = activeRemote.value;
+    if (!st || st.peerId.startsWith("local:")) return;
+    const next = Math.min(2, Math.max(0.75, Number(rate) || 1));
+    st.speed = next; // 乐观回写:轮询回来前按钮/下拉先显示新档位
+    speedIssuedAt.set(st.peerId, Date.now());
+    api.post(peerApi(st.peerId, "/speed"), { speed: next }).catch(() => {});
+  }
+  /** 统一倍速入口:当前绑定的播放端决定落点(本机解码器 / 远端设备)。 */
+  function setPlaybackRate(rate: number) {
+    if (isRemotePeer.value) setRemotePlaybackRate(rate);
+    else setStudyRate(rate);
+  }
   // 歌单自动补齐回执(服务端 /v1/play 后台匹配并把新曲目追加到设备队列后广播)。
   // WEB 端过去是自己 补队列才有 perceptible feedback;投屏路径改由服务端补齐后,
   // 靠这条事件把「补了几首」交还给 UI(见 Playlists/Detail.vue 里的 watch)。
@@ -1471,6 +1500,9 @@ export const usePlayerStore = defineStore("player", () => {
     return dur > 0 ? Math.min(projected, dur) : projected;
   }
   const volumeIssuedAt = new Map<string, number>(); // 每设备最近一次下发音量的时刻(ms)
+  // 每 peer 最近一次下发倍速的时刻(ms):与 volumeIssuedAt 同款陈旧保护 ——
+  // 1x→1.5x 时轮询可能先带回「命令之前采样」的 1x,不挡会把刚选的档位顶回去。
+  const speedIssuedAt = new Map<string, number>();
   let transportIssuedAt = 0; // 最近一次下发播放/暂停命令的时刻(ms)
   /**
    * 每设备最近一次下发 seek 的「时刻 + 目标秒」。**Web 端此前唯独缺这一段护栏**
@@ -1590,6 +1622,11 @@ export const usePlayerStore = defineStore("player", () => {
           const volumeStale = isStaleSample(s, volumeIssuedAt.get(st.peerId) || 0);
           if (typeof s.volume === "number" && currentPeerId.value === st.peerId && !volumeStale) {
             volume.value = Math.max(0, Math.min(100, s.volume)) / 100;
+          }
+          // 同步设备真实倍速(服务端 4.13.0 起 /status 回传 speed)。
+          const speedStale = isStaleSample(s, speedIssuedAt.get(st.peerId) || 0);
+          if (typeof s.speed === "number" && !speedStale) {
+            st.speed = s.speed;
           }
 
           const media = s.media;
@@ -2706,6 +2743,8 @@ export const usePlayerStore = defineStore("player", () => {
     seek, seekPercent, setVolume, cyclePlayMode,
     // 学习模块控制(倍速 / ±15 秒 / 进度上报)
     studyRate, setStudyRate, skipBy, isStudyPlaying, reportStudyProgress,
+    // 倍速:远端(投屏播放器/群组)与本地共用同一控件,落点由当前播放端决定
+    uiPlaybackRate, setPlaybackRate, canSetPlaybackRate,
     removeFromQueue, clearQueue, getCoverUrl, loadLyrics, updateCurrentLyric,
     toggleLyrics, togglePlaylistPanel, togglePlayMode,
     // cast lifecycle (投屏)
