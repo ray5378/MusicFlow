@@ -2,10 +2,12 @@
 //
 // 背景:首页「并排随机」此前调 /v1/playlists?pageSize=200 拉「全量」,而生产库有 873 个
 // 歌单、服务端单页上限 500 —— 随机池实际只覆盖最新约 200 个,其余永不出现。现改为服务端
-// 常驻一份最瘦索引(id+name+songCount)并一次返回全量池。
+// 常驻一份最瘦索引(id+name+songCount+changed)并一次返回全量池。
 //
 // 契约:
-//   1) 响应项**只有** {id,name,songCount} 三个字段(owner/pub 是内部可见性判定列,绝不外泄);
+//   1) 响应项**只有** {id,name,songCount,changed} 四个字段(owner/pub 是内部可见性判定列,绝不外泄);
+//      changed(= playlists.updated_at)是 2026-11-15 为首页「最近更新」分区补的纯增字段,
+//      与 GET /v1/playlists 的 changed 同义;只读旧三键的老客户端忽略它即可。
 //   2) 可见性口径与 /v1/playlists 一致:管理员全见;普通用户仅见「自己 + 公开 + 导入」;
 //   3) TTL 内复用缓存、超过 TTL 重建(新插入的歌单最迟 TTL 内出现在池里);
 //   4) 索引为空/无歌单时安全返回空池(不得抛错)。
@@ -34,7 +36,13 @@ function makeUser(id: string) {
 function makePlaylist(
   id: string,
   owner: string,
-  opts: { isPublic?: number; sourceUrl?: string | null; songCount?: number } = {},
+  opts: {
+    isPublic?: number;
+    sourceUrl?: string | null;
+    songCount?: number;
+    /** 建表默认值是空串,要断言 changed 非空就得显式给值。 */
+    updatedAt?: string;
+  } = {},
 ) {
   db.insert(playlists)
     .values({
@@ -44,6 +52,7 @@ function makePlaylist(
       isPublic: opts.isPublic ?? 0,
       sourceUrl: opts.sourceUrl ?? null,
       songCount: opts.songCount ?? 0,
+      updatedAt: opts.updatedAt ?? "",
     } as Any)
     .run();
 }
@@ -59,12 +68,21 @@ beforeEach(() => {
 });
 
 describe("首页全量歌单池索引", () => {
-  it("只返回 {id,name,songCount} 三个字段,绝不外泄 owner/pub", () => {
-    makePlaylist("p1", "u1", { isPublic: 1, songCount: 40 });
+  it("只返回 {id,name,songCount,changed} 四个字段,绝不外泄 owner/pub", () => {
+    makePlaylist("p1", "u1", {
+      isPublic: 1,
+      songCount: 40,
+      updatedAt: "2026-11-15T08:30:00.000Z",
+    });
     const r = buildPlaylistPool({ id: "u1", isAdmin: true });
     expect(r.total).toBe(1);
-    expect(Object.keys(r.items[0]).sort()).toEqual(["id", "name", "songCount"]);
+    // 精确键集合是「防泄漏」那道闸:多一个键(owner/pub/…)或少一个键都必须红,不许放宽成 toContain。
+    expect(Object.keys(r.items[0]).sort()).toEqual(["changed", "id", "name", "songCount"]);
     expect(r.items[0].songCount).toBe(40);
+    // 加固留证:changed 必须真的被投影出来(漏投影 updated_at 时上面键集合已会红,这里再钉住值)。
+    expect(typeof r.items[0].changed).toBe("string");
+    expect(r.items[0].changed.length).toBeGreaterThan(0);
+    expect(r.items[0].changed).toBe("2026-11-15T08:30:00.000Z");
   });
 
   it("管理员全见", () => {
