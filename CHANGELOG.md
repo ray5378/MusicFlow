@@ -2,6 +2,15 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.14.10] - 2026-11-16
+
+### Fix / 歌单池用例门禁：精确键集合对齐 4.14.9 的纯增字段 `changed`
+
+- `backend/tests/qa_perf/playlistPool.test.ts` 里「只返回三字段、绝不外泄 owner/pub」的断言，精确键集合由 `{id,name,songCount}` 改为 `{changed,id,name,songCount}`，与 4.14.9 `GET /v1/home/playlist-pool` 新增的**纯增字段** `changed`（= `updated_at`，供「最近更新」分区排序）对齐。防泄漏闸门仍是**精确键集合 `toEqual`**（未放宽成 `toContain`），owner / public 等内部可见性列继续被钉死不得外泄。
+- 同时新增 `changed` 的**值透传**断言（`updated_at → changed`）并断言其非空：只「多一个键」不够，键里必须有真值，否则「最近更新」分区恒空且无人发现。
+- 背景（为什么必须补这一版）：v4.14.9 的 `build-and-push` 正是被这条过时断言拦红（`expected [ Array(4) ] to deeply equal [ 'id', 'name', 'songCount' ]`，`Tests 1 failed | 8661 passed | 1 skipped`），失败触发了 workflow 内的**回滚发版 job**，把 `:4.14.9` 与 `:latest` 静默打回上一版构建（镜像内 `APP_VERSION=4.14.8`），而 Release 页面与 tag 看起来一切正常 —— 属于典型的静默回滚。
+- 本次为**纯测试修正**：`src/**` 零改动，不含任何运行时行为变更；4.14.9 的功能（含服务端确定性组装「为你推荐」与「最近更新的歌单」端点）随本版首次真正上线。
+
 ## [4.14.9] - 2026-11-15
 
 ### Feature / 首页「为你推荐」收敛为服务端确定性组装，新增「最近更新的歌单」端点
