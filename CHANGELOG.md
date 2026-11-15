@@ -2,6 +2,21 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.14.9] - 2026-11-15
+
+### Feature / 首页「为你推荐」收敛为服务端确定性组装，新增「最近更新的歌单」端点
+
+- **新增 `GET /v1/home/recommend-section`**。固定卡**零门槛**全返回（`showOnHome` 的卡按 `position` 升序、并列按 `pluginId` 字典序）；随机补位从可见性过滤后的全量歌单池里，排除固定卡占用的 id、只留 `songCount >= 30`，按 `md5(userId|hourBucket|id)` 前 8 位十六进制升序（并列按 id 字典序兜底）取 `max(0, homeCount - fixed.length)` 条。随机位写 `settings` 快照（key = `home.section.<userId|anon>`，每用户 1 行 UPSERT），命中时校验「条数恰好等于当前应补张数 + 每个 id 仍在池子且非固定卡」，否则重算并覆盖；`?refresh=1` 跳过快照并强制重建歌单池。此前 Web / Flutter（音流）/ HA 卡片三端各自本地洗牌、同一时刻打开三个客户端看到三套卡片，现统一为服务端单一真源，同一小时内结果恒定。
+- **新增 `GET /v1/home/recent-playlists`**。按 `updated_at` 字符串倒序（并列按 id 字典序）返回前 20 条，`?limit` clamp 到 1..100，响应刻意不返回 `total`；无随机位故**不做快照**，如实反映当前数据。与「为你推荐」拆成两个端点、各管一件事（稳定性策略本就不同）。
+- `GET /v1/home/playlist-pool` 增纯增字段 `changed`（= `updated_at`），供最近更新分区排序；owner / public 等内部可见性判定列仍不外泄。
+
+### Fix / Web 首页换源、固定卡重复 key 与缺行可观测
+
+- **Web 首页「为你推荐」改走新端点**：删掉本地 `songCount > 15` 固定卡门槛与 `Math.random()` 洗牌，不再本地算补位差值、不再由首页拉 200 条全量歌单池；`homeCount` 优先用服务端 `section.homeCount`、回落本地配置；启动期预取与 24h 本地兜底缓存改存整份 section 响应；`refreshRoam` 改带 `?refresh=1` 让服务端重算；`degraded=true` 本轮只告警、不做 UI 提示。
+- **修复固定卡重复 key**：`daily-rec-platform` 一个插件挂 6 张卡、`pluginId` 全同，模板 `:key` 改用 `playlistId`。
+- **固定卡歌单行缺失不再静默消失**：`GET /v1/recommend/home-cards` 与聚合端点都对缺行卡标 `missing:true`（仍返回该卡，`playlistName` 空、曲目数 0、封面 null），聚合响应以 `degraded` 标记降级；缺行告警改为**每张卡每小时最多一条**，避免长期坏卡把日志刷屏。
+- 守卫同步：`check-home-perf.mjs` R8 / PREFETCH / 首屏并发断言改钉新字面量，并新增「Home 禁 `Math.random()`、禁 `songCount > 15`、必须 `:key="card.playlistId"`」三条防回归；29 个 `check-*.mjs` 全绿。
+
 ## [4.14.8] - 2026-11-15
 
 ### 修复 / 标签修复：无解曲目收敛终态不可得 + 内嵌封面不落库 + ffmpeg 写封面静默丢弃
