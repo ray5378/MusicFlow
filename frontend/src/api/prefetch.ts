@@ -8,12 +8,17 @@ import api from "@/api";
  * 接口完全空闲,数据请求纯排在「等自己的 JS」后面。这里在 bootstrap 一开始就把首屏
  * 必需的 3 个 GET 发出去,让网络与应用启动并行;组件侧用 dedupGet 取同一条 promise,
  * 不重复打接口。
+ *
+ * 2026-11-15 换源:首屏卡片的组装收敛到服务端 GET /v1/home/recommend-section,
+ * 预取的第二条 URL 随之从 playlist-pool 换成 recommend-section(Home 用 dedupGet 消费)。
+ * home-cards 仍保留:preloadCardCovers 靠它拿前 3 张固定卡封面做 <link rel=preload>,
+ * 且两端点的 coverArt 格式都是 pl-<id>,预热仍然有效。
  */
 const HOME_CARDS_URL = "/rest/api/v1/recommend/home-cards";
 
 const HOME_PREFETCH_URLS = [
   HOME_CARDS_URL,
-  "/rest/api/v1/home/playlist-pool",
+  "/rest/api/v1/home/recommend-section",
   "/rest/api/v1/favorites/ids",
 ];
 

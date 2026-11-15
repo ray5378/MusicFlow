@@ -3,7 +3,7 @@ import { test, expect, type Page } from "@playwright/test";
 // 首页首屏封面优先级回归守卫(2026-10-19 首页打开提速;2026-11-10 下半屏改为懒挂载)。
 //
 // 契约(与 backend/scripts/check-home-perf.mjs 的 R3 静态计数断言同源,这里补行为级验证):
-//   - 上半屏「固定推荐卡 + 并排随机歌单」封面:**急切加载**(`:src` 直接赋值,不依赖
+//   - 上半屏「固定卡 + 随机补位」封面(两区都由服务端 recommend-section 给出):**急切加载**(`:src` 直接赋值,不依赖
 //     IntersectionObserver)且 fetchpriority="high" —— 首屏可见的几张先抢到连接;
 //   - 下半屏「平台精选 / 本地随机」:**首屏不挂载**(每个分区包 `LazyMount`,滚到视口
 //     附近才渲染),因此首屏既没有这些分区、也没有它们的封面请求;
@@ -58,12 +58,14 @@ async function loginAsAdmin(page: Page) {
   }, data);
 }
 
-// 8 张「并排随机」歌单(≥30 首才进池):homeCount=8、无固定卡 ⇒ 上半屏恰好 8 张。
-const PLAYLISTS = Array.from({ length: 8 }, (_, i) => ({
+// 8 张「为你推荐」卡片完全由服务端 GET /v1/home/recommend-section 给出:
+// 本轮 fixed=[]、random=8 条、homeCount=8 ⇒ 上半屏恰好 8 张。前端不再本地洗牌、
+// 不再按 >=30 首过滤、不再算 homeCount 差值 —— 这些都在服务端做完了。
+const RANDOM_CARDS = Array.from({ length: 8 }, (_, i) => ({
   id: `pl-${i + 1}`,
   name: `测试歌单 ${i + 1}`,
   songCount: 40,
-  coverArt: `cov-${i + 1}`,
+  coverArt: `pl-pl-${i + 1}`,
 }));
 
 // 下半屏注入 4 个分区(各 2 首歌单)。分区数必须明显多于「阈值内会挂载的块数」,
@@ -88,18 +90,29 @@ const TOTAL_LOW_COVERS = (1 + LOWER_CHANNELS.length) * 2;
 
 /** 注入首页所需的确定性数据(仅拦 5 个首页取数端点,其余仍走真实后端)。 */
 async function mockHomeData(page: Page) {
-  // 首页并排随机池已改走轻量接口(2026-10-20):只回 id/name/songCount,
-  // 不含 coverArt(封面由前端按 pl-<id> 派生),故这里按真实响应契约构造假数据。
-  await page.route(/\/rest\/api\/v1\/home\/playlist-pool$/, (r) =>
+  // 2026-11-15 换源:「为你推荐」由服务端一次给全(fixed[] + random[] + homeCount),
+  // 前端只做字段归一。按真实响应契约造 fixed:[] / random:8 条;coverArt 服务端已
+  // 算成 pl-<id>,前端不再派生。正则带可选 query,覆盖手动刷新的 ?refresh=1。
+  await page.route(/\/rest\/api\/v1\/home\/recommend-section(\?.*)?$/, (r) =>
     r.fulfill({
       json: {
         success: true,
-        total: PLAYLISTS.length,
-        items: PLAYLISTS.map((p) => ({ id: p.id, name: p.name, songCount: p.songCount })),
+        hourBucket: 498541,
+        homeCount: 8,
+        degraded: false,
+        fixed: [],
+        random: RANDOM_CARDS.map((p) => ({
+          id: p.id,
+          name: p.name,
+          songCount: p.songCount,
+          coverArt: p.coverArt,
+        })),
       },
     }),
   );
+  // playlist-count 仍被 loadHomeConfig 调用(只作 homeCount 回落),保留 stub。
   await page.route(/\/rest\/api\/v1\/home\/playlist-count$/, (r) => r.fulfill({ json: { count: 8 } }));
+  // home-cards 仍被启动期预取(preloadCardCovers 封面预热),保留 stub。
   await page.route(/\/rest\/api\/v1\/recommend\/home-cards$/, (r) => r.fulfill({ json: { cards: [] } }));
   await page.route(/\/rest\/api\/v1\/local-recommend$/, (r) =>
     r.fulfill({ json: { pending: false, channels: LOWER_CHANNELS } }),
@@ -156,6 +169,12 @@ test("首页首屏:上半屏 high 且急切加载,下半屏分区首屏不全挂
   // 1) 上半屏恰好 8 张,且全部 fetchpriority=high。
   await expect.poll(() => high.count(), { timeout: 20_000 }).toBe(8);
 
+  // 1b) 顶部区实体卡片数 = 服务端给的 fixed + random(8),不应多出本地拼装的卡片,
+  //     也不应因 homeCount 补位算法不一致而多/少占位以外的卡。
+  await expect
+    .poll(() => page.locator(".top-row > .card:not(.placeholder)").count(), { timeout: 20_000 })
+    .toBe(RANDOM_CARDS.length);
+
   // 2) 上半屏必须「急切加载」:每张都已设置 src(observer 永不回调,故只能来自 :src)。
   for (let i = 0; i < 8; i++) {
     const src = await high.nth(i).getAttribute("src");
@@ -163,6 +182,7 @@ test("首页首屏:上半屏 high 且急切加载,下半屏分区首屏不全挂
   }
 
   // 3) 下半屏首屏「不全挂」:阈值外的分区仍等滚动挂载(LazyMount 仍在起作用)。
+  //    顶部区仍是 1 个 section,故 TOTAL_SECTIONS 的结构在换源后不变。
   //    2026-11-14:LazyMount 增加 nearViewport() 同步判定(修「垫了占位高度后观察器不补
   //    发通知」),所以阈值内的块即使 observer 被打桩也会当场挂载 —— 断言从「恰好 1 个」
   //    改为「少于总数」,既允许阈值内挂载,又能在「去掉 LazyMount 全量渲染」时判红。

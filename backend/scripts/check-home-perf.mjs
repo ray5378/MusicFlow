@@ -11,9 +11,11 @@
 //   R2 首屏数据获取路径(2026-11-09 变更):原「/rest/api/v1/home/preload 四合一聚合
 //      预热接口」已删除 —— 首页并不展示 songs/albums/artists/playlists 四个列表,把它们的
 //      第一页全量查出来塞进一次响应纯属白烧 CPU/内存。现改为启动期并行预取
-//      home-cards / playlist-pool / favorites/ids(api/prefetch.ts),组件侧按 URL 去重
+//      home-cards / recommend-section / favorites/ids(api/prefetch.ts),组件侧按 URL 去重
 //      复用同一条 promise。若退回「等组件 mount 才发请求」,首屏卡片又要多等 200ms+;
 //      若把已删除的聚合接口重新接回来,则首屏重新背上一堆用不到的列表查询。
+//      2026-11-15:预取第二条由 playlist-pool 换成 recommend-section(服务端组装卡片),
+//      home-cards 保留给 preloadCardCovers 做封面预热。
 //   R3 封面懒加载:首页 130 张同源封面(实测平均 1397ms、最坏 2442ms)靠 IntersectionObserver
 //      精确控制发请求时机。若退回原生 loading="lazy"(桌面快网阈值过大,会把视口附近整屏
 //      图片一次性预取)或退回默认 size=300,首屏解码/带宽又白白翻倍。
@@ -83,17 +85,19 @@ function mustNotMatch(rel, re, why) {
 }
 
 /**
- * 断言：Home 首屏即时并发**恰好**是上半屏 3 路（歌单 / 首页配置 / 固定推荐卡）。
- * 2026-11-05(P1):三路各包了 `softDeadline(...)` 软截止,原来的一行式正则匹配不到;
- * 改为按括号深度切 Promise.all 数组体做结构性校验 —— 兼容包装,仍禁止第 4 路挤进首屏。
+ * 断言：Home 首屏即时并发**恰好**是上半屏 2 路（服务端 section / 首页配置回落）。
+ * 2026-11-05(P1):各路包了 `softDeadline(...)` 软截止,原来的一行式正则匹配不到;
+ * 改为按括号深度切 Promise.all 数组体做结构性校验 —— 兼容包装,仍禁止多余路挤进首屏。
+ * 2026-11-15 换源:固定卡与随机卡合并为服务端一个端点,首屏从 3 路降到 2 路;
+ * playlist-pool 不再由首页调用(函数与端点都保留给其它消费方)。
  */
-function mustFirstScreenTriple(rel) {
+function mustFirstScreenPair(rel) {
   checks += 1;
   const text = stripComments(textOf(rel));
   const mounted = text.indexOf("onMounted(async () => {");
   const at = mounted < 0 ? -1 : text.indexOf("await Promise.all([", mounted);
   const fail = (detail) =>
-    errors.push(`${rel}: Home 首屏即时并发只允许上半屏 3 路（歌单 / 首页配置 / 固定推荐卡）${detail ? " —— " + detail : ""}`);
+    errors.push(`${rel}: Home 首屏即时并发只允许上半屏 2 路（recommend-section / 首页配置回落）${detail ? " —— " + detail : ""}`);
   if (at < 0) return fail("");
   const open = text.indexOf("[", at);
   let depth = 0;
@@ -118,8 +122,8 @@ function mustFirstScreenTriple(rel) {
   }
   items.push(cur);
   const flat = items.map((x) => x.replace(/\s+/g, " ").trim()).filter(Boolean);
-  const names = ["loadPlaylists(", "loadHomeConfig(", "loadHomeCards("];
-  if (!(flat.length === 3 && names.every((n, i) => flat[i].includes(n)))) {
+  const names = ["loadRecommendSection(", "loadHomeConfig("];
+  if (!(flat.length === 2 && names.every((n, i) => flat[i].includes(n)))) {
     fail(`实际 ${flat.length} 路: ${flat.join(" | ").slice(0, 160)}`);
   }
 }
@@ -216,8 +220,8 @@ mustMatch(PREFETCH, /\/rest\/api\/v1\/recommend\/home-cards/, "启动期预取�
 mustMatch(PREFETCH, /preloadCardCovers\(/, "home-cards 到达后必须立刻预加载首屏封面（否则封面要等组件渲染才发请求）");
 mustMatch(MAIN, /prefetchHomeData\(\)/, "main.ts 必须在 mount 前调用 prefetchHomeData");
 mustNotMatch(MAIN, /\/rest\/api\/v1\/home\/preload/, "已删除的聚合预热接口不得被前端重新调用");
-mustMatch(HOME, /dedupGet\("\/rest\/api\/v1\/recommend\/home-cards"\)/, "Home 首屏卡片必须经 dedupGet 复用预取结果");
-mustMatch(HOME, /dedupGet\("\/rest\/api\/v1\/home\/playlist-pool"\)/, "Home 歌单池必须经 dedupGet 复用预取结果");
+mustMatch(HOME, /dedupGet\("\/rest\/api\/v1\/home\/recommend-section"\)/, "Home「为你推荐」section 必须经 dedupGet 复用启动期预取结果");
+mustMatch(HOME, /loadPlaylists\(/, "Home 必须保留 loadPlaylists()（其它消费方接线；/v1/home/playlist-pool 端点不得下线）");
 mustMatch(FAVORITES, /dedupGet\("\/rest\/api\/v1\/favorites\/ids"\)/, "收藏 id 必须经 dedupGet 复用预取结果");
 mustNotMatch(PRELOAD, /\/rest\/api\/v1\/home\/preload/, "preload 店不得再调已删除的聚合预热接口");
 
@@ -268,7 +272,7 @@ mustMatch(FAVORITES, /inflight = null;/, "loadFavorites 的 finally 必须清空
 
 // ---------- R5 首屏外呼分层（2026-10-19） ----------
 //
-// 首屏实测同时发出 14 条 XHR:上半屏只有 3 路是真关键(歌单 / 首页配置 / 固定推荐卡),
+// 首屏实测同时发出 14 条 XHR:上半屏只有 2 路是真关键(服务端 section / 首页配置回落),
 // 而流转播放初始化(两次全量 /v1/peers,单次 809ms / 329KB,之后每 20s 轮询一次)、
 // 平台精选(/v1/recommend)、本地随机(/v1/local-recommend,冷启动实测 3.7s)都在首屏
 // 抢 HTTP/1.1 同源的 6 条连接,把首屏内容整体往后挤。改动把后三者改为「首屏绘制之后
@@ -279,7 +283,7 @@ mustMatch(
   /function scheduleLowerSections\(\): void \{/,
   "Home 必须保留下半屏延迟排期函数 scheduleLowerSections（下半屏两路不得再回到 onMounted 的即时并发）",
 );
-mustFirstScreenTriple(HOME);
+mustFirstScreenPair(HOME);
 mustNotMatch(
   HOME,
   /Promise\.all\(\[[^\]]*loadLocalRandom\(\)/,
@@ -421,8 +425,8 @@ mustMatch(
 );
 mustMatch(
   PLAYLISTS,
-  /visible\.map\(\(e\) => \(\{ id: e\.id, name: e\.name, songCount: e\.songCount \}\)\)/,
-  "响应项必须只投影 id/name/songCount：owner/pub 是内部可见性判定列，外泄会扩大隐私面",
+  /visible\.map\(\(e\) => \(\{ id: e\.id, name: e\.name, songCount: e\.songCount, changed: e\.updatedAt \}\)\)/,
+  "响应项必须只投影 id/name/songCount/changed(=updated_at)：owner/pub 是内部可见性判定列，外泄会扩大隐私面（changed 是 2026-11-15 为首页「最近更新」分区补的纯增字段，与 GET /v1/playlists 的 changed 同义）",
 );
 mustMatch(
   PLAYLISTS,
@@ -440,7 +444,10 @@ mustNotMatch(
   "启动预热不得做递归 re-arm：索引重建 <2ms，周期预热既无收益又会在每个 import 本模块的测试进程里常驻定时器",
 );
 
-// ---------- R8 首页全量歌单池接口与前端接线（homePreload.ts + Home/index.vue，2026-10-20） ----------
+// ---------- R8 首页「为你推荐」换源 + 全量歌单池接口保留（homePreload.ts + Home/index.vue，2026-11-15） ----------
+// 前端最终展示哪几张卡片已收敛到服务端 GET /v1/home/recommend-section,不再拉
+// playlist-pool 自己洗牌。但 /v1/home/playlist-pool 端点与 Home 里的 loadPlaylists()
+// 都保留给其它消费方,故下面前 5 条服务端断言原样保留。
 mustMatch(
   HOMEPRELOAD,
   /app\.get\("\/v1\/home\/playlist-pool"/,
@@ -468,18 +475,13 @@ mustMatch(
 );
 mustMatch(
   HOME,
-  /\/rest\/api\/v1\/home\/playlist-pool/,
-  "Home 并排随机池必须改走轻量全量接口 /rest/api/v1/home/playlist-pool",
+  /\/rest\/api\/v1\/home\/recommend-section/,
+  "Home「为你推荐」必须改走服务端聚合接口 /rest/api/v1/home/recommend-section（三端一致性真源）",
 );
 mustMatch(
   HOME,
   /\?refresh=1/,
-  "Home 手动刷新必须带 ?refresh=1 跳过服务端索引 TTL 缓存（否则新歌单最迟 60s 才进并排随机池）",
-);
-mustMatch(
-  HOME,
-  /loadPlaylists\(true\)/,
-  "「重新生成漫游」必须调用 loadPlaylists(true)（带 force），不能用默认的缓存命中路径",
+  "Home 手动刷新必须带 ?refresh=1（让服务端跳过随机位快照并强制重建歌单池）",
 );
 mustNotMatch(
   HOME,
@@ -491,10 +493,20 @@ mustNotMatch(
   /pageSize: 200/,
   "Home 不得再出现 pageSize=200 截断",
 );
+mustNotMatch(
+  HOME,
+  /Math\.random\(\)/,
+  "Home 不得出现本地随机洗牌（三端各洗各的 → 同一时刻三个客户端三套卡片；随机位由服务端 md5 决定）",
+);
+mustNotMatch(
+  HOME,
+  /songCount\s*>\s*15/,
+  "Home 不得再按曲目数过滤固定卡（服务端固定卡零门槛，本地过滤会把日推/漫游卡静默吞掉）",
+);
 mustMatch(
   HOME,
-  /coverArt: `pl-\$\{p\.id\}`/,
-  "歌单池响应不含 coverArt，Home 必须按 pl-<id> 派生封面（否则首屏封面整块消失）",
+  /:key="card\.playlistId"/,
+  "首页固定卡 v-for 的 :key 必须用 playlistId（daily-rec-platform 一个插件挂 6 张卡、pluginId 全同 → 重复 key）",
 );
 
 // ---------- R9 下半屏懒挂载占位高度（方案 B，2026-11-14） ----------

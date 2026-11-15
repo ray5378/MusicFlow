@@ -13,7 +13,7 @@
              今日漫游(combo 能力)卡片带刷新按钮。 -->
         <div
           v-for="(card, idx) in fixedCards"
-          :key="card.pluginId"
+          :key="card.playlistId"
           class="card fnos-card-sheen"
           :style="{ '--stagger': Math.min(idx + 1, 4) }"
           @contextmenu="openContextMenu($event, playlistActions(card), card.playlistName, t('home.playlist'))"
@@ -42,7 +42,7 @@
 
         <!-- 并排随机抽取的歌单 -->
         <div
-          v-for="(pl, idx) in sidePlaylists"
+          v-for="(pl, idx) in randomCards"
           :key="pl.id"
           class="card fnos-card-sheen"
           :style="{ '--stagger': Math.min(idx + 1, 4) }"
@@ -176,8 +176,15 @@ const recommendChannels = ref<any[]>([]);
 const recommendProviderId = ref("");
 const recommendError = ref(false);
 const importingId = ref("");
-// 首页顶部展示张数(含今日漫游固定卡),由每日推荐插件配置 homeCount 控制(默认 8)。
-const homeCount = ref(8);
+// 「为你推荐」section:服务端确定性组装的结果(固定卡 + 随机补位),前端只做字段归一。
+const section = ref<any>(null);
+// 首页顶部展示张数:优先用服务端 section.homeCount(服务端才是真源),
+// 接口未返回/失败时回落 loadHomeConfig() 的本地配置(默认 8)。
+const configuredHomeCount = ref(8);
+const homeCount = computed(() => {
+  const n = Number(section.value?.homeCount);
+  return Number.isFinite(n) && n >= 1 ? n : configuredHomeCount.value;
+});
 
 function cover(id: string) {
   // 卡片封面实际显示约 140~160px:桌面上收紧到 150 而非默认 300,
@@ -197,43 +204,77 @@ async function playPl(pl: any) {
   else ElMessage.warning(t("home.playlistEmpty"));
 }
 
-// 首页固定推荐卡：由各推荐插件配置 showOnHome + homePosition 决定。
-// 核心经 /v1/recommend/home-cards 按位次排序返回,前端只做 >=30 首门槛过滤。
-// (曾为 >30:历史日推等固定卡被误杀不显示,240 真机实锤 → 用户定调 >15。)
-const homeCards = ref<any[]>([]);
-async function loadHomeCards() {
-  try {
-    const res = await dedupGet("/rest/api/v1/recommend/home-cards");
-    homeCards.value = res.data?.cards || [];
-  } catch {
-    homeCards.value = [];
+// ==================== 首页「为你推荐」(服务端确定性组装,2026-11-15) ====================
+// 旧实现:固定卡取 /v1/recommend/home-cards 后本地按曲目数过滤,随机卡从
+// /v1/home/playlist-pool 本地随机洗牌 —— 三端(Web / Flutter / HA)各洗各的,
+// 同一时刻打开三个客户端会看到三套不同卡片。现收敛到服务端单一真源:
+//   GET /v1/home/recommend-section → { success, hourBucket, homeCount, degraded, fixed[], random[] }
+//   fixed[]  零门槛、已按 (position, pluginId) 排好序,不含 pluginId,缺行标 missing
+//   random[] 服务端按 md5(userId|hourBucket|id) 洗牌并按小时快照冻结
+//   degraded 至少一张固定卡指向不存在的歌单(本轮只告警,不做 UI 提示)
+// 前端**不再过滤固定卡、不再洗牌、不再算补位差值**,只做字段归一。
+
+/** 校验并落地一次 section 响应;形状不对直接忽略,不清空旧值(保留冷启动兜底)。 */
+function applySection(data: any, persist = true): void {
+  if (!data || !Array.isArray(data.fixed) || !Array.isArray(data.random)) return;
+  section.value = data;
+  if (persist) saveSectionCache(data);
+  if (data.degraded === true) {
+    const broken = data.fixed
+      .filter((c: any) => c.missing === true)
+      .map((c: any) => c.playlistId);
+    // 开发期诊断日志(非 UI 文案):i18n 守卫禁止源码里出现硬编码中文,故用英文。
+    console.warn(
+      `[home/recommend-section] degraded=true: ${broken.length} fixed card(s) point to missing playlists` +
+        ` (${broken.join(",") || "no missing detail"}); warn only, no UI prompt this round`,
+    );
   }
 }
+
+/** 拉取「为你推荐」section。force=true(重新生成漫游后)带 ?refresh=1,让服务端跳过快照、
+ *  强制重建歌单池并重算;失败时保留旧值或缓存兜底(与 loadPlaylists 的 try/catch 同语义)。 */
+async function loadRecommendSection(force = false) {
+  try {
+    const res = await (force
+      ? api.get("/rest/api/v1/home/recommend-section?refresh=1")
+      : dedupGet("/rest/api/v1/home/recommend-section"));
+    applySection(res?.data);
+  } catch {
+    // 网络失败时不清空:保留上一次结果或 hydrate 的本地兜底
+  }
+}
+
 // 归一化为歌单形状(playPl/playlistActions 都按 id/name 工作),带 isCombo 标记。
+// 服务端已做零门槛与位次排序,前端不再按曲目数过滤。
 const fixedCards = computed<any[]>(() =>
-  homeCards.value
-    .filter((c) => c.songCount > 15) // >15 首展示门槛(用户定调:保底展示历史日推等固定卡)
-    .map((c) => ({
-      id: c.playlistId,
-      playlistId: c.playlistId, // 模板点击跳转用(此前缺失 → /playlists/undefined)
-      name: c.playlistName || c.name,
-      coverArt: c.coverArt,
-      songCount: c.songCount,
-      pluginId: c.pluginId,
-      isCombo: !!c.isCombo,
-      position: c.position || 0,
-    })),
+  (section.value?.fixed || []).map((c: any) => ({
+    id: c.playlistId,
+    // 模板的 :key 也是它:daily-rec-platform 一个插件挂 6 张卡,pluginId 全同会重复 key。
+    playlistId: c.playlistId,
+    playlistName: c.playlistName || "",
+    name: c.playlistName || c.name,
+    coverArt: c.coverArt,
+    songCount: c.songCount || 0,
+    isCombo: !!c.isCombo,
+    position: c.position || 0,
+    missing: !!c.missing,
+  })),
 );
-// 并排随机：从全部歌单里随机抽（排除固定卡；只抽音乐 ≥30 首的歌单），
-// 与固定卡合并成 homeCount 张等大卡片（默认 8，桌面 4 列 × 2 行）。
-const sidePlaylists = computed(() => {
-  const fixedIds = new Set(fixedCards.value.map((c) => c.id));
-  const pool = playlists.value.filter(
-    (p) => !fixedIds.has(p.id) && (p.songCount || 0) >= 30
-  );
-  const shuffled = [...pool].sort(() => Math.random() - 0.5);
-  return shuffled.slice(0, Math.max(0, homeCount.value - fixedIds.size));
-});
+
+// 随机补位卡:服务端已洗好牌并按小时冻结,前端不再洗牌 / 过滤 / 算 homeCount 差值。
+const randomCards = computed<any[]>(() =>
+  (section.value?.random || []).map((r: any) => ({
+    id: r.id,
+    playlistId: r.id,
+    name: r.name,
+    coverArt: r.coverArt,
+    songCount: r.songCount || 0,
+    isCombo: false,
+  })),
+);
+
+/** 顶部区最终展示的卡片(固定 + 随机);占位数量按它算。 */
+const homeCardsMerged = computed<any[]>(() => [...fixedCards.value, ...randomCards.value]);
 
 // 手动刷新：重新触发每日推荐 + 本地推荐随机生成，再重组今日漫游。
 // 异步契约(方案3)：POST 立即返回 taskId(202)，生成跑在一次性批量子进程里，
@@ -249,8 +290,9 @@ async function refreshRoam() {
     // 结果仅在任务完成时携带(每日/本地/漫游各生成一张歌单),耗时通常秒级。
     await waitAsyncTask(taskId, { timeoutMs: 600000 });
     ElMessage.success(t("home.roamRegenerated"));
-    // 显式刷新:带 force 跳过服务端索引 TTL 缓存,新生成的歌单立刻进并排随机池。
-    await Promise.all([loadPlaylists(true), loadHomeCards()]);
+    // 显式刷新:带 ?refresh=1 让服务端跳过随机位快照、强制重建歌单池后重算,
+    // 新生成的歌单立刻能参与补位(旧实现的 loadPlaylists(true) 只刷了本地随机池)。
+    await loadRecommendSection(true);
   } catch (e: any) {
     ElMessage.error(formatApiError(e, t("home.refreshFailed")));
   } finally {
@@ -376,10 +418,9 @@ function placeholderCount(featuredItem: any, list: any[], want: number) {
   return Array.from({ length: need }, (_, i) => i + 1);
 }
 
-// 首页顶部占位：按 homeCount 补齐（含全部固定推荐卡）
+// 首页顶部占位：按 homeCount 补齐（服务端返回的固定卡 + 随机卡）
 function placeholderHomeCount() {
-  const fixed = fixedCards.value.length;
-  const real = fixed + sidePlaylists.value.length;
+  const real = homeCardsMerged.value.length;
   const need = Math.max(0, homeCount.value - real);
   return Array.from({ length: need }, (_, i) => i + 1);
 }
@@ -401,35 +442,35 @@ async function loadPlaylists(force = false) {
       songCount: p.songCount || 0,
       coverArt: `pl-${p.id}`,
     }));
-    savePlaylistPoolCache(playlists.value);
+    // 首页不再缓存歌单池:本地兜底改存 recommend-section 整份响应(见 SECTION_CACHE_KEY)。
   } catch {
     // 网络失败时不清空:保留本地兜底(无兜底时本来就是空数组)
   }
 }
 
-// 首屏陈旧兜底:playlist-pool 是首屏唯一体积较大的接口(约 873 条 / 35KB 最小投影)。
-// 本地留一份最近成功结果(24h),重启/空闲回收后的首屏先同步上屏,网络返回后覆盖。
-// 已知代价:24h 内被删除的歌单仍可能出现在并排随机卡里,点进去是空态(可接受)。
-const POOL_CACHE_KEY = "mf.home.playlistPool.v1";
-const POOL_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+// 首屏陈旧兜底:缓存的是**服务端算好的整份 section**,重启/空闲回收后的首屏先同步上屏,
+// 网络返回后覆盖。24h TTL 语义不变。这里刻意不重新组装/洗牌 —— 否则三端不一致又会回来。
+// 已知代价:24h 内被删除的歌单仍可能出现在兜底卡片里,点进去是空态(可接受)。
+const SECTION_CACHE_KEY = "mf.home.recommendSection.v1";
+const SECTION_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
-function hydratePlaylistPoolCache(): void {
+function hydrateSectionCache(): void {
   try {
-    const raw = localStorage.getItem(POOL_CACHE_KEY);
+    const raw = localStorage.getItem(SECTION_CACHE_KEY);
     if (!raw) return;
     const parsed = JSON.parse(raw);
-    if (!parsed || !Array.isArray(parsed.items)) return;
-    if (Date.now() - Number(parsed.ts) > POOL_CACHE_TTL_MS) return;
-    const items = parsed.items.filter((p: any) => p && p.id != null);
-    if (items.length) playlists.value = items;
+    if (!parsed || !parsed.data) return;
+    if (Date.now() - Number(parsed.ts) > SECTION_CACHE_TTL_MS) return;
+    // persist=false:读回缓存不再重复写一遍
+    applySection(parsed.data, false);
   } catch {
     /* 坏数据 / 隐私模式:忽略,走网络 */
   }
 }
 
-function savePlaylistPoolCache(items: any[]): void {
+function saveSectionCache(data: any): void {
   try {
-    localStorage.setItem(POOL_CACHE_KEY, JSON.stringify({ ts: Date.now(), items }));
+    localStorage.setItem(SECTION_CACHE_KEY, JSON.stringify({ ts: Date.now(), data }));
   } catch {
     /* 配额 / 隐私模式:忽略 */
   }
@@ -459,7 +500,7 @@ async function loadHomeConfig() {
   try {
     const res = await api.get("/rest/api/v1/home/playlist-count");
     const n = parseInt(String(res.data?.count), 10);
-    if (Number.isFinite(n) && n >= 1 && n <= 24) homeCount.value = n;
+    if (Number.isFinite(n) && n >= 1 && n <= 24) configuredHomeCount.value = n;
   } catch {
     /* 保持默认 8 */
   }
@@ -654,12 +695,13 @@ onMounted(async () => {
   // 2026-11-05(P1):先同步铺本地兜底(歌单池 24h 缓存),再给 3 路各加 2s 软截止 ——
   // 任一接口慢(冷启动索引重建 / 空闲回收后 provider 冷调)都不再拖住整屏骨架,
   // 在途请求照常落地并覆盖。
-  hydratePlaylistPoolCache();
+  hydrateSectionCache();
   loading.value = true;
+  // 首屏关键路径从 3 路降到 2 路:section 由启动期预取(dedupGet 复用)+ 首页配置回落。
+  // /v1/home/playlist-pool 不再由首页调用(端点与 loadPlaylists 函数都保留给其它消费方)。
   await Promise.all([
-    softDeadline(loadPlaylists(), FIRST_SCREEN_DEADLINE_MS),
+    softDeadline(loadRecommendSection(), FIRST_SCREEN_DEADLINE_MS),
     softDeadline(loadHomeConfig(), FIRST_SCREEN_DEADLINE_MS),
-    softDeadline(loadHomeCards(), FIRST_SCREEN_DEADLINE_MS),
   ]);
   loading.value = false;
   await nextTick(); // 让上半屏先完成一次渲染提交,再放行下半屏外呼

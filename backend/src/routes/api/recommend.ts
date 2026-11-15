@@ -724,6 +724,11 @@ app.get("/v1/home/playlist-count", (c) => {
 //   manifest.homePlaylistId 声明首页对应的固定歌单 id。
 // 核心按能力收集(不写死插件名),位次冲突在保存插件配置时校验。
 
+/** 缺行告警去重:每张卡**每小时**最多一条(长期坏卡不再每请求刷一条日志)。
+ *  集合上界 = 该小时坏卡张数,跨小时自动清空,不会无界增长。 */
+let homeCardsMissingWarnedBucket = -1;
+const homeCardsMissingWarned = new Set<string>();
+
 app.get("/v1/recommend/home-cards", (c) => {
   // ?all=1 返回全部固定推荐歌单(含未开启「在首页显示」的),供音流等场景
   // 选择固定引用;默认只返回 showOnHome(首页展示)。
@@ -737,7 +742,26 @@ app.get("/v1/recommend/home-cards", (c) => {
   });
   const cards = sorted.map((p) => {
     const pl = sqlite.prepare("SELECT id, name, song_count, cover_art FROM playlists WHERE id = ?").get(p.playlistId) as any;
-    return {
+    // 缺行可观测(2026-11-15):固定卡声明的歌单行不存在时(插件当日还没生成 / 歌单被删 /
+    // manifest id 配错),songCount 会静默变成 0、coverArt 变 null,前端按门槛把整张卡吞掉,
+    // 现场只表现为「首页少了一张卡」,任何日志都查不到。这里补一条 warn 带上两侧 id,
+    // 并在该卡对象上标 missing(只在缺行时出现,既有字段名/类型一律不变)。
+    const missing = !pl;
+    if (missing) {
+      // 每张卡每小时最多一条:长期坏卡不会把日志刷爆。
+      const hourBucket = Math.floor(Date.now() / 3600000);
+      if (homeCardsMissingWarnedBucket !== hourBucket) {
+        homeCardsMissingWarnedBucket = hourBucket;
+        homeCardsMissingWarned.clear();
+      }
+      if (!homeCardsMissingWarned.has(p.playlistId)) {
+        homeCardsMissingWarned.add(p.playlistId);
+        log.warn(
+          `[home-cards] 固定卡歌单行缺失: playlistId=${p.playlistId} pluginId=${p.pluginId}(songCount 按 0 返回;本小时仅告警一次)`,
+        );
+      }
+    }
+    const card = {
       pluginId: p.pluginId,
       name: p.name,
       playlistId: p.playlistId,
@@ -752,6 +776,7 @@ app.get("/v1/recommend/home-cards", (c) => {
       // 查表失败 → 首页卡片无封面)。
       coverArt: pl ? `pl-${p.playlistId}` : null,
     };
+    return missing ? { ...card, missing: true } : card;
   });
   return c.json({ success: true, cards });
 });

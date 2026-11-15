@@ -151,12 +151,15 @@ type PlaylistPoolEntry = {
   songCount: number;
   owner: string;
   pub: boolean;
+  /** 歌单最后更新时间(库里是 text,生产实测全部为标准 ISO 8601 UTC,形如
+   *  `2026-11-15T12:36:43.461Z`)。首页「最近更新」分区按它倒序,直接比字符串即可。 */
+  updatedAt: string;
 };
 
 let playlistPoolCache: { ts: number; entries: PlaylistPoolEntry[] } | null = null;
 let playlistPoolTimer: ReturnType<typeof setTimeout> | null = null;
 
-/** 读常驻索引(超过 TTL 则同步重建)。单次全表 SELECT 只投影 6 列,重建成本远低于
+/** 读常驻索引(超过 TTL 则同步重建)。单次全表 SELECT 只投影 7 列,重建成本远低于
  *  一次 HTTP 往返,故不为它引入后台刷新/单飞那套复杂度。
  *  force=true 时跳过 TTL 缓存强制重建(供「重新生成漫游」这类显式刷新拿到最新歌单)。 */
 function readPlaylistPoolEntries(force = false): PlaylistPoolEntry[] {
@@ -171,6 +174,7 @@ function readPlaylistPoolEntries(force = false): PlaylistPoolEntry[] {
       owner: playlists.ownerId,
       isPublic: playlists.isPublic,
       sourceUrl: playlists.sourceUrl,
+      updatedAt: playlists.updatedAt,
     })
     .from(playlists)
     .where(eq(playlists.kind, "music"))
@@ -183,22 +187,24 @@ function readPlaylistPoolEntries(force = false): PlaylistPoolEntry[] {
     // pub 的口径必须与 buildPlaylistsPage 的 SQL 逐字对齐(`eq(isPublic, 1)` + `isNotNull(sourceUrl)`):
     // 放宽成 `!!r.isPublic`(非 0 即真)一旦 isPublic 出现非 0/1 的脏值,就会向普通用户多放歌单。
     pub: r.isPublic === 1 || r.sourceUrl != null,
+    updatedAt: r.updatedAt || "",
   }));
   playlistPoolCache = { ts: Date.now(), entries };
   return entries;
 }
 
-/** 按当前用户可见性过滤后返回全量最小投影池({id,name,songCount})——供首页一次性拿到全量。
- *  opts.force=true 跳过索引 TTL 缓存强制重建(见 readPlaylistPoolEntries)。 */
+/** 按当前用户可见性过滤后返回全量最小投影池({id,name,songCount,changed})——供首页一次性拿到全量。
+ *  opts.force=true 跳过索引 TTL 缓存强制重建(见 readPlaylistPoolEntries)。
+ *  changed(= updated_at)是 2026-11-15 为「最近更新」分区补的:纯增字段,老客户端忽略即可。 */
 export function buildPlaylistPool(
   user: { id?: string; isAdmin?: boolean } | undefined,
   opts?: { force?: boolean },
-): { total: number; items: { id: string; name: string; songCount: number }[] } {
+): { total: number; items: { id: string; name: string; songCount: number; changed: string }[] } {
   const all = readPlaylistPoolEntries(opts?.force === true);
   const visible = user?.isAdmin
     ? all
     : all.filter((e) => e.owner === (user?.id ?? "") || e.pub);
-  const items = visible.map((e) => ({ id: e.id, name: e.name, songCount: e.songCount }));
+  const items = visible.map((e) => ({ id: e.id, name: e.name, songCount: e.songCount, changed: e.updatedAt }));
   return { total: items.length, items };
 }
 
