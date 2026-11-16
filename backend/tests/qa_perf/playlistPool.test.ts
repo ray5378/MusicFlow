@@ -21,6 +21,19 @@ import {
   __resetPlaylistPoolForTest,
 } from "../../src/routes/api/playlists.js";
 
+// 防呆门(2026-11-16 QA):本文件的 db.delete(playlists) 依赖 setup.ts 分配的独立 DATA_DIR。
+// 若不经 backend/vitest.config.ts 运行(例:在仓库根目录直接跑 npx vitest run backend/tests/...,
+// 吃不到 setupFiles),DATA_DIR 未设 -> db 落到 cwd/data **真实库** -> 删歌单撞 playlist_songs
+// 外键(FK constraint failed);更糟的是,真实库若恰无子表行,这条 delete 会清掉真实歌单。
+// 故在碰库前 fail-fast,把「跑错目录」当场暴露,而不是放行到数据库层才炸。
+if (!process.env.DATA_DIR) {
+  throw new Error(
+    "playlistPool.test.ts: DATA_DIR 未设置 —— 本文件必须经 backend/vitest.config.ts 运行" +
+      "(在 backend/ 目录下执行 npx vitest run tests/qa_perf/playlistPool.test.ts)," +
+      "否则 db 会落到 cwd/data 真实库,删除歌单会撞外键甚至清掉真实数据。",
+  );
+}
+
 type Any = any;
 
 /** 建一个用户行:playlists.owner_id 有外键指向 users.id,不先建用户插入歌单会被 FK 拒。 */
