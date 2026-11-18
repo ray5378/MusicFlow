@@ -2296,3 +2296,19 @@ late 累积    ≈ 22/秒（约占发包 18%）    ← producer 阻塞（欠料�
   ②或让代次首曲锚点走「等待/裁头」而非硬垫(需验证不吞曲头)。
 - **判据**:仅代次首曲出现、1.5–2.2s、`hard-timeout=0`、其后 `gap-fill filledMs=0`
   ⇒ 边界一次性,不必按 P1 处理。
+
+**2026-11-19 更新（4.14.14）：`newgen-skip` 与曲中跳段分账**
+
+- 背景:B(resetTimeline 清 `lastResampledGen`,让复位首帧走 `newgen-skip` 而非补静音)
+  上线后,每次换代都留下 `skippedFrames > 0` ⇒ `isContentAxisPoisoned()` 恒真 ⇒
+  **每次换歌都 `warm-reuse-poisoned` 再 reset** ⇒ 曲头反复重建 ⇒ 曲中 insert 变密
+  (240 实测 50min 7 次 / 合计 2.25s;4.14.10 时代约每 25 分钟一次)。与本文档"仅代次
+  首曲一次、其后零复现"的既有结论直接冲突 —— 说明判据把「换代正常跳段」误当污染。
+- 修法:`BridgeAlignAction` 增加 `newgenSkip` 标记;`stats` 拆成
+  `newgenSkipFrames`(换代,诊断用)与 `skippedFrames`(曲中 seek/长断料)。
+  `isContentAxisPoisoned()` 实现**一字不动**(守卫 `check-airplay-bridge.mjs` 按字面量
+  钉 `return this.stats.skippedFrames > 0`),语义因此自动退回「只认曲中跳段」。
+- 验证(240,17:53~18:00):切歌 `timeline-reset` 由「每次」降为 **0 次**;
+  tick `skippedFrames=0` / `newgenSkipFrames=94715` 分账清晰;曲头 insert 由每次降为
+  3 次切歌里 1 次(473ms)。**残留**:曲头换代接续空档本身仍在(数百 ms 量级),与
+  `lastSentTs` 强制前跳同源,属本文档上一条的既有边界,未在本版处理。

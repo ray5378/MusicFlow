@@ -217,6 +217,13 @@ export interface BridgeAlignAction {
   realigned: boolean;
   /** 原始差 target − contentPos(帧)。 */
   diff: number;
+  /** 本次 skip 是否来自**换代首帧**的大缺口（newgen-skip）。
+   *
+   *  分账用途（2026-11-19）：换代首帧撞结构缺口是**正常**行为（每次新会话/换歌都会），
+   *  与「曲中 seek/断料导致的本地跳段」性质完全不同。前者若计入 `skippedFrames`，
+   *  `isContentAxisPoisoned()` 会恒真 ⇒ 每次换歌都 `resetTimeline` ⇒ 曲头反复重建
+   *  ⇒ 曲中 insert 变密（240 实测 50min 7 次）。故只累加 `newgenSkipFrames`。 */
+  newgenSkip?: boolean;
 }
 
 /** realigned 日志分级(降噪 rider):无动作(insert/drop/skip 全 0)的恒定漂移
@@ -964,8 +971,12 @@ export interface BridgeSessionStats {
   insertedFrames: number;
   /** §4.5 裁头帧数(内容超前/重叠 + 欠料跳段出清)。 */
   droppedFrames: number;
-  /** 欠料超上限直接跳段时间线的内容帧数(不物化静音)。 */
+  /** 欠料超上限直接跳段时间线的内容帧数(不物化静音)。
+   *  ⚠️ 只记**曲中**跳段(seek/长断料)。换代首帧的 newgen-skip 记在
+   *  `newgenSkipFrames`,不计入这里 —— 见 BridgeAlignAction.newgenSkip。 */
   skippedFrames: number;
+  /** 换代首帧大缺口跳过的帧数（正常换代行为，诊断用；不参与污染判据）。 */
+  newgenSkipFrames: number;
   /** |drift| > 1ms 的对齐次数(§4.5 realigned)。 */
   realignments: number;
   /** 旧 generation 帧/队列丢弃计数(Phase 5 BLK-02 判据:seek/rehost 后 > 0)。 */
@@ -1004,7 +1015,7 @@ export class BridgeSession {
   private prefillDone = false;
   readonly stats: BridgeSessionStats = {
     framesIn: 0, chunksOut: 0, silenceChunks: 0,
-    insertedFrames: 0, droppedFrames: 0, skippedFrames: 0, realignments: 0,
+    insertedFrames: 0, droppedFrames: 0, skippedFrames: 0, newgenSkipFrames: 0, realignments: 0,
     staleFramesDropped: 0,
   };
   private streamPromise: Promise<void> | null = null;
@@ -2124,6 +2135,7 @@ export class BridgeSession {
       insertedFrames: this.stats.insertedFrames,
       droppedFrames: this.stats.droppedFrames,
       skippedFrames: this.stats.skippedFrames,
+      newgenSkipFrames: this.stats.newgenSkipFrames,
       driftUs: this.aligner?.lastDriftUs ?? 0,
       deltaUs,
       deltaP95Us: p95,
@@ -2262,7 +2274,10 @@ export class BridgeSession {
       const newGenGap = genChanged ? aligner.gapFramesTo(entry.tsUs) : 0;
       if (newGenGap > 0 && (newGenGap / rate) * 1e6 > BRIDGE_NEWGEN_GAP_SKIP_US) {
         const frames = aligner.skipGapTo(entry.tsUs);
-        act = { insertFrames: 0, dropFrames: 0, skipFrames: frames, realigned: frames > 0, diff: frames };
+        act = {
+          insertFrames: 0, dropFrames: 0, skipFrames: frames, realigned: frames > 0, diff: frames,
+          newgenSkip: true,
+        };
         log.warn(`[airplay-bridge] ${JSON.stringify({
           ev: "newgen-skip",
           dev: this.deviceId,
@@ -2290,7 +2305,11 @@ export class BridgeSession {
       }
       if (act.skipFrames > 0) {
         // 长欠料:跳段(不物化静音),RTP 时间线同步前移。
-        this.stats.skippedFrames += act.skipFrames;
+        // 分账(2026-11-19):换代首帧的 newgen-skip 是**正常**换代行为,只记诊断字段;
+        // 只有曲中跳段(seek/长断料)才算「内容轴被污染」——否则 isContentAxisPoisoned()
+        // 恒真 ⇒ 每次换歌都 resetTimeline ⇒ 曲头反复重建 ⇒ 曲中 insert 变密。
+        if (act.newgenSkip) this.stats.newgenSkipFrames += act.skipFrames;
+        else this.stats.skippedFrames += act.skipFrames;
         this.player?.bridgeSkipFrames(act.skipFrames);
       }
       if (act.realigned) {
@@ -2392,6 +2411,7 @@ export class BridgeSession {
     this.commandedLeadUs = null;
     this.streamAborted = true;
     this.stats.skippedFrames = 0;
+    this.stats.newgenSkipFrames = 0;
     // ★(2026-11-19 立项-B) 复位语义 = 开一条新时间线，必须同时清「上一次重采样的帧代次」。
     //   不清它：复位后第一条 AUDIO 的 `entry.generation` 恰等于旧 `lastResampledGen`
     //   ⇒ `genChanged=false` ⇒ 结构缺口(≈2.1s)不进 newgen-skip，落进 aligner.onFrame

@@ -2,6 +2,16 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.14.14] - 2026-11-19
+
+### Fix / 换代跳段与曲中跳段分账，根治「每次换歌都重规划时间线」引起的曲中偶发静音
+
+- **现象**：4.14.13 上线后 HiVi 仍有偶发静音。240 实测 50 分钟 7 次、合计 2.25s（100~500ms/次），而 4.14.10 时代约每 25 分钟一次 —— 频率升了约 3 倍。
+- **根因**：4.14.13 的 B（`resetTimeline` 清 `lastResampledGen`，让复位首帧走 `newgen-skip` 而不是补静音）会让每次换代都留下 `skippedFrames > 0`；而 `isContentAxisPoisoned()` 的判据正是 `skippedFrames > 0` ⇒ **下一次换歌必然判 `warm-reuse-poisoned` 再 `resetTimeline`**（240 日志 17:12~17:33 连续 7 次切歌全部命中）⇒ 每次都重建 anchors/aligner ⇒ 曲头 10s 内更容易出现内容空档 ⇒ 曲中 `insert` 变密。`docs/airplay-权威方案文档.md`「已知边界」早就写明 poisoned 后**每代次只有第一次**换歌出现 newgen-skip、其后零复现 —— 4.14.13 让它变成每次，说明判据把「换代正常跳段」误当成了「曲中污染跳段」。
+- **修法（分账）**：`BridgeAlignAction` 增加 `newgenSkip` 标记；`stats` 拆成 `newgenSkipFrames`（换代跳段，诊断用）与 `skippedFrames`（曲中 seek / 长断料）。`isContentAxisPoisoned()` 实现**一字未动**（守卫 `check-airplay-bridge.mjs` 按字面量钉住 `return this.stats.skippedFrames > 0`），语义因此自动退回「只认曲中跳段」。tick 新增 `newgenSkipFrames` 字段便于真机区分两类跳段。
+- 真机验证（240，17:53~18:00）：切歌 `timeline-reset` 由「每次」降为 **0 次**；tick `skippedFrames=0` / `newgenSkipFrames=94715` 分账清晰；曲头补静音由每次降为 3 次切歌里 1 次（473ms）。**残留**：曲头换代接续空档本身仍在（数百 ms），与 `lastSentTs` 强制前跳同源，属权威文档记录的既有边界，本版未处理。
+- 新增回归锁：`tests/airplay/bridgeSkipAccounting.test.ts`（6 条：标记、分账、双计数器、reset 双清、**污染判据仍只看 skippedFrames**、tick 上报）。
+
 ## [4.14.13] - 2026-11-19
 
 ### Fix / 桥时间线复位双修：终止旧推流循环（根治起播无声）+ 复位改走跳段（消除 2.3s 静音）
