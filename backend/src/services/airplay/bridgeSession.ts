@@ -2392,6 +2392,15 @@ export class BridgeSession {
     this.commandedLeadUs = null;
     this.streamAborted = true;
     this.stats.skippedFrames = 0;
+    // ★(2026-11-19 立项-B) 复位语义 = 开一条新时间线，必须同时清「上一次重采样的帧代次」。
+    //   不清它：复位后第一条 AUDIO 的 `entry.generation` 恰等于旧 `lastResampledGen`
+    //   ⇒ `genChanged=false` ⇒ 结构缺口(≈2.1s)不进 newgen-skip，落进 aligner.onFrame
+    //   被物化成静音(240 实测 insert=94434)。
+    //   4.14.11 曾加过同一行并被真机否决 —— 但那次翻车的真因是**旧推流循环未终止**
+    //   （waitUntilUs 卡在 sendAt ≈2s，新旧两条流并行发包，idx 25788/240 交错），
+    //   pacing 恒 lag 600ms。P1 已把该窗口关掉（见 raop.waitUntilUs 中止判据），
+    //   docs/桥时间线复位-旧流并行与pacing错位-方案-2026-11-19.md §6 记录了重试前置。
+    this.lastResampledGen = 0;
     this.player?.flush();
     log.info(`[airplay-bridge] ${JSON.stringify({ ev: "timeline-reset", dev: this.deviceId, gen: this.generation, reason })}`);
   }

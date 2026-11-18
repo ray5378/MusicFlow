@@ -2,6 +2,19 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.14.13] - 2026-11-19
+
+### Fix / 桥时间线复位双修：终止旧推流循环（根治起播无声）+ 复位改走跳段（消除 2.3s 静音）
+
+- **起播全程无声的根因：旧推流与新推流并行**。`timeline-reset` 后 `flush()` 只把 `RaopPlayer.streaming` 置 false，而 `waitUntilUs(sendAt)` 只等 `setTimeout`、不检查中止标志 —— 旧循环最长要等满一个 sendAt 周期（≈2s）才回到主条件，这 2 秒里它继续用**已被 `resetTimeline` 作废的 `startTs`** 打包发包，与随后启动的新循环并行。现场铁证：`pacing rebase(lag)` 日志的 `idx` 在 107 / 25788 / 240 / 26075 之间交替 —— 两套循环各持自己的 `idx` 同时向同一 RAOP socket 发包，设备收到两套时间线 ⇒ 缓冲被抽空 ⇒ MUZO 类固件欠载**静默**（用户现场：切歌起播后 HiVi 全程不出声，手动 seek 重建流才恢复）。修法（1 行逻辑）：`waitUntilUs` 每轮先查 `!this.streaming || this.destroying`，轮询粒度 50ms → 10ms —— 复位后旧循环最多再发 1 帧（8ms）旧包即退出。
+- **复位后 2.3s 静音改为跳段**。`resetTimeline` 的语义是「丢弃内容轴、让下一帧重新规划」，等价于开一条新代次，但它只清 `aligner` / `skippedFrames`，**没清 `lastResampledGen`** ⇒ 新曲首帧 `genChanged` 判为 false ⇒ 2.1~2.3s 结构缺口不进 `newgen-skip`（阈值 `BRIDGE_NEWGEN_GAP_SKIP_US = 500ms`），落进 `aligner.onFrame` 被**物化成静音**（240 实测 `insert=94434`）。本版补 `this.lastResampledGen = 0`。**该行曾在 4.14.11 单独上线并被真机否决** —— 那次翻车的真因是上面的并行双流，不是跳段本身：新会话首帧的跳段一直是安全的（实测 `skip=94346 insert=0`，`pacing rebase` 零条）。本版把两件事一起修，跳段才成立。
+- 真机验证（同一台 HiVi，同一 `warm-reuse-poisoned` 条件）：
+  - 4.14.10 原行为：`insert=94434`（2.14s 静音）+ `pacing rebase` 0 条 —— 能出声，但每轮复位断 2 秒；
+  - 4.14.11（只有本行的跳段）：`skip` 后 `pacing rebase` 每秒一条 +600ms 持续两分钟 —— 全程无声；
+  - **本版：`skip=102448 insert=0` + `pacing rebase` 0 条**，`insertedFrames=0`、`late=4`、`lossReq=0`、`driftUs=0`、`deltaUs` 稳 +2.06s。
+- 新增回归锁：`tests/airplay/bridgeStreamSerial.test.ts`（5 条：`waitUntilUs` 必须有中止判据、检查在 `setTimeout` 之前、粒度 ≤10ms，且**不得**为等旧流引入 `await` —— 该 promise 整首歌都不 resolve，await 等于每次换歌硬等超时）；`tests/airplay/bridgeResetGen.test.ts`（6 条，末条是前提锁：P1 必须同时在场，否则重演 4.14.11）。
+- 方案与判据落档：`docs/桥时间线复位-旧流并行与pacing错位-方案-2026-11-19.md`。
+
 ## [4.14.12] - 2026-11-18
 
 ### Fix / 撤回 4.14.11 的 `resetTimeline` 代次重置（真机否决：起播全程无声）
