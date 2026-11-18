@@ -2827,6 +2827,21 @@ restRoutes.get("/dlna/stream/:token", async (c) => {
   // cast token 绑定的歌曲一律走管道出流,不再有直传旁路(P2-2/D9)。
   const rawEntry = resolveRawStreamToken(token);
   if (rawEntry) {
+    // ★ 预取命中优先(2026-11-18):泵跑在 fork 子进程,看不到主进程的 prefetchCache,
+    //   过去一律回源 ⇒ 网盘 FLAC 切歌实测 6.4s 空窗(桥补 1.555s 静音,再被 pacing
+    //   rebase 把落后永久固化)。这里按 `sid` 现查主进程 membuf:命中则整曲字节已在
+    //   内存,ffmpeg 零回源;未传 / 未命中 / 条目已回收 ⇒ 原样落回 proxyRawRange。
+    const sid = c.req.query("sid");
+    if (sid) {
+      const { prefetchToken } = await import("../../services/source/prefetchCache.js");
+      const { resolveMemStream } = await import("../../services/source/bufferedFetch.js");
+      const mbToken = prefetchToken(sid);
+      const memEntry = mbToken ? resolveMemStream(mbToken) : null;
+      if (memEntry) {
+        log.info(`[raw-stream] 预取命中 song=${sid} bytes=${memEntry.buf.length} → 内存回环直出`);
+        return serveMemStreamResponse(c, memEntry);
+      }
+    }
     // PERF-B(2026-09-23):回环 raw 流不再纯透传 —— 改走「有界回源 + 256KB 稀疏块缓存」
     // 代理,让 ffmpeg 对无 SEEKTABLE 的网盘 FLAC 做输入定位(-ss)时的多次回溯 Range
     // 命中本地缓存。`docs/PLAYBACK_SEEK_OPTIMIZATION.md` §6;开关 RAW_STREAM_CACHE=0 回旧行为。
@@ -2894,9 +2909,25 @@ restRoutes.get("/download", permMiddleware(PERM.LIBRARY_STREAM), async (c) => {
 // token 16 字节随机,信任模型与 dlna 回环流 token 的 raw 分支一致(仅本机回环消费)。
 restRoutes.get("/membuf/:token", async (c) => {
   const { resolveMemStream } = await import("../../services/source/bufferedFetch.js");
-  const { parseRangeHeader } = await import("../../services/dlna/rawStreamCache.js");
   const entry = resolveMemStream(c.req.param("token"));
   if (!entry) return c.text("Invalid or expired membuf token", 403);
+  return serveMemStreamResponse(c, entry);
+});
+
+/** 内存缓冲条目的 HTTP 出流(Range 支持)。**单一真源**,两条消费路径共用:
+ *    ① `/rest/membuf/:token`  —— HTTP 出流侧 prefetchHit 命中的回环地址;
+ *    ② `/rest/dlna/stream/:token?raw=1&sid=` —— sendspin/airplay 的 ffmpeg 回环取源
+ *       (2026-11-18 新增,见该分支注释)。
+ *  ⚠️ 定义必须留在 membuf 路由**之后**:P2-6 结构锁扫 /stream 与 /dlna/stream 段,
+ *  `Accept-Ranges` 属锁内禁用字样(见 tests/rest/pipelineContract.test.ts)。
+ *  @param c Hono context(只读 range 头)
+ *  @param entry membuf 条目(整曲原始字节 + mime)
+ */
+async function serveMemStreamResponse(
+  c: any,
+  entry: { buf: Buffer; mime?: string },
+): Promise<Response> {
+  const { parseRangeHeader } = await import("../../services/dlna/rawStreamCache.js");
   const total = entry.buf.length;
   const base: Record<string, string> = {
     "Accept-Ranges": "bytes",
@@ -2920,7 +2951,7 @@ restRoutes.get("/membuf/:token", async (c) => {
     });
   }
   return new Response(new Uint8Array(entry.buf), { status: 200, headers: { ...base, "Content-Length": String(total) } });
-});
+}
 
 // ==================== SMB 回环出流 ====================
 // SMB 不是 HTTP，ffmpeg/预取/DLNA 代理都读不了；这里把「源 + 文件路径」兑换成

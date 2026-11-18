@@ -38,6 +38,14 @@ export interface QueuePeekSource {
   playMode: PlayMode;
   shuffleOrder?: number[];
   shufflePos?: number;
+  /** 序列生成时的队列长度(`QueueController.rebuildShuffle` 落笔)。
+   *
+   *  与 `items.length` 不等 ⇒ 序列已过期(队列增删后尚未重建)。消费方必须**放弃
+   *  本轮预测**而不是照旧读 order:order 里存的是旧长度的下标,取出来的「下一首」
+   *  根本不会被播(2026-11-18 事故:shuffle 预取据此把不存在的下一首整曲灌进
+   *  membuf,切歌时真正的下一首零准备,桥侧补 2.13s 静音)。
+   *  可选:老快照 / 测试替身不提供时按 `order.length === items.length` 退化判断。 */
+  shuffleLen?: number;
 }
 
 /** 下发给客户端 / Web 的预探测状态位。 */
@@ -97,6 +105,13 @@ export function peekUpcomingPositions(
 
   if (q.playMode === "shuffle") {
     const order = q.shuffleOrder || [];
+    // 序列一致性（2026-11-18）：`shuffleLen` 是序列生成时的队列长度。队列增删后
+    // 未重建前，order 里存的是**旧长度的下标** —— 按它取「下一首」会指向一首根本
+    // 不会被播的歌。与 QueueController.peekNext 同一口径：宁可少预取，绝不预取
+    // 错歌。真正的重建由 ensureShuffleReady / shuffleNextIndex 负责（不在这里，
+    // 本函数是只读 peek，红线：绝不允许推进状态）。
+    const seqOk = typeof q.shuffleLen === "number" ? q.shuffleLen === n : order.length === n;
+    if (!seqOk || order.length === 0) return { positions, reachedEnd: true };
     let pos = (q.shufflePos ?? -1) + 1;
     while (pos < order.length && positions.length < maxPositions) {
       const idx = order[pos];

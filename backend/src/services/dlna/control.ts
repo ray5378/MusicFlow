@@ -737,10 +737,21 @@ export function loopbackBase(): string {
   return `http://127.0.0.1:${runtimePort ?? process.env.PORT ?? CURRENT_PORT}`;
 }
 
-/** 任意直链的回环取流 URL(raw=1 直透原始字节,不嗅探不转码)。 */
-export function loopbackRawStreamUrl(url: string, headers?: Record<string, string>): string {
+/** 任意直链的回环取流 URL(raw=1 直透原始字节,不嗅探不转码)。
+ *
+ *  `songId`(可选,2026-11-18):只是**预取命中提示** —— 主进程的 raw 分支据 `sid`
+ *  实时查 prefetchCache 的 membuf,命中则整曲字节已在内存、ffmpeg 零回源
+ *  (240 实测:天翼网盘 FLAC 切歌回源 6.4s ⇒ AirPlay 桥补 1.555s 静音)。
+ *  未传 / 未命中 / 条目已回收时一律落回 proxyRawRange,与改前逐字节一致。
+ *  ⚠️ 不传 songId 时生成的 URL 与旧实现完全相同(契约测试 controlPure 锁定)。 */
+export function loopbackRawStreamUrl(
+  url: string,
+  headers?: Record<string, string>,
+  songId?: string,
+): string {
   const token = mintRawStreamToken(url, headers);
-  return `${loopbackBase()}/rest/dlna/stream/${token}?raw=1`;
+  const sid = typeof songId === "string" && songId ? `&sid=${encodeURIComponent(songId)}` : "";
+  return `${loopbackBase()}/rest/dlna/stream/${token}?raw=1${sid}`;
 }
 
 export interface CastOptions {

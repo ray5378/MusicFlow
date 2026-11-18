@@ -102,13 +102,18 @@ export interface FfmpegInput {
  * 本地文件路径原样放行。空输入直接抛错(早失败,别等 ffmpeg 报).
  * 注意动态导入 dlna/control:audio 层不允许静态依赖上层路由模块(禁环)。
  */
-export async function resolvePipelineInput(direct: FfmpegInput): Promise<FfmpegInput> {
+export async function resolvePipelineInput(
+  direct: FfmpegInput,
+  /** 曲目 id(可选):透传成回环 URL 的 `sid`,让主进程 raw 分支能命中预取 membuf。
+   *  不传 ⇒ URL 与旧实现逐字节一致(见 dlna/control.ts::loopbackRawStreamUrl)。 */
+  songId?: string,
+): Promise<FfmpegInput> {
   if (!direct.input) {
     throw new Error("ffmpeg 输入为空(本地文件路径或回环 token URL 二选一)");
   }
   if (/^https?:\/\//i.test(direct.input) && !isLoopbackUrl(direct.input)) {
     const { loopbackRawStreamUrl } = await import("../dlna/control.js");
-    return { input: loopbackRawStreamUrl(direct.input, direct.headers ?? {}) };
+    return { input: loopbackRawStreamUrl(direct.input, direct.headers ?? {}, songId) };
   }
   return direct;
 }

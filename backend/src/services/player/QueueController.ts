@@ -318,7 +318,14 @@ export class QueueController extends EventEmitter {
    * 只读不改队列状态),这里不自己推算。
    */
   private schedulePrefetch(playerId: string): void {
-    prefetchUpcoming(this.queues.get(playerId));
+    const q = this.queues.get(playerId);
+    // 洗牌序列先就绪再算「下一首」(2026-11-18)：prefetchUpcoming 直接读 q 的
+    // shuffleOrder，而序列此前只在**真切歌**（shuffleNextIndex）时才惰性重建 ⇒
+    // 队列增删后到下一次切歌之间，预取一直按**过期序列**取位置，灌的是不会播的歌
+    // (240 现场:实际播 9b7c115f,预取却灌 efb30357)。这里与预探测共用同一个重建
+    // 入口，语义不变（重建后 shuffleLen = items.length，同一次增删只重建一次）。
+    if (q) this.ensureShuffleForLookahead(q);
+    prefetchUpcoming(q);
   }
 
   /**

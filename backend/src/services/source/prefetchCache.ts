@@ -439,11 +439,24 @@ export function prefetchUpcoming(peek: QueuePeekSource | undefined, n?: number):
   if (!peek) return;
   const count = n ?? prefetchLookahead();
   if (count <= 0) return;
+  // 单曲循环没有「下一首」（与 QueueController.peekNext 的 `one => -1` 同口径）。
+  // 预探测仍需 peek 返回当前曲（判它可不可播），但**预取**不需要 —— 当前曲已经在播，
+  // 再灌一遍整曲只会白占串行通道（并发恒 1）。
+  if (peek.playMode === "one") return;
   try {
-    const { positions } = peekUpcomingPositions(peek, count);
-    for (const p of positions.slice(0, count)) {
+    // 判死曲不占预取额度(2026-11-18)：与 drainPreheat.peekNextSongId 的 `skipDead`
+    // 同一判据 —— 起播会被跳过的歌，预取它等于白占串行通道（并发恒 1），真下一首
+    // 反而排不上。多看几个位置，凑够 count 个「非判死」即停。
+    // 注：闸门 0（prefetchSong 内部）仍保留 —— 这里只是不把它算进额度。
+    const { positions } = peekUpcomingPositions(peek, Math.max(count, count * 4));
+    let taken = 0;
+    for (const p of positions) {
+      if (taken >= count) break;
       const songId = peek.items?.[p]?.songId;
-      if (songId) void prefetchSong(songId);
+      if (!songId) continue;
+      if (playabilityReader?.(songId) === "unplayable") continue;
+      void prefetchSong(songId);
+      taken++;
     }
   } catch (e: any) {
     // 预取绝不能影响调用方（localSetIndex / 切歌推进）。

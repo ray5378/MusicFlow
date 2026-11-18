@@ -2,6 +2,16 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.14.11] - 2026-11-18
+
+### Fix / 桥侧回环取源接入预取内存、shuffle 预取错歌、时间线重置漏清帧代次
+
+- **sendspin 泵取不到预取字节（跨进程断层）**：泵跑在 supervisor fork 的子进程，`streamingSource` → `loopbackRawStreamUrl` 生成的 `/rest/dlna/stream/:token?raw=1` 由主进程 `proxyRawRange` 处理，**一律回源**；而 `prefetchCache` 的整曲 membuf 只挂在 `/rest/membuf/:token` 上，两条路完全不相交 —— 网盘曲目预取得再成功，泵也得自己重下一遍。240 实测：天翼网盘 FLAC 切歌回源 6.4s，AirPlay 桥侧补静音 1555ms，并被 `pacing rebase(lag)` 把落后永久固化（`deltaUs` 由 +2.06s 跳到 -0.16s、`inQueueMs` 1.7s → 3.8s）。修法：回环 URL 追加 `sid`（预取命中提示，**不传时生成的 URL 与旧实现逐字节一致**），raw 分支按 `sid` 现查主进程 `prefetchToken → resolveMemStream`，命中即内存直出、未命中回落 `proxyRawRange`；membuf 出流抽成 `serveMemStreamResponse` 单一真源（`/rest/membuf` 与 raw 命中共用，`Accept-Ranges` 只定义一次）。命中路径实测：`[raw-stream] 预取命中 bytes=4177965 → 内存回环直出`，起播由 6.4s 降到同秒。
+- **shuffle 预取灌错歌**：`prefetchUpcoming` 直接读 `QueueData.shuffleOrder`，而洗牌序列只在**真切歌**（`shuffleNextIndex → ensureShuffleReady`）时才惰性重建 ⇒ 队列增删后到下一次切歌之间，预取按**过期序列**取位置。240 实测：实际播 `9b7c115f`（潇洒走一回），预取却在灌 `efb30357`（LOLA MONTEZ），切歌时真正的下一首零准备、被补 2134ms 静音。修法：`QueuePeekSource` 暴露 `shuffleLen`（序列生成时的队列长度），`peekUpcomingPositions` 的 shuffle 分支长度不一致即**放弃本轮预测**（与 `QueueController.peekNext` 同口径：宁可少预取、绝不预取错歌）；`QueueController.schedulePrefetch` 先 `ensureShuffleForLookahead` 让序列就绪，再算下一首。
+- **预取额度不再被死曲占用**：`prefetchUpcoming` 跳过已判 `unplayable` 的歌（与 `drainPreheat.peekNextSongId` 的 `skipDead` 同源，最多再看 4×lookahead 个位置）；`playMode === "one"` 直接短路 —— 单曲循环没有「下一首」（与 `peekNext` 的 `one ⇒ -1` 同口径），预探测仍保留它判当前曲可播性的用途。
+- **`resetTimeline` 漏清帧代次 ⇒ 结构缺口被物化成静音**：暖复用时旧会话 `skippedFrames > 0` 被判 `warm-reuse-poisoned` → `resetTimeline` 只清 `aligner` / `skippedFrames`，**没清 `lastResampledGen`** ⇒ 新曲首帧 `genChanged` 判为 false ⇒ 2.1~2.3s 结构缺口不进 `newgen-skip`（阈值 `BRIDGE_NEWGEN_GAP_SKIP_US = 500ms`），落进 `aligner.onFrame` 补静音。240 实测：同一时段 5 次切歌，仅这一次 `insert=94809`（2149.9ms，可闻断音），其余 4 次全部零 `realigned` —— 条件明确、复现率 1/5。修法一行：`resetTimeline` 里补 `this.lastResampledGen = 0`（**不动 `this.generation`**：该字段由泵侧 `refreshGeneration` 驱动，桥侧自行递增会让组锚点登记与 tick 口径错位）。修复后同场景 `insert=0 skip=100492`，听感由「卡住 2 秒」变「跳过」；`pacing rebase` 近 5 分钟 0 次、`driftUs` -23µs。
+- 新增回归锁：`tests/rest/rawPrefetchHit.test.ts`（8 条：`sid` 编码与 token 回解、命中必须在 `proxyRawRange` 与 `resolveCastSession` **之前**、membuf 单一真源）、`tests/player/shufflePrefetch.test.ts`（12 条：四种 playMode 行为 + 调度顺序锁 + one 短路）、`tests/airplay/bridgeResetGen.test.ts`（5 条：清 `lastResampledGen` 且位置在 `aligner = null` 之后、不得改 `this.generation`、仍清 `skippedFrames`、新代次缺口阈值必须 < 2.15s）。
+
 ## [4.14.10] - 2026-11-16
 
 ### Fix / 歌单池用例门禁：精确键集合对齐 4.14.9 的纯增字段 `changed`

@@ -328,10 +328,12 @@ async function defaultSource(
  *  独立导出供契约测试锁定(ffmpegInputContract);改本函数必须同步该测试。
  *  实现已下沉到 audio/pipeline.resolvePipelineInput,此处仅保留别名(调用方零改动)。 */
 export async function resolveFfmpegInput(
-  direct: { input: string; headers?: Record<string, string> }
+  direct: { input: string; headers?: Record<string, string> },
+  /** 曲目 id(可选):透传到回环 URL 的 `sid`,主进程据此查预取 membuf(零回源起播)。 */
+  songId?: string,
 ): Promise<{ input: string; headers?: Record<string, string> }> {
   const { resolvePipelineInput } = await import("../audio/pipeline.js");
-  return resolvePipelineInput(direct);
+  return resolvePipelineInput(direct, songId);
 }
 
 async function streamingSource(
@@ -346,7 +348,9 @@ async function streamingSource(
   const { resolveRowInput } = await import("../source/resolveAudio.js");
   const direct = resolveRowInput(row as any);
   if (!direct) throw new Error("no streamable input for row");
-  const source = await resolveFfmpegInput(direct);
+  // songId 透传到回环 URL(sid):该曲已预取进主进程 membuf 时 ffmpeg 直读内存,
+  // 不再回源(网盘 FLAC 回源实测 6.4s,足以让桥补 1.555s 静音)。
+  const source = await resolveFfmpegInput(direct, songId);
   // startMs 直达 ffmpeg `-ss`(PcmWindow 构造本就支持,此前未透传):
   // 起播即定位,省掉「先建流再 seekTo 冷起一次」的整段空窗。
   // 解码窗口上限(插件配置「解码窗口上限」):歌长 ≤ 上限 → 整曲保留(前后 seek 零成本);
