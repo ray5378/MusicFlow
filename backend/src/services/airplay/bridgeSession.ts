@@ -2386,17 +2386,6 @@ export class BridgeSession {
     this.commandedLeadUs = null;
     this.streamAborted = true;
     this.stats.skippedFrames = 0;
-    // ★(2026-11-18)必须同时清「上一次重采样的帧代次」—— resetTimeline 的语义是
-    //   「丢弃内容轴、让下一帧 AUDIO 重新规划」，那就等价于一条新代次的开头。
-    //   不清它：reset 后第一条 AUDIO 的 `entry.generation` 恰好等于旧
-    //   `lastResampledGen` ⇒ `genChanged=false` ⇒ 结构缺口不进 newgen-skip
-    //   (BRIDGE_NEWGEN_GAP_SKIP_US=500ms)，而落进 aligner.onFrame 被**物化成静音**。
-    //   240 实测: 15:04:09 warm-reuse-poisoned 后 `insert=94809`(2149.9ms) 可闻断音;
-    //   同一时段另外 4 次正常切歌(未 reset)全部零 realigned。缺口本身来自
-    //   forceNow 锚(A=now+leadUs)与泵内容 lead 的固有差，无法在本层消除；
-    //   能做且该做的是让它走 skip(前移 RTP 时间线、不污染内容前沿/节拍轴)，
-    //   这正是该阈值设计时的原话(见 BRIDGE_NEWGEN_GAP_SKIP_US 注释)。
-    this.lastResampledGen = 0;
     this.player?.flush();
     log.info(`[airplay-bridge] ${JSON.stringify({ ev: "timeline-reset", dev: this.deviceId, gen: this.generation, reason })}`);
   }

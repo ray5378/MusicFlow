@@ -2,6 +2,15 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.14.12] - 2026-11-18
+
+### Fix / 撤回 4.14.11 的 `resetTimeline` 代次重置（真机否决：起播全程无声）
+
+- **4.14.11 引入的回归**：`resetTimeline` 里补的 `this.lastResampledGen = 0` 会让暖复用复位后的首帧走 `newgen-skip`（跳段、不物化静音）而不是补静音。设计上这是对的（2.1~2.3s 结构缺口不该变成静音），但真机实测**跳段把内容轴前移后，RAOP 的 pacing 基准没有同步前移** —— 随后 `pacing rebase(lag)` 每秒报 `+600ms 上下（持续 ≥1000ms，RTP 映射不动）`，欠账被固化成常量，整首歌每包都迟到 600ms，MUZO 类接收端有效缓冲被吃空后**欠载静默**。用户现场：切歌起播后 HiVi 全程不出声，手动 seek 重建流才恢复。
+- **与正常 skip 的区别（关键判据）**：新会话首帧的 skip 是安全的 —— 同一份代码在冷启/重启后连跑多次 `skip=94406 insert=0`，`pacing rebase` 零次、`lossReq=0`、`deltaUs` 稳定 +2.06s。**只有 `resetTimeline` 之后**的 skip 会撞上 pacing 错位。故本版只撤这一行，`newgen-skip` 本身与其阈值（500ms）保持不变。
+- 撤回内容：`backend/src/services/airplay/bridgeSession.ts` 回到 v4.14.11 之前的状态；删除 `backend/tests/airplay/bridgeResetGen.test.ts`（它锁的正是被否决的行为）。4.14.11 的另外两项修复（桥侧回环取源命中预取 membuf、shuffle 预取错歌）全部保留 —— 前者在真机上命中路径稳定（`[raw-stream] 预取命中 → 内存回环直出`），后者预取对象已与实际播出对齐。
+- 遗留：`warm-reuse-poisoned` 复位后那 2.1~2.3s 仍会补静音（回到 4.14.10 的既有行为，可闻但不出事）。彻底解决需要让 RAOP pacing 基准随内容轴一起复位，属时间线核心改造，需单独立项与真机回归。
+
 ## [4.14.11] - 2026-11-18
 
 ### Fix / 桥侧回环取源接入预取内存、shuffle 预取错歌、时间线重置漏清帧代次
