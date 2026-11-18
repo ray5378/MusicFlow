@@ -1532,9 +1532,17 @@ export class RaopPlayer {
    *  假时钟(测试)与真实定时器解耦时也只多轮询不挂死。 */
   private async waitUntilUs(targetUs: bigint): Promise<void> {
     for (;;) {
+      // ★(2026-11-19) 等待必须可中止：`flush()`(时间线复位路径同步调用)把
+      //   `streaming` 置 false 后，旧实现仍会一直等到 sendAt 才回循环条件 ——
+      //   最长 2s 窗口里它继续按**已作废的** startTs 发包，与新起的 streamBridge
+      //   时间戳叠加(240 实测 idx 25788/240 交错) ⇒ 设备收到两套时间线 ⇒
+      //   pacing 恒 lag 600ms + 欠载静默。这里 50ms 一轮，最迟一个轮询即退出。
+      if (!this.streaming || this.destroying) return;
       const delayUs = Number(targetUs - nowUs());
       if (delayUs <= 0) return;
-      await new Promise((r) => setTimeout(r, Math.min(delayUs / 1000, 50)));
+      // 10ms 粒度（原 50ms）：时间线复位后旧循环最多再发 1 帧（8ms/帧）旧包即退出，
+      // 而不是十余帧。定时器仅在本包需等待未来 sendAt 时才转，成本可忽略。
+      await new Promise((r) => setTimeout(r, Math.min(delayUs / 1000, 10)));
     }
   }
 

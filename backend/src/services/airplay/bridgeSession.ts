@@ -1599,6 +1599,12 @@ export class BridgeSession {
         ? this.pendingRewindFrames
         : 0;
     this.pendingRewindFrames = 0;
+    // (2026-11-19 立项) 旧流的退出**只**由 raop.waitUntilUs 的中止判据负责，此处保持
+    // 同步覆盖语义不变：resetTimeline 已置 `streamAborted` 并 `flush()`（streaming
+    // 同步 false），旧循环最迟一个 10ms 轮询就回主条件退出。
+    // ⚠️ 不要在这里 await 旧 streamPromise —— 它整首歌期间都不 resolve，await 等于
+    // 每次换歌硬等超时；也不要引入任何 await，会让起播路径失去同步语义
+    // （bridgePhase5.qa2 的同步驱动断言会直接红）。
     this.streamPromise = player
       .streamBridge(() => this.pullChunk(), session, {
         baseTs: plan.anchors.baseTs,
