@@ -2,6 +2,55 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.14.22] - 2026-11-19
+
+### Fix / 加压准入从未执行：请求被泵抢走
+
+4.14.21 的准入判据在真机上一次都没跑过。20:04 再次卡顿：
+
+```
+deliverableMs 28400~30400（远超 8s 阈值）
+bridge-push-reject-bump 0 次
+pace-bump-req 10 次 / 泵执行 10 次
+deltaUs -52783（转负）、inQueueMs 1675、insertedFrames 29243
+```
+
+**根因是时序**：泵的 `pushLoop` 每 **25ms** 跑一拍、每拍都 `take()`；而 `bridgePushTick` 每 **250ms** 才 `peek()`。请求只存活 25ms，几乎总在检查前被泵取走 ⇒ `peek()` 恒为 0 ⇒ 准入判据从未执行。
+
+这也解释了 4.14.21 验证时「误拒 0 次」的真实含义 —— 不是不误拒，是**从没检查**。
+
+### Fix / 请求消费权归投递侧（两段式）
+
+```
+add(ms)     → pendingMs（待审）
+server 每 tick：peek() 判 deliverable
+    超标 → reject()   丢弃 + bridge-push-reject-bump
+    否则 → approve()  pendingMs → approvedMs
+泵每拍：takeApproved()  只执行被批准的
+```
+
+泵取不到未批准的请求，判据不可能被绕过。
+
+### 新增
+
+- `bridge-push-approve-bump` 日志（放行也留痕，便于确认判据真的在跑）
+- `peek()` / `approve()` / `reject()` / `takeApproved()`（原 `take()` 移除）
+
+### 验证（真机主动造请求）
+
+把桥侧阈值临时调到 6000 强制触发（`inQueue 5525 < 6000` 必然请求）：
+
+```
+pace-bump 已转发 ms=2000
+bridge-push-reject-bump droppedMs=2000 ⇒ ring 里堆积未投内容，问题在投递不在供给
+```
+
+连续 3 次全部被拒，`inQueue 5525` / `delta +2.06` 保持不变 —— 证明 server 真的看到请求并做出判断。验证后阈值已改回 2000。
+
+- 起播 `deliverable=8500`（ring 堆 8.5s 未投）→ reject，正确：此时不缺料
+- 稳态 `deliverable=4275` → 真缺料时走 approve
+- `tests/sendspin + tests/airplay` 140 文件全绿，回归锁 10 tests
+
 ## [4.14.21] - 2026-11-19
 
 ### Fix / 低缓冲自愈改为「判断是否需要补」：按投递侧真实可投存量准入

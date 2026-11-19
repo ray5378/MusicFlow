@@ -24,17 +24,33 @@ const read = (dir: string, f: string) => fs.readFileSync(path.join(dir, f), "utf
 describe("加压信号总线", () => {
   afterEach(() => paceBumpBus.reset());
 
-  it("累加与取走清零", () => {
+  it("★未批准不执行：请求必须经 approve 才能进执行槽（2026-11-19 20:04 事故）", () => {
+    // 事故：泵每 25ms take 一次、server 每 250ms 才 peek，请求总被泵抢走
+    // ⇒ 准入判据从未执行 ⇒ deliverable 涨到 28~30s、delta 掉负。
     paceBumpBus.add(2000);
     paceBumpBus.add(1000);
-    expect(paceBumpBus.take()).toBe(3000);
-    expect(paceBumpBus.take()).toBe(0);
+    // 未经批准，泵取不到
+    expect(paceBumpBus.takeApproved()).toBe(0);
+    expect(paceBumpBus.peek()).toBe(3000);
+    // 批准后转入执行槽
+    paceBumpBus.approve();
+    expect(paceBumpBus.peek()).toBe(0);
+    expect(paceBumpBus.takeApproved()).toBe(3000);
+    expect(paceBumpBus.takeApproved()).toBe(0);
+  });
+
+  it("拒绝即丢弃待审量", () => {
+    paceBumpBus.add(2000);
+    expect(paceBumpBus.reject()).toBe(2000);
+    expect(paceBumpBus.peek()).toBe(0);
+    expect(paceBumpBus.takeApproved()).toBe(0);
   });
 
   it("忽略非法值", () => {
     paceBumpBus.add(Number.NaN);
     paceBumpBus.add(-5);
-    expect(paceBumpBus.take()).toBe(0);
+    paceBumpBus.approve();
+    expect(paceBumpBus.takeApproved()).toBe(0);
   });
 });
 
@@ -63,11 +79,12 @@ describe("桥侧判断（airplay）", () => {
     expect(srv).toContain("const BRIDGE_BUMP_MAX_DELIVERABLE_MS = 8_000;");
     expect(srv).toContain("if (deliverableUs >= BigInt(BRIDGE_BUMP_MAX_DELIVERABLE_MS) * 1000n) {");
     expect(srv).toContain("bridge-push-reject-bump");
-    expect(srv).toContain("const dropped = paceBumpBus.take();");
+    expect(srv).toContain("const dropped = paceBumpBus.reject();");
+    expect(srv).toContain("paceBumpBus.approve();");
 
     // 泵恢复纯执行：不做超前量判断（该判据实测不成立：正常 14.95s vs 事故 34.96s）
     const se = read(SEND, "streamEngine.ts");
-    expect(se).toContain("const bumpMs = paceBumpBus.take();");
+    expect(se).toContain("const bumpMs = paceBumpBus.takeApproved();");
     expect(se).toContain("this.paceAnchorWall -= bumpMs;");
     expect(se).not.toContain("BRIDGE_BUMP_MAX_AHEAD_MS");
     expect(se).not.toContain("aheadMs");
@@ -108,7 +125,7 @@ describe("纯执行（sendspin）", () => {
 
   it("泵每拍取走并前提 paceAnchorWall（不残留阈值/冷却/本地水位）", () => {
     const s = read(SEND, "streamEngine.ts");
-    expect(s).toContain("const bumpMs = paceBumpBus.take();");
+    expect(s).toContain("const bumpMs = paceBumpBus.takeApproved();");
     expect(s).toContain("this.paceAnchorWall -= bumpMs;");
     expect(s).not.toContain("BRIDGE_LOW_QUEUE_RECOVER_MS");
     expect(s).not.toContain("bridgeHealthLocal");

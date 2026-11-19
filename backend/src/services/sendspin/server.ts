@@ -1506,13 +1506,19 @@ export class SendspinGroup {
         if (paceBumpBus.peek() > 0) {
           const wm = this.bridgeWatermarks.get(deviceId) ?? 0n;
           const deliverableUs = this.currentGenDeliverableUs(ring, lo, wm);
+          const deliverableMs = Math.round(Number(deliverableUs) / 1000);
           if (deliverableUs >= BigInt(BRIDGE_BUMP_MAX_DELIVERABLE_MS) * 1000n) {
-            const dropped = paceBumpBus.take();
+            const dropped = paceBumpBus.reject();
             this.server.log(
               "warn",
-              `bridge-push-reject-bump device=${deviceId}` +
-                ` deliverableMs=${Math.round(Number(deliverableUs) / 1000)}` +
+              `bridge-push-reject-bump device=${deviceId} deliverableMs=${deliverableMs}` +
                 ` droppedMs=${dropped} ⇒ ring 里堆积未投内容，问题在投递不在供给`,
+            );
+          } else {
+            paceBumpBus.approve();
+            this.server.log(
+              "info",
+              `bridge-push-approve-bump device=${deviceId} deliverableMs=${deliverableMs} ⇒ 真缺料，放行`,
             );
           }
         }

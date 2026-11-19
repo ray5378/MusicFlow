@@ -9,13 +9,13 @@
  */
 const GKEY = "__mf_paceBumpBus_v1";
 
-type Bus = { pendingMs: number };
+type Bus = { pendingMs: number; approvedMs: number };
 
 function bus(): Bus {
   const g = globalThis as unknown as Record<string, Bus | undefined>;
   let b = g[GKEY];
   if (!b) {
-    b = { pendingMs: 0 };
+    b = { pendingMs: 0, approvedMs: 0 };
     g[GKEY] = b;
   }
   return b;
@@ -32,15 +32,34 @@ export const paceBumpBus = {
     return bus().pendingMs;
   },
 
-  /** 取走并清零。 */
-  take(): number {
+  /** 投递侧判定「该补」：把待审量转入待执行槽。 */
+  approve(): void {
+    const b = bus();
+    if (b.pendingMs > 0) {
+      b.approvedMs += b.pendingMs;
+      b.pendingMs = 0;
+    }
+  },
+
+  /** 投递侧判定「不该补」：丢弃待审量，返回丢弃了多少。 */
+  reject(): number {
     const b = bus();
     const v = b.pendingMs;
     b.pendingMs = 0;
     return v;
   },
 
+  /** 泵取走**已批准**的加压量（未经 approve 的请求不会被执行）。 */
+  takeApproved(): number {
+    const b = bus();
+    const v = b.approvedMs;
+    b.approvedMs = 0;
+    return v;
+  },
+
   reset(): void {
-    bus().pendingMs = 0;
+    const b = bus();
+    b.pendingMs = 0;
+    b.approvedMs = 0;
   },
 };

@@ -1498,11 +1498,12 @@ export class GroupPump {
         //    而声音明明从头开始 —— 已推送量比实际听到的多出整整一个缓冲深度)。
         //  取帧仍用 playCursorMs(已推送),只有对外上报走可听位置。
         this.group.positionMs = this.audiblePositionMs(framePosMs, cursorUs, floorMs);
-        // 加压执行：是否「需要补」已由投递侧判断（bridgePushTick 在 ring 里堆着
-        //   未投内容时会丢弃请求 bridge-push-reject-bump）。走到这里还没被丢弃，
-        //   说明确实缺料 —— 此处纯执行。
+        // 加压执行：是否「需要补」已由投递侧判断（bridgePushTick 判 deliverable：
+        //   超标 → reject 丢弃，否则 → approve 转入 approvedMs）。
+        //   ⚠️ 必须取 takeApproved 而非 take：泵每 25ms 一拍、server 每 250ms 才检查，
+        //   若泵直接 take 会把待审请求抢走，判据永远看不到它（2026-11-19 20:04 事故）。
         {
-          const bumpMs = paceBumpBus.take();
+          const bumpMs = paceBumpBus.takeApproved();
           if (bumpMs > 0) {
             this.paceAnchorWall -= bumpMs;
             logSafe(
