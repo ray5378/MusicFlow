@@ -40,7 +40,19 @@ jobs:
         run: cd frontend && npm run build
 
       - name: Install Playwright Chromium
-        run: cd frontend && npx playwright install --with-deps chromium
+        run: |
+          # apt 源偶发 503（2026-11-19 实测 security.ubuntu.com 返回 503）：
+          # --with-deps 要 apt-get install 一批字体包，源一抖整条 CI 就判红。
+          # 加重试把「基础设施抖动」与「真实代码问题」区分开。
+          for i in 1 2 3; do
+            if (cd frontend && npx playwright install --with-deps chromium); then
+              exit 0
+            fi
+            echo "::warning::第 ${i} 次安装失败（apt 源 503 等基础设施抖动），30s 后重试"
+            sleep 30
+          done
+          echo "::error::三次安装均失败"
+          exit 1
 
       - name: Run responsive e2e
         run: cd frontend && npx playwright test
