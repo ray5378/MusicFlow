@@ -2,6 +2,19 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.14.15] - 2026-11-19
+
+### Revert / 撤回 `resetTimeline` 帧代次重置（B 二次否决：跳段累积把时间线推歪，导致长时间播放后卡顿静音）
+
+- **现象**：4.14.14 跑了一夜后 HiVi 卡顿+静音明显加重。240 实测 tick：`inQueueMs` 从正常的 **5525 掉到 2000**（设备侧只剩 2 秒余量，任何抖动即欠载）；`deltaUs` 从 **+2059294 变成 −431704**（内容轴被推到节拍轴前面）；`insertedFrames` 累计 447812（10 秒）。同一时刻 `realigned`/`pacing rebase` 并不活跃 —— 是**恒定偏移**，不是抖动。
+- **根因**：4.14.13 引入的 B（`resetTimeline` 清 `lastResampledGen`，让复位首帧走 `newgen-skip`）**每次换代都把内容轴前移约 2.15 秒**（跳段前移 RTP 时间线而不补静音）。单次听感确实优于补静音，但这是**累积**的：跑几十次换歌后内容轴越推越前，投递窗口按「now + N」算出的量随之缩水 ⇒ `inQueueMs` 一路下滑 ⇒ 缓冲耗尽。
+- **验证（回滚即复原）**：把 240 的 dist 换回 4.14.12（raw 预取 + shuffle，无 P1 无 B）后，`inQueueMs` 立刻回到 **5525**、`deltaUs` 回到 **+2059294**、`late` 10、`realigned` 1、`insertedFrames` 0，播放恢复正常推进。确认是 B 引入。
+- **撤回内容**：`bridgeSession.ts::resetTimeline` 不再重置 `lastResampledGen`，并在原处留下警示注释（含本次实测数据），防止再次尝试。**保留**两项与偏移无关的修复：
+  - **P1**（`raop.ts::waitUntilUs` 中止判据）：防止时间线复位时旧推流循环与新流并行发包 —— 那是「起播全程无声」的真因，纯防御、不改内容轴；
+  - **跳段分账**（`newgenSkipFrames` / `skippedFrames`）：让换代跳段不再触发 `isContentAxisPoisoned()` 的循环重规划。
+- **代价（明示）**：复位后仍会补 2.1~2.3 秒静音（回到 4.14.10 的有界行为）。这是**可听但有界**的；B 换来的「无静音」是**不可听但无界**的漂移，长时间运行后代价远高于收益。
+- 回归锁：`tests/airplay/bridgeResetGen.test.ts` 由「锁清 lastResampledGen」反转为「**不得**重置」；`bridgeStreamSerial`（P1 在场）与 `bridgeSkipAccounting`（分账）保持不变。
+
 ## [4.14.14] - 2026-11-19
 
 ### Fix / 换代跳段与曲中跳段分账，根治「每次换歌都重规划时间线」引起的曲中偶发静音

@@ -2412,15 +2412,14 @@ export class BridgeSession {
     this.streamAborted = true;
     this.stats.skippedFrames = 0;
     this.stats.newgenSkipFrames = 0;
-    // ★(2026-11-19 立项-B) 复位语义 = 开一条新时间线，必须同时清「上一次重采样的帧代次」。
-    //   不清它：复位后第一条 AUDIO 的 `entry.generation` 恰等于旧 `lastResampledGen`
-    //   ⇒ `genChanged=false` ⇒ 结构缺口(≈2.1s)不进 newgen-skip，落进 aligner.onFrame
-    //   被物化成静音(240 实测 insert=94434)。
-    //   4.14.11 曾加过同一行并被真机否决 —— 但那次翻车的真因是**旧推流循环未终止**
-    //   （waitUntilUs 卡在 sendAt ≈2s，新旧两条流并行发包，idx 25788/240 交错），
-    //   pacing 恒 lag 600ms。P1 已把该窗口关掉（见 raop.waitUntilUs 中止判据），
-    //   docs/桥时间线复位-旧流并行与pacing错位-方案-2026-11-19.md §6 记录了重试前置。
-    this.lastResampledGen = 0;
+    // ⛔ **绝不要在这里重置 `lastResampledGen`**（2026-11-19 二次否决，4.14.15 撤回）。
+    //   重置它会让复位后首帧走 `newgen-skip`（跳掉 ~2.15s 内容而不补静音），单次听感
+    //   确实更好；但**每次换代都把内容轴前移 2.15s**，跑一夜后 240 实测：
+    //     deltaUs  +2059294 → −431704（内容轴被推到节拍轴前面）
+    //     inQueueMs    5525 →     2000（投递窗口算出的量缩水，设备侧只剩 2s 余量）
+    //   ⇒ 任何抖动即欠载 ⇒ 可闻卡顿+静音，比「每轮偶发 2.14s 静音」严重得多。
+    //   复位后补静音虽然断 2.14s，但**不累积漂移**，这才是有界的行为。
+    //   P1（raop.waitUntilUs 中止判据）与跳段分账与本行无关，均已保留。
     this.player?.flush();
     log.info(`[airplay-bridge] ${JSON.stringify({ ev: "timeline-reset", dev: this.deviceId, gen: this.generation, reason })}`);
   }

@@ -1,4 +1,4 @@
-// resetTimeline 帧代次重置（立项-B，2026-11-19 重试）
+// resetTimeline **不得**重置帧代次（4.14.15 撤回 B，二次否决）
 //
 // 背景：暖复用时旧会话 `skippedFrames > 0` ⇒ `isContentAxisPoisoned()` ⇒
 // `resetTimeline("warm-reuse-poisoned")`。复位后首帧若 `genChanged=false`，
@@ -27,13 +27,14 @@ function resetBody(): string {
 }
 
 describe("resetTimeline 帧代次重置（B）", () => {
-  it("清 lastResampledGen（否则 genChanged=false，缺口被物化成静音）", () => {
-    expect(resetBody()).toContain("this.lastResampledGen = 0");
+  it("★不得重置 lastResampledGen（4.14.15 撤回 B：会让每次换代跳 2.15s，累积推歪时间线）", () => {
+    expect(resetBody()).not.toContain("this.lastResampledGen = 0");
   });
 
-  it("清理发生在 aligner 置空之后（同一次重规划内生效）", () => {
+  it("仍保留 aligner/streamAborted 的复位（撤回的只是帧代次，不是整个复位逻辑）", () => {
     const body = resetBody();
-    expect(body.indexOf("this.lastResampledGen = 0")).toBeGreaterThan(body.indexOf("this.aligner = null"));
+    expect(body).toContain("this.aligner = null");
+    expect(body).toContain("this.streamAborted = true");
   });
 
   it("不得改 this.generation（该字段由泵侧 refreshGeneration 驱动）", () => {
