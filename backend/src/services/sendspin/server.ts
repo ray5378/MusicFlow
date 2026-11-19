@@ -10,6 +10,15 @@
 // 分组同步推流保留:解码 → **按 (codec, gain) 分组编码(同组只编一次)** →
 // 按组公共时间戳下发(group.pushFrame)。
 
+import { paceBumpBus } from "./paceBumpBus.js";
+
+/** 加压准入阈值（ms）：ring 里「当前代次、未投过、未过期」的帧总时长超过此值，
+ *  说明内容堆着投不出去 —— 瓶颈在投递而非供给，补无用。
+ *
+ *  240 实测 2026-11-19 19:37（健康态，88 个采样）：稳定在 4250~4325ms（±75ms）；
+ *  18:42 死锁态 ring 里堆了 30s 未投内容。取 8s = 正常值的 ~2 倍余量，
+ *  既能吸收投递抖动，又远低于真卡住时的量级。 */
+const BRIDGE_BUMP_MAX_DELIVERABLE_MS = 8_000;
 import WebSocket, { WebSocketServer } from "ws";
 import { randomBytes } from "node:crypto";
 import { loadOrCreateIdentity, type Identity } from "./identity.js";
@@ -1488,6 +1497,25 @@ export class SendspinGroup {
         // [诊断 2026-10-31] 窗口对位只读采样(2s 节流)。**不影响投递**,见
         //  logBridgeWindowDiag:tailVsHiUs 恒 >0 = 内容永久超前窗口上沿(稳态断粮)。
         this.logBridgeWindowDiag(b, deviceId, ring, lo, hi);
+        // 加压准入（判断「是否需要补」的唯一落点）：
+        //   补 = 让泵更早产出 ⇒ 只有「真的缺料」时才有意义。
+        //   若 ring 里已堆着 ≥6s 未投出去的内容（currentGenDeliverableUs 大），
+        //   瓶颈在投递而非供给 —— 补只会把内容推得更远，丢弃请求。
+        //   240 2026-11-19 18:42 事故：前沿超前 34.96s、连补 287 次、queueMs=0
+        //   ⇒ 一帧都投不出，越补越死。
+        if (paceBumpBus.peek() > 0) {
+          const wm = this.bridgeWatermarks.get(deviceId) ?? 0n;
+          const deliverableUs = this.currentGenDeliverableUs(ring, lo, wm);
+          if (deliverableUs >= BigInt(BRIDGE_BUMP_MAX_DELIVERABLE_MS) * 1000n) {
+            const dropped = paceBumpBus.take();
+            this.server.log(
+              "warn",
+              `bridge-push-reject-bump device=${deviceId}` +
+                ` deliverableMs=${Math.round(Number(deliverableUs) / 1000)}` +
+                ` droppedMs=${dropped} ⇒ ring 里堆积未投内容，问题在投递不在供给`,
+            );
+          }
+        }
         // 开局 bulk(曲中失声根因修复):换代后等「本代新料 ≥ 6s」一次性批量投递。
         // 不够 6s 就不触发(换代瞬间 ring 必空,硬投只能投到残羹),tick 照旧 1x 续杯。
         if (this.bridgeBulkInFlight.has(deviceId)) continue; // bulk 分片让出期间跳过窗口投递(防乱序双写)
@@ -1675,7 +1703,8 @@ export class SendspinGroup {
       "info",
       `bridge-window group=${this.name} device=${deviceId} padUs=${Number(this.pendingTrackLeadUs)}` +
         ` contentFrontierVsNowUs=${frontier} tailVsLoUs=${tailVsLo} tailVsHiUs=${tailVsHi}` +
-        ` queueMs=${this.bridgeQueuedMs(b)} queuePeakMs=${queuePeakMs}`,
+        ` queueMs=${this.bridgeQueuedMs(b)} queuePeakMs=${queuePeakMs}` +
+        ` deliverableMs=${Math.round(Number(this.currentGenDeliverableUs(ring, lo, this.bridgeWatermarks.get(deviceId) ?? 0n)) / 1000)}`,
     );
   }
 

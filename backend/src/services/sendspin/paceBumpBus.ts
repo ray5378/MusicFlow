@@ -27,6 +27,11 @@ export const paceBumpBus = {
     bus().pendingMs += Math.round(ms);
   },
 
+  /** 只看不取（投递侧判断是否需要补时用）。 */
+  peek(): number {
+    return bus().pendingMs;
+  },
+
   /** 取走并清零。 */
   take(): number {
     const b = bus();

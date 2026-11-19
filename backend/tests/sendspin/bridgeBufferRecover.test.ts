@@ -53,6 +53,38 @@ describe("桥侧判断（airplay）", () => {
     expect(s).not.toContain("BRIDGE_PACE_BUMP_MAX_STREAK");
   });
 
+  it("★判断是否需要补：泵侧看内容超前量，超标即拒绝（2026-11-19 18:42 事故）", () => {
+    // 判断落在**投递侧**：ring 里堆着 ≥6s 未投内容 ⇒ 不是缺料，丢弃请求。
+    //   用 currentGenDeliverableUs（Fix 2026-10-31 验证过的"真实可投存量"），
+    //   不用 currentGenTailUs（注释明确：恒为幻影值，不参与判据）。
+    const srv = read(SEND, "server.ts");
+    expect(srv).toContain("if (paceBumpBus.peek() > 0) {");
+    expect(srv).toContain("const deliverableUs = this.currentGenDeliverableUs(ring, lo, wm);");
+    expect(srv).toContain("const BRIDGE_BUMP_MAX_DELIVERABLE_MS = 8_000;");
+    expect(srv).toContain("if (deliverableUs >= BigInt(BRIDGE_BUMP_MAX_DELIVERABLE_MS) * 1000n) {");
+    expect(srv).toContain("bridge-push-reject-bump");
+    expect(srv).toContain("const dropped = paceBumpBus.take();");
+
+    // 泵恢复纯执行：不做超前量判断（该判据实测不成立：正常 14.95s vs 事故 34.96s）
+    const se = read(SEND, "streamEngine.ts");
+    expect(se).toContain("const bumpMs = paceBumpBus.take();");
+    expect(se).toContain("this.paceAnchorWall -= bumpMs;");
+    expect(se).not.toContain("BRIDGE_BUMP_MAX_AHEAD_MS");
+    expect(se).not.toContain("aheadMs");
+
+    // 桥侧只报事实，不得残留任何"次数/时长"刹车
+    const air = read(AIR, "bridgeSession.ts");
+    expect(air).not.toContain("bumpBlockedAt");
+    expect(air).not.toContain("bumpIneffective");
+    expect(air).not.toContain("bumpStreak");
+    expect(air).not.toContain("bumpProbeFromMs");
+    expect(air).not.toContain("BRIDGE_BUMP_WINDOW_MAX");
+    expect(air).not.toContain("BRIDGE_BUMP_BLOCK_MAX_MS");
+    expect(air).not.toContain("pace-bump-blocked");
+    // 但"设备侧饿了就报"这条保留
+    expect(air).toContain('ev: "pace-bump-req"');
+  });
+
   it("发指令时打可 grep 的日志", () => {
     const s = read(AIR, "bridgeSession.ts");
     expect(s).toContain('ev: "pace-bump-req"');

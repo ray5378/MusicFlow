@@ -31,6 +31,7 @@ import {
   PREFILL_BUFFER_MIN_MS,
 } from "./constants.js";
 import { paceBumpBus } from "./paceBumpBus.js";
+
 import { SAMPLE_RATE, CHANNELS } from "./encoding.js";
 import { nowUs } from "./clock.js";
 import { PcmWindow, WindowEvictedError, WINDOW_HIGH_SEC, type WindowSource } from "./streamSource.js";
@@ -1497,9 +1498,9 @@ export class GroupPump {
         //    而声音明明从头开始 —— 已推送量比实际听到的多出整整一个缓冲深度)。
         //  取帧仍用 playCursorMs(已推送),只有对外上报走可听位置。
         this.group.positionMs = this.audiblePositionMs(framePosMs, cursorUs, floorMs);
-        // 指令式加压：桥侧判断「缓冲被抽干」后发指令，这里纯执行 ——
-        // 把 pacing 墙钟基准前提 N 毫秒，dueMs 随之前移，泵立即多吐 N 毫秒内容
-        // （内容顺序与 ts 不变，设备侧连续无感）。判断/冷却/阈值全在 airplay 侧。
+        // 加压执行：是否「需要补」已由投递侧判断（bridgePushTick 在 ring 里堆着
+        //   未投内容时会丢弃请求 bridge-push-reject-bump）。走到这里还没被丢弃，
+        //   说明确实缺料 —— 此处纯执行。
         {
           const bumpMs = paceBumpBus.take();
           if (bumpMs > 0) {

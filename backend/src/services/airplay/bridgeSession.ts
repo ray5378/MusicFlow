@@ -2114,6 +2114,11 @@ export class BridgeSession {
       const bridgeInQ = this.backlogMs();
       bridgeStatsSink?.({ deviceId: this.deviceId, inQueueMs: bridgeInQ });
       const nowMs = Date.now();
+
+      // 低缓冲自愈：桥侧**只报事实**（设备侧饿了），不设次数/时长限制。
+      //   2026-11-19 教训：这里曾堆过"补后验证 / 停手 120s / 次数额度"，全部是
+      //   在错误动作发生后才刹车。真正该做的是判断"是否需要补"——而判断依据
+      //   （内容前沿超前多少）只有泵侧有，所以判断搬到那边，这里保持纯粹。
       if (bridgeInQ < BRIDGE_LOW_QUEUE_BUMP_MS) {
         if (this.lowQueueSinceMs === 0) this.lowQueueSinceMs = nowMs;
         if (

@@ -2,6 +2,57 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.14.21] - 2026-11-19
+
+### Fix / 低缓冲自愈改为「判断是否需要补」：按投递侧真实可投存量准入
+
+4.14.19 把节流换成「设备缓冲天花板 8s」时，把唯一的刹车（连续补 3 次上限）一并拆掉了。真机立刻给出后果：
+
+```
+18:13~18:42   inQueueMs 恒 0  →  天花板判据 (0 + 2000 <= 8000) 恒成立
+              pace-bump-req 287 次 / 泵执行 286 次
+              contentFrontierVsNowUs 34.96s、queueMs=0、pacing rebase 1137 次
+```
+
+**机制**：`inQueue=0` 并不等于「缺料」。内容是够的（前沿超前 34.96s），断的是**投递窗口够不到内容**（`tailVsHiUs=30.16s`，一帧都投不出）。此时补内容只会把前沿推得更远 —— 越补越死。
+
+4.14.17~20 反复在「设限」上打转（补后验证 / 停手 120s / 10 分钟 6 次），全都是在错误动作发生后才刹车。正解是**判断这个动作该不该做**。
+
+### Fix / 准入判据：投递侧真实可投存量
+
+| 候选量 | 健康态实测 | 事故态 | 结论 |
+|---|---|---|---|
+| `contentFrontierVsNowUs` | 14.95s | 34.96s | 只差 2.3 倍，任何阈值都会误伤一边 |
+| `tailVsHiUs` | 10.15s | 30.16s | 同上，且源码注明「恒为幻影值，不参与判据」 |
+| **`currentGenDeliverableUs`** | **4250~4325ms（88 采样，±75ms）** | ring 堆 30s 未投 ⇒ ~30s | 区分度 7 倍且极稳 |
+
+`currentGenDeliverableUs` = ring 内「当前代次 + 未投过 + 未过期」的帧总时长，直接度量「有料但投不出去」，正是「是否需要补」的依据（Fix 2026-10-31 的既有成果，bulk 判据同源）。
+
+新增准入（`server.ts::bridgePushTick`）：
+
+```
+有加压请求时算 deliverable
+  deliverable >= BRIDGE_BUMP_MAX_DELIVERABLE_MS(8s) → 丢弃请求 + bridge-push-reject-bump
+  否则                                              → 放行，泵执行
+```
+
+阈值 8s = 实测正常值（4.25~4.33s）的 2 倍余量，远低于真卡住时的量级（30s）。
+
+### Fix / 桥侧删除全部「事后刹车」
+
+补后验证、停手 120s、10 分钟 6 次额度 —— 全部移除。桥侧只保留「`inQueue < 2000` 持续 3s → 报饿」，判断交给投递侧，泵侧纯执行。
+
+### 新增
+
+- `bridge-push-reject-bump` 日志（含 `deliverableMs` / `droppedMs`）
+- `bridge-window` 诊断日志增加 `deliverableMs` 字段（纯只读，不参与判据）
+- `paceBumpBus.peek()`（只看不取）
+
+### 验证
+
+- 健康态：误拒 0 次、`deliverableMs` 稳定 4275、`inQueueMs 5525`、`deltaUs +2.06`
+- `tests/sendspin + tests/airplay` 140 文件全绿，回归锁 9 tests
+
 ## [4.14.20] - 2026-11-19
 
 ### Fix / 加压指令「发了但泵不执行」：改走 sendspin 子进程内全局总线
