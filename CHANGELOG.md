@@ -2,6 +2,64 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.14.23] - 2026-11-20
+
+### Fix / 低缓冲的真正开关是「重建缓冲」，不是「多产内容」
+
+4.14.17~22 六轮改动都在让泵多产内容（pace-bump）。诊断证明方向错了。
+
+2026-11-19 23:48 带 `bridge-push-diag` 的现场：
+
+```
+n=10                  每拍投 250ms
+lastOut - lastIn = 250000   水位正常前进
+budgetMs = 15000      队列预算充裕，没有限流
+hiEff - lastIn = +274ms     窗口紧贴水位
+deliverableMs = 10425       ring 里 10.4s「未来内容」超出窗口上界
+```
+
+投递机制完全正常。真正的约束是**窗口宽度 `hi - lo = 1.5 秒`**，每拍只放 250ms 出去；
+设备侧那 5.5 秒缓冲本来就是 `bulkBackfillBridge` **一次性灌 6 秒**建立的。
+一旦 `inQueue` 归零，1x 续杯永远补不回来 —— 22:07 那次因此干涸 54 分钟，`late` 涨到 17 万。
+
+### Fix / 有料投不出 → 触发 bulk 重建
+
+`bridgePushTick` 的准入分支：
+
+```
+deliverable >= 8s（ring 里堆着料却投不出去）
+  → reject 加压请求（产能不是瓶颈）
+  → bridgeBulkPending.add(deviceId)   ← 新增：触发 bulk 一次性灌 6s
+  → 日志 bridge-push-bulk-rebuild
+deliverable < 8s（真缺料）
+  → approve（泵多产）
+```
+
+### 验证（真机端到端）
+
+```
+00:02:43  pace-bump-req        inQueueMs=1925
+00:02:43  bridge-push-bulk-rebuild  deliverableMs=10425
+00:02:43  bridge-bulk          durUs=6000000
+00:02:55  inQueueMs=7675  late=6  delta=+2.058
+```
+
+同场景对比（22:07 无此修复）：`inQueue` 停在 0 达 54 分钟、`late` 涨到 172658。
+修复后 12 秒内从 1925 拉回 7675，`late` 全程只有 6。
+
+### 新增 / 诊断
+
+- `bridge-push-diag`（10s 节流，纯只读）：`n` / `lastIn` / `lastOut` / `hi` / `hiEff` /
+  `lo` / `budgetMs` / `ringMinVsNow` / `ringMaxVsNow`。
+  只有这张快照能区分「水位被清零」「队列预算被挤小」「帧全超窗口上界」三种成因，
+  今晚正是靠它把方向从「补内容」纠正到「重建缓冲」。
+
+### 撤回
+
+- Fix F（换代对齐水位）：假设「换代时 `bridgeContentEpoch` 递增」被真机否定
+  （3 次换代该值未变化，换代用的是 `generation`），逻辑一次未触发；
+  且清零 watermark 在「帧 ts 超前」时会落进 `hiEff = hi` 的坑，属净负风险。
+
 ## [4.14.22] - 2026-11-19
 
 ### Fix / 加压准入从未执行：请求被泵抢走

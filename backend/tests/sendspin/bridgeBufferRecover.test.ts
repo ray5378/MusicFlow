@@ -78,7 +78,7 @@ describe("桥侧判断（airplay）", () => {
     expect(srv).toContain("const deliverableUs = this.currentGenDeliverableUs(ring, lo, wm);");
     expect(srv).toContain("const BRIDGE_BUMP_MAX_DELIVERABLE_MS = 8_000;");
     expect(srv).toContain("if (deliverableUs >= BigInt(BRIDGE_BUMP_MAX_DELIVERABLE_MS) * 1000n) {");
-    expect(srv).toContain("bridge-push-reject-bump");
+    expect(srv).toContain("bridge-push-bulk-rebuild");
     expect(srv).toContain("const dropped = paceBumpBus.reject();");
     expect(srv).toContain("paceBumpBus.approve();");
 
@@ -129,5 +129,14 @@ describe("纯执行（sendspin）", () => {
     expect(s).toContain("this.paceAnchorWall -= bumpMs;");
     expect(s).not.toContain("BRIDGE_LOW_QUEUE_RECOVER_MS");
     expect(s).not.toContain("bridgeHealthLocal");
+  });
+  it("★有料投不出时触发 bulk 重建缓冲（2026-11-19 23:48 定案）", () => {
+    const s = read(SEND, "server.ts");
+    // 窗口只有 1.5s 宽、每拍只放 250ms；设备 5.5s 缓冲靠 bulk 一次性灌 6s 建立。
+    // 所以「有料投不出」必须挂 bulk pending，而不是只 reject（那样永远干涸）。
+    expect(s).toContain("bridge-push-bulk-rebuild");
+    expect(s).toContain("this.bridgeBulkPending.add(deviceId);");
+    // 真缺料那条路仍然走 pace-bump（泵多产）
+    expect(s).toContain("paceBumpBus.approve();");
   });
 });

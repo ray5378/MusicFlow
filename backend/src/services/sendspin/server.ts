@@ -799,6 +799,8 @@ export class SendspinGroup {
   bridgeSpecs: BridgeSocketSpec[] = [];
   /** 每桥投递水位(原 ts 域):≤ 水位的帧已投递/已丢弃;缺失或 0n = 当前代次尚未投递。 */
   readonly bridgeWatermarks = new Map<string, bigint>();
+  /** 投递对位诊断节流（deviceId → 上次打点时刻 us）。 */
+  readonly bridgePushDiagAt = new Map<string, bigint>();
   /** [Fix D.1 2026-10-31] 每桥「上一次投递给定时器所用的锚点位移」基准。
    *  与当前 shift 不一致 ⇒ 水位属于旧基准,follow 外扩必须失效一拍(见 deliverBridgeWindow)。 */
   readonly bridgeShiftAtDelivery = new Map<string, bigint>();
@@ -1509,10 +1511,16 @@ export class SendspinGroup {
           const deliverableMs = Math.round(Number(deliverableUs) / 1000);
           if (deliverableUs >= BigInt(BRIDGE_BUMP_MAX_DELIVERABLE_MS) * 1000n) {
             const dropped = paceBumpBus.reject();
+            // [Fix G 2026-11-19] 有料投不出 ⇒ 不是缺料，是**缓冲需要重建**。
+            //   诊断实证（23:48）：投递机制完全正常（n=10、budget 15000、水位逐拍前进），
+            //   但窗口宽度只有 hi−lo=1.5s，每拍只放 250ms；设备侧那 5.5s 缓冲是
+            //   bulkBackfillBridge 一次性灌出来的。inQueue 一旦归零，1x 续杯永远补不回来。
+            //   此前这里只 reject（不补也不重建），于是一直干涸到重启。
+            this.bridgeBulkPending.add(deviceId);
             this.server.log(
               "warn",
-              `bridge-push-reject-bump device=${deviceId} deliverableMs=${deliverableMs}` +
-                ` droppedMs=${dropped} ⇒ ring 里堆积未投内容，问题在投递不在供给`,
+              `bridge-push-bulk-rebuild device=${deviceId} deliverableMs=${deliverableMs}` +
+                ` droppedMs=${dropped} ⇒ 有料投不出，触发 bulk 重建缓冲`,
             );
           } else {
             paceBumpBus.approve();
@@ -1565,6 +1573,7 @@ export class SendspinGroup {
     const epoch = this.bridgeContentEpoch;
     const shift = this.bridgeDeliveryShiftUs(deviceId); // 与窗口同一取值(D1:新模型恒 0n)
     let last = this.bridgeWatermarks.get(deviceId) ?? 0n;
+    const lastIn = last; // 诊断：进入本拍时的水位（判定就是拿它算的）
     let n = 0;
     // [Fix D 2026-10-31] 窗口上界**跟随水位**,否则与 bulk 形成永久死锁:
     //   稳态窗口 = (watermark, hi],hi = now + HORIZON + ahead − shift;
@@ -1648,6 +1657,38 @@ export class SendspinGroup {
       last = e.tsUs;
     }
     this.bridgeWatermarks.set(deviceId, last);
+
+    // [诊断 2026-11-19] 投递对位快照（2s 节流，纯只读，不参与判据）。
+    //   22:07 事故形态：deliverable 恒 10425、inQueue 恒 0、late 涨到 17 万，持续 54 分钟。
+    //   算下来每 2s 积压 +2250ms = 完全零投递，而不是限流 —— 但只有这张快照能区分
+    //   「last 被清零」/「queueBudget 被桥队列挤小」/「帧 ts 全超 hiEff」三种成因。
+    {
+      const t = nowUs();
+      const at = this.bridgePushDiagAt.get(deviceId);
+      // 10s 节流：比 bridge-window 的 2s 稀疏（这条字段更多、更啰嗦），
+      // 但足以在复发时留下完整现场（今晚就是靠它定案）。
+      if (at === undefined || t - at >= 10_000_000n) {
+        this.bridgePushDiagAt.set(deviceId, t);
+        let mn = 0n;
+        let mx = 0n;
+        let cnt = 0;
+        for (const e of ring) {
+          if (e.ep !== epoch) continue;
+          if (!e.data || e.data.length === 0) continue;
+          cnt += 1;
+          if (mn === 0n || e.tsUs < mn) mn = e.tsUs;
+          if (e.tsUs > mx) mx = e.tsUs;
+        }
+        this.server.log(
+          "info",
+          `bridge-push-diag device=${deviceId} n=${n} epoch=${epoch} ringCnt=${cnt}` +
+            ` lastIn=${lastIn} lastOut=${last}` +
+            ` hi=${hi} hiEff=${hiEff} lo=${lo} budgetMs=${queueBudgetMs}` +
+            ` ringMinVsNow=${Number(mn - t)} ringMaxVsNow=${Number(mx - t)}` +
+            ` lastInVsHiEff=${Number(lastIn - hiEff)}`,
+        );
+      }
+    }
     return n;
   }
 
@@ -1721,6 +1762,7 @@ export class SendspinGroup {
     this.bridgeBulkPending.delete(deviceId);
     this.bridgeBulkInFlight.delete(deviceId);
     this.bridgeDiagLogAt.delete(deviceId);
+    this.bridgePushDiagAt.delete(deviceId);
     if (this.bridges.size === 0) this.stopBridgePushTimer();
   }
 
@@ -1731,6 +1773,7 @@ export class SendspinGroup {
     this.bridgeBulkPending.clear();
     this.bridgeBulkInFlight.clear();
     this.bridgeDiagLogAt.clear();
+    this.bridgePushDiagAt.clear();
     this.stopBridgePushTimer();
   }
 
