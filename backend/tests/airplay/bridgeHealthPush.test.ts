@@ -35,7 +35,7 @@ describe("推送链路（子进程侧）", () => {
   it("bridgeSession 有 sink 且在 tick 里上报 backlogMs", () => {
     const s = read("bridgeSession.ts");
     expect(s).toContain("export function setBridgeStatsSink");
-    expect(s).toContain("bridgeStatsSink?.({ deviceId: this.deviceId, inQueueMs: this.backlogMs() });");
+    expect(s).toContain("bridgeStatsSink?.({ deviceId: this.deviceId, inQueueMs: bridgeInQ });");
   });
 
   it("childMain 在构造函数内接线（send 在作用域内）", () => {

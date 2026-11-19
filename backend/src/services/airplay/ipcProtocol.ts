@@ -40,7 +40,12 @@ export type AirplayChildEvent =
   /** 桥水位上报(2026-11-19,低缓冲自愈用):与 tick 同频(2s/桥)。
    *  走 process.send 单向事件 —— `bridgeStatus` RPC 会因 supervisor.running 与真实
    *  状态不同步而误报「子进程未运行」(见 rendererHost/supervisor.ts:160)。 */
-  | { t: "bridgeStats"; deviceId: string; inQueueMs: number };
+  | { t: "bridgeStats"; deviceId: string; inQueueMs: number }
+  /** 请求加压指令(2026-11-19 指令式重构)：airplay 侧判断「桥缓冲被抽干」后发出，
+   *  主进程转给 sendspin 子进程，泵按 ms 把 pacing 墙钟基准前提、一次性多吐内容。
+   *  与 `bridgeStats` 的区别：后者只上报水位（诊断用），本事件是**动作请求** ——
+   *  判断留在发现者（airplay），执行权留给内容源头（sendspin）。 */
+  | { t: "bridgePaceBump"; deviceId: string; ms: number };
 
 // ------------------------- Phase 2:桥接 op 载荷(§6.2) -------------------------
 

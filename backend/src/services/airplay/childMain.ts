@@ -11,7 +11,7 @@
 //     与 native cast 互斥:cast 到桥占用设备直接拒绝,bridgePrepare 先停同设备 native 会话。
 import { ChildRpcHost } from "../rendererHost/childHost.js";
 import { AirplaySessionRuntime } from "./sessionRuntime.js";
-import { BridgeSessionManager, setBridgeStatsSink } from "./bridgeSession.js";
+import { BridgeSessionManager, setBridgeStatsSink, setPaceBumpSink } from "./bridgeSession.js";
 import { raopTeardownProbe } from "./raop.js";
 import { cleanupStaleBridgeSockets } from "./bridgeChannel.js";
 import type {
@@ -54,6 +54,13 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
         send({ t: "bridgeStats", deviceId: row.deviceId, inQueueMs: row.inQueueMs });
       } catch {
         /* 上报失败不影响推流 */
+      }
+    });
+    setPaceBumpSink((req) => {
+      try {
+        send({ t: "bridgePaceBump", deviceId: req.deviceId, ms: req.ms });
+      } catch {
+        /* 指令失败不影响推流 */
       }
     });
     // hooks 里的 onChanged 要回调到本控制器(触发快照),而 super() 之前还不能用 this

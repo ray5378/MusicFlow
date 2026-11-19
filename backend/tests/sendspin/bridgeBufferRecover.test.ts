@@ -1,64 +1,64 @@
-// 低缓冲自愈回归锁（2026-11-19）
+// 低缓冲自愈（指令式）回归锁（2026-11-19）
 //
-// 根因：设备侧一次网络波动把桥缓冲追发到 0 后，`deltaUs` 从 2.06 塌到 1.53（贴住墙钟）
-// ⇒ 系统再无「超前量」可攒回 ⇒ inQueueMs 长期 0~175、连续 6 次换代不恢复，只有重启
-// 容器重建会话才回到 5500。
+// 职责划分：**桥侧判断**（它才知道 inQueue 被抽干成什么样）→ 发「请加速 ms」指令
+// → 主进程转发 → **泵纯执行**（唯一能多产内容的一方，但它看不到设备侧水位）。
 //
-// 修法：`depthMs`（已推未播）跌破 3s 时，把 pacing 墙钟基准前提 2s ⇒ dueMs 提前 ⇒
-// 泵立即多吐 ~2s 内容（源已在内存，无 IO 压力）⇒ 缓冲深度与 deltaUs 一起回升。
-// 内容顺序与 ts 不变 ⇒ 设备侧连续、无静音。冷却 60s。
+// 历史：v1 `depthMs`（sendspin 侧推算，含 30s 未投递量，崩溃时仍 3.7s）、
+//       v2 `BridgeSource.queuedMs`（健康时本就小）、v3 RPC `bridgeStatus`（被
+//       supervisor.running 误拒）、v4 水位跨进程推送（sendspin 侧仍读不到）——
+//       四次都在真机证伪，最终落到「谁发现问题谁决策」。
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-const DIR = fileURLToPath(new URL("../../src/services/sendspin", import.meta.url));
-const src = fs.readFileSync(path.join(DIR, "streamEngine.ts"), "utf8");
+const SEND = fileURLToPath(new URL("../../src/services/sendspin", import.meta.url));
+const AIR = fileURLToPath(new URL("../../src/services/airplay", import.meta.url));
+const read = (dir: string, f: string) => fs.readFileSync(path.join(dir, f), "utf8");
 
-describe("低缓冲自愈", () => {
-  it("三个常量就位（阈值 3s / 前提 2s / 冷却 60s）", () => {
-    expect(src).toMatch(/export const BRIDGE_LOW_BUFFER_RECOVER_MS = 3_000;/);
-    expect(src).toMatch(/export const BRIDGE_PACE_BUMP_MS = 2_000;/);
-    expect(src).toMatch(/export const BRIDGE_PACE_BUMP_COOLDOWN_MS = 60_000;/);
+describe("桥侧判断（airplay）", () => {
+  it("判据与冷却都在桥侧，且持续 3s 才发指令", () => {
+    const s = read(AIR, "bridgeSession.ts");
+    expect(s).toContain("const BRIDGE_LOW_QUEUE_BUMP_MS = 2_000;");
+    expect(s).toContain("const BRIDGE_LOW_QUEUE_PERSIST_MS = 3_000;");
+    expect(s).toContain("const BRIDGE_PACE_BUMP_COOLDOWN_MS = 60_000;");
+    expect(s).toContain("paceBumpSink?.({ deviceId: this.deviceId, ms: BRIDGE_PACE_BUMP_MS });");
   });
 
-  it("有 lastPaceBumpAt 冷却字段", () => {
-    expect(src).toMatch(/private lastPaceBumpAt = 0;/);
+  it("发出指令时打一条可 grep 的日志", () => {
+    const s = read(AIR, "bridgeSession.ts");
+    expect(s).toContain('ev: "pace-bump-req"');
+  });
+});
+
+describe("转发（主进程）", () => {
+  it("supervisor 收到 bridgePaceBump 后转给 sendspinSupervisor", () => {
+    const s = read(AIR, "supervisor.ts");
+    expect(s).toContain('ev.t === "bridgePaceBump"');
+    expect(s).toContain('rpc("paceBump", { ms: ev.ms })');
+  });
+});
+
+describe("纯执行（sendspin）", () => {
+  it("childMain 有 paceBump handler，只转交不判断", () => {
+    const s = read(SEND, "childMain.ts");
+    expect(s).toContain('case "paceBump"');
+    expect(s).toContain("requestPaceBump(ms)");
   });
 
-  it("自愈动作是前提 paceAnchorWall（不是改 paceAnchorMs，避免进度错乱）", () => {
-    const i = src.indexOf("sendspin buffer-recover");
-    expect(i).toBeGreaterThanOrEqual(0);
-    const seg = src.slice(Math.max(0, i - 600), i);
-    expect(seg).toContain("this.paceAnchorWall -= BRIDGE_PACE_BUMP_MS;");
-    expect(seg).not.toContain("this.paceAnchorMs -=");
+  it("server 有 pendingPaceBumpMs 的存取", () => {
+    const s = read(SEND, "server.ts");
+    expect(s).toContain("private pendingPaceBumpMs = 0;");
+    expect(s).toContain("requestPaceBump(ms: number): void {");
+    expect(s).toContain("consumePaceBump(): number {");
   });
 
-  it("触发条件：桥侧 inQueueMs 偏低且过冷却", () => {
-    const i = src.indexOf("sendspin buffer-recover");
-    const seg = src.slice(Math.max(0, i - 1200), i);
-    // 判据来源：airplay 子进程主动推送的 bridgeStats 事件 → bridgeHealth.min()。
-    // 前两版（depthMs / BridgeSource.queuedMs）都在真机上被证伪。
-    expect(seg).toContain("bridgeInQ < BRIDGE_LOW_QUEUE_RECOVER_MS");
-    expect(seg).toContain("const bridgeInQ = bridgeHealthLocal.min()");
-    expect(seg).toContain("Date.now() - this.lastPaceBumpAt >= BRIDGE_PACE_BUMP_COOLDOWN_MS");
-  });
-
-  it("不再依赖 RPC 轮询（bridgeStatus 会误报子进程未运行）", () => {
-    expect(src).not.toContain('rpc<');
-    expect(src).not.toContain('"bridgeStatus"');
-    expect(src).toContain('from "./bridgeHealthLocal.js"');
-  });
-
-
-  it("桥队列判据常量 2000ms", () => {
-    expect(src).toMatch(/export const BRIDGE_LOW_QUEUE_RECOVER_MS = 2_000;/);
-  });
-
-  it("自愈位置在进度上报之后（本拍 cursorUs 已更新）", () => {
-    const report = src.indexOf("this.group.positionMs = this.audiblePositionMs(framePosMs, cursorUs, floorMs);");
-    const bump = src.indexOf("sendspin buffer-recover");
-    expect(report).toBeGreaterThanOrEqual(0);
-    expect(bump).toBeGreaterThan(report);
+  it("泵每拍取走并把 pacing 墙钟基准前提（不判断阈值/冷却）", () => {
+    const s = read(SEND, "streamEngine.ts");
+    expect(s).toContain("consumePaceBump?.()");
+    expect(s).toContain("this.paceAnchorWall -= bumpMs;");
+    // 判断侧的东西不该残留在泵里
+    expect(s).not.toContain("BRIDGE_LOW_QUEUE_RECOVER_MS");
+    expect(s).not.toContain("bridgeHealthLocal");
   });
 });

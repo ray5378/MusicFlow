@@ -20,7 +20,6 @@ import type {
   GroupMirrorMsg,
   PairRecordMirrorMsg,
 } from "./ipcProtocol.js";
-import { bridgeHealthLocal } from "./bridgeHealthLocal.js";
 import type { SendspinServer } from "./server.js";
 import {
   playCore,
@@ -111,10 +110,10 @@ export class SendspinChildController extends ChildRpcHost<SendspinChildToParent,
   private async dispatch(op: string, p: any): Promise<unknown> {
     const srv = this.deps.getServer();
     switch (op) {
-      case "bridgeHealth": {
-        // 主进程转发来的「最薄那座桥」的设备侧缓冲（低缓冲自愈的判据来源）。
-        const ms = Number((p as { minInQueueMs?: number } | undefined)?.minInQueueMs);
-        if (Number.isFinite(ms)) bridgeHealthLocal.record(ms);
+      case "paceBump": {
+        // 指令式：桥侧已判断「缓冲被抽干」，这里只把毫秒数交给泵执行。
+        const ms = Number((p as { ms?: number } | undefined)?.ms);
+        if (Number.isFinite(ms) && ms > 0) (srv as unknown as { requestPaceBump(m: number): void } | null)?.requestPaceBump(ms);
         return true;
       }
       case "setLogLevel": {

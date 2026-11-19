@@ -897,6 +897,22 @@ export class SendspinGroup {
     return min;
   }
 
+  /** 待消费的「加压」毫秒数（指令式：桥侧判断 → 主进程转发 → 泵执行）。
+   *  多个桥同时请求时累加；由泵在下一拍取走并清零。 */
+  private pendingPaceBumpMs = 0;
+
+  requestPaceBump(ms: number): void {
+    if (!Number.isFinite(ms) || ms <= 0) return;
+    this.pendingPaceBumpMs += Math.round(ms);
+  }
+
+  /** 取走并清零（泵每拍调用一次）。 */
+  consumePaceBump(): number {
+    const v = this.pendingPaceBumpMs;
+    this.pendingPaceBumpMs = 0;
+    return v;
+  }
+
   /** streamEngine 重锚钩子(§4.3 唯一落点,Phase 3 由 GroupPump 重锚分支调用):
    *  把新流代次推给全部桥 —— 桥清旧代次队列并发 BOUNDARY。
    *  `prefetched`(S1 2026-11-01):边界内容已由 `pushBridgePrefetch` 按连续 ts 预先

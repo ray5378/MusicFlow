@@ -2,6 +2,29 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.14.17] - 2026-11-19
+
+### Refactor / 低缓冲自愈改为「指令式」：判断留在桥侧，泵纯执行
+
+4.14.16 把桥水位跨两次进程传给 sendspin，让泵自己判 `inQueueMs < 2000` —— 泵根本看不到设备侧水位，为此要维护 6 秒过期的跨进程缓存、阈值与冷却。本次按「谁发现问题谁决策」重构：
+
+| | 4.14.16 | 4.14.17 |
+|---|---|---|
+| 判据位置 | sendspin（转发来的水位） | **airplay 桥侧**（真实水位持有者） |
+| 跨进程传递 | 水位数值 + 6s 过期缓存 | **一条「请加速 ms」指令** |
+| 判断参数 | 泵内 `threshold + cooldown` | 桥内 `2s 阈值 + 持续 3s + 冷却 60s` |
+| 泵的职责 | 判断 + 执行 | **纯执行**（取走 `pendingPaceBumpMs` 并前提 `paceAnchorWall`） |
+
+- **airplay 侧**：`BridgeSession.tickStats` 里判 `inQueueMs < 2000`，**持续 3 秒**才发指令（避免瞬时抖动误判），冷却 60 秒；发出时打 `ev: "pace-bump-req"` 日志（含当时水位）。
+- **转发**：`ipcProtocol` 新增 `{ t: "bridgePaceBump"; deviceId; ms }`；`supervisor` 收到后动态 import `sendspinSupervisor` 转发（避免 airplay↔sendspin 静态循环依赖）。
+- **sendspin 侧**：`childMain` 的 `case "paceBump"` 只调 `srv.requestPaceBump(ms)`；`SendspinServer` 用 `pendingPaceBumpMs` 累加；泵每拍 `consumePaceBump()` 取走并 `paceAnchorWall -= ms`，打 `sendspin pace-bump ms=N` 日志。
+- **删除**：`sendspin/bridgeHealthLocal.ts`（泵侧不再需要水位缓存）与其测试；`streamEngine` 里的阈值常量、冷却字段、`bridgeHealthLocal` 判据全部移除。`airplay/bridgeHealth.ts` 与 `bridgeStats` 事件保留（诊断用）。
+- **验证（240）**：健康态（`inQueue 5525`）零触发、`delta 2.065` 正常；`tests/sendspin` + `tests/airplay` 共 **140 文件全绿**。
+
+### Test
+
+`bridgeBufferRecover.test.ts` 重写为指令式四段锁：桥侧判据与冷却、`pace-bump-req` 日志、主进程转发、泵纯执行（并断言泵内**不得**残留阈值/冷却/`bridgeHealthLocal`）。
+
 ## [4.14.16] - 2026-11-19
 
 ### Feature / 桥缓冲耗尽后的自动恢复（跨进程水位 + 泵加速）

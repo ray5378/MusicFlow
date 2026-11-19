@@ -71,6 +71,15 @@ class AirplaySupervisor extends RendererHostSupervisor<
           try { hooks.onSessionEnded?.(ev.deviceId, ev); } catch { /* 上报失败不拖垮桥 */ }
           return;
         }
+        if (ev.t === "bridgePaceBump") {
+          // 指令式：桥侧已判断「缓冲被抽干」，这里只做转发，sendspin 子进程纯执行。
+          void import("../sendspin/supervisor.js")
+            .then((m) => m.sendspinSupervisor.rpc("paceBump", { ms: ev.ms }))
+            .catch(() => {
+              /* sendspin 未起（无播放）：丢弃即可，桥侧下一次判断再来 */
+            });
+          return;
+        }
         if (ev.t === "bridgeStats") {
           bridgeHealth.record(ev.deviceId, ev.inQueueMs);
           // 转发给 sendspin 子进程（泵在那里，判据要用）：桥水位与泵分属两个子进程，

@@ -985,6 +985,10 @@ export interface BridgeSessionStats {
 
 export class BridgeSession {
   readonly deviceId: string;
+  /** 低缓冲持续起点(0 = 当前不低)。 */
+  private lowQueueSinceMs = 0;
+  /** 上次发出加压请求的时刻(冷却)。 */
+  private lastPaceBumpReqAt = 0;
   readonly token: string;
   readonly opts: BridgeSessionOpts;
   /** 输出采样率(raop/ap2-compat = 44100;48k 协商直通 = 48000)。 */
@@ -2104,9 +2108,34 @@ export class BridgeSession {
     const p95 = sorted.length > 0
       ? sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * 0.95) - 1))]
       : 0;
-    // 低缓冲自愈的权威判据(设备侧真实缓冲)：与 tick 同频上报，主进程汇总后
-    // 经 sendspinSupervisor 转发给 sendspin 子进程（泵在那里执行加速）。
-    bridgeStatsSink?.({ deviceId: this.deviceId, inQueueMs: this.backlogMs() });
+    // 低缓冲自愈(指令式):**判断留在桥侧**(只有它知道被抽干成什么样),发"请加速"指令,
+    // 主进程转发给 sendspin 子进程执行 —— 泵是唯一能多产内容的一方,但它看不到设备侧水位。
+    {
+      const bridgeInQ = this.backlogMs();
+      bridgeStatsSink?.({ deviceId: this.deviceId, inQueueMs: bridgeInQ });
+      const nowMs = Date.now();
+      if (bridgeInQ < BRIDGE_LOW_QUEUE_BUMP_MS) {
+        if (this.lowQueueSinceMs === 0) this.lowQueueSinceMs = nowMs;
+        if (
+          nowMs - this.lowQueueSinceMs >= BRIDGE_LOW_QUEUE_PERSIST_MS
+          && nowMs - this.lastPaceBumpReqAt >= BRIDGE_PACE_BUMP_COOLDOWN_MS
+        ) {
+          this.lastPaceBumpReqAt = nowMs;
+          this.lowQueueSinceMs = 0;
+          paceBumpSink?.({ deviceId: this.deviceId, ms: BRIDGE_PACE_BUMP_MS });
+          log.info(
+            `[airplay-bridge] ${JSON.stringify({
+              ev: "pace-bump-req",
+              dev: this.deviceId,
+              inQueueMs: Math.round(bridgeInQ),
+              ms: BRIDGE_PACE_BUMP_MS,
+            })}`,
+          );
+        }
+      } else {
+        this.lowQueueSinceMs = 0;
+      }
+    }
     log.info(`[airplay-bridge] ${JSON.stringify({
       ev: "tick",
       dev: this.deviceId,
@@ -2521,8 +2550,7 @@ export class BridgeSession {
     linkLoss: string | null;
     /** 因 sendAt 过久被丢弃的 AP2 块数(RAOP 恒 0)。 */
     ap2LateSkips: number;
-    /** 设备侧待播缓冲(ms) = inQueue + outBuf 折算，与 tick 日志同源(backlogMs)。
-     *  低缓冲自愈的权威判据：正常 5000~6000，被追发抽干时 0~175。 */
+    /** 设备侧待播缓冲(ms) = inQueue + outBuf 折算,与 tick 日志同源(backlogMs)。 */
     inQueueMs: number;
   } {
     return {
@@ -2547,13 +2575,27 @@ export class BridgeSession {
   }
 }
 
-/** 桥水位上报出口(子进程内模块级;由 childMain 在构造时接到 process.send)。 */
+/** 桥水位上报出口(诊断用;childMain 接到 process.send)。 */
 type BridgeStatsSink = (row: { deviceId: string; inQueueMs: number }) => void;
 let bridgeStatsSink: BridgeStatsSink | null = null;
+
+/** 加压请求出口(指令式):桥侧判断"缓冲被抽干"后发出,主进程转给 sendspin 子进程执行。 */
+type PaceBumpSink = (req: { deviceId: string; ms: number }) => void;
+let paceBumpSink: PaceBumpSink | null = null;
 
 export function setBridgeStatsSink(fn: BridgeStatsSink | null): void {
   bridgeStatsSink = fn;
 }
+
+export function setPaceBumpSink(fn: PaceBumpSink | null): void {
+  paceBumpSink = fn;
+}
+
+/** 桥缓冲判据(指令式,全部在 airplay 侧):跌破即计时,持续够久才发指令。 */
+const BRIDGE_LOW_QUEUE_BUMP_MS = 2_000;
+const BRIDGE_LOW_QUEUE_PERSIST_MS = 3_000;
+const BRIDGE_PACE_BUMP_MS = 2_000;
+const BRIDGE_PACE_BUMP_COOLDOWN_MS = 60_000;
 
 /** 子进程侧桥会话表(按 sessionToken 索引;同 deviceId 新 prepare 拆旧)。 */
 export class BridgeSessionManager {
