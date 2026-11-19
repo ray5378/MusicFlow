@@ -21,8 +21,18 @@ describe("桥侧判断（airplay）", () => {
     const s = read(AIR, "bridgeSession.ts");
     expect(s).toContain("const BRIDGE_LOW_QUEUE_BUMP_MS = 2_000;");
     expect(s).toContain("const BRIDGE_LOW_QUEUE_PERSIST_MS = 3_000;");
-    expect(s).toContain("const BRIDGE_PACE_BUMP_COOLDOWN_MS = 60_000;");
+    expect(s).toContain("const BRIDGE_PACE_BUMP_COOLDOWN_MS = 5_000;");
     expect(s).toContain("paceBumpSink?.({ deviceId: this.deviceId, ms: BRIDGE_PACE_BUMP_MS });");
+  });
+
+  it("节流：短冷却 5s + 连续补上限 3 次，恢复即清零", () => {
+    const s = read(AIR, "bridgeSession.ts");
+    expect(s).toContain("const BRIDGE_PACE_BUMP_COOLDOWN_MS = 5_000;");
+    expect(s).toContain("const BRIDGE_PACE_BUMP_MAX_STREAK = 3;");
+    expect(s).toContain("private paceBumpStreak = 0;");
+    expect(s).toContain("this.paceBumpStreak < BRIDGE_PACE_BUMP_MAX_STREAK");
+    // 恢复分支必须清零，否则一次低缓冲会永久消耗掉额度
+    expect(s).toContain("this.paceBumpStreak = 0;");
   });
 
   it("发出指令时打一条可 grep 的日志", () => {

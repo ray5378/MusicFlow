@@ -989,6 +989,8 @@ export class BridgeSession {
   private lowQueueSinceMs = 0;
   /** 上次发出加压请求的时刻(冷却)。 */
   private lastPaceBumpReqAt = 0;
+  /** 本轮低缓冲已连续补了几次(桥水位恢复即清零)。 */
+  private paceBumpStreak = 0;
   readonly token: string;
   readonly opts: BridgeSessionOpts;
   /** 输出采样率(raop/ap2-compat = 44100;48k 协商直通 = 48000)。 */
@@ -2119,9 +2121,11 @@ export class BridgeSession {
         if (
           nowMs - this.lowQueueSinceMs >= BRIDGE_LOW_QUEUE_PERSIST_MS
           && nowMs - this.lastPaceBumpReqAt >= BRIDGE_PACE_BUMP_COOLDOWN_MS
+          && this.paceBumpStreak < BRIDGE_PACE_BUMP_MAX_STREAK
         ) {
           this.lastPaceBumpReqAt = nowMs;
           this.lowQueueSinceMs = 0;
+          this.paceBumpStreak++;
           paceBumpSink?.({ deviceId: this.deviceId, ms: BRIDGE_PACE_BUMP_MS });
           log.info(
             `[airplay-bridge] ${JSON.stringify({
@@ -2129,11 +2133,14 @@ export class BridgeSession {
               dev: this.deviceId,
               inQueueMs: Math.round(bridgeInQ),
               ms: BRIDGE_PACE_BUMP_MS,
+              streak: this.paceBumpStreak,
             })}`,
           );
         }
       } else {
+        // 桥水位恢复正常：结束本轮，下次低缓冲重新获得 3 次补的额度。
         this.lowQueueSinceMs = 0;
+        this.paceBumpStreak = 0;
       }
     }
     log.info(`[airplay-bridge] ${JSON.stringify({
@@ -2595,7 +2602,11 @@ export function setPaceBumpSink(fn: PaceBumpSink | null): void {
 const BRIDGE_LOW_QUEUE_BUMP_MS = 2_000;
 const BRIDGE_LOW_QUEUE_PERSIST_MS = 3_000;
 const BRIDGE_PACE_BUMP_MS = 2_000;
-const BRIDGE_PACE_BUMP_COOLDOWN_MS = 60_000;
+const BRIDGE_PACE_BUMP_COOLDOWN_MS = 5_000;
+/** 连续补次数上限：每次补 BRIDGE_PACE_BUMP_MS(2s)，3 次 = 6s，远小于 PcmWindow
+ *  的 30s 上限 ⇒ 不会灌爆；桥水位恢复即清零，下一次低缓冲重新获得 3 次额度。
+ *  真喂不上（源本身慢）时靠这个上限停手，避免无限空转。 */
+const BRIDGE_PACE_BUMP_MAX_STREAK = 3;
 
 /** 子进程侧桥会话表(按 sessionToken 索引;同 deviceId 新 prepare 拆旧)。 */
 export class BridgeSessionManager {
