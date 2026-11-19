@@ -37,6 +37,7 @@ import { recordSendspinDebug, refreshSendspinDebugEnabled } from "./debugLog.js"
 import type { SendspinServer, SendspinGroup } from "./server.js";
 import { bridgeStartLeadUs, capEndDrainMs } from "../airplay/bridgeMath.js";
 import { ANCHOR_SAFE_LEAD_US } from "../airplay/rates.js";
+import { bridgeHealthLocal } from "./bridgeHealthLocal.js";
 import { createLogger } from "../../utils/logger.js";
 import { ap2TruncateMissingSec } from "../source/prefetchConfig.js";
 import { readBridgePrefetchConfig } from "./bridgePrefetchConfig.js";
@@ -191,6 +192,18 @@ export function nextTrackPrefetchEnabled(): boolean {
 /** 触发阈值(ms):本曲剩余 ≤ 5s 时开始预解码下一首(≤ bulk 6s 上限,保证边界前
  *  预取帧已在 ring 里)。 */
 export const BRIDGE_NEXT_PREFETCH_TRIGGER_MS = 5_000;
+
+/** 低缓冲自愈阈值（ms）：`depthMs`（已推未播）跌破它就认为缓冲被追发抽干。
+ *  正常稳态 5000~6000，恶化时 0~175，取 3000 作分界可避开头抖动。 */
+export const BRIDGE_LOW_BUFFER_RECOVER_MS = 3_000;
+/** 自愈时把 pacing 墙钟基准前提的量（ms）：泵立即多吐这么长内容。
+ *  2s 足以把 0 缓冲拉回 2s（deltaUs +2s），又不至于一次性灌太深。 */
+export const BRIDGE_PACE_BUMP_MS = 2_000;
+/** 自愈冷却（ms）：源真喂不上时不做无意义的反复加速。 */
+export const BRIDGE_PACE_BUMP_COOLDOWN_MS = 60_000;
+/** 自愈的桥队列判据（ms）：待发队列低于它就认为桥在追发、缓冲已被抽干。
+ *  正常稳态 5000~6000，崩溃时 0~175 ⇒ 取 2000 作分界。 */
+export const BRIDGE_LOW_QUEUE_RECOVER_MS = 2_000;
 /** 预取内容长度(ms):只解新曲前 3s —— 覆盖边界处解码空窗(实测 1~3s)即可,
  *  再长只是多占 ring 与内存。 */
 export const BRIDGE_NEXT_PREFETCH_CONTENT_MS = 3_000;
@@ -482,6 +495,8 @@ export class GroupPump {
    */
   private paceAnchorMs = 0;
   private paceAnchorWall = 0;
+  /** 上次「低缓冲自愈」加速的时刻（冷却用，避免供给真不足时反复空转）。 */
+  private lastPaceBumpAt = 0;
   /** seek 后需重建时间线锚点(timelineBaseUs / cursorUs)。
    *
    *  时间戳必须与墙钟同源(见 pushLoop 头部"第三次无声事故"注释)。seek 时:
@@ -1487,6 +1502,46 @@ export class GroupPump {
         //    而声音明明从头开始 —— 已推送量比实际听到的多出整整一个缓冲深度)。
         //  取帧仍用 playCursorMs(已推送),只有对外上报走可听位置。
         this.group.positionMs = this.audiblePositionMs(framePosMs, cursorUs, floorMs);
+        // ★ 低缓冲自愈（2026-11-19）：`depthMs` = 已推入时间线但还没播的时长，就是
+        //   整条链路的缓冲深度。设备侧一次网络波动会把缓冲追发到 0，之后 deltaUs 贴住
+        //   墙钟 ⇒ 永远没有超前量可攒回来（240 实测 inQueueMs 0~175 持续 30 分钟、
+        //   连续 6 次换代不恢复，只有重启容器才回到 5500）。
+        //   这里在缓冲跌破 3s 时把 pacing 墙钟基准**前提 2s**：dueMs 随之提前，泵立即
+        //   连续多吐 ~2s 内容（内容顺序与 ts 完全不变，只是一段提前到达）⇒ 缓冲深度与
+        //   deltaUs 一起回升。设备侧无感知（内容连续、无静音）；代价仅为这几秒解码
+        //   快于 1x，本地/预取命中场景无压力。冷却 60s，防止源真喂不上时反复空转。
+        {
+          const depthMs = (Number(cursorUs) - Number(nowUs())) / 1000;
+          // ⚠️ `depthMs` 只是「内容时间戳领先墙钟的量」，**不反映设备侧真实缓冲**：
+          //   240 实测桥 inQueueMs 已掉到 0、late 5516 时，depth 仍有 3.7s（自愈因此
+          //   0 次触发）。真正的判据是桥侧发送队列水位 —— 桥越追发，它越小。
+          // ⛔ `bridgeMinQueuedMs()` 判据已撤回（2026-11-19 14:20 实测）：BridgeSource 的
+          //   待发队列在**健康**状态下本来就很小（sendspin 现投现发，桥消费快），
+          //   实测 depth=14983ms（缓冲 15s、inQueue 5525）时它仍 < 2000 ⇒ 误触发加速。
+          //   真正需要的是**桥侧 inQueueMs**（设备侧真实缓冲），那在 airplay 子进程里，
+          //   当前没有回传通道 —— 加通道是下一步，不在本轮硬凑判据。
+          // 判据 = airplay 子进程回传的桥侧 inQueueMs（设备侧真实缓冲）：
+          //   `depthMs` 含 ring 里 30s 未投递量（崩溃时仍 3.7s，不触发）；
+          //   `queuedMs` 健康时本就小（15s 缓冲时误触发）。两者都已证伪。
+          // 判据 = 子进程推送的桥侧 inQueueMs（设备侧真实缓冲，bridgeHealth 汇总最薄那座）：
+          //   `depthMs` 含 ring 里 30s 未投递量（崩溃时仍 3.7s，不触发）；
+          //   `queuedMs` 健康时本就小（15s 缓冲时误触发）。两者都已证伪。
+          // 先快照再判定：min() 每次调用都会读到最新 record，两次取值可能不同
+          // （240 实测：判据用低值进入，日志却打成刚更新的 5525，排障时完全误导）。
+          const bridgeInQ = bridgeHealthLocal.min();
+          if (
+            bridgeInQ < BRIDGE_LOW_QUEUE_RECOVER_MS
+            && Date.now() - this.lastPaceBumpAt >= BRIDGE_PACE_BUMP_COOLDOWN_MS
+          ) {
+            this.lastPaceBumpAt = Date.now();
+            this.paceAnchorWall -= BRIDGE_PACE_BUMP_MS;
+            logSafe(
+              this.server,
+              "warn",
+              `sendspin buffer-recover bridgeInQueue=${Math.round(bridgeInQ)}ms depth=${Math.round(depthMs)}ms ⇒ 泵加速 ${BRIDGE_PACE_BUMP_MS}ms song=${this.songId}`,
+            );
+          }
+        }
         // 首次越过上报下界 ⇒ 已可听,解除 buffering(严格大于:等于 floor 时仍被钳位,不可分辨)。
         if (!this.group.audibleStarted && this.group.positionMs > floorMs) this.group.audibleStarted = true;
         // S1:曲末窗口内预解码下一首(开关关时立即返回,零开销)。

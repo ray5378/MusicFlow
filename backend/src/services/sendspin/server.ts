@@ -58,10 +58,19 @@ import type { BridgeBoundaryReason } from "../airplay/bridgeChannel.js";
 import type { BridgeSocketSpec } from "./bridgeAttach.js";
 import { BRIDGE_PCM_BYTES_PER_SEC, BRIDGE_QUEUE_HARD_CAP_MS, bridgeSyncGroupTimelineEnabled } from "../airplay/rates.js";
 
+/** keepTail 的旧尾最小可投存量（µs）：低于此值就当旧尾「太薄」，降级 bulk 重建缓冲。
+ *
+ *  240 实测（2026-11-19 12:29–12:55）：设备侧一次网络波动把缓冲抽干后，连续 6 次换代
+ *  的 `keptFrames` 只有 8634~16546（0.20~0.38s），`inQueueMs` 全程 0~175 —— 因为
+ *  keepTail 只看「预取就绪」，不看旧尾还剩多少，于是低缓冲被一代代继承，永不恢复。 */
+const BRIDGE_KEEP_TAIL_MIN_US = 1_000_000;
+
 /** 桥投递句柄(sendspin 侧对一座桥的最小接口)。
  *  BridgeMember 满足该接口;单测用桩实现(纯内存)。 */
 export interface SendspinBridgeHandle {
   readonly deviceId: string;
+  /** 待发队列深度(ms)。低缓冲自愈用:桥越追发该值越小(缺省 = 桩不提供)。 */
+  readonly queuedMs?: number;
   /** 入队一帧 48k s16le/2ch PCM(桥内部自带有界队列,立即返回)。 */
   pushAudio(pcm: Uint8Array, tsUs: bigint): void;
   /** 流代次变更:清旧代次队列并发 BOUNDARY(§4.4)。 */
@@ -866,6 +875,28 @@ export class SendspinGroup {
     return this.bridgeContentEpoch;
   }
 
+  /** 最近一次 `pushBridgePrefetch` 实际写入 ring 的帧数（2026-11-19 供给侧加固）。
+   *
+   *  该函数在 `bridges.size === 0 || pcm.length === 0` 时会**早退**，但仍返回
+   *  `nextEpoch`；上层据此把「预取就绪」传给 `notifyBridgeGeneration(prefetched=true)`，
+   *  于是 `keepTail` 保留旧尾却**不做 bulk 回填**。240 实测该路径下
+   *  `bridge-prefetch-drop frames=0` + `keptFrames=7250`（0.16s）⇒ 旧尾耗尽即断粮
+   *  （inQueue 3.3s → 0、late 涨到 27928、卡顿 4 分钟）。
+   *  记下真实写入量，供 keepTail 判定。 */
+  private lastPrefetchFrames = 0;
+
+  /** 全组桥待发队列的**最小值**(ms)。低缓冲自愈用它判断「系统是不是真的没料」:
+   *  桥在追发时队列会被迅速吃掉,最先空的那座就是瓶颈。
+   *  注:复用具名参数版本 `bridgeQueuedMs(b)`(该方法早已存在,本处只做聚合)。 */
+  bridgeMinQueuedMs(): number {
+    let min = Number.POSITIVE_INFINITY;
+    for (const b of this.bridges.values()) {
+      const q = this.bridgeQueuedMs(b);
+      if (Number.isFinite(q) && q < min) min = q;
+    }
+    return min;
+  }
+
   /** streamEngine 重锚钩子(§4.3 唯一落点,Phase 3 由 GroupPump 重锚分支调用):
    *  把新流代次推给全部桥 —— 桥清旧代次队列并发 BOUNDARY。
    *  `prefetched`(S1 2026-11-01):边界内容已由 `pushBridgePrefetch` 按连续 ts 预先
@@ -913,7 +944,45 @@ export class SendspinGroup {
     //   (ts ≤ 水位的帧已经投过,重投会在桥队列里重复)。
     //   只重打 prevEpoch 一代:更老的代次帧若一并复活,会把若干首歌之前的内容
     //   重新插进投递窗口(ring 按追加顺序扫,旧帧排在当前帧之前但 ts 可能更大)。
-    const keepTail = reason === "track" && prefetched === true && BRIDGE_TRACK_KEEP_QUEUE_ENABLED;
+    // 供给侧加固（2026-11-19）：`prefetched=true` 只表示泵侧有预取交接点，**不保证**
+    // 帧真的写进了 ring（`pushBridgePrefetch` 可能早退）。没有本代次新料时若仍 keep，
+    // 旧尾耗尽后就断粮（240 实测 keptFrames=7250 → inQueue 0 → late 27928）。
+    // 这种情况降级为 bulk 回填：宁可多灌 ~6s，也不留空窗。
+    let keepTail = reason === "track" && prefetched === true && BRIDGE_TRACK_KEEP_QUEUE_ENABLED;
+    if (keepTail && this.lastPrefetchFrames <= 0) {
+      keepTail = false;
+      this.server.log(
+        "warn",
+        `bridge-keep-degraded group=${this.name} gen=${generation} 预取未落 ring ⇒ 降级 bulk 回填`,
+      );
+    }
+    // 旧尾存量校验（2026-11-19）：keepTail 会把旧曲尾连同水位一起带进新代次，但**不做
+    // bulk 回填**。若旧尾本身只剩几百毫秒，换代后缓冲就被永久继承在低位 —— 240 实测
+    // 设备侧网络波动抽干缓冲后，连续 6 次换代 keptFrames 只有 0.20~0.38s、inQueueMs
+    // 一直 0~175，直到重启容器才恢复。这里改为：旧尾不足 1 秒就降级 bulk，让换代
+    // 重建 ~6s 缓冲（换代本就有交界，多灌料不引入额外停顿）。
+    if (keepTail) {
+      const ring = this.ringFor(this.encoderKey("pcm", 100));
+      let minOldUs = Number.MAX_SAFE_INTEGER;
+      for (const deviceId of this.bridges.keys()) {
+        const wm = this.bridgeWatermarks.get(deviceId) ?? 0n;
+        let sum = 0n;
+        for (const e of ring) {
+          if (e.ep !== prevEpoch) continue;
+          if (wm !== 0n && e.tsUs <= wm) continue; // 已投过的不算
+          sum += BigInt(e.durUs);
+        }
+        const us = Number(sum);
+        if (us < minOldUs) minOldUs = us;
+      }
+      if (minOldUs < BRIDGE_KEEP_TAIL_MIN_US) {
+        keepTail = false;
+        this.server.log(
+          "warn",
+          `bridge-keep-thin group=${this.name} gen=${generation} oldTailUs=${minOldUs} < ${BRIDGE_KEEP_TAIL_MIN_US} ⇒ 降级 bulk 重建缓冲`,
+        );
+      }
+    }
     if (keepTail) {
       for (const ring of this.recentByGroup.values()) {
         for (const e of ring) if (e.ep === prevEpoch) e.ep = this.bridgeContentEpoch;
@@ -1315,6 +1384,13 @@ export class SendspinGroup {
     const nextEpoch = this.bridgeContentEpoch + 1;
     let ts = startTsUs;
     if (this.bridges.size === 0 || pcm.length === 0) {
+      // 早退 = 帧根本没进 ring。上层仍会拿到 nextEpoch 并当作「预取就绪」，
+      // 必须让 keepTail 知道这件事（否则保留旧尾却不回填 ⇒ 断粮）。
+      this.lastPrefetchFrames = 0;
+      this.server.log(
+        "warn",
+        `bridge-prefetch-skip group=${this.name} bridges=${this.bridges.size} pcm=${pcm.length} (预取未落 ring)`,
+      );
       return { nextEpoch, endTsUs: startTsUs };
     }
     const ring = this.ringFor(this.encoderKey("pcm", 100));
@@ -1334,6 +1410,7 @@ export class SendspinGroup {
       ring.push({ tsUs: ts, durUs, data: buf, ep: nextEpoch });
       ts += BigInt(durUs);
     }
+    this.lastPrefetchFrames = ring.length > 0 ? Math.ceil(pcm.length / perFrame) : 0;
     this.ensureBridgePushTimer();
     return { nextEpoch, endTsUs: ts };
   }

@@ -20,6 +20,7 @@ import type {
   GroupMirrorMsg,
   PairRecordMirrorMsg,
 } from "./ipcProtocol.js";
+import { bridgeHealthLocal } from "./bridgeHealthLocal.js";
 import type { SendspinServer } from "./server.js";
 import {
   playCore,
@@ -110,6 +111,12 @@ export class SendspinChildController extends ChildRpcHost<SendspinChildToParent,
   private async dispatch(op: string, p: any): Promise<unknown> {
     const srv = this.deps.getServer();
     switch (op) {
+      case "bridgeHealth": {
+        // 主进程转发来的「最薄那座桥」的设备侧缓冲（低缓冲自愈的判据来源）。
+        const ms = Number((p as { minInQueueMs?: number } | undefined)?.minInQueueMs);
+        if (Number.isFinite(ms)) bridgeHealthLocal.record(ms);
+        return true;
+      }
       case "setLogLevel": {
         // 运行期日志等级下发(2026-09-21)。子进程 stdio inherit,日志与主进程同汇
         // docker logs,但它有**独立的 logger 实例**:LOG_LEVEL 只在 fork 时读一次 env,

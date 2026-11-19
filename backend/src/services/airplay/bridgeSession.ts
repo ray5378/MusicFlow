@@ -2104,6 +2104,9 @@ export class BridgeSession {
     const p95 = sorted.length > 0
       ? sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * 0.95) - 1))]
       : 0;
+    // 低缓冲自愈的权威判据(设备侧真实缓冲)：与 tick 同频上报，主进程汇总后
+    // 经 sendspinSupervisor 转发给 sendspin 子进程（泵在那里执行加速）。
+    bridgeStatsSink?.({ deviceId: this.deviceId, inQueueMs: this.backlogMs() });
     log.info(`[airplay-bridge] ${JSON.stringify({
       ev: "tick",
       dev: this.deviceId,
@@ -2518,6 +2521,9 @@ export class BridgeSession {
     linkLoss: string | null;
     /** 因 sendAt 过久被丢弃的 AP2 块数(RAOP 恒 0)。 */
     ap2LateSkips: number;
+    /** 设备侧待播缓冲(ms) = inQueue + outBuf 折算，与 tick 日志同源(backlogMs)。
+     *  低缓冲自愈的权威判据：正常 5000~6000，被追发抽干时 0~175。 */
+    inQueueMs: number;
   } {
     return {
       deviceId: this.deviceId,
@@ -2536,8 +2542,17 @@ export class BridgeSession {
       degraded: this.ap2LinkLoss !== null || this.ap2Session?.currentState === "error",
       linkLoss: this.ap2LinkLoss,
       ap2LateSkips: this.ap2LateSkips,
+      inQueueMs: this.backlogMs(),
     };
   }
+}
+
+/** 桥水位上报出口(子进程内模块级;由 childMain 在构造时接到 process.send)。 */
+type BridgeStatsSink = (row: { deviceId: string; inQueueMs: number }) => void;
+let bridgeStatsSink: BridgeStatsSink | null = null;
+
+export function setBridgeStatsSink(fn: BridgeStatsSink | null): void {
+  bridgeStatsSink = fn;
 }
 
 /** 子进程侧桥会话表(按 sessionToken 索引;同 deviceId 新 prepare 拆旧)。 */

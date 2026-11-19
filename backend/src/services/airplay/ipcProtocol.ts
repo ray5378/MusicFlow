@@ -36,7 +36,11 @@ export interface AirplayReadyInfo {
 export type AirplayChildEvent =
   | ({ t: "sessionEnded"; deviceId: string } & AirplaySessionEndInfo)
   /** 停播空闲回收:子进程连续 afterMs 无会话/无桥 → 主进程停掉它(下次投屏懒启动)。 */
-  | { t: "idleReclaim"; idleMs: number };
+  | { t: "idleReclaim"; idleMs: number }
+  /** 桥水位上报(2026-11-19,低缓冲自愈用):与 tick 同频(2s/桥)。
+   *  走 process.send 单向事件 —— `bridgeStatus` RPC 会因 supervisor.running 与真实
+   *  状态不同步而误报「子进程未运行」(见 rendererHost/supervisor.ts:160)。 */
+  | { t: "bridgeStats"; deviceId: string; inQueueMs: number };
 
 // ------------------------- Phase 2:桥接 op 载荷(§6.2) -------------------------
 

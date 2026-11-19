@@ -229,6 +229,11 @@ export class BridgeMember {
     this.sendHeartbeat();
   }
 
+  /** 待发队列深度（ms）：桥消费越快该值越小，供低缓冲自愈判断「系统无料」。 */
+  get queuedMs(): number {
+    return this.source.queuedMs;
+  }
+
   get paused(): boolean {
     return this.pausedForBridge;
   }

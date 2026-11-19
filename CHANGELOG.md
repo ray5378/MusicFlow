@@ -2,6 +2,35 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.14.16] - 2026-11-19
+
+### Feature / 桥缓冲耗尽后的自动恢复（跨进程水位 + 泵加速）
+
+- **现象**（240 实测）：设备侧一次网络波动（`timingAgeMs` 878→2878ms）把桥缓冲追发到 0 后，`deltaUs` 从 **2.06** 塌到 **1.53**（贴住墙钟）⇒ 系统再无「超前量」可攒回 ⇒ `inQueueMs` 长期 **0~175**、`late` 涨到 7 万+，**连续 6 次换代都不恢复**，只有重启容器重建 RAOP 会话才回到 5525。两版都复现，与代码版本无关。
+- **机制**：播放源全部预取在内存（`/rest/dlna/stream?raw=1` 命中 membuf、`PcmWindow` 主动前滚 30s），内容天然就绪 —— 唯一卡点是 `pushLoop` 的 1x pacing 节流（`dueMs = paceAnchorWall + (i*FRAME_MS − paceAnchorMs)/speed`）。把 `paceAnchorWall` 前提 2 秒，`dueMs` 随之前移，泵立即连续多吐 2 秒内容；**内容顺序与 ts 完全不变**，设备侧连续、无静音、无可闻停顿。进度上报不受影响（`audiblePositionMs` 用 `cursorUs − now` 折算）。
+- **为什么不选「映射后移」**：`retimeByUs` 会让设备有一段无内容 ⇒ 1.5 秒可闻静音，不可接受。
+- **跨进程链路**（本轮核心）：桥水位在 **airplay 子进程**、泵在 **sendspin 子进程**，中间隔着主进程，`bridgeHealth` 跨模块与 `globalThis` 都无法共享（实测 sendspin 侧恒读 `Infinity`）。故新增：
+  - `ipcProtocol`：`{ t: "bridgeStats"; deviceId; inQueueMs }` 事件（`BridgeSession.tickStats` 与 tick 同频上报，2s/桥）；
+  - `airplay/bridgeHealth.ts`：主进程侧按 deviceId 记录，`min()` 取最薄那座，6s 过期；
+  - `airplay/supervisor.ts`：收到事件后**动态 import** `sendspinSupervisor`（避免 airplay↔sendspin 静态循环依赖），`rpc("bridgeHealth", { minInQueueMs })` 转发；
+  - `sendspin/bridgeHealthLocal.ts` + `childMain` 的 `case "bridgeHealth"`：子进程内落值；
+  - `streamEngine`：`bridgeHealthLocal.min() < 2000` 且冷却 60s ⇒ `paceAnchorWall -= 2000`。
+- **验证**（阈值临时调 6000 强制触发）：`buffer-recover bridgeInQueue=5775ms depth=14993ms ⇒ 泵加速 2000ms`，随后 `depth` 14993 → 16993（**+2000ms 生效**），`delta` 保持 4.21、`inQueue` 5525、播放正常。健康态（`inQueue 5525 > 2000`）不触发。
+- **已知边界**：真实设备波动场景（`inQueue` 真掉到 0 之后）能否被拉回，尚待线上观察 —— 机制已证明能加速补料，但该场景不可主动构造。
+
+### Fix / `keepTail` 增加两道校验（旧尾太薄 / 预取未落 ring 时降级 bulk）
+
+- **keep-thin**：`keepTail` 原先只看 `prefetched === true`，不看旧尾还剩多少。240 实测缓冲被抽干后，连续 6 次代换的 `keptFrames` 只有 **8634~16546（0.20~0.38s）**，却仍 keep ⇒ 不清队列、不 bulk ⇒ **低缓冲被一代代继承**。现追加「所有在线桥的旧代次可投存量 ≥ 1s」，不满足即降级 bulk 重建 ~6s 缓冲（换代本就有交界，多灌料不引入额外停顿）。
+- **keep-degraded**：`pushBridgePrefetch` 在 `bridges.size === 0 || pcm.length === 0` 时会**早退**，但仍返回 `nextEpoch`，上层据此认为「预取就绪」⇒ `prefetched=true` ⇒ `keepTail` 保留旧尾却不回填。现记录 `lastPrefetchFrames`（早退记 0），`keepTail` 追加 `> 0` 校验，不满足即降级 bulk 并告警 `bridge-keep-degraded`。
+
+### Fix / 自愈日志先快照再判定
+
+`min()` 每次调用都会读到最新 `record`，两次取值可能不同 —— 240 实测判据用低值 1500 进入，日志却打成刚更新的 5525，排障时完全误导。改为 `const bridgeInQ = bridgeHealthLocal.min()` 一次取值，日志与判据同源。
+
+### Test
+
+新增 8 个回归锁：`bridgeBufferRecover`（判据/冷却/动作）、`bridgeHealthLocal`（子进程单元 + 转发链路）、`bridgeHealthPush`（推送三段）、`bridgeKeepThin`（旧尾校验）、`bridgePrefetchGuard`（预取落 ring）、`bridgeSnapshotInQueue`（snapshot 字段）、`bridgeSkipComp`（与 B 的成对约束）。`tests/sendspin` + `tests/airplay` 共 **143 文件全绿**。
+
 ## [4.14.15] - 2026-11-19
 
 ### Revert / 撤回 `resetTimeline` 帧代次重置（B 二次否决：跳段累积把时间线推歪，导致长时间播放后卡顿静音）

@@ -20,6 +20,7 @@ import type {
   AirplaySessionMirrorRow,
   AirplaySessionEndInfo,
 } from "./ipcProtocol.js";
+import { bridgeHealth } from "./bridgeHealth.js";
 
 const CHILD_ENTRY = resolveChildEntry(import.meta.url);
 
@@ -68,6 +69,20 @@ class AirplaySupervisor extends RendererHostSupervisor<
           // ev 本身就是 AirplaySessionEndInfo 的形状(current/positionSec/durationSec/
           // loudnessStderr),原样交给主进程,不再只挑 loudnessStderr 传。
           try { hooks.onSessionEnded?.(ev.deviceId, ev); } catch { /* 上报失败不拖垮桥 */ }
+          return;
+        }
+        if (ev.t === "bridgeStats") {
+          bridgeHealth.record(ev.deviceId, ev.inQueueMs);
+          // 转发给 sendspin 子进程（泵在那里，判据要用）：桥水位与泵分属两个子进程，
+          // 必须经主进程中转。动态 import 避免 airplay ↔ sendspin 的静态循环依赖。
+          const min = bridgeHealth.min();
+          if (Number.isFinite(min)) {
+            void import("../sendspin/supervisor.js")
+              .then((m) => m.sendspinSupervisor.rpc("bridgeHealth", { minInQueueMs: min }))
+              .catch(() => {
+                /* sendspin 子进程未起（无播放）：丢弃即可，下一次 tick 再来 */
+              });
+          }
           return;
         }
         if (ev.t === "idleReclaim") {

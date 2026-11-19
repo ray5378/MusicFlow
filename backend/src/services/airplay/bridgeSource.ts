@@ -215,7 +215,9 @@ export class BridgeSource {
   }
 
   /** 当前排队毫秒数(48k/s16le/2ch = 192000B/s 口径,MIN-05)。 */
-  private get queuedMs(): number {
+  /** 待发队列深度（ms）——2026-11-19 起公开：低缓冲自愈需要它作为「系统无料」的判据。
+   *  桥消费越快（追发/缓冲耗尽）该值越小。 */
+  get queuedMs(): number {
     return (this.queuedBytes / BRIDGE_PCM_BYTES_PER_SEC) * 1000;
   }
 
