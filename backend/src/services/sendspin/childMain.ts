@@ -20,6 +20,7 @@ import type {
   GroupMirrorMsg,
   PairRecordMirrorMsg,
 } from "./ipcProtocol.js";
+import { paceBumpBus } from "./paceBumpBus.js";
 import type { SendspinServer } from "./server.js";
 import {
   playCore,
@@ -111,9 +112,9 @@ export class SendspinChildController extends ChildRpcHost<SendspinChildToParent,
     const srv = this.deps.getServer();
     switch (op) {
       case "paceBump": {
-        // 指令式：桥侧已判断「缓冲被抽干」，这里只把毫秒数交给泵执行。
+        // 走进程内全局总线（见 paceBumpBus 注释：实例方法在 server 重建后失效）
         const ms = Number((p as { ms?: number } | undefined)?.ms);
-        if (Number.isFinite(ms) && ms > 0) (srv as unknown as { requestPaceBump(m: number): void } | null)?.requestPaceBump(ms);
+        if (Number.isFinite(ms) && ms > 0) paceBumpBus.add(ms);
         return true;
       }
       case "setLogLevel": {

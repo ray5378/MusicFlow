@@ -2,6 +2,37 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.14.20] - 2026-11-19
+
+### Fix / 加压指令「发了但泵不执行」：改走 sendspin 子进程内全局总线
+
+4.14.17~19 的指令式加压在真机上**完全没生效**，但现场是一片寂静 —— 桥侧判断正确（`inQueue=25`、连续 3 次），转发侧 `.catch` 静默吞掉了异常。加日志后才看到真相：
+
+```
+[probe-A] sendspin child 收到 paceBump ms=2000 srv=true      ← 子进程收到了
+[probe-B] （空）                                               ← 但没调用到
+WARN pace-bump 转发失败: srv?.requestPaceBump is not a function
+```
+
+**根因**：`requestPaceBump` 被加在 `SendspinGroup` 类上，而 `deps.getServer()` 返回的是 `SendspinServer`。更麻烦的是同一版代码下 **15 次指令里 5 次成功、14 次报 `is not a function`** —— 说明 `getServer()` 在不同时机返回的对象并不一致（server 会重建），**把方法挂在任何类实例上都不可靠**。
+
+改为**进程内全局总线**（`globalThis.__mf_paceBumpBus_v1`）：
+
+```
+childMain: case "paceBump" → paceBumpBus.add(ms)
+streamEngine: 每拍 paceBumpBus.take() → paceAnchorWall -= ms
+```
+
+同一子进程内所有模块共享 `globalThis`，不依赖任何实例类型，也不受 server 重建影响。
+
+- 删除 `SendspinServer.requestPaceBump/consumePaceBump/pendingPaceBumpMs`（方法不可靠，避免误用）。
+- 新增 `backend/src/services/sendspin/paceBumpBus.ts`。
+- **验证（240）**：修复前 15 次指令 / 5 次执行；修复后 **2 次指令 / 2 次执行（100%）**，`inQueue 5525`、`delta 2.06` 正常。
+
+### Chore / 日志分级
+
+加压转发日志从 `console.log` 改为内置 logger：成功 `debug`（`LOG_LEVEL=debug` 开）、失败 `warn`（常驻）。
+
 ## [4.14.19] - 2026-11-19
 
 ### Refactor / 加压节流：固定「连续 3 次」→ 设备缓冲天花板 8 秒（借自 MA）

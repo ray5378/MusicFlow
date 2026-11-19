@@ -30,6 +30,7 @@ import {
   PREFILL_BUFFER_MAX_MS,
   PREFILL_BUFFER_MIN_MS,
 } from "./constants.js";
+import { paceBumpBus } from "./paceBumpBus.js";
 import { SAMPLE_RATE, CHANNELS } from "./encoding.js";
 import { nowUs } from "./clock.js";
 import { PcmWindow, WindowEvictedError, WINDOW_HIGH_SEC, type WindowSource } from "./streamSource.js";
@@ -1500,7 +1501,7 @@ export class GroupPump {
         // 把 pacing 墙钟基准前提 N 毫秒，dueMs 随之前移，泵立即多吐 N 毫秒内容
         // （内容顺序与 ts 不变，设备侧连续无感）。判断/冷却/阈值全在 airplay 侧。
         {
-          const bumpMs = (this.server as unknown as { consumePaceBump?(): number }).consumePaceBump?.() ?? 0;
+          const bumpMs = paceBumpBus.take();
           if (bumpMs > 0) {
             this.paceAnchorWall -= bumpMs;
             logSafe(
