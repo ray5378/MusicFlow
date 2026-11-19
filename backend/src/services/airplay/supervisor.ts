@@ -13,6 +13,7 @@
 //
 // 开关见 mode.ts:20 `defaultFork: true`(默认 fork;MUSICFLOW_AIRPLAY_INPROC=1 才回落 in-proc)。
 import { RendererHostSupervisor, resolveChildEntry } from "../rendererHost/index.js";
+import { createLogger } from "../../utils/logger.js";
 import type {
   AirplaySnapshot,
   AirplayReadyInfo,
@@ -39,6 +40,9 @@ export interface AirplayHostHooks {
   /** 停播空闲回收:子进程连续 N 分钟无 native/桥会话 → 主进程停掉它(下次投屏懒启动)。 */
   onIdleReclaim?: (idleMs: number) => void;
 }
+
+/** 本模块日志（与基类私有 log 分离：基类 log 不可见）。 */
+const log = createLogger("airplay-supervisor");
 
 class AirplaySupervisor extends RendererHostSupervisor<
   AirplayMirror,
@@ -73,10 +77,21 @@ class AirplaySupervisor extends RendererHostSupervisor<
         }
         if (ev.t === "bridgePaceBump") {
           // 指令式：桥侧已判断「缓冲被抽干」，这里只做转发，sendspin 子进程纯执行。
+          // 失败必须留痕 —— 240 实测曾因静默 catch 导致「指令发了 3 次、泵一次没执行」，
+          // 现场完全看不出断在哪（rendererHost/supervisor.ts 的 running 标志问题同样会
+          // 让 rpc 直接 reject）。
           void import("../sendspin/supervisor.js")
             .then((m) => m.sendspinSupervisor.rpc("paceBump", { ms: ev.ms }))
-            .catch(() => {
-              /* sendspin 未起（无播放）：丢弃即可，桥侧下一次判断再来 */
+            .then(() => {
+              // 常规路径：debug 级（需要时 LOG_LEVEL=debug 打开）
+              log.debug(`[airplay] pace-bump 已转发 ms=${ev.ms}`);
+            })
+            .catch((e: unknown) => {
+              // 异常路径：warn 级常驻 —— 240 实测曾因静默 catch 导致
+              // 「指令发了 3 次、泵一次没执行」而现场完全看不出断点。
+              log.warn(
+                `[airplay] pace-bump 转发失败 ms=${ev.ms}: ${(e as Error)?.message ?? String(e)}`,
+              );
             });
           return;
         }
