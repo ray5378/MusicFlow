@@ -989,6 +989,9 @@ export class BridgeSession {
   private lowQueueSinceMs = 0;
   /** 上次发出加压请求的时刻(冷却)。 */
   private lastPaceBumpReqAt = 0;
+  /** 换代窗口（见 BRIDGE_POST_GEN_LOW_MS）：generation 一变即重开。 */
+  private postGenWindowGen = -1;
+  private postGenWindowUntilMs = 0;
   readonly token: string;
   readonly opts: BridgeSessionOpts;
   /** 输出采样率(raop/ap2-compat = 44100;48k 协商直通 = 48000)。 */
@@ -2134,7 +2137,18 @@ export class BridgeSession {
       //   （inQueueMs=0 roomMs=8000），sendspin 侧再判 deliverableMs=0「真缺料」放行，
       //   泵被无限加速 —— 与 2026-11-19 18:42 连补 287 次同款。设备上电后内容轴已超前
       //   几十秒，只会溢出/追发。判据必须是"有真实消费者"：anchorUs 非空才算在流。
-      if (bridgeInQ < BRIDGE_LOW_QUEUE_BUMP_MS && this.anchorUs !== null) {
+      // 换代补足窗口：gen 一变就重开 20s；窗口内阈值 4s（见 BRIDGE_POST_GEN_LOW_MS）。
+      const genNow = this.generation;
+      if (genNow !== this.postGenWindowGen) {
+        this.postGenWindowGen = genNow;
+        this.postGenWindowUntilMs = nowMs + BRIDGE_POST_GEN_WINDOW_MS;
+      }
+      const inPostGenWindow = nowMs < this.postGenWindowUntilMs;
+      const lowThresholdMs = inPostGenWindow
+        ? Math.max(BRIDGE_POST_GEN_LOW_MS, BRIDGE_LOW_QUEUE_BUMP_MS)
+        : BRIDGE_LOW_QUEUE_BUMP_MS;
+
+      if (bridgeInQ < lowThresholdMs && this.anchorUs !== null) {
         if (this.lowQueueSinceMs === 0) this.lowQueueSinceMs = nowMs;
         if (
           nowMs - this.lowQueueSinceMs >= BRIDGE_LOW_QUEUE_PERSIST_MS
@@ -2151,6 +2165,8 @@ export class BridgeSession {
               inQueueMs: Math.round(bridgeInQ),
               ms: BRIDGE_PACE_BUMP_MS,
               roomMs: BRIDGE_DEVICE_BUFFER_MAX_MS - Math.round(bridgeInQ),
+              genWindow: inPostGenWindow,
+              thrMs: lowThresholdMs,
             })}`,
           );
         }
@@ -2649,6 +2665,20 @@ export function setPaceBumpSink(fn: PaceBumpSink | null): void {
 /** 桥缓冲判据(指令式,全部在 airplay 侧):跌破即计时,持续够久才发指令。 */
 const BRIDGE_LOW_QUEUE_BUMP_MS = 2_000;
 const BRIDGE_LOW_QUEUE_PERSIST_MS = 3_000;
+
+/** 换代补足阈值/窗口（2026-11-20）。
+ *
+ *  换代时投递会停顿：新代次首帧被窗口上界挡住（240 实测 16:06 那拍 n=0 ——
+ *  `hiEff=4473103375` 比 `timeline base=4473253375` 低 150ms），叠加结构性缺口
+ *  （`realign insert=387ms`）；而投递速率恒 1x，**停顿是净损失、永不补回**。
+ *  现场：inQueue 7.0s → 2.7s、delta +1.54 → -1.15，之后卡在坏稳态
+ *  （late 693、秒级断续），只能重启。
+ *
+ *  所以换代后开一个窗口，把「报饿」阈值临时放宽到 4s：健康换代 inQueue 是 5.5~7s，
+ *  不会误报；只有"换代把缓冲打低"才报。请求仍由 sendspin 侧既有准入判据裁决 ——
+ *  `deliverable >= 8s` ⇒ bulk 重建 6s（Fix G），`< 8s` ⇒ 继续放行泵加速。 */
+const BRIDGE_POST_GEN_LOW_MS = 4_000;
+const BRIDGE_POST_GEN_WINDOW_MS = 20_000;
 const BRIDGE_PACE_BUMP_MS = 2_000;
 const BRIDGE_PACE_BUMP_COOLDOWN_MS = 5_000;
 /** 设备侧缓冲天花板（ms）—— 借自 MA `sendspin_bridge.py` 的 `MAX_DEVICE_BUFFER_SECONDS

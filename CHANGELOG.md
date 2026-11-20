@@ -2,6 +2,43 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.14.27] - 2026-11-20
+
+### Fix / 换代把缓冲打低后，不再卡在「2.7 秒 + delta 负」的坏稳态
+
+15:06 现场：换代后 `inQueueMs` 7000→2725、`deltaUs` +1.54→**−1.15**、`late` 693、
+`realigned` 11 次，听感是持续的秒级断续，只有重启能恢复。
+
+根因是换代时投递停顿，而投递速率恒 1x ⇒ **停顿是净损失、永不补回**：
+
+```
+timeline base=4473253375   对比那拍 hiEff=4473103375  → 新代次首帧高 150ms，n=0
+realign insert=387ms                                   → 结构性缺口
+diag 水位：20 秒墙钟只前进 14.35 秒                     → 少投 5.65 秒
+```
+
+于是 `inQueue` 从 7.0 掉到 2.7、`delta` 转负（已写入内容的时间戳过期 ⇒ 设备收到即播 ⇒
+消费完即欠载）。而低缓冲自愈门槛是 `inQueue < 2000`、Fix G 又要求「有加压请求」——
+两者都够不到，于是停在坏稳态。
+
+修法：**换代后开 20 秒窗口**（`generation` 一变即重开），窗口内把报饿阈值从 2000
+放宽到 **4000**，触发一次请求；动作仍由 sendspin 侧既有准入判据决定
+（`deliverable ≥ 8s` ⇒ bulk 重建 6 秒，否则继续放行泵加速）。
+健康换代 `inQueue` 是 5.5~7 秒，不会误报。请求日志新增 `genWindow` / `thrMs` 区分成因。
+
+验证：
+
+- 健康换代（`continuity=1`）：`genWindow` 0 次、bulk 0 次、`inQueue 5475`、
+  `delta +2.064`、`realign` 0 次、diag 水位每 10 秒前进 10 秒；
+- 强制链路（窗口阈值临时 6000，`inQueue 5525 < 6000` 必中）：
+  `pace-bump-req genWindow:true thrMs=6000` → `bridge-push-bulk-rebuild deliverableMs=8250`
+  → `bridge-bulk durUs=6000000` → `inQueue 5525→11300`；
+- `tests/airplay + tests/sendspin` **141 文件全过**（新增 3 条锁，含反向锁
+  `not.toContain("if (bridgeInQ < BRIDGE_LOW_QUEUE_BUMP_MS && this.anchorUs !== null) {")`）。
+
+边界：不消除换代停顿本身（那是窗口挡一拍 + 结构性缺口，属于同一套时间线机制），
+只保证停顿之后能把缓冲补回来，不再卡死在 2.7 秒。
+
 ## [4.14.26] - 2026-11-20
 
 ### Fix / 自我重启接口的错误体走统一契约（修 CI 红）

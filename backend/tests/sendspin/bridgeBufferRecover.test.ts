@@ -144,8 +144,33 @@ describe("纯执行（sendspin）", () => {
 describe("报饿门控：设备未接流时不得报饿（2026-11-20 断电实测）", () => {
   it("★判据必须要求 anchorUs 非空 —— 否则 listening/离线时 inQueue 恒 0 会被当成\"饿\"无限加速", () => {
     const s = read(AIR, "bridgeSession.ts");
-    expect(s).toContain("bridgeInQ < BRIDGE_LOW_QUEUE_BUMP_MS && this.anchorUs !== null");
+    expect(s).toContain("bridgeInQ < lowThresholdMs && this.anchorUs !== null");
     // 反向锁：不允许存在"只看水位就报饿"的形态
     expect(s).not.toContain("if (bridgeInQ < BRIDGE_LOW_QUEUE_BUMP_MS) {");
+  });
+});
+
+describe("换代补足：换代把缓冲打低时放宽报饿阈值（2026-11-20 实测 7.0s→2.7s）", () => {
+  it("★gen 变化即重开 20s 窗口，窗口内阈值 4s", () => {
+    const s = read(AIR, "bridgeSession.ts");
+    expect(s).toContain("const BRIDGE_POST_GEN_LOW_MS = 4_000;");
+    expect(s).toContain("const BRIDGE_POST_GEN_WINDOW_MS = 20_000;");
+    // 窗口必须跟着 generation 走（不是按时间单纯滚动，也不是只判一次）
+    expect(s).toContain("if (genNow !== this.postGenWindowGen)");
+    expect(s).toContain("this.postGenWindowUntilMs = nowMs + BRIDGE_POST_GEN_WINDOW_MS");
+  });
+
+  it("判据用的是窗口阈值，且窗口外仍回到 2000（不改变常规饥饿语义）", () => {
+    const s = read(AIR, "bridgeSession.ts");
+    expect(s).toContain("const lowThresholdMs = inPostGenWindow");
+    expect(s).toContain("if (bridgeInQ < lowThresholdMs && this.anchorUs !== null)");
+    // 反向锁：不允许退回"只有固定 2000 阈值"的形态
+    expect(s).not.toContain("if (bridgeInQ < BRIDGE_LOW_QUEUE_BUMP_MS && this.anchorUs !== null) {");
+  });
+
+  it("请求日志能区分「换代补足」与「常规饥饿」", () => {
+    const s = read(AIR, "bridgeSession.ts");
+    expect(s).toContain("genWindow: inPostGenWindow");
+    expect(s).toContain("thrMs: lowThresholdMs");
   });
 });
