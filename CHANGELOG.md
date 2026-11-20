@@ -2,6 +2,41 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.14.24] - 2026-11-20
+
+### Fix / 设备没接流时不再报饿（否则泵会被无限加速）
+
+2026-11-20 10:16 HiVi 断电实测：会话进入 `listening`（`connected=false`、`anchorUs=null`），
+`inQueueMs` 恒为 0 ⇒ 桥侧每 6 秒一条 `pace-bump-req`（`inQueueMs=0 roomMs=8000`），
+sendspin 侧再判 `deliverableMs=0`「真缺料」放行 ⇒ 泵被无限加速，内容轴被推向超前几十秒，
+设备上电后只会溢出或追发。与 2026-11-19 18:42 连补 287 次同款。
+
+判据补一条 `anchorUs !== null`：只有真实消费者在流时才允许报饿。
+
+### Fix / 空壳桥会话自愈（A 自检 + B 设备上线触发）
+
+2026-11-20 09:37 现场：HiVi 整首无声，`state=connected` 但 `anchorUs=null`、`leadUs=null`、
+`timingAgeMs=null`、`inQueueMs=10150`，每 14s 一条 `recv-overflow backlog=16025 dropped=14025`；
+日志里 `prepare warm-reuse token=8095304f...` **同一 token 复用 8 小时**，全程 0 条
+`bridge first packet`。重启容器强制丢表后才新建会话、立刻 live。
+
+成因：设备离线时 prepare 建出「connected 无 anchor」的空壳，设备上线后每次换代都 warm-reuse 它
+⇒ 永远锚不上 ⇒ 从不出流 ⇒ 投进来的内容全部 overflow 丢弃。缺口在 `notifyAirplayDeviceOnline`
+首行 `if (已在路由内) continue` —— 空壳正挂在路由内，上线钩子直接跳过。
+
+- **A**：`BridgeSession` 每 2s（`emitStatsTick`）自检「connected + 无 anchor + backlog>0 +
+  存活 ≥25s」⇒ `scheduleRaopReconnect("unanchored(tick)")`（显式 TEARDOWN + 新 RECORD）。
+  25s 而非 15s：`resetTimeline` 换代也会清 `anchorUs`，曲末排空 8s + bulk 等 6s 最坏约 14s
+  仍属合法无锚窗口。
+- **B**：新 op `bridgeReanchor` + `bridgeReanchorDevice`；`notifyAirplayDeviceOnline` 的
+  「已在路由内」分支改为先尝试重建（非空壳即返回 false，幂等）。
+- `warmReusable` 追加「超时仍未锚定 ⇒ 不得暖复用」：即使 A/B 都漏掉，下次 prepare 也会拆旧建新；
+  prepare 拆旧时打 `warm-reuse 拒绝 … anchored=…` 日志。
+
+验证：`tests/airplay/bridgeUnanchoredRebuild.test.ts` 9 条 + `bridgeBufferRecover` 12 条；
+airplay+sendspin+group 全量通过。240 真机：断电期间报饿 0 次、上电后 13 秒自动恢复
+（走「设备上线补桥」）、一轮换代 `unanchored-rebuild` / `warm-reuse 拒绝` 均 0 次。
+
 ## [4.14.23] - 2026-11-20
 
 ### Fix / 低缓冲的真正开关是「重建缓冲」，不是「多产内容」

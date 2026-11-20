@@ -1026,6 +1026,8 @@ export class BridgeSession {
 
   // ---- Phase 4:锚点与对齐状态 ----
   private connected = false;
+  /** 会话对象创建时刻(ms)：空壳判据/暖复用判据的时间基准。 */
+  private readonly createdAtMs = Date.now();
   /** 首帧有效 AUDIO 的 tsUs(A 候选;§7.2:锚点只在此刻确定)。 */
   private firstFrameTsUs: bigint | null = null;
   /** 锚点已落定(aligner 非 null ⇒ 已进入四锚点驱动)。 */
@@ -1111,7 +1113,11 @@ export class BridgeSession {
   /** 暖复用判据(B 方案,对齐 MA _can_reuse_stream_warm):会话未关闭且链路未降级
    *  (AP2 link-loss/error;RAOP 重连退避不算 —— 会话对象会自愈重连)。 */
   get warmReusable(): boolean {
-    return !this.closed && this.ap2LinkLoss === null && this.ap2Session?.currentState !== "error";
+    if (this.closed || this.ap2LinkLoss !== null || this.ap2Session?.currentState === "error") return false;
+    // 空壳会话不得暖复用：见 BRIDGE_UNANCHORED_REBUILD_MS 注释。这里只挡"超时仍无 anchor"
+    // 的，正常起播窗口（刚建 <15s）仍允许复用，避免每次 prepare 都重来一遍 RADOP 握手。
+    if (this.anchorUs === null && Date.now() - this.createdAtMs > BRIDGE_UNANCHORED_REBUILD_MS) return false;
+    return true;
   }
 
   /** 起 listener(+ 非 dry 时 RAOP 握手,等首帧 AUDIO 后进入四锚点驱动推流)。 */
@@ -2108,6 +2114,10 @@ export class BridgeSession {
     const p95 = sorted.length > 0
       ? sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * 0.95) - 1))]
       : 0;
+    // A：空壳自检（每 2s）—— 有内容在投却始终无 anchor ⇒ 强制重建。
+    // 不依赖设备上线事件（mDNS 抖动/上线事件漏发时的兜底）。
+    this.reanchorIfUnanchored(0, "tick");
+
     // 低缓冲自愈(指令式):**判断留在桥侧**(只有它知道被抽干成什么样),发"请加速"指令,
     // 主进程转发给 sendspin 子进程执行 —— 泵是唯一能多产内容的一方,但它看不到设备侧水位。
     {
@@ -2119,7 +2129,12 @@ export class BridgeSession {
       //   2026-11-19 教训：这里曾堆过"补后验证 / 停手 120s / 次数额度"，全部是
       //   在错误动作发生后才刹车。真正该做的是判断"是否需要补"——而判断依据
       //   （内容前沿超前多少）只有泵侧有，所以判断搬到那边，这里保持纯粹。
-      if (bridgeInQ < BRIDGE_LOW_QUEUE_BUMP_MS) {
+      // ★设备没接流时绝不报饿（2026-11-20 10:16 实测）：HiVi 断电后会话进入 listening
+      //   （connected=false、anchorUs=null），inQueue 恒 0 ⇒ 每 6s 一条 pace-bump-req
+      //   （inQueueMs=0 roomMs=8000），sendspin 侧再判 deliverableMs=0「真缺料」放行，
+      //   泵被无限加速 —— 与 2026-11-19 18:42 连补 287 次同款。设备上电后内容轴已超前
+      //   几十秒，只会溢出/追发。判据必须是"有真实消费者"：anchorUs 非空才算在流。
+      if (bridgeInQ < BRIDGE_LOW_QUEUE_BUMP_MS && this.anchorUs !== null) {
         if (this.lowQueueSinceMs === 0) this.lowQueueSinceMs = nowMs;
         if (
           nowMs - this.lowQueueSinceMs >= BRIDGE_LOW_QUEUE_PERSIST_MS
@@ -2528,12 +2543,44 @@ export class BridgeSession {
     return true;
   }
 
+  /** 空壳：已建连、内容在投（backlog>0），但始终无 anchor（从未进 live）。
+   *  graceMs <= 0 时用 BRIDGE_UNANCHORED_REBUILD_MS。
+   *  为什么要求 backlog>0：正常起播前还没内容投进来，那时 anchor 也是 null，
+   *  不能当成空壳；一旦有内容在投却锚不上，才是设备侧真的没接流。 */
+  private isUnanchoredShell(graceMs: number): boolean {
+    if (this.closed || !this.connected) return false;
+    if (this.anchorUs !== null) return false;
+    if (this.raopReconnectInFlight || this.raopReconnectTimer !== null) return false;
+    if (this.backlogMs() <= 0) return false;
+    const grace = graceMs > 0 ? graceMs : BRIDGE_UNANCHORED_REBUILD_MS;
+    return Date.now() - this.createdAtMs >= grace;
+  }
+
+  /** 重建空壳会话（A 自检 / B 设备上线共用）。
+   *  @returns true = 判为空壳且已调度重建。 */
+  reanchorIfUnanchored(graceMs: number, reason: string): boolean {
+    if (!this.isUnanchoredShell(graceMs)) return false;
+    log.warn(`[airplay-bridge] ${JSON.stringify({
+      ev: "unanchored-rebuild",
+      dev: this.deviceId,
+      gen: this.generation,
+      ageMs: Date.now() - this.createdAtMs,
+      backlogMs: Math.round(this.backlogMs()),
+      reason,
+    })}`);
+    this.scheduleRaopReconnect(`unanchored(${reason})`);
+    return true;
+  }
+
   /** D9(2026-11-01):会话是否已关闭 —— manager 据此**跳过僵尸会话**。
    *  240 实证:同 deviceId 可能残留一条 `reason=closed` 的旧条目(泵断连后未从表里摘除),
    *  按 deviceId 查找时它会**遮蔽**真正在跑的那座桥 ⇒ 改补偿/音量全部落到死会话上。 */
   isClosedSession(): boolean {
     return this.closed;
   }
+
+  /** 会话年龄(ms)：供 manager 日志使用（createdAtMs 是私有字段）。 */
+  createdAtMsForLog(): number { return this.createdAtMs; }
 
   /** 诊断快照(bridgeStatus op 用)。 */
   snapshot(): {
@@ -2610,6 +2657,18 @@ const BRIDGE_PACE_BUMP_COOLDOWN_MS = 5_000;
  *  用它替代"连续补 3 次"这种固定额度：按剩余空间判断，更贴实际。 */
 const BRIDGE_DEVICE_BUFFER_MAX_MS = 8_000;
 
+/** A(2026-11-20)：空壳会话重建门槛 —— 会话已建连、内容已在投，却始终拿不到 anchor
+ *  （设备从未真正接流）。240 实测 09:37：设备离线时 prepare 建出 connected 无 anchor
+ *  的空壳，之后每次换代都 warm-reuse 它 ⇒ 同 token 复用 8 小时、全程 0 条
+ *  `bridge first packet`、内容按 14s/次 overflow 丢弃、设备整首静音。
+ *  超时即走 reconnectRaop（显式 TEARDOWN + 新 RECORD），这是唯一能救活 MUZO 的动作。
+ *  为什么是 25s 而不是 15s：`resetTimeline`（换代/复位）也会把 anchorUs 清成 null，
+ *  而曲末排空 8s + 换代后 bulk 等 6s 最坏约 14s 仍在合法无锚窗口内 —— 门槛必须
+ *  明显高于它，否则正常换代会被误判成空壳、白丢一次会话（1~2s 静音 + 队列清空）。 */
+const BRIDGE_UNANCHORED_REBUILD_MS = 25_000;
+/** B：设备上线事件触发时的宽限 —— 刚 prepare 的会话还没来得及拿到首帧，别当场重建。 */
+const BRIDGE_UNANCHORED_ONLINE_GRACE_MS = 5_000;
+
 /** 子进程侧桥会话表(按 sessionToken 索引;同 deviceId 新 prepare 拆旧)。 */
 export class BridgeSessionManager {
   private readonly sessions = new Map<string, BridgeSession>();
@@ -2679,6 +2738,17 @@ export class BridgeSessionManager {
     return false;
   }
 
+  /** B(2026-11-20)：按 deviceId 重建空壳会话（设备上线时调用）。
+   *  @returns true = 命中且已调度重建。 */
+  reanchorUnanchored(deviceId: string, graceMs: number, reason: string): boolean {
+    this.pruneClosed();
+    for (const s of this.sessions.values()) {
+      if (s.deviceId !== deviceId) continue;
+      if (s.reanchorIfUnanchored(graceMs, reason)) return true;
+    }
+    return false;
+  }
+
   /** 起一座桥会话(同 deviceId 旧会话先拆 = 新流语义;同 token 暖复用除外)。 */
   async prepare(opts: BridgeSessionOpts): Promise<{ listening: true; socketPath: string }> {
     // 暖复用(B 方案,对齐 MA sendspin_bridge._can_reuse_stream_warm):同 token + 同
@@ -2705,6 +2775,12 @@ export class BridgeSessionManager {
       }
       log.info(`[airplay-bridge] sessions: prepare warm-reuse deviceId=${opts.deviceId} token=${opts.token} gen=${prev.snapshot().generation} shiftUs=${opts.anchorShiftUs ?? 0}`);
       return { listening: true, socketPath: prev.listeningOn ?? opts.socketPath };
+    }
+    if (prev && !prev.isClosedSession() && prev.deviceId === opts.deviceId) {
+      // 走到这里 = 同 token 同设备却不可暖复用。最常见原因就是空壳（设备离线时建出、
+      // 从未锚定）—— 必须让它可见，否则现场看起来只是"每次换代都重建"，查不出为什么。
+      const snap = prev.snapshot();
+      log.warn(`[airplay-bridge] sessions: warm-reuse 拒绝 deviceId=${opts.deviceId} token=${opts.token} gen=${snap.generation} anchored=${snap.anchorUs !== null} ageMs=${Date.now() - prev.createdAtMsForLog()} → 拆旧建新`);
     }
     for (const [, s] of [...this.sessions]) {
       if (s.deviceId === opts.deviceId) {

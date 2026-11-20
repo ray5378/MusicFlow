@@ -453,6 +453,26 @@ export async function bridgeRebuildDelayDevice(deviceId: string, shiftUs: number
   }
 }
 
+/** B(2026-11-20):设备上线时让子进程检查该设备的桥会话是否为空壳
+ *  (connected 但从未锚定 —— 设备离线期间建出来的),是则重建 RTSP。
+ *  幂等:非空壳时子进程直接返回 false,零副作用。
+ *  @returns true = 确实重建了。 */
+export async function bridgeReanchorDevice(deviceId: string): Promise<boolean> {
+  if (!deviceId) return false;
+  if (!airplaySupervisor.isRunning()) {
+    log.warn(`[bridge-reanchor] airplay 子进程未运行,跳过 dev=${deviceId}`);
+    return false;
+  }
+  try {
+    const r = await airplaySupervisor.rpc<boolean>("bridgeReanchor", { deviceId });
+    if (r) log.info(`[bridge-reanchor] dev=${deviceId} 空壳会话已重建`);
+    return !!r;
+  } catch (e) {
+    log.warn("桥空壳重建失败(忽略)", { deviceId, err: (e as Error)?.message || e });
+    return false;
+  }
+}
+
 /** 主进程编排:按 token 拆桥会话(bridgeStop)并清 owner。deviceId 供清 owner,可省。 */
 export async function bridgeStopDevice(token: string, deviceId?: string): Promise<void> {
   if (deviceId) bridgeOwners.delete(deviceId);

@@ -312,7 +312,20 @@ export async function notifyAirplayDeviceOnline(deviceId: string): Promise<numbe
   let n = 0;
   for (const g of getGroupManager().list()) {
     if (!splitGroupMembers(g.id).airplay.includes(deviceId)) continue;
-    if (activeBridgeRoutes.get(g.id)?.some((r) => r.deviceId === deviceId)) continue; // 已在路由内
+    if (activeBridgeRoutes.get(g.id)?.some((r) => r.deviceId === deviceId)) {
+      // 已在路由内 —— 但可能是设备离线时建出来的"空壳"会话（connected 却从未锚定）。
+      // 240 实测 2026-11-20 09:37：空壳会被后续每次换代 warm-reuse，同 token 复用 8 小时、
+      // 全程 0 条 bridge first packet、设备整首静音。设备上线正是重建它的时机
+      // （§5.2「重新上线按加入处理」）。非空壳时子进程直接返回 false，幂等。
+      const rebuilt = await import("../airplay/control.js")
+        .then((m) => m.bridgeReanchorDevice(deviceId))
+        .catch(() => false);
+      if (rebuilt) {
+        n++;
+        log.info(`[group][bridge] ${g.id}: 设备上线检出空壳桥会话 device=${deviceId} → 已重建 RTSP`);
+      }
+      continue;
+    }
     let active = false;
     let index = -1;
     try {

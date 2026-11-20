@@ -140,3 +140,12 @@ describe("纯执行（sendspin）", () => {
     expect(s).toContain("paceBumpBus.approve();");
   });
 });
+
+describe("报饿门控：设备未接流时不得报饿（2026-11-20 断电实测）", () => {
+  it("★判据必须要求 anchorUs 非空 —— 否则 listening/离线时 inQueue 恒 0 会被当成\"饿\"无限加速", () => {
+    const s = read(AIR, "bridgeSession.ts");
+    expect(s).toContain("bridgeInQ < BRIDGE_LOW_QUEUE_BUMP_MS && this.anchorUs !== null");
+    // 反向锁：不允许存在"只看水位就报饿"的形态
+    expect(s).not.toContain("if (bridgeInQ < BRIDGE_LOW_QUEUE_BUMP_MS) {");
+  });
+});

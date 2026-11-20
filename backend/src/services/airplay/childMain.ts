@@ -201,6 +201,16 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
         // 主进程随载荷下发(子进程 discovery 注册表恒空,不能按 deviceId 反查)。
         return raopTeardownProbe(String(p.host), Number(p.port), Number(p.timeoutMs) > 0 ? Number(p.timeoutMs) : 6_000);
       }
+      case "bridgeReanchor": {
+        // A/B(2026-11-20):空壳会话重建 —— 会话已建、内容在投，却始终拿不到 anchor
+        // （设备从未真正接流）。设备上线事件走这里（B）；子进程内每 2s 的自检走
+        // BridgeSession.reanchorIfUnanchored（A）。返回 true = 确实重建了。
+        return this.bridgeSessions.reanchorUnanchored(
+          String(p?.deviceId ?? ""),
+          5_000,
+          "device-online",
+        );
+      }
       case "bridgeStatus": {
         // 桥会话状态(诊断/soak):deviceId/token/socket/streaming/统计。
         return this.bridgeSessions.list();
