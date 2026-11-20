@@ -139,6 +139,19 @@ const BRIDGE_WINDOW_DIAG_THROTTLE_US = 2_000_000n;
  *  只在"已有存量排队"时才收紧。 */
 const BRIDGE_BULK_QUEUE_MARGIN_MS = 1_000;
 
+/** 换代投递损失统计窗口（2026-11-20）。
+ *
+ *  为什么需要：换代时投递会停顿（新代次首帧被窗口上界挡一拍 + 结构性缺口），
+ *  而投递速率恒 1x ⇒ **停顿是净损失、永不补回**，直接吃掉桥侧垫子（`inQueueMs`）。
+ *  240 实测 16:06 那次：20 秒窗口少投 5.65 秒 ⇒ 垫子 7.0→2.7 秒 ⇒ delta 转负 ⇒
+ *  听感秒级断续。
+ *
+ *  这条日志把"每次换代亏多少"变成可测量的量：攒几天拿到真实分布（P95），
+ *  才谈得上给「换代补足阈值」定一个有依据的值 —— 现在 4s/6s 都是估的。 */
+const BRIDGE_GEN_LOSS_WINDOW_US = 20_000_000;
+/** 每帧时长(µs)，与 streamEngine.FRAME_MS 同源（不 import 以免循环依赖）。 */
+const BRIDGE_GEN_LOSS_FRAME_US = 25_000;
+
 export interface SendspinServerOptions {
   pairkeys: Identity;
   identityDir?: string;
@@ -807,6 +820,10 @@ export class SendspinGroup {
   /** 开局 bulk 待投桥集合(换代时登记;tick 发现本代新料 ≥6s 时一次性投递,见
    *  bulkBackfillBridge)。250ms tick 供=耗=1x,接收侧水位永远起不来 —— 曲中失声根因。 */
   private bridgeBulkPending = new Set<string>();
+  /** 换代投递损失统计（见 BRIDGE_GEN_LOSS_WINDOW_US）：纯观测，不参与判据。 */
+  private genLoss = new Map<string, { atUs: bigint; gen: number; frames: number }>();
+  /** 桥侧报的缺口（ms）：下一次 bulk 的量上限，补到目标水位即止（见 PaceBumpSink）。 */
+  private bridgeBulkDeficitMs = new Map<string, number>();
   /** bulk 投递进行中的桥(期间 tick 对该桥跳过窗口投递,防乱序双写)。 */
   private bridgeBulkInFlight = new Set<string>();
   /** bridge-window 诊断日志的最后输出时刻(µs)。**仅日志节流用,不参与任何判据**;
@@ -1034,6 +1051,14 @@ export class SendspinGroup {
     if (reason === "track" && prefetched === true) {
       this.server.log("info", `bridge-track-pad group=${this.name} padUs=0 reason=prefetched`);
     }
+    // 换代投递损失统计起点（纯观测）。放在 keep/else 两分支之后统一记录，
+    // 这样无论走保留旧尾还是 bulk 重建，都能量到"这一代开头亏了多少"。
+    {
+      const t0 = nowUs();
+      for (const deviceId of this.bridges.keys()) {
+        this.genLoss.set(deviceId, { atUs: t0, gen: this.bridgeContentEpoch, frames: 0 });
+      }
+    }
     this.ensureBridgePushTimer();
   }
 
@@ -1196,7 +1221,12 @@ export class SendspinGroup {
     const epoch = this.bridgeContentEpoch;
     // [Fix 2026-10-31 D] 6s 只是上限之一:再加上「硬上限 − 当前排队 − 余量」的钳位,
     //   否则 6s bulk + 既有 ~2s 排队 ≈ 8s 顶格 ⇒ 断连重连。见 bulkBackfillCapUs。
-    const capUs = this.bulkBackfillCapUs(b);
+    // 桥侧报了缺口就以它为准：补到目标水位即止，别把垫子顶过设备天花板。
+    const deficitMs = this.bridgeBulkDeficitMs.get(deviceId) ?? 0;
+    if (deficitMs > 0) this.bridgeBulkDeficitMs.delete(deviceId);
+    const baseCapUs = this.bulkBackfillCapUs(b);
+    const deficitUs = BigInt(Math.max(0, Math.round(deficitMs))) * 1000n;
+    const capUs = deficitUs > 0n && deficitUs < baseCapUs ? deficitUs : baseCapUs;
     if (capUs <= 0n) {
       // 队列已顶格:本轮不投,但**重新登记 pending** 让下个 tick 再试(队列排空后
       // 仍能拿到那 6s 注入)。pending 期间窗口投递照常进行,不会因此停摆。
@@ -1233,6 +1263,12 @@ export class SendspinGroup {
     }
     this.bridgeWatermarks.set(deviceId, last);
     if (totalUs > 0n) {
+      // [口径修正 2026-11-20] bulk 投出的内容同样是「实际投出」，必须计入换代损失统计。
+      //   漏计会让 lossMs 虚高整整一个 bulk 量：240 实测每代 5.3~6.1s，与 bulk 的 6s
+      //   完全吻合，于是正常衔接被误报成 15~30% 丢失。反证是 gen=25/26 两代未走 bulk，
+      //   同口径 lossMs = -19/-70ms（≈0）。用户听感无损失与此一致。
+      const g = this.genLoss.get(deviceId);
+      if (g) g.frames += Math.round(Number(totalUs) / BRIDGE_GEN_LOSS_FRAME_US);
       this.server.log("info", `bridge-bulk group=${this.name} device=${deviceId} durUs=${totalUs}`);
     }
   }
@@ -1510,7 +1546,9 @@ export class SendspinGroup {
           const deliverableUs = this.currentGenDeliverableUs(ring, lo, wm);
           const deliverableMs = Math.round(Number(deliverableUs) / 1000);
           if (deliverableUs >= BigInt(BRIDGE_BUMP_MAX_DELIVERABLE_MS) * 1000n) {
+            const deficitMs = paceBumpBus.peekDeficit();
             const dropped = paceBumpBus.reject();
+            if (deficitMs > 0) this.bridgeBulkDeficitMs.set(deviceId, deficitMs);
             // [Fix G 2026-11-19] 有料投不出 ⇒ 不是缺料，是**缓冲需要重建**。
             //   诊断实证（23:48）：投递机制完全正常（n=10、budget 15000、水位逐拍前进），
             //   但窗口宽度只有 hi−lo=1.5s，每拍只放 250ms；设备侧那 5.5s 缓冲是
@@ -1520,7 +1558,28 @@ export class SendspinGroup {
             this.server.log(
               "warn",
               `bridge-push-bulk-rebuild device=${deviceId} deliverableMs=${deliverableMs}` +
-                ` droppedMs=${dropped} ⇒ 有料投不出，触发 bulk 重建缓冲`,
+                ` droppedMs=${dropped} deficitMs=${deficitMs} ⇒ 有料投不出，触发 bulk 重建缓冲`,
+            );
+          } else if (
+            // [Fix H 2026-11-20] 桥队列低于目标水位(桥侧 deficit>0)但 ring 里有货(≥6s)
+            //   ⇒ 有效动作是**灌桥**,不是让泵加速吐。窗口投递带宽由时间轴门控
+            //   (窗口宽度 1.5s/拍),泵产得再早也投不进桥队列:240 2026-11-20
+            //   实测 3 次共请求 6000ms,inQueue 只 +2225,其余全堆进 deliverable
+            //   (6025→8225) 撞 8s 天花板才被动转 bulk。deficitMs 由桥侧按
+            //   「目标水位-实际水位」算好,bulkBackfillBridge 会照它限流,
+            //   不会把垫子顶过设备天花板。
+            paceBumpBus.peekDeficit() > 0 &&
+            deliverableUs >= BigInt(BRIDGE_BACKFILL_MAX_US)
+          ) {
+            const deficitMs = paceBumpBus.peekDeficit();
+            const dropped = paceBumpBus.reject();
+            this.bridgeBulkDeficitMs.set(deviceId, deficitMs);
+            this.bridgeBulkPending.add(deviceId);
+            this.server.log(
+              "warn",
+              `bridge-push-topup-bulk device=${deviceId} deliverableMs=${deliverableMs}` +
+                ` inQueueDeficitMs=${deficitMs} droppedMs=${dropped}` +
+                ` ⇒ 桥队列缺料且 ring 有货，直接 bulk 灌桥（泵加速对投递窗口无效）`,
             );
           } else {
             paceBumpBus.approve();
@@ -1657,6 +1716,26 @@ export class SendspinGroup {
       last = e.tsUs;
     }
     this.bridgeWatermarks.set(deviceId, last);
+
+    // 换代投递损失：窗口内累计实际投出的帧数，到点输出「应该投 vs 实际投」。
+    {
+      const g = this.genLoss.get(deviceId);
+      if (g) {
+        g.frames += n;
+        const elapsedUs = Number(nowUs() - g.atUs);
+        if (elapsedUs >= BRIDGE_GEN_LOSS_WINDOW_US) {
+          this.genLoss.delete(deviceId);
+          const actualUs = g.frames * BRIDGE_GEN_LOSS_FRAME_US;
+          const lossUs = elapsedUs - actualUs;
+          this.server.log(
+            "info",
+            `bridge-gen-delivery-loss group=${this.name} device=${deviceId} gen=${g.gen}` +
+              ` windowMs=${Math.round(elapsedUs / 1000)} actualMs=${Math.round(actualUs / 1000)}` +
+              ` lossMs=${Math.round(lossUs / 1000)} lossPct=${((lossUs / elapsedUs) * 100).toFixed(1)}`,
+          );
+        }
+      }
+    }
 
     // [诊断 2026-11-19] 投递对位快照（2s 节流，纯只读，不参与判据）。
     //   22:07 事故形态：deliverable 恒 10425、inQueue 恒 0、late 涨到 17 万，持续 54 分钟。

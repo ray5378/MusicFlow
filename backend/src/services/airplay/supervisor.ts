@@ -81,7 +81,7 @@ class AirplaySupervisor extends RendererHostSupervisor<
           // 现场完全看不出断在哪（rendererHost/supervisor.ts 的 running 标志问题同样会
           // 让 rpc 直接 reject）。
           void import("../sendspin/supervisor.js")
-            .then((m) => m.sendspinSupervisor.rpc("paceBump", { ms: ev.ms }))
+            .then((m) => m.sendspinSupervisor.rpc("paceBump", { ms: ev.ms, deficitMs: ev.deficitMs }))
             .then(() => {
               // 常规路径：debug 级（需要时 LOG_LEVEL=debug 打开）
               log.debug(`[airplay] pace-bump 已转发 ms=${ev.ms}`);

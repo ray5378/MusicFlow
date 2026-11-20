@@ -9,22 +9,29 @@
  */
 const GKEY = "__mf_paceBumpBus_v1";
 
-type Bus = { pendingMs: number; approvedMs: number };
+type Bus = { pendingMs: number; approvedMs: number; pendingDeficitMs: number };
 
 function bus(): Bus {
   const g = globalThis as unknown as Record<string, Bus | undefined>;
   let b = g[GKEY];
   if (!b) {
-    b = { pendingMs: 0, approvedMs: 0 };
+    b = { pendingMs: 0, approvedMs: 0, pendingDeficitMs: 0 };
     g[GKEY] = b;
   }
   return b;
 }
 
 export const paceBumpBus = {
-  add(ms: number): void {
+  /** @param deficitMs 桥侧算出的「离目标水位还差多少」(≈ 目标 − inQueue)。
+   *  只对 bulk 建缓冲有意义（泵加速用它推导不了量），由投递侧在 reject 分支取走。 */
+  add(ms: number, deficitMs = 0): void {
     if (!Number.isFinite(ms) || ms <= 0) return;
-    bus().pendingMs += Math.round(ms);
+    const b = bus();
+    b.pendingMs += Math.round(ms);
+    const d = Number(deficitMs);
+    if (Number.isFinite(d) && d > 0) {
+      b.pendingDeficitMs = Math.max(b.pendingDeficitMs || 0, Math.round(d));
+    }
   },
 
   /** 只看不取（投递侧判断是否需要补时用）。 */
@@ -39,6 +46,12 @@ export const paceBumpBus = {
       b.approvedMs += b.pendingMs;
       b.pendingMs = 0;
     }
+    b.pendingDeficitMs = 0;
+  },
+
+  /** 桥侧报的缺口（ms）：0 = 未提供。 */
+  peekDeficit(): number {
+    return bus().pendingDeficitMs || 0;
   },
 
   /** 投递侧判定「不该补」：丢弃待审量，返回丢弃了多少。 */
@@ -46,6 +59,7 @@ export const paceBumpBus = {
     const b = bus();
     const v = b.pendingMs;
     b.pendingMs = 0;
+    b.pendingDeficitMs = 0;
     return v;
   },
 
@@ -61,5 +75,6 @@ export const paceBumpBus = {
     const b = bus();
     b.pendingMs = 0;
     b.approvedMs = 0;
+    b.pendingDeficitMs = 0;
   },
 };

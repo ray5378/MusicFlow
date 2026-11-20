@@ -130,7 +130,7 @@ describe("QueueController 可听显示延迟(4.11.12 A 方案)", () => {
     expect(qc.displayHoldState("d1")).toBeUndefined();
   });
 
-  it("硬顶兜底:超过 remain+5s 即使设备没上报新曲也会放开显示", async () => {
+  it("硬顶兜底:超过 remain+20s 即使设备没上报新曲也会放开显示", async () => {
     // 直接设持有(不经 handleDecision):避免 fake timers 干扰起播链路里的真实异步。
     const item = { songId: "s1", title: "t1", mime: "audio/mpeg", duration: 200 };
     qc.setQueue("d1", [item, { songId: "s2", title: "t2", mime: "audio/mpeg" }], 1, "http://base");
@@ -138,7 +138,7 @@ describe("QueueController 可听显示延迟(4.11.12 A 方案)", () => {
     try {
       (qc as any).setDisplayHold("d1", 0, item, 200, 10, 190, -1);
       expect(qc.snapshot("d1").currentIndex).toBe(0);
-      vi.advanceTimersByTime(16_000);
+      vi.advanceTimersByTime(32_000);
       expect(qc.snapshot("d1").currentIndex).toBe(1);
       expect(qc.displayHoldState("d1")).toBeUndefined();
     } finally {
@@ -159,13 +159,36 @@ describe("QueueController 可听显示延迟(4.11.12 A 方案)", () => {
       expect(hold).toBeTruthy();
       expect(hold!.position).toBeGreaterThanOrEqual(193.8);
       expect(hold!.position).toBeLessThanOrEqual(194.2);
-      // 内容 10s 在 2x 下 5s 墙钟即播完(定时器到 until,硬顶再 +5s 兜底)。
-      vi.advanceTimersByTime(8200);
+      // 内容 10s 在 2x 下 5s 墙钟即播完(定时器到 until,硬顶再 +20s 兜底)。
+      vi.advanceTimersByTime(26_000);
       expect(qc.snapshot("d1").currentIndex).toBe(1);
       expect(qc.displayHoldState("d1")).toBeUndefined();
     } finally {
       vi.useRealTimers();
       setPlaybackSpeed("d1", 1);
+    }
+  });
+});
+
+describe("旧曲可听期结束后不冻结进度(2026-11-20 用户报:新曲出声了进度还停在上一首)", () => {
+  it("越过 until 但仍在硬顶内:media 继续持有,position 交还真实值", () => {
+    const qc = new QueueController();
+    const item = { songId: "s1", title: "t1", mime: "audio/mpeg", duration: 200 };
+    qc.setQueue("d1", [item, { songId: "s2", title: "t2", mime: "audio/mpeg" }], 1, "http://base");
+    vi.useFakeTimers();
+    try {
+      (qc as any).setDisplayHold("d1", 0, item, 200, 10, 190, -1);
+      vi.advanceTimersByTime(2000);
+      const mid = qc.displayHoldState("d1");
+      expect(mid).toBeTruthy();
+      expect(mid!.position).toBeGreaterThan(190); // 可听期:按旧曲外推
+      vi.advanceTimersByTime(10_000); // 越过 until(10s),仍远早于硬顶(30s)
+      const late = qc.displayHoldState("d1");
+      expect(late).toBeTruthy();                    // 封面仍按旧曲,不提前切
+      expect(late!.position).toBeUndefined();       // 进度不再冻结,交给真实时间线
+      expect(late!.duration).toBe(200);
+    } finally {
+      vi.useRealTimers();
     }
   });
 });

@@ -329,8 +329,10 @@ app.get("/v1/dlna/devices/:deviceId/status", async (c) => {
     const hold = getQueueController()?.displayHoldState?.(deviceId);
     if (hold) {
       status.media = hold.media;
-      status.position = hold.position;
-      status.duration = hold.duration;
+      if (typeof hold.position === "number") {
+        status.position = hold.position;
+        status.duration = hold.duration;
+      }
     }
     return c.json(status);
   } catch (e: any) { return c.json(apiInternalError(e), 500); }

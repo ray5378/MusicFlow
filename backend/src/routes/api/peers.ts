@@ -1193,8 +1193,10 @@ app.get("/v1/peers/:peerId/status", async (c) => {
       const hold = getQueueController()?.displayHoldState?.(deviceId);
       if (hold) {
         status.media = hold.media;
-        status.position = hold.position;
-        status.duration = hold.duration;
+        if (typeof hold.position === "number") {
+          status.position = hold.position;
+          status.duration = hold.duration;
+        }
       }
       // 队列版本号(4.12.9):客户端据此判断队列是否真的变了,只有变了才拉 /queue。
       // 此前客户端每 2s 无条件整包重拉(4216 首的群组队列 404,654 B)。
@@ -1222,8 +1224,10 @@ app.get("/v1/peers/:peerId/status", async (c) => {
       const hold = getQueueController()?.displayHoldState?.(parsed.id);
       if (hold) {
         (status as any).media = hold.media;
-        status.position = hold.position;
-        status.duration = hold.duration;
+        if (typeof hold.position === "number") {
+          status.position = hold.position;
+          status.duration = hold.duration;
+        }
       }
       return c.json({ ...status, queueRevision: getQueueController().queueRevision(parsed.id), speed: getQueueController().getPlaybackSpeed(parsed.id) });
     } catch (e: any) { return c.json(apiInternalError(e), 500); }

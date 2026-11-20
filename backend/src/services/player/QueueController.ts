@@ -791,7 +791,21 @@ export class QueueController extends EventEmitter {
         // 注意这里只**查**不删 —— 位置快照留在 linkLost 里,由 resumeAfterLinkRecovery
         // 取用(它自己负责清)。先删就会把"离开时的播放位置"丢掉,续播只能从头播。
         const wasLost = this.linkLost.has(deviceId);
-        if (typeof state.position === "number" && state.position > 0) this.lastPos.set(deviceId, state.position);
+        // [2026-11-20] 只记录 PLAYING 的位置:IDLE 那一刻泵会把 positionMs 强设成 duration
+        //   (streamEngine 的播完上报 100%),若也写进 lastPos,下面 advance 决策里的
+        //   holdRemain = dur - lastPos 恒为 0 ⇒ 不设 displayHold ⇒ 上一首还有缓冲没响完
+        //   就切了封面(用户报「上一首没播完就切封面」)。hold=0 次实测即此因。
+        {
+          // 只排除「IDLE 且位置已顶到曲尾」这一种读数:那是泵播完时把 positionMs
+          // 强设成 duration 的结果(streamEngine 播完上报 100%),写进 lastPos 会让
+          // advance 决策的 holdRemain 恒为 0 ⇒ 不设 displayHold ⇒ 上一首还有缓冲
+          // 没响完就切封面(用户报的现象,hold 实测 0 次即此因)。
+          // IDLE 但位置在曲中(链路恢复/设备被外部停)仍要记,续播靠它。
+          const p = typeof state.position === "number" ? state.position : 0;
+          const d = typeof state.duration === "number" ? state.duration : 0;
+          const atTail = state.playbackState === PlaybackState.IDLE && d > 0 && p >= d - 0.5;
+          if (!atTail && p > 0) this.lastPos.set(deviceId, p);
+        }
         // 可听显示延迟:设备已进入新曲(position 重新从小值走)或到硬顶 → 放开显示。
         this.maybeReleaseDisplayHold(deviceId, state);
         if (state.playbackState === PlaybackState.PLAYING) {
@@ -2278,13 +2292,24 @@ export class QueueController extends EventEmitter {
     // 进度条还在旧曲爬 —— 倍速越高滞后越大。
     const speed = getPlaybackSpeed(id);
     const wallRemainMs = (Math.max(0, remainSec) * 1000) / (speed > 0 ? speed : 1);
+    // 可听显示延迟的观测点(2026-11-20):封面/歌名提不提前切,全看这条 hold 是否设上。
+    log.info(
+      `[QueueController][display-hold] ${id}: 旧曲「${item.title ?? "-"}」还可听 ` +
+        `${remainSec.toFixed(1)}s(内容)/${(wallRemainMs / 1000).toFixed(1)}s(墙钟)` +
+        ` posAtSet=${posAtSet.toFixed(1)} idx=${index}`,
+    );
     const until = now + wallRemainMs;
     const hold: DisplayHold = {
       index,
       item,
       duration,
       until,
-      releaseAt: until + 5000,
+      // [2026-11-20] 硬顶 = 旧曲可听尾 + 新曲启动宽限。实测自然换歌:旧曲尾 8.5s +
+      //   新曲 BUFFERING 起播 ≈8.5s ⇒ 从设 hold 到真正出声约 17s。原来只 +5s(总 13.5s),
+      //   会在新曲出声前 3s 就放开封面(用户报「上一首没播完就切封面」的残余 3 秒)。
+      //   正常路径由 maybeReleaseDisplayHold(新曲 position 重新从小值走)提前放开,
+      //   这里只做兜底,放宽到 20s 不会让封面多停留(判据通常先命中,最多晚一个 poll 周期)。
+      releaseAt: until + 20000,
       posAtSet,
       setAt: now,
       speed,
@@ -2333,7 +2358,7 @@ export class QueueController extends EventEmitter {
   /** 对外**状态出口**用的覆盖:持有期间返回旧曲媒体 + 按可听时间轴外推的位置/时长。
    *  无持有返回 undefined(= 各出口保持原有取值)。 */
   displayHoldState(playerId: string):
-    | { media: { songId: string; title: string; artist?: string; album?: string; coverArt?: string }; position: number; duration: number }
+    | { media: { songId: string; title: string; artist?: string; album?: string; coverArt?: string }; position?: number; duration: number }
     | undefined {
     const id = stripPlayerPrefix(playerId);
     const hold = this.displayHold.get(id);
@@ -2342,6 +2367,18 @@ export class QueueController extends EventEmitter {
     // 用 until/remain 反推只适用于 1x;倍速下旧曲尾按 speed 播,进度也必须按 speed 走。
     const elapsedSec = (Date.now() - hold.setAt) / 1000;
     const position = Math.max(0, Math.min(hold.duration, hold.posAtSet + elapsedSec * hold.speed));
+    // [2026-11-20] 进度冻结只在「旧曲确实还有内容没响完」期间成立(now < until)。
+    //   硬顶放宽到 +20s 后,旧曲 8.3s 就响完了,若还继续冻结,进度条/歌词会卡在曲末
+    //   十几秒而声音早已进了新曲 —— 用户报的「歌词进度全是落后的」。
+    //   媒体仍持有到新曲出声,所以封面不会提前切;进度到点就交还给真实值。
+    // [2026-11-20] 冻结进度的窗口 = 「旧曲还有内容没响完」**或**「队列还没前进」。
+    //   只看 until 会留一个 2 秒空档:泵的内容轴已进新曲(position 归 0/dur=新曲),
+    //   而队列 advance 还差一个 poll 周期才发生(currentIndex 仍是旧曲) —— 实测
+    //   22:36:02 出现 status=0/183 而 queue=清明雨上(219) 的错配。
+    //   补上「队列未前进就继续按旧曲显示」,两个出口就始终同曲同进度。
+    const q = this.queues.get(id);
+    const queueAdvanced = !q || q.currentIndex !== hold.index;
+    const audible = Date.now() < hold.until || !queueAdvanced;
     return {
       media: {
         songId: hold.item.songId,
@@ -2350,7 +2387,7 @@ export class QueueController extends EventEmitter {
         album: hold.item.album,
         coverArt: hold.item.coverArt,
       },
-      position,
+      ...(audible ? { position } : {}),
       duration: hold.duration,
     };
   }

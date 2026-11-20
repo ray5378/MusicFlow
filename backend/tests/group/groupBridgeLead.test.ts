@@ -1,16 +1,23 @@
-// ==================== 组状态「桥成员 lead 扣除」回归测试(2026-11-14 00def316) ====================
+// ==================== 组状态位置口径:与设备侧真相同源(2026-11-20 修订) ====================
 //
-// 事故:桥成员「写入未出声」~2.05s(tick 的 commandedLeadUs),组状态直接回组泵
-//   positionMs ⇒ 进度恒领先声音。修复:getGroupStatus 的两条 sendspin 分支都要
-//   扣掉 bridgeLeadContentSec(取路由内最大 lead,输出流秒 × 倍速 = 内容秒,
-//   倍速越高同样 2s 的 lead 覆盖的内容越多),并钳 0 绝不为负。
+// 历史:00def316(2026-11-14) 认为组状态直接回 positionMs 会让进度领先声音 ~2.05s,
+//   于是在 getGroupStatus 里再扣一次 bridgeLeadContentSec(取路由内最大 lead)。
+//   但 streamEngine.audiblePositionMs 已经把「已推送位置 − 缓冲深度」算好,
+//   positionMs 本身就是「设备此刻正在响」的位置 ⇒ 二次扣减变成恒定落后 ~2.05s:
+//   歌没播完 UI 就到不了终点(看着像提前切歌),seek 落点也少 2s。
 //
-// 这里用真实 playMedia(纯 AP 桥组)登记 activeBridgeRoutes,再从 mock 侧注入
-// lead 值,断言:
-//   ① lead>0 → 组状态 position 扣掉 lead×speed;
-//   ② lead=0 / 无桥路由 → 原值不动;
-//   ③ 倍速 2x → 按 speed 折算内容秒;
-//   ④ 扣完为负 → 钳 0。
+// 为什么现在判定为落后(判据):
+//   sendspinPlayer.pollState() 用的是**同一个** positionMs 且不减 lead,
+//   240 实测自然播完时 pos == dur 精确相等(近 60 分钟 15/15 次) ——
+//   设备侧真相就是 positionMs。两侧必须同源,lead 只由 audiblePositionMs 一处扣。
+//
+// 下面是防回归锁:
+//   ① 有/无桥路由:position 都等于 floor(positionMs/1000);
+//   ② 倍速、多成员、lead 值都不再影响结果;
+//   ③ 播完(positionMs == durationMs)时 position 必须等于 duration;
+//   ④ 源码里不得再对 positionMs 做 lead 二次扣减。
+import fs from "node:fs";
+import path from "node:path";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const h = vi.hoisted(() => {
@@ -189,32 +196,32 @@ beforeEach(async () => {
   setPlaybackSpeed("g1", 1);
 });
 
-describe("getGroupStatus:组进度扣除桥成员 lead(00def316)", () => {
-  it("① 无桥路由时不扣 lead:position 原值返回", async () => {
+describe("getGroupStatus:位置与设备侧真相同源(不二次扣 lead)", () => {
+  it("① 无桥路由:position = floor(positionMs/1000)", async () => {
     setGroup(["airplay:ap1"]);
     apOn("ap1");
-    h.leads["ap1"] = 2050; // 有 lead 记录但组没登记桥路由 ⇒ bridgeLeadContentSec=0
+    h.leads["ap1"] = 2050;
     const st = await getGroupStatus("g1");
     expect(st.state).toBe("PLAYING");
-    expect(st.position).toBe(12); // floor(12000/1000),不扣
+    expect(st.position).toBe(12);
   });
 
-  it("② 桥路由在 + lead=2050ms → position 扣掉 2.05s 内容秒", async () => {
+  it("② 桥路由在、lead=2050ms:仍不扣(必须与 pollState 同源)", async () => {
     await startBridgePlayback();
     h.leads["ap1"] = 2050;
     const st = await getGroupStatus("g1");
-    expect(st.position).toBe(9); // floor(12 - 2.05)
+    expect(st.position).toBe(12); // 旧行为 9 ⇒ UI 恒定落后 2.05s
   });
 
-  it("③ 倍速 2x:lead 按速度折算内容秒(输出流秒 × speed)", async () => {
+  it("③ 倍速 2x 不再折算内容秒", async () => {
     await startBridgePlayback();
     setPlaybackSpeed("g1", 2);
     h.leads["ap1"] = 2050;
     const st = await getGroupStatus("g1");
-    expect(st.position).toBe(7); // floor(12 - 2.05*2) = floor(7.9)
+    expect(st.position).toBe(12);
   });
 
-  it("④ 组内多桥成员取最大 lead(宁少不多扣)", async () => {
+  it("④ 多桥成员的大 lead 不再影响结果", async () => {
     setGroup(["airplay:ap1", "airplay:ap2"]);
     apOn("ap1");
     apOn("ap2");
@@ -223,21 +230,34 @@ describe("getGroupStatus:组进度扣除桥成员 lead(00def316)", () => {
     h.leads["ap1"] = 1000;
     h.leads["ap2"] = 3050;
     const st = await getGroupStatus("g1");
-    expect(st.position).toBe(8); // max(3050)/1000 → floor(12 - 3.05)
-  });
-
-  it("⑤ 扣完为负 → 钳 0,绝不为负", async () => {
-    await startBridgePlayback();
-    setPlaybackSpeed("g1", 2);
-    h.leads["ap1"] = 2050;
-    h.state.groupPoll = { playing: true, paused: false, positionMs: 1_000, durationMs: 100_000 };
-    const st = await getGroupStatus("g1");
-    expect(st.position).toBe(0); // max(0, floor(1 - 4.1))
-  });
-
-  it("⑥ 无 tick 记录(lead=0)→ position 原值(扣除路径不引入误差)", async () => {
-    await startBridgePlayback();
-    const st = await getGroupStatus("g1");
     expect(st.position).toBe(12);
+  });
+
+  it("⑤ 播完(positionMs == durationMs):position 必须等于 duration", async () => {
+    await startBridgePlayback();
+    h.leads["ap1"] = 2050;
+    h.state.groupPoll = { playing: true, paused: false, positionMs: 195_000, durationMs: 195_000 };
+    const st = await getGroupStatus("g1");
+    expect(st.duration).toBe(195);
+    // 旧行为 192 ⇒ 进度条差 3 秒到终点,表现为「没播完就切歌」
+    expect(st.position).toBe(195);
+  });
+
+  it("⑥ 极小位置仍钳 0,绝不为负", async () => {
+    await startBridgePlayback();
+    h.leads["ap1"] = 2050;
+    h.state.groupPoll = { playing: true, paused: false, positionMs: 800, durationMs: 100_000 };
+    const st = await getGroupStatus("g1");
+    expect(st.position).toBe(0);
+  });
+
+  it("⑦ 源码不得再对 positionMs 做 lead 二次扣减", () => {
+    const src = fs.readFileSync(
+      path.resolve(process.cwd(), "src/services/group/protocolPlayer.ts"),
+      "utf8",
+    );
+    expect(src).toContain("position: Math.max(0, Math.floor(st.positionMs / 1000)),");
+    expect(src).not.toContain("st.positionMs / 1000 - ");
+    expect(src).not.toContain("gst.positionMs / 1000 - ");
   });
 });

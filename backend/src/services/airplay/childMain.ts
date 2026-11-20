@@ -58,7 +58,7 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
     });
     setPaceBumpSink((req) => {
       try {
-        send({ t: "bridgePaceBump", deviceId: req.deviceId, ms: req.ms });
+        send({ t: "bridgePaceBump", deviceId: req.deviceId, ms: req.ms, deficitMs: req.deficitMs });
       } catch {
         /* 指令失败不影响推流 */
       }

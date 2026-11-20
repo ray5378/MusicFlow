@@ -114,7 +114,11 @@ export class SendspinChildController extends ChildRpcHost<SendspinChildToParent,
       case "paceBump": {
         // 走进程内全局总线（见 paceBumpBus 注释：实例方法在 server 重建后失效）
         const ms = Number((p as { ms?: number } | undefined)?.ms);
-        if (Number.isFinite(ms) && ms > 0) paceBumpBus.add(ms);
+        // deficitMs：桥侧算的「离目标水位还差多少」，供投递侧限制 bulk 量。
+        const deficitMs = Number((p as { deficitMs?: number } | undefined)?.deficitMs);
+        if (Number.isFinite(ms) && ms > 0) {
+          paceBumpBus.add(ms, Number.isFinite(deficitMs) ? deficitMs : 0);
+        }
         return true;
       }
       case "setLogLevel": {

@@ -904,19 +904,14 @@ async function enrichGroupCurrentMedia(groupId: string, media: any): Promise<any
 
 /** 组状态(路由层 /v1/peers/group:<id>/status 用):leader 派生;无在线成员 STOPPED 默认值。
  *  leader 是 sendspin 成员时从共享组 pump 派生(位置/时长走组时间线,音量走组标度)。 */
-/** 组内桥成员「写入未出声」的内容秒数（取最大 lead，宁少不一多）。
- *  输出流秒 × speed = 内容秒；倍速越高，同样 2s 的 lead 覆盖的内容越多。 */
-function bridgeLeadContentSec(groupId: string): number {
-  const route = activeBridgeRoutes.get(groupId);
-  if (!route || route.length === 0) return 0;
-  let maxMs = 0;
-  for (const spec of route as Array<{ deviceId?: string }>) {
-    if (!spec?.deviceId) continue;
-    const ms = getBridgeLeadMs(spec.deviceId);
-    if (ms > maxMs) maxMs = ms;
-  }
-  return (maxMs / 1000) * getPlaybackSpeed(groupId);
-}
+// [2026-11-20] 原先这里有一个 bridgeLeadContentSec，把组状态 position 再扣一次桥 lead
+//   （00def316 的修法）。它假设 sendspinGroupPoll().positionMs 是「已写入未出声」的位置，
+//   但 streamEngine.audiblePositionMs 之后 positionMs 已经是「设备此刻正在响」的位置
+//   （depthMs = cursorUs - nowUs 已扣掉缓冲深度）⇒ 二次扣减让对外进度恒定落后 ~2.05s：
+//   歌没播完 UI 就先到不了终点，seek 落点也少 2s。
+//   实证：同源 positionMs 在 sendspinPlayer.pollState 里不减 lead，自然播完时
+//   pos == dur（240 近 60 分钟 15/15 次精确相等）；而本文件减了 lead 的分支会少 2~3s。
+//   ⇒ 两侧统一为「直接用 positionMs」，扣减逻辑交给 audiblePositionMs 一处收口。
 
 export async function getGroupStatus(groupId: string): Promise<{
   state: string; position: number; duration: number; volume: number; muted: boolean; media?: unknown;
@@ -936,7 +931,7 @@ export async function getGroupStatus(groupId: string): Promise<{
     const gv = front?.groups.get(gname) as any;
     return {
       state: st.paused ? "PAUSED" : st.playing ? ((st as any).buffering ? "BUFFERING" : "PLAYING") : "STOPPED",
-      position: Math.max(0, Math.floor(st.positionMs / 1000 - bridgeLeadContentSec(groupId))),
+      position: Math.max(0, Math.floor(st.positionMs / 1000)),
       duration: Math.floor(st.durationMs / 1000),
       // 实时组在则回实时(刚调过),否则回持久库值(重启后 / ug 组尚未创建)。
       volume: typeof gv?.volume === "number" ? gv.volume : persistedVolume,
@@ -958,7 +953,7 @@ export async function getGroupStatus(groupId: string): Promise<{
       const gst = await sendspinGroupPoll(gname).catch(() => ({ playing: false, paused: false, positionMs: 0, durationMs: 0, buffering: false }));
       return {
         state: gst.paused ? "PAUSED" : gst.playing ? ((gst as any).buffering ? "BUFFERING" : "PLAYING") : "STOPPED",
-        position: Math.max(0, Math.floor(gst.positionMs / 1000 - bridgeLeadContentSec(groupId))),
+        position: Math.max(0, Math.floor(gst.positionMs / 1000)),
         duration: Math.floor(gst.durationMs / 1000),
         volume: persistedVolume,
         muted: false,

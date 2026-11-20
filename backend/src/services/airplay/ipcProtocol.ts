@@ -45,7 +45,7 @@ export type AirplayChildEvent =
    *  主进程转给 sendspin 子进程，泵按 ms 把 pacing 墙钟基准前提、一次性多吐内容。
    *  与 `bridgeStats` 的区别：后者只上报水位（诊断用），本事件是**动作请求** ——
    *  判断留在发现者（airplay），执行权留给内容源头（sendspin）。 */
-  | { t: "bridgePaceBump"; deviceId: string; ms: number };
+  | { t: "bridgePaceBump"; deviceId: string; ms: number; deficitMs?: number };
 
 // ------------------------- Phase 2:桥接 op 载荷(§6.2) -------------------------
 
