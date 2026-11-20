@@ -2,6 +2,29 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.14.25] - 2026-11-20
+
+### Feature / 服务端自我重启（客户端「设置 → 维护」）
+
+换完 `dist` 之后，Node 的模块缓存只有"换进程"才能清掉 —— 以往只能 SSH 进机器
+`docker restart`。现在把既有的 `gracefulShutdown`（停 mDNS → 各端发 TEARDOWN →
+`retainActiveQueues` 保住"正在播" → 关端口 → exit）暴露成一个受控入口，由容器
+`restart=always` 把进程重新拉起。
+
+- `GET /v1/system/restart`：能力探测（`adminMiddleware`）—— 管理员 200、其余 403。
+  客户端据此决定设置页是否渲染「维护」模块；客户端不另存一份"谁算管理员"，
+  "看不见"与"点不到"是同一个判据。
+- `POST /v1/system/restart`：受理后立即返回 **202**，500ms 后才进入 `gracefulShutdown`，
+  保证响应先飞回去。**5s 冷却**：连点/重试只能退一次，否则会连续经历两轮启动。
+- 未注册处理器时返回 **503**（不假装能重启，客户端不会傻等）。
+- 启动台账：`服务端自我重启已就绪: POST /rest/api/v1/system/restart (管理员)`
+  —— 日志里没有这条就说明 handler 没接线。
+
+240 实测：容器启动 → `listening` 2.2 秒；起来后约 10 秒 `playCurrent source=resume-active`
+自动续播。用户可感知的是接口约 3 秒不可用、音箱一次 TEARDOWN→重连（1~3 秒中断）。
+
+刻意不做：热加载模块（Node 做不到）、启动失败自动回滚（这是常规运维重启，不是滚动升级）。
+
 ## [4.14.24] - 2026-11-20
 
 ### Fix / 设备没接流时不再报饿（否则泵会被无限加速）

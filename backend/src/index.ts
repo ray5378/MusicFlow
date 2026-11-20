@@ -738,5 +738,16 @@ async function gracefulShutdown(sig: string): Promise<void> {
   try { server.close(); } catch { /* ignore */ }
   setTimeout(() => process.exit(0), 800).unref?.();
 }
+// 服务端自我重启（客户端「设置 → 维护」触发）：复用上面的 gracefulShutdown，
+// 容器 restart=always 会重新拉起 —— 不需要 SSH / docker restart。
+// 只在 index.ts 注册，因为退出时序（server.close + 800ms 后 exit）在这里。
+{
+  const { setRestartHandler } = await import("./services/system/restartControl.js");
+  setRestartHandler((reason: string) => gracefulShutdown(reason));
+  // 可验证性：这行是"重启能力已接线"的唯一台账。日志里没有它就说明 handler
+  // 没注册（此时 POST 会返回 503，不会假装重启）。
+  log.info("服务端自我重启已就绪: POST /rest/api/v1/system/restart (管理员)");
+}
+
 process.on("SIGTERM", () => { void gracefulShutdown("SIGTERM"); });
 process.on("SIGINT", () => { void gracefulShutdown("SIGINT"); });
