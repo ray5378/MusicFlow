@@ -2,6 +2,21 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.14.26] - 2026-11-20
+
+### Fix / 自我重启接口的错误体走统一契约（修 CI 红）
+
+4.14.25 在「未接线」分支手搓了错误响应体，触发仓库守卫
+`tests/routes/apiSearchOnlineErrorContract.test.ts`（routes 下禁止手搓错误体，**逐行正则扫**）
+⇒ tag 与 main 的 `build-and-push` / `ci` 红，镜像被回滚 job 打回上一版。
+
+- 改用 `apiError(BusinessErrorCode.UNAVAILABLE, "errors.system.restartUnavailable")` + **503**；
+- 文案入 i18n catalog（zh / en 各一条），英文环境不再回落到中文；
+- 顺带把注释里的字面写法改掉 —— 守卫是逐行正则，注释里写出来同样算违规。
+
+无行为变化：受理路径（202）与鉴权（401/403）不变，仅「未接线」时的错误体从裸对象
+变成带 `code` 的统一结构。
+
 ## [4.14.25] - 2026-11-20
 
 ### Feature / 服务端自我重启（客户端「设置 → 维护」）

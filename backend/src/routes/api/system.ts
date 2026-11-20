@@ -3,6 +3,7 @@ import type { Hono } from "hono";
 import { adminMiddleware } from "../../middleware/auth.js";
 import { takeBootNotices } from "../../services/system/bootNotices.js";
 import { isRestartAvailable, requestRestart } from "../../services/system/restartControl.js";
+import { apiError, BusinessErrorCode } from "../../utils/errors.js";
 
 export function registerSystem(app: Hono): void {
   app.get("/v1/system/boot-notices", adminMiddleware, (c) => {
@@ -26,7 +27,12 @@ export function registerSystem(app: Hono): void {
     const accepted = requestRestart(`api:${user?.username ?? "-"}`);
     if (!accepted) {
       // 没有注册处理器（例如被当作库引入）：明确告诉客户端"这次没重启"，别让它傻等。
-      return c.json({ success: false, error: "restart unavailable" }, 503);
+      // 错误体必须走 apiError —— routes 下禁止手搓错误响应体
+      // （守卫 tests/routes/apiSearchOnlineErrorContract.test.ts 逐行扫、钉死 0 处）。
+      return c.json(
+        apiError(BusinessErrorCode.UNAVAILABLE, "errors.system.restartUnavailable"),
+        503,
+      );
     }
     // 202：已受理，进程会在约 1.3s 内退出并重启。客户端据此进入"等待恢复"轮询。
     return c.json({ success: true, restarting: true }, 202);
