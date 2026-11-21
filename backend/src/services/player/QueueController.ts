@@ -790,6 +790,8 @@ export class QueueController extends EventEmitter {
           log.debug(`[QueueController][poll] t=${Date.now()} ${deviceId}: 链路不可用,跳过上报`);
           continue;
         }
+        // 广播这次采样(sendspin 组没有自带 state_changed,见 broadcastState 注释)。
+        this.broadcastState(deviceId, state);
         // 链路从"丢"回到"通":先把这一轮的真实状态上报掉,再触发续播。
         // 注意这里只**查**不删 —— 位置快照留在 linkLost 里,由 resumeAfterLinkRecovery
         // 取用(它自己负责清)。先删就会把"离开时的播放位置"丢掉,续播只能从头播。
@@ -2350,6 +2352,23 @@ export class QueueController extends EventEmitter {
   /** 解析「设备是否已进入新曲」,满足即放开显示并广播新快照。
    *  判据:新曲 position 从 0 重新走 ⇒ `position > 0 && position < posAtSet`(旧曲位置已接近曲末)。
    *  硬顶兜底放在 setDisplayHold 的定时器里。 */
+  /** 把一次采样广播到 ws(EventManager 的 `state_changed`)。
+   *  sendspin 组**从不发**这个事件(只有 DLNA GENA 会发),于是 App/Web/HA 三个界面
+   *  都只能靠轮询:HA 30s、App 数秒 ⇒「切歌后新曲进度不是从 00 开始」。
+   *  这里在每次轮询后补发一次,让状态推送这条链对 sendspin 组也成立。 */
+  private broadcastState(deviceId: string, state: any): void {
+    if (!state) return;
+    void import("../dlna/eventing.js")
+      .then(({ getEventManager }) => {
+        getEventManager().emit("state_changed", deviceId, {
+          ...state,
+          // ws 侧按 `state`(字符串)下发;PlayerState 里叫 playbackState。
+          state: state.playbackState ?? state.state,
+        });
+      })
+      .catch(() => { /* 事件层不可用不影响播放 */ });
+  }
+
   private maybeReleaseDisplayHold(deviceId: string, state: any): void {
     const hold = this.displayHold.get(deviceId);
     if (!hold) return;
@@ -2369,6 +2388,14 @@ export class QueueController extends EventEmitter {
     if (hold.watchTimer) clearInterval(hold.watchTimer);
     if (silent) return;
     log.info(`[QueueController][display-hold] ${id}: 放开显示(${reason}) → idx=${this.queues.get(id)?.currentIndex ?? -1}`);
+    // 放开瞬间立刻推一次状态:此刻新曲刚出声(position≈0),界面能马上从 00:00 起走;
+    // 否则要等下一次轮询(HA 30s / App 数秒)才看到,表现为"新曲不是从 00 开始"。
+    void (async () => {
+      try {
+        const st = await this.players.get(id)?.pollState();
+        if (st) this.broadcastState(id, st);
+      } catch { /* 读不到就靠下一轮轮询 */ }
+    })();
     this.emit("queue_changed", id, this.snapshot(id));
     // 状态类出口(WS state / peers status)由客户端重拉;DLNA 设备用 player_refresh
     // 触发一次主动刷新。动态 import 防 QueueController ↔ eventing 的加载环。
