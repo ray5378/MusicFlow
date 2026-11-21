@@ -953,7 +953,7 @@ export function setMutedCore(srv: SendspinServer | null, clientId: string, muted
 /** 上一次对外上报(回退检测用;仅诊断,不参与取值)。 */
 const lastExit = new Map<string, { disp: number; pos: number; songId: string }>();
 
-export function pollCore(srv: SendspinServer | null, clientId: string): { playing: boolean; paused: boolean; positionMs: number; durationMs: number; buffering: boolean; displayPositionMs: number } {
+export function pollCore(srv: SendspinServer | null, clientId: string): { playing: boolean; paused: boolean; positionMs: number; displayPositionMs: number; durationMs: number; buffering: boolean } {
   // ⚠️ 必须读**实际所属**的组(resolveLiveGroup):设备若在用户组内,
   // srv.group(clientId) 是单设备组,其 paused/current 不反映真实播放态 ——
   // 只读它会导致暂停后仍报 playing(HA 卡片进度条不锁帧、暂停键常显"播放")。

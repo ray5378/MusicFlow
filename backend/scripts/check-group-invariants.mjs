@@ -901,8 +901,8 @@ console.log("===== G14 可听前 BUFFERING 瞬态(audibleStarted ⇒ pollCore.bu
     "复位点缺失 ⇒ 对应路径切歌/seek 后进度回跳循环回归",
   );
   check(
-    "streamEngine 推流/排空两处首次越过下界置位 audibleStarted(漏置位 ⇒ 永远 BUFFERING 不出声)",
-    count(se14, "audibleStarted = true") === 2,
+    "streamEngine 三处置位 audibleStarted:推流/排空首越下界 + 暂停恢复重锚(已出声时);漏一处 ⇒ 该路径永远 BUFFERING 或恢复后被误判未出声",
+    count(se14, "audibleStarted = true") === 3,
     "置位点缺失 ⇒ 进度条永远停在下界,看门狗也等不到 PLAYING",
   );
   const core14 = code(SPIN_CORE);
