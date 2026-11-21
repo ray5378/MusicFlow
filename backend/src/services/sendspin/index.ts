@@ -430,6 +430,27 @@ export async function startSendspinService(port?: number): Promise<SendspinRunti
     },
     // 停播空闲回收:插件层(按需加载)已常驻在子进程里,Node 卸不掉 → 换进程释放。
     // 设备会经 mDNS/拨号目标自动重连(与崩溃重启同一路径),QC/PM 注册在 activated 里重建。
+    // 新曲真正出声:立刻放开封面延迟(不再等观察器轮询)并广播一次状态。
+    // 位置用泵给的**可听位置**(新曲≈0),界面第一眼就是 00:00。
+    onAudibleStarted: (clientId, _songId, positionMs, durationMs) => {
+      // 泵的组名有三种形态:group:<id> / ug:<id> / 裸 id —— 统一剥到裸 id,
+      //   否则 clearDisplayHold 找不到持有者(实测放不开,又退回 2s 的轮询延迟)。
+      const bareId = clientId.replace(/^(?:ug|group):/, "");
+      void (async () => {
+        try {
+          const { getQueueController } = await import("../player/index.js");
+          const qc = getQueueController();
+          qc.releaseDisplayHold(bareId, "audible-started");
+          qc.broadcastState(bareId, {
+            state: "PLAYING",
+            playbackState: "PLAYING",
+            position: positionMs / 1000,
+            duration: durationMs / 1000,
+            updatedAt: Date.now(),
+          });
+        } catch { /* 广播失败不影响播放 */ }
+      })();
+    },
     onIdleReclaim: (idleMs) => {
       void sendspinSupervisor.recycle(`停播空闲 ${Math.round(idleMs / 1000)}s,回收插件层内存`);
     },

@@ -464,6 +464,16 @@ const AUDIBLE_DEVICE_LEAD_MS = 2_050;
 /** 暂停时长超过该值才重建时间线(短暂停缓冲未耗尽,重锚反而制造跳变)。 */
 const PAUSE_RESEED_MS = 3_000;
 
+/** 泵「新曲开始出声」的跨进程回调(实现由子进程入口注入,见 childMain)。
+ *  只上报事实,不做广播决策 —— 广播在主进程。 */
+type AudibleStartSink = (clientId: string, songId: string, positionMs: number, durationMs: number) => void;
+let audibleStartSink: AudibleStartSink | null = null;
+
+/** 注册/清除出声回调(childMain 启动时注册)。 */
+export function setAudibleStartSink(fn: AudibleStartSink | null): void {
+  audibleStartSink = fn;
+}
+
 export class GroupPump {
   private group: SendspinGroup;
   private server: SendspinServer;
@@ -1580,7 +1590,18 @@ export class GroupPump {
           }
         }
         // 首次越过上报下界 ⇒ 已可听,解除 buffering(严格大于:等于 floor 时仍被钳位,不可分辨)。
-        if (!this.group.audibleStarted && this.group.positionMs > floorMs) this.group.audibleStarted = true;
+        if (!this.group.audibleStarted && this.group.positionMs > floorMs) {
+          this.group.audibleStarted = true;
+          // 新曲**真正出声**这一刻上报主进程:主进程立刻放开封面延迟并广播状态,
+          //   界面第一眼就是 00:00(不必等 400ms 观察器 + 子进程 RPC 回来,实测迟 1~2s)。
+          try {
+            // 上报值 = **起播下界**(floorMs):「刚越过下界」这一刻,设备播到的正是下界
+            //   本身。新曲下界 = 0、seek 下界 = 目标 ⇒ 天然精确,不依赖任何外推。
+            //   (用 positionMs/displayPositionMs 都不行:接续切歌的锚点落在过去时,
+            //    两者一上来就是 1~2s,界面第一眼还是「02 秒」。)
+            audibleStartSink?.(this.group.name, this.songId, Math.max(0, floorMs), this.durationMs);
+          } catch { /* 上报失败不影响推流 */ }
+        }
         // S1:曲末窗口内预解码下一首(开关关时立即返回,零开销)。
         this.maybeStartNextPrefetch();
         // ⚠️⚠️ 必须用**绝对时刻调度**,不能用「每轮固定 sleep(FRAME_MS)」(2026-09-17 实锤)。

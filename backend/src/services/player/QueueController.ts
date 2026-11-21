@@ -2356,7 +2356,7 @@ export class QueueController extends EventEmitter {
    *  sendspin 组**从不发**这个事件(只有 DLNA GENA 会发),于是 App/Web/HA 三个界面
    *  都只能靠轮询:HA 30s、App 数秒 ⇒「切歌后新曲进度不是从 00 开始」。
    *  这里在每次轮询后补发一次,让状态推送这条链对 sendspin 组也成立。 */
-  private broadcastState(deviceId: string, state: any): void {
+  broadcastState(deviceId: string, state: any): void {
     if (!state) return;
     void import("../dlna/eventing.js")
       .then(({ getEventManager }) => {
@@ -2367,6 +2367,13 @@ export class QueueController extends EventEmitter {
         });
       })
       .catch(() => { /* 事件层不可用不影响播放 */ });
+  }
+
+  /** 事件驱动地放开显示持有(泵上报「新曲真正出声」时调用)。
+   *  与 maybeReleaseDisplayHold 的区别:不依赖任何采样,RPC 一到就放开,
+   *  把「封面/进度切到新曲」的时延从 1~2s 压到毫秒级。 */
+  releaseDisplayHold(playerId: string, reason: string): void {
+    this.clearDisplayHold(stripPlayerPrefix(playerId), false, reason);
   }
 
   private maybeReleaseDisplayHold(deviceId: string, state: any): void {
@@ -2390,12 +2397,16 @@ export class QueueController extends EventEmitter {
     log.info(`[QueueController][display-hold] ${id}: 放开显示(${reason}) → idx=${this.queues.get(id)?.currentIndex ?? -1}`);
     // 放开瞬间立刻推一次状态:此刻新曲刚出声(position≈0),界面能马上从 00:00 起走;
     // 否则要等下一次轮询(HA 30s / App 数秒)才看到,表现为"新曲不是从 00 开始"。
-    void (async () => {
-      try {
-        const st = await this.players.get(id)?.pollState();
-        if (st) this.broadcastState(id, st);
-      } catch { /* 读不到就靠下一轮轮询 */ }
-    })();
+    // audible-started 由泵侧事件驱动,调用方会广播精确的起播值(0/seek 目标);
+    //   这里再补一次采样反而会把那个精确值覆盖成 1~2s 的轮询读数。
+    if (reason !== "audible-started") {
+      void (async () => {
+        try {
+          const st = await this.players.get(id)?.pollState();
+          if (st) this.broadcastState(id, st);
+        } catch { /* 读不到就靠下一轮轮询 */ }
+      })();
+    }
     this.emit("queue_changed", id, this.snapshot(id));
     // 状态类出口(WS state / peers status)由客户端重拉;DLNA 设备用 player_refresh
     // 触发一次主动刷新。动态 import 防 QueueController ↔ eventing 的加载环。

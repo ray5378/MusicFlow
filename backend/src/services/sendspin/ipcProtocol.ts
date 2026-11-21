@@ -100,7 +100,11 @@ export type SendspinChildEvent =
   | { t: "pauseStopIssued"; clientId: string }
   /** 停播空闲:插件层按需加载占住的内存只能靠换进程释放(见 idleReclaim.ts)。
    *  子进程只负责判定与上报,真正的 stop→start 由主进程 supervisor.recycle 执行。 */
-  | { t: "idleReclaim"; idleMs: number };
+  | { t: "idleReclaim"; idleMs: number }
+  /** 新曲**真正出声**的那一刻(泵的可听位越过下界)。主进程据此立刻放开 displayHold
+   *  并广播一次状态：此前只能等 400ms 观察器轮询 + 子进程 RPC 回来，实测迟 1~2s，
+   *  界面第一眼就是「02 秒」而不是 00:00。 */
+  | { t: "audibleStarted"; clientId: string; songId: string; positionMs: number; durationMs: number };
 
 /** 主进程 → child。 */
 export type ParentToSendspinChild = HostToChild<SendspinHostExtra>;

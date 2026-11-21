@@ -48,6 +48,9 @@ export interface SupervisorHooks {
   onSongUnplayable?: (songId: string, reason: string) => void;
   /** 停播空闲 → 回收重启子进程,释放按需加载的插件层内存(idleReclaim.ts)。 */
   onIdleReclaim?: (idleMs: number) => void;
+  /** 新曲真正出声(泵上报)。主进程据此放开 displayHold 并广播状态 —— 事件驱动,
+   *  不再等轮询,界面第一眼才是 00:00。 */
+  onAudibleStarted?: (clientId: string, songId: string, positionMs: number, durationMs: number) => void;
 }
 
 /** 子进程业务事件 → hooks 分发(纯函数抽出,便于单测)。
@@ -71,6 +74,9 @@ export function dispatchSendspinChildEvent(ev: SendspinChildEvent, hooks: Superv
       return;
     case "idleReclaim":
       try { hooks.onIdleReclaim?.(ev.idleMs); } catch { /* ignore */ }
+      return;
+    case "audibleStarted":
+      try { hooks.onAudibleStarted?.(ev.clientId, ev.songId, ev.positionMs, ev.durationMs); } catch { /* ignore */ }
       return;
     default:
       return;

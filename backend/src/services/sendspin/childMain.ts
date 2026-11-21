@@ -40,6 +40,7 @@ import {
   leaveGroupCore,
   bridgeSyncCore,
 } from "./playerCore.js";
+import { setAudibleStartSink } from "./streamEngine.js";
 import { syncGroupBridges, detachGroupBridge, type BridgeSocketSpec } from "./bridgeAttach.js";
 import { cleanupStaleBridgeSockets } from "../airplay/bridgeChannel.js";
 import { ensureChildPluginLayer } from "../rendererHost/childBootstrap.js";
@@ -58,6 +59,7 @@ export interface ChildControllerDeps {
 
 export class SendspinChildController extends ChildRpcHost<SendspinChildToParent, SendspinSnapshot> {
   private readonly deps: ChildControllerDeps;
+  private readonly sendRaw: ChildSend;
   private seq = 0;
 
   constructor(deps: ChildControllerDeps, send: ChildSend) {
@@ -68,6 +70,13 @@ export class SendspinChildController extends ChildRpcHost<SendspinChildToParent,
       onStop: () => deps.stopRuntime(),
     });
     this.deps = deps;
+    this.sendRaw = send;
+    // 泵「新曲开始出声」→ 主进程(立刻放开封面延迟 + 广播状态)。
+    setAudibleStartSink((clientId, songId, positionMs, durationMs) => {
+      try {
+        this.sendRaw({ t: "audibleStarted", clientId, songId, positionMs, durationMs });
+      } catch { /* 通道断了不影响推流 */ }
+    });
     // Phase 5(§5.2):子进程启动即清扫陈旧 mfab socket(探针连接被拒才删,
     // 活 listener 不动);fire-and-forget,绝不阻塞启动。
     void cleanupStaleBridgeSockets().catch(() => { /* 清理失败不拖垮启动 */ });
