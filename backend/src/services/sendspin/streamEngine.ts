@@ -1542,8 +1542,15 @@ export class GroupPump {
             //   不取历史最大值:positionMs 在曲内只前进(推送/排空都以内容时间为准),
             //   天然单调;取最大值反而让 seek 往回拖时进度条卡死。回退只有换曲/seek
             //   两个合法来源,各自由 displaySongId 与 seek 的显式复位负责。
-            const raw = this.group.positionMs + leadBack;
-            this.group.displayPositionMs = this.durationMs > 0 ? Math.min(this.durationMs, raw) : raw;
+            // 显示 = 设备**此刻在响**的位置 = (已推送 − 缓冲深度) + lead。
+            //   不能用 positionMs:它被 floorMs 钳在 ≥0,而起播头 lead(2.05s)内
+            //   pushed−depth 还是负的,钳 0 之后再加 lead ⇒ 进度凭空从 2s 起步
+            //   (用户报「切歌到下一首,进度直接是 02 秒」)。这里取未钳值再加 lead,
+            //   最后统一钳 [0, dur]:起播头 lead 秒显示 0.0→2.05,与真实出声同步。
+            const depthMs = (Number(cursorUs) - Number(nowUs())) / 1000;
+            const raw = framePosMs - depthMs + leadBack;
+            const capped = this.durationMs > 0 ? Math.min(this.durationMs, raw) : raw;
+            this.group.displayPositionMs = capped < 0 ? 0 : capped;
           }
         }
         // 加压执行：是否「需要补」已由投递侧判断（bridgePushTick 判 deliverable：
@@ -1876,8 +1883,11 @@ export class GroupPump {
                 // 排空期显示位置也要跟着走(否则整段停在推完那一刻,曲末少走 9s)。
                 //   与推送循环同一口径:加粘住的 lead、钳到时长、只升不降。
                 if (this.group.hasBridges?.() === true) this.group.displayLeadMs = AUDIBLE_DEVICE_LEAD_MS;
-                const rawDisp = nextPos + this.group.displayLeadMs;
-                this.group.displayPositionMs = this.durationMs > 0 ? Math.min(this.durationMs, rawDisp) : rawDisp;
+                // 与推送循环同一口径:未钳的可听位置 + lead,再钳 [0, dur]。
+                const depthDrainMs = (Number(cursorUs) - Number(nowUs())) / 1000;
+                const rawDisp = lastPushedMs - depthDrainMs + this.group.displayLeadMs;
+                const cappedDisp = this.durationMs > 0 ? Math.min(this.durationMs, rawDisp) : rawDisp;
+                this.group.displayPositionMs = cappedDisp < 0 ? 0 : cappedDisp;
               }
               if (!this.group.audibleStarted && this.group.positionMs > floorMs) this.group.audibleStarted = true;
               if (canFillSilence) {
