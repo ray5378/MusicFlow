@@ -478,6 +478,12 @@ export class GroupPump {
   private paused = false;
   /** 暂停起点(ms);resume 用它判断是否需要重建时间线。 */
   private pausedAtMs = 0;
+  /** 本段播放的「墙钟起点 / 内容起点」:显示位置的上界 = 内容起点 + 已流逝墙钟 × 倍速。
+   *  设备不可能"听到"比这更多的内容 —— 起播瞬间时间线锚点可能落在过去(接续上一首),
+   *  按 `pushed − depth` 算会把那点差值直接算成已播秒数,于是新曲第一眼不是 00:00
+   *  (实测 13:58 那次首样本 pos=1)。取 min(可听位置, 上界) 即可,且它只在上界更小时生效。 */
+  private playWallMs = 0;
+  private playContentMs = 0;
   private epoch = 0;
   /** 起播预填充窗口是否已退出(pushLoop 里 wantFill 由 true 翻 false)。
    *  服务端开环检测靠它豁免「起播灌水位」阶段;设备不消费时 wantFill 会恒 true,
@@ -856,6 +862,8 @@ export class GroupPump {
      *  否则 dueMs 会按 positionMs(=startMs)算出一个远在未来的时刻(见 paceAnchorMs)。 */
     this.paceAnchorMs = startMs;
     this.paceAnchorWall = Date.now();
+    this.playWallMs = Date.now();
+    this.playContentMs = startMs;
     this.resumeWaiter = null;
     // 主循环不阻塞调用方(playMedia 需尽快返回,由 pollState 反映进度)。
     void this.pushLoop(myEpoch);
@@ -959,6 +967,8 @@ export class GroupPump {
     this.group.audibleStarted = false;
     this.paceAnchorMs = 0;
     this.paceAnchorWall = Date.now();
+    this.playWallMs = Date.now();
+    this.playContentMs = 0;
     this.resumeWaiter = null;
     // ★ 时间线交接点:ring 里已有 [startTsUs, +3s] 的预取帧,正片必须从同一 ts
     //   继续(否则同内容两套 ts,后被水位判重丢弃,边界后跳掉一段)。
@@ -1549,7 +1559,8 @@ export class GroupPump {
             //   最后统一钳 [0, dur]:起播头 lead 秒显示 0.0→2.05,与真实出声同步。
             const depthMs = (Number(cursorUs) - Number(nowUs())) / 1000;
             const raw = framePosMs - depthMs + leadBack;
-            const capped = this.durationMs > 0 ? Math.min(this.durationMs, raw) : raw;
+            let capped = this.durationMs > 0 ? Math.min(this.durationMs, raw) : raw;
+            capped = this.capDisplayByElapsed(capped);
             this.group.displayPositionMs = capped < 0 ? 0 : capped;
           }
         }
@@ -1886,7 +1897,8 @@ export class GroupPump {
                 // 与推送循环同一口径:未钳的可听位置 + lead,再钳 [0, dur]。
                 const depthDrainMs = (Number(cursorUs) - Number(nowUs())) / 1000;
                 const rawDisp = lastPushedMs - depthDrainMs + this.group.displayLeadMs;
-                const cappedDisp = this.durationMs > 0 ? Math.min(this.durationMs, rawDisp) : rawDisp;
+                let cappedDisp = this.durationMs > 0 ? Math.min(this.durationMs, rawDisp) : rawDisp;
+                cappedDisp = this.capDisplayByElapsed(cappedDisp);
                 this.group.displayPositionMs = cappedDisp < 0 ? 0 : cappedDisp;
               }
               if (!this.group.audibleStarted && this.group.positionMs > floorMs) this.group.audibleStarted = true;
@@ -2070,6 +2082,16 @@ export class GroupPump {
     this.releaseAudio();
   }
 
+  /** 显示位置的上界:内容起点 + 已流逝墙钟 × 倍速 —— 不可能"听到"比这更多。
+   *  只在上界更小时生效(稳态下可听位置总是更小,行为不变),专治接续切歌时
+   *  时间线锚点落在过去导致的「新曲第一眼 01~02 秒」。 */
+  private capDisplayByElapsed(dispMs: number): number {
+    if (!(this.playWallMs > 0)) return dispMs;
+    const speed = this.speed > 0 ? this.speed : 1;
+    const capMs = this.playContentMs + (Date.now() - this.playWallMs) * speed;
+    return dispMs > capMs ? capMs : dispMs;
+  }
+
   /** 位置回退观测:对内 positionMs 的任何向下跳都留痕(只诊断,不改取值)。 */
   private notePosBack(src: string, prev: number, next: number): void {
     if (prev > 0 && next < prev - 500) {
@@ -2141,6 +2163,8 @@ export class GroupPump {
     // ① 之后还要记住这个下界:新 pushLoop 的首帧会按「可听位置」上报,而刚拖动完
     // 缓冲还没建立,可听位置会低于目标 —— 不设下界 UI 会看到「拖到 40s 却显示 39.2s」。
     this.reportedFloorMs = alignedMs;
+    this.playWallMs = Date.now();
+    this.playContentMs = alignedMs;
     this.group.audibleStarted = false; // seek 重建缓冲,回到可听前
     this.group.displayPositionMs = 0; // seek 允许显示回退,单调保护从头起算
     logSafe(this.server, "info", `[pump] display-reset song=${this.songId} reason=seek`);
