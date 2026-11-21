@@ -74,6 +74,7 @@ import { createLogger } from "../../utils/logger.js";
 import { getDataDir } from "../../utils/env.js";
 import { getSetting, setSetting } from "../settings.js";
 import { searchAlbumConsensus, searchCover, searchLyrics, searchMetadata } from "../../plugins/providers.js";
+import { lrcBelongsToSong } from "../lyrics.js";
 import { needsAlbumConsensus } from "../source/tagRecovery.js";
 import { cacheRemoteCover, resolveCoverFile } from "../playlistCover.js";
 import { withCoverLimit } from "../covers.js";
@@ -840,7 +841,16 @@ export async function repairSongTags(songId: string, cfg: FetchConfig): Promise<
     try {
       const text = await searchLyrics(songInput, { onMatch });
       if (text && text.trim()) {
-        tags.lyric = text;
+        // 2026-11-22:写入文件前必须过归属闸门。provider 按 id 取回的可能是别的歌
+        //   (真机:狂信者 → 分开旅行;本地 4 万 flac 里实测 1395 个文件的歌词标签是错的),
+        //   写进文件后无法自动修复,比显示层的错词更贵。
+        if (lrcBelongsToSong(text, { title: songInput.title, artist: songInput.artist, duration: songInput.duration })) {
+          tags.lyric = text;
+        } else {
+          log.warn(
+            `[tagrepair] 歌词与曲目不符,不写入: song=${songId} title=${songInput.title ?? "-"} artist=${songInput.artist ?? "-"}`,
+          );
+        }
       }
     } catch (e) {
       log.warn(`歌词探测失败(不计入，进退避重试): song=${songId} err=${e instanceof Error ? e.message : e}`);
