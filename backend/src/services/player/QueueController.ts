@@ -133,6 +133,9 @@ interface DisplayHold {
   /** 设持有时洗牌位置,快照回显与之对齐。 */
   shufflePos: number;
   timer: ReturnType<typeof setTimeout> | null;
+  /** 仅用于「新曲是否已经出声」的轻量观察定时器(400ms)。不喂 tracker、不参与切歌判定,
+   *  只为把封面/歌名的切换时延从"一个轮询周期(最长 5s)"压到亚秒级。 */
+  watchTimer?: ReturnType<typeof setInterval> | null;
 }
 
 interface PlayerControllerLike {
@@ -2323,6 +2326,20 @@ export class QueueController extends EventEmitter {
     hold.timer = setTimeout(() => {
       if (this.displayHold.get(id) === hold) this.clearDisplayHold(id, false, "hard-timeout");
     }, Math.max(0, hold.releaseAt - now) + 1);
+    // [2026-11-21] 封面切换时延:此前只靠 5s 轮询发现「设备已进入新曲」,实测新曲出声后
+    //   **3.1s** 封面才切(用户报「切歌时切换不够及时」)。这里起一个只做 hold 释放判定的
+    //   轻量轮询(400ms):它不写 lastPos/lastPlaying、不调 handleDecision,因此不会影响
+    //   切歌判定(避免再踩「poll 侧再造触发器」的链式跳歌)。
+    hold.watchTimer = setInterval(() => {
+      if (this.displayHold.get(id) !== hold) return;
+      void (async () => {
+        try {
+          const st = await this.players.get(id)?.pollState();
+          if (st) this.maybeReleaseDisplayHold(id, st);
+        } catch { /* 读不到不影响主轮询 */ }
+      })();
+    }, 400);
+    hold.watchTimer?.unref?.();
     hold.timer.unref?.();
     this.displayHold.set(id, hold);
     log.info(
@@ -2349,6 +2366,7 @@ export class QueueController extends EventEmitter {
     if (!hold) return;
     this.displayHold.delete(id);
     if (hold.timer) clearTimeout(hold.timer);
+    if (hold.watchTimer) clearInterval(hold.watchTimer);
     if (silent) return;
     log.info(`[QueueController][display-hold] ${id}: 放开显示(${reason}) → idx=${this.queues.get(id)?.currentIndex ?? -1}`);
     this.emit("queue_changed", id, this.snapshot(id));
