@@ -33,8 +33,9 @@ function searchStub(
         songs: songs.map((s) => ({
           id: s.id ?? "1",
           source: s.source ?? "qq",
-          name: s.name ?? "歌",
-          artist: "歌手",
+          // 2026-11-21:分支 A 也有身份闸门了(与桥接同一把尺),占位名必须与 target 一致。
+          name: s.name ?? target.title,
+          artist: (s as any).artist ?? target.artist,
           album: "专辑",
           duration: 240,
           cover: "",
@@ -156,7 +157,7 @@ describe("collectCandidates 多源聚合", () => {
   });
 
   it("sourceData 缺失 → 分支 B 不参与（无平台 ID 不盲查）", async () => {
-    const noData: FetchTarget = { id: "s", title: "歌", artist: "人" };
+    const noData: FetchTarget = { id: "s", title: "歌", artist: target.artist };
     const sources = [src("lx-source", ["stream"], resolveStub("https://cdn.example.com/kw/1.flac"))];
     const out = await collectCandidates({ target: noData, sources });
     expect(out).toEqual([]);
@@ -214,9 +215,9 @@ describe("collectCandidates 多源聚合", () => {
       async search() {
         return {
           songs: [
-            { id: "1", source: "netease", name: "歌", artist: "人", album: "专", duration: 200, cover: "", extra: { Genre: "摇滚" } },
-            { id: "2", source: "netease", name: "歌2", artist: "人", album: "专", duration: 200, cover: "", extra: { style: "民谣" } },
-            { id: "3", source: "netease", name: "歌3", artist: "人", album: "专", duration: 200, cover: "", extra: {} },
+            { id: "1", source: "netease", name: target.title, artist: target.artist, album: "专", duration: 200, cover: "", extra: { Genre: "摇滚" } },
+            { id: "2", source: "netease", name: target.title, artist: target.artist, album: "专", duration: 200, cover: "", extra: { style: "民谣" } },
+            { id: "3", source: "netease", name: "歌3", artist: target.artist, album: "专", duration: 200, cover: "", extra: {} },
           ],
         };
       },
@@ -402,8 +403,8 @@ function inspectStub(inspectImpl: (song: any) => any): CandidateSource {
         songs: Object.keys(INSPECT_KBPS).map((id) => ({
           id,
           source: "migu",
-          name: "歌",
-          artist: "人",
+          name: target.title,
+          artist: target.artist,
           album: "专",
           duration: 269,
           cover: "",
@@ -454,7 +455,7 @@ describe("inspect 预探（真实码率驱动排序）", () => {
   it("provider 未实现 inspectSong → 跳过 inspect 阶段，取链结果照常", async () => {
     const source = src("go-music-dl", ["stream", "search"], {
       async search() {
-        return { songs: [{ id: "1", source: "netease", name: "歌", artist: "人", album: "专", duration: 200, cover: "" }] };
+        return { songs: [{ id: "1", source: "netease", name: target.title, artist: target.artist, album: "专", duration: 200, cover: "" }] };
       },
       streamUrl: (_c: any, s: any) => `https://cdn.example.com/${s.id}.mp3`,
     });
@@ -533,8 +534,8 @@ describe("inspect 预探（真实码率驱动排序）", () => {
           songs: ids.map((id) => ({
             id,
             source: "migu",
-            name: "歌",
-            artist: "人",
+            name: target.title,
+            artist: target.artist,
             album: "专",
             duration: 269,
             cover: "",
@@ -567,7 +568,7 @@ describe("Candidate.extra 透传", () => {
       async search() {
         return {
           songs: [
-            { id: "1", source: "kugou", name: "晴天", artist: "周杰伦", album: "叶惠美", duration: 269, cover: "", extra: KUGOU_FULL },
+            { id: "1", source: "kugou", name: target.title, artist: target.artist, album: "叶惠美", duration: 269, cover: "", extra: KUGOU_FULL },
           ],
         };
       },
@@ -698,7 +699,7 @@ function rawSearchStub(songs: any[], urlOf: (s: any) => string): CandidateSource
 
 /** 一条最小的 search 结果（字段可覆盖）。 */
 function songOf(over: Record<string, any> = {}): Record<string, any> {
-  return { id: "1", source: "qq", name: "歌", artist: "人", album: "专", duration: 200, cover: "", ...over };
+  return { id: "1", source: "qq", name: target.title, artist: target.artist, album: "专", duration: 200, cover: "", ...over };
 }
 
 describe("collectCandidates 边界分支补充", () => {
@@ -713,7 +714,7 @@ describe("collectCandidates 边界分支补充", () => {
 
   it("搜索结果缺 id → 用 URL 哈希兜底生成候选 id;cover 透传", async () => {
     const source = rawSearchStub(
-      [{ source: "qq", name: "歌", artist: "人", album: "专", duration: 200, cover: "https://img.example.com/c.jpg" }],
+      [{ source: "qq", name: target.title, artist: target.artist, album: "专", duration: 200, cover: "https://img.example.com/c.jpg" }],
       () => "https://cdn.example.com/qq/x.mp3",
     );
     const out = await collectCandidates({ target, sources: [source] });
@@ -753,7 +754,7 @@ describe("collectCandidates 边界分支补充", () => {
 
   it("sourceData 非法/非对象 → 分支 B 不参与", async () => {
     for (const sd of ["not-json", "[1,2]", "null", "123"]) {
-      const t: FetchTarget = { id: "s", title: "歌", artist: "人", sourceData: sd };
+      const t: FetchTarget = { id: "s", title: "歌", artist: target.artist, sourceData: sd };
       const out = await collectCandidates({
         target: t,
         sources: [src("lx-source", ["stream"], resolveStub("https://cdn.example.com/kw/1.flac"))],
@@ -1002,7 +1003,7 @@ describe("覆盖率补充:inspect/排序/身份边界", () => {
   it("候选无任何声明(缺 duration)时 hintRank 归 unknown,排序不抛", async () => {
     const source = src("go-music-dl", ["stream", "search"], {
       async search() {
-        return { songs: [{ id: "1", source: "qq", name: "歌", artist: "人", album: "专", cover: "" }] }; // 无 duration
+        return { songs: [{ id: "1", source: "qq", name: target.title, artist: target.artist, album: "专", cover: "" }] }; // 无 duration
       },
       streamUrl(_c: any) {
         return "https://cdn.example.com/1.mp3";
@@ -1016,7 +1017,7 @@ describe("覆盖率补充:inspect/排序/身份边界", () => {
 
   it("直链无音频后缀且无曲目时长 → 声明质量整体为空(compactQuality → undefined)", async () => {
     const source = rawSearchStub(
-      [{ id: "1", source: "qq", name: "歌", artist: "人", album: "专", cover: "" }], // 无 duration
+      [{ id: "1", source: "qq", name: target.title, artist: target.artist, album: "专", cover: "" }], // 无 duration
       () => "https://cdn.example.com/dl/stream",
     );
     const out = await collectCandidates({ target, sources: [source] });

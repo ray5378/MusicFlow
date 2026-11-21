@@ -379,7 +379,7 @@ function supportsBridgeResolve(src: CandidateSource, target: FetchTarget): boole
  * 多艺术家任一分词命中即放行（一方无歌手信息则标题对上即可）。宁缺毋滥：过滤不过
  * 的命中不做 resolveStream，避免把同名别人的歌唱进下载目录。
  */
-function bridgeHitMatches(h: OnlineSongResult, target: FetchTarget): boolean {
+function hitMatchesTarget(h: OnlineSongResult, target: FetchTarget): boolean {
   const norm = (v: unknown) => String(v ?? "").toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
   const t = norm(target.title);
   const hn = norm(h.name);
@@ -421,8 +421,20 @@ async function viaSearch(src: CandidateSource, target: FetchTarget): Promise<Can
   const query = [target.title, target.artist].filter(Boolean).join(" ").trim();
   const res = await src.provider.search(src.config, { query });
   const songs: OnlineSongResult[] = Array.isArray(res?.songs) ? res.songs : [];
+  // 2026-11-21 补闸门:此处此前**完全不过滤** —— 插件 search 返回什么就拿什么去下载,只靠
+  //   下游「时长门禁 + 完整歌曲守卫」兜底。同歌手、时长相近的另一首能一路下到落盘
+  //   (歌词串成同歌手的另一首就是同一类问题的证据)。分支 C(桥接)一直有这把尺,这里补齐。
+  const hits = songs.filter((x) => hitMatchesTarget(x, target));
+  if (hits.length !== songs.length) {
+    log.debug("分支 A 搜索结果过滤:标题/歌手不符的命中已丢弃", {
+      pluginId: src.pluginId,
+      title: target.title,
+      before: songs.length,
+      after: hits.length,
+    });
+  }
   const out: CandRecord[] = [];
-  for (const s of songs) {
+  for (const s of hits) {
     let url = "";
     try {
       url = String(src.provider.streamUrl(src.config, s) ?? "");
@@ -544,7 +556,7 @@ async function viaBridgeResolve(
     });
     return [];
   }
-  const matched = hits.filter((h) => bridgeHitMatches(h, target)).slice(0, Math.max(1, DEFAULT_BRIDGE_TOP_N));
+  const matched = hits.filter((h) => hitMatchesTarget(h, target)).slice(0, Math.max(1, DEFAULT_BRIDGE_TOP_N));
   if (matched.length === 0) {
     log.debug("桥接搜索无标题/歌手匹配命中，分支 C 跳过", {
       pluginId: src.pluginId,
