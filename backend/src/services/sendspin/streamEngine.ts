@@ -458,6 +458,12 @@ interface NextTrackPrefetch {
   audio: GroupAudio;
 }
 
+/** 设备「距离开播」的 lead(ms):桥 tick 的 commandedLeadUs 实测 2050000。 */
+const AUDIBLE_DEVICE_LEAD_MS = 2_050;
+
+/** 暂停时长超过该值才重建时间线(短暂停缓冲未耗尽,重锚反而制造跳变)。 */
+const PAUSE_RESEED_MS = 3_000;
+
 export class GroupPump {
   private group: SendspinGroup;
   private server: SendspinServer;
@@ -470,6 +476,8 @@ export class GroupPump {
   private dbgPrevWall = 0;
   private dbgPrevTs = 0;
   private paused = false;
+  /** 暂停起点(ms);resume 用它判断是否需要重建时间线。 */
+  private pausedAtMs = 0;
   private epoch = 0;
   /** 起播预填充窗口是否已退出(pushLoop 里 wantFill 由 true 翻 false)。
    *  服务端开环检测靠它豁免「起播灌水位」阶段;设备不消费时 wantFill 会恒 true,
@@ -835,6 +843,7 @@ export class GroupPump {
     const startMs = alignFrameMs(this.pendingSeekMs ?? 0);
     this.pendingSeekMs = null;
     this.playCursorMs = startMs;
+    this.notePosBack("start", this.group.positionMs, startMs);
     this.group.positionMs = startMs;
     // 本轮上报下界 = 起播位置(见 reportedFloorMs 注释:正常起播为 0,
     // 带 seek 起播时为目标位置,防止刚发布的目标被可听位置拉低)。
@@ -944,6 +953,7 @@ export class GroupPump {
     // 起播位置 = 0(预取就是从 0 解出来的);上报下界与 pacing 锚点同一起播语义。
     this.pendingSeekMs = null;
     this.playCursorMs = 0;
+    this.notePosBack("prefetch-start", this.group.positionMs, 0);
     this.group.positionMs = 0;
     this.reportedFloorMs = 0;
     this.group.audibleStarted = false;
@@ -1115,6 +1125,11 @@ export class GroupPump {
    *  边界:缓冲被抽干(卡顿/停滞)时深度变负 → 位置不得超过已推送量。 */
   private audiblePositionMs(pushedMs: number, cursorUs: bigint, floorMs: number): number {
     const depthMs = (Number(cursorUs) - Number(nowUs())) / 1000;
+    // [2026-11-21] MUZO/Linkplay 系接收端(如 HiVi H5MKII)收到即播、不等 RTP 时间戳;
+    //   而 depth 里含着「距离开播还有多久」那一段(桥 commandedLead ≈ 2.05s),
+    //   把它也扣掉会让 UI 恒定落后一个 lead(240 实测 3~4 秒;抓包确认发送侧 1x 无积累)。
+    //   只保留「还没送出去」的部分(ring + inQueue),lead 加回来。
+    //   ⚠️ 将来接入严格按 ts 播的设备要按类型分流,不能一律加回。
     const audible = pushedMs - depthMs;
     if (audible > pushedMs) return pushedMs;
     return audible < floorMs ? floorMs : audible;
@@ -1250,6 +1265,18 @@ export class GroupPump {
         // 分开写迟早漂移(此前 pacing 在 seek 时完全没被重设,是"拖动后无声"的真凶)。
         if (firstFrame || this.timelineReseed !== consumedReseed) {
           const reseed = !firstFrame;
+          // 只有**新曲首帧**才把显示位置归零。reseed(曲末泵移交/内部重锚)不清 ——
+          //   排空期 positionMs 会因 depth 增长往下掉(实测 252→243),清掉就等于把显示
+          //   往回拽 9 秒(用户报「临近结尾往后跳」)。seek 另有专门重置。
+          // ⚠️ 判据挂在**组**上(group.displaySongId),不是泵实例字段:曲末泵换代
+          //   (handover)会 new 一个 GroupPump,实例字段恒空 ⇒ 同名曲首帧再清一次显示,
+          //   把「pin 到时长」的 185 打回真实排空位置 176(实测 11:51:44 回退 9s)。
+          if (this.group.displaySongId !== this.songId) {
+            this.group.displaySongId = this.songId;
+            this.group.displayLeadMs = 0;
+            this.group.displayPositionMs = 0;
+            logSafe(this.server, "info", `[pump] display-reset song=${this.songId} reason=new-song`);
+          }
           consumedReseed = this.timelineReseed;
           firstFrame = false;
           // ★ S1(2026-11-01):采纳下一首预取后的**首个锚点**必须是预取起点,不是
@@ -1497,7 +1524,28 @@ export class GroupPump {
         //   (2026-09-24 真机:预填充 10s 档下,开播瞬间进度条与歌词直接显示 00:10,
         //    而声音明明从头开始 —— 已推送量比实际听到的多出整整一个缓冲深度)。
         //  取帧仍用 playCursorMs(已推送),只有对外上报走可听位置。
-        this.group.positionMs = this.audiblePositionMs(framePosMs, cursorUs, floorMs);
+        {
+          {
+            const nextPos = this.audiblePositionMs(framePosMs, cursorUs, floorMs);
+            this.notePosBack("push", this.group.positionMs, nextPos);
+            this.group.positionMs = nextPos;
+          }
+          // [2026-11-21] 显示位置与判定位置分离:MUZO/Linkplay 系接收端收到即播、不等 RTP ts,
+          //   所以「对外进度」要加回桥的 commandedLead(2.05s);而「唱完/切歌」判定必须用真实
+          //   位置,否则曲末进度提前 2 秒撞到总时长 ⇒ 切歌等待 → 又拉回播放 → 真唱完才切。
+          {
+            // lead 按曲粘住(只升不降):曲末桥会话收尾瞬间 hasBridges() 翻 false,
+            //   跟着翻 0 会让显示位置当场掉 2.05s。
+            if (this.group.hasBridges?.() === true) this.group.displayLeadMs = AUDIBLE_DEVICE_LEAD_MS;
+            const leadBack = this.group.displayLeadMs;
+            // 显示位置 = 当前可听位置的**纯派生量**(+ 粘住的 lead,钳到时长)。
+            //   不取历史最大值:positionMs 在曲内只前进(推送/排空都以内容时间为准),
+            //   天然单调;取最大值反而让 seek 往回拖时进度条卡死。回退只有换曲/seek
+            //   两个合法来源,各自由 displaySongId 与 seek 的显式复位负责。
+            const raw = this.group.positionMs + leadBack;
+            this.group.displayPositionMs = this.durationMs > 0 ? Math.min(this.durationMs, raw) : raw;
+          }
+        }
         // 加压执行：是否「需要补」已由投递侧判断（bridgePushTick 判 deliverable：
         //   超标 → reject 丢弃，否则 → approve 转入 approvedMs）。
         //   ⚠️ 必须取 takeApproved 而非 take：泵每 25ms 一拍、server 每 250ms 才检查，
@@ -1821,7 +1869,16 @@ export class GroupPump {
               //   - 代价:总排空量最多多 1ms(相对于 14s 量级完全无意义)。
               const stepMs = Math.min(drainStepMs, Math.ceil(left));
               await sleep(stepMs);
-              this.group.positionMs = this.audiblePositionMs(lastPushedMs, cursorUs, floorMs);
+              {
+                const nextPos = this.audiblePositionMs(lastPushedMs, cursorUs, floorMs);
+                this.notePosBack("drain", this.group.positionMs, nextPos);
+                this.group.positionMs = nextPos;
+                // 排空期显示位置也要跟着走(否则整段停在推完那一刻,曲末少走 9s)。
+                //   与推送循环同一口径:加粘住的 lead、钳到时长、只升不降。
+                if (this.group.hasBridges?.() === true) this.group.displayLeadMs = AUDIBLE_DEVICE_LEAD_MS;
+                const rawDisp = nextPos + this.group.displayLeadMs;
+                this.group.displayPositionMs = this.durationMs > 0 ? Math.min(this.durationMs, rawDisp) : rawDisp;
+              }
               if (!this.group.audibleStarted && this.group.positionMs > floorMs) this.group.audibleStarted = true;
               if (canFillSilence) {
                 fillChunks += this.group.pushBridgeOnlySilence?.(fillTsUs, stepMs * 1000) ?? 0;
@@ -1933,7 +1990,13 @@ export class GroupPump {
             //   的「IDLE 但位置远未到时长」判据会把它当成误报(idle_early),再叠加 seek
             //   冷静期(8s)⇒ 既不 advance 也不 stalled(真机实测卡 20s 后 stall 重投)。
             //   内容确实已到结尾,上报时长即真实终态;非自然结束(截断/链路死亡)不动。
-            if (this.endedNaturally && this.durationMs > 0) this.group.positionMs = this.durationMs;
+            if (this.endedNaturally && this.durationMs > 0) {
+              // positionMs 钉到时长 = 喂给 tracker 的「已到结尾」判据(idle_early 会拦下
+              //   「IDLE 但位置远未到时长」)。**只钉判定值**:显示值是纯派生量,让它停在
+              //   真实可听位置,下一首起播按 displaySongId 归零 —— 否则 185 这个"将来的数"
+              //   会在泵换代那一刻被打回 176(用户报的曲末回退 9s)。
+              this.group.positionMs = this.durationMs;
+            }
             this.group.current = null;
           }
         } finally {
@@ -1997,12 +2060,45 @@ export class GroupPump {
     this.releaseAudio();
   }
 
+  /** 位置回退观测:对内 positionMs 的任何向下跳都留痕(只诊断,不改取值)。 */
+  private notePosBack(src: string, prev: number, next: number): void {
+    if (prev > 0 && next < prev - 500) {
+      logSafe(
+        this.server,
+        "warn",
+        `[pump-pos-back] src=${src} ${Math.round(prev)}->${Math.round(next)} song=${this.songId}` +
+          ` cursor=${Math.round(this.playCursorMs)} dur=${Math.round(this.durationMs)}` +
+          ` started=${this.group.audibleStarted} disp=${Math.round(this.group.displayPositionMs)}`,
+      );
+    }
+  }
+
   pause(): void {
     this.paused = true;
+    this.pausedAtMs = Date.now();
   }
 
   resume(): void {
     if (!this.paused) return;
+    // [2026-11-21] 暂停期间桥把内存队列一次推给设备(实测 7.86s)并播完,而 cursorUs
+    //   停在暂停时刻 ⇒ 恢复后新内容 ts 已落后墙钟,设备收到即播/丢弃 ⇒「每秒卡一下」。
+    //   超过阈值就重建时间线(与 rehost/seek 的重锚路径同源)。
+    const pausedMs = this.pausedAtMs > 0 ? Date.now() - this.pausedAtMs : 0;
+    this.pausedAtMs = 0;
+    if (pausedMs > PAUSE_RESEED_MS) {
+      this.timelineReseed++;
+      // 重锚只是把时间线平移到「现在 + lead」,不改变「这首已经在出声」的事实;
+      // 不清这一位,恢复后会出现一段假的 BUFFERING(测试 queueModes 也据此断言)。
+      this.group.audibleStarted = true;
+      // 上报下界保底 = 暂停时的位置:重锚把 cursor 推到 now+lead,若内容量还不足一个
+      // lead(短曲/测试),audible 会被算成 0 ⇒ 进度条从 0 跳回。保底后只会原地不动。
+      this.reportedFloorMs = Math.max(this.reportedFloorMs, this.group.positionMs);
+      logSafe(
+        this.server,
+        "info",
+        `[pump] resume 重建时间线 pausedMs=${pausedMs} reseed=${this.timelineReseed}`,
+      );
+    }
     this.paused = false;
     this.resumeWaiter?.();
     this.resumeWaiter = null;
@@ -2036,6 +2132,8 @@ export class GroupPump {
     // 缓冲还没建立,可听位置会低于目标 —— 不设下界 UI 会看到「拖到 40s 却显示 39.2s」。
     this.reportedFloorMs = alignedMs;
     this.group.audibleStarted = false; // seek 重建缓冲,回到可听前
+    this.group.displayPositionMs = 0; // seek 允许显示回退,单调保护从头起算
+    logSafe(this.server, "info", `[pump] display-reset song=${this.songId} reason=seek`);
     // S1:拖动会改变内容位置 ⇒ 预取的「下一首从 0 起」内容不再是用得上的衔接。
     // 只丢帧、**保留**「下一首是谁」:拖完继续播到曲末照样要在 ≤5s 窗口预解码。
     this.cancelNextTrackPrefetch(true);

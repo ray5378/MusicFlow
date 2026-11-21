@@ -931,7 +931,7 @@ export async function getGroupStatus(groupId: string): Promise<{
     const gv = front?.groups.get(gname) as any;
     return {
       state: st.paused ? "PAUSED" : st.playing ? ((st as any).buffering ? "BUFFERING" : "PLAYING") : "STOPPED",
-      position: Math.max(0, Math.floor(st.positionMs / 1000)),
+      position: Math.max(0, Math.floor(((st as any).displayPositionMs ?? st.positionMs) / 1000)),
       duration: Math.floor(st.durationMs / 1000),
       // 实时组在则回实时(刚调过),否则回持久库值(重启后 / ug 组尚未创建)。
       volume: typeof gv?.volume === "number" ? gv.volume : persistedVolume,
@@ -953,7 +953,7 @@ export async function getGroupStatus(groupId: string): Promise<{
       const gst = await sendspinGroupPoll(gname).catch(() => ({ playing: false, paused: false, positionMs: 0, durationMs: 0, buffering: false }));
       return {
         state: gst.paused ? "PAUSED" : gst.playing ? ((gst as any).buffering ? "BUFFERING" : "PLAYING") : "STOPPED",
-        position: Math.max(0, Math.floor(gst.positionMs / 1000)),
+        position: Math.max(0, Math.floor(((gst as any).displayPositionMs ?? gst.positionMs) / 1000)),
         duration: Math.floor(gst.durationMs / 1000),
         volume: persistedVolume,
         muted: false,

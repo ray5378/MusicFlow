@@ -228,7 +228,7 @@ export class QueueController extends EventEmitter {
   private appliedSpeed = new Map<string, number>();
   /** 最后一次**PLAYING**采样(位置/时长/时刻),供 advance 时外推旧曲还能听多久。
    *  与 lastPos 分开:lastPos 只记位置(链路恢复/冻结用),这里还要时长与时间戳。 */
-  private lastPlaying = new Map<string, { pos: number; dur: number; at: number }>();
+  private lastPlaying = new Map<string, { pos: number; dur: number; at: number; disp?: number }>();
   /** 可听显示延迟持有(key=裸 id)。见 DisplayHold 注释。 */
   private displayHold = new Map<string, DisplayHold>();
   /** judgePlayable 刚裁决出的可播源行(key=裸 id):起播时透传给 player,
@@ -811,6 +811,10 @@ export class QueueController extends EventEmitter {
         if (state.playbackState === PlaybackState.PLAYING) {
           this.lastPlaying.set(deviceId, {
             pos: typeof state.position === "number" ? state.position : 0,
+            // 显示口径(桥组 = 可听位置 + 设备 lead)。hold 是**显示**机制,外推必须与
+            //   显示同口径,否则接管那一刻会按"真实位置"重算 ⇒ 进度当场往回掉
+            //   (实测 257 -> 256.28;lead 在场时可掉 2.05s)。
+            disp: typeof state.displayPosition === "number" ? state.displayPosition : undefined,
             dur: typeof state.duration === "number" ? state.duration : 0,
             at: Date.now(),
           });
@@ -1026,7 +1030,7 @@ export class QueueController extends EventEmitter {
             let holdPosAtSet = 0;
             let holdRemain = 0;
             if (holdDur > 0 && sample) {
-              holdPosAtSet = Math.min(holdDur, sample.pos + (Date.now() - sample.at) / 1000);
+              holdPosAtSet = Math.min(holdDur, (sample.disp ?? sample.pos) + (Date.now() - sample.at) / 1000);
               // ★ 用「本轮 poll 刚上报的位置」钳住外推值(2026-11-14 240 混合组实测)。
               //   泵在曲末会一次推满(位置从 190 跳到 202),而 lastPlaying 只在 PLAYING
               //   采样里刷新,最多落后一个采样周期 ⇒ 按外推值算 remain 会多按 ~10s:

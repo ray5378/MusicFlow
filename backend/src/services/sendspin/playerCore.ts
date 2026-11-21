@@ -352,6 +352,13 @@ export function playCore(
   // 发布位置:入参是**内容毫秒**,泵时间轴是输出流毫秒(倍速已压缩音频)⇒ 除以 rate。
   g.positionMs = seekPositionMs != null ? Math.max(0, Math.round(seekPositionMs / rate)) : 0;
   g.audibleStarted = false; // 起播即回可听前,poll 报 buffering 至首帧可听
+  // 显示位置只在**换曲**时归零:同一首的续流/重锚(曲末交接、seek 后续传)
+  //   保留既有值,否则「已 pin 到时长」的显示被打回真实排空点(实测 185->176)。
+  //   归属判据挂在**组**上,泵换代(新实例)不会重复清零。
+  if (g.displaySongId !== item.songId) {
+    g.displayPositionMs = 0;
+    g.displayLeadMs = 0;
+  }
   // 当前曲元数据进组状态:status.media / queue currentMedia 据此上报,
   // 前端与 HA 靠 media.songId 变化触发歌词/封面刷新(缺了就卡在第一首)。
   g.current = { songId: item.songId, title: item.title, artist: item.artist, album: item.album, coverArt: item.coverArt, mime: item.mime, durationMs: (item.duration ?? 0) * 1000 };
@@ -502,6 +509,13 @@ export function playGroupCore(
   // 发布位置:入参是**内容毫秒**,泵时间轴是输出流毫秒(倍速已压缩音频)⇒ 除以 rate。
   g.positionMs = seekPositionMs != null ? Math.max(0, Math.round(seekPositionMs / rate)) : 0;
   g.audibleStarted = false; // 起播即回可听前,poll 报 buffering 至首帧可听
+  // 显示位置只在**换曲**时归零:同一首的续流/重锚(曲末交接、seek 后续传)
+  //   保留既有值,否则「已 pin 到时长」的显示被打回真实排空点(实测 185->176)。
+  //   归属判据挂在**组**上,泵换代(新实例)不会重复清零。
+  if (g.displaySongId !== item.songId) {
+    g.displayPositionMs = 0;
+    g.displayLeadMs = 0;
+  }
   g.current = { songId: item.songId, title: item.title, artist: item.artist, album: item.album, coverArt: item.coverArt, mime: item.mime, durationMs: (item.duration ?? 0) * 1000 };
   // ★ P2 接续:对**已是成员**的直连播放器不能再推 stream/start(那会重开会话/清缓冲,
   //   把这条连续时间线上的旧曲尾一起弄丢);仍在推流的连接保持原样,只对本次真正
@@ -936,7 +950,10 @@ export function setMutedCore(srv: SendspinServer | null, clientId: string, muted
 
 /** 轮询核心:逻辑播放状态以「组当前曲」为准(已注册播放器在投/续播即视为播放中);
  *  连接就绪与否只影响推流可达性,不改变 QueueController 的切歌/恢复判定。 */
-export function pollCore(srv: SendspinServer | null, clientId: string): { playing: boolean; paused: boolean; positionMs: number; durationMs: number; buffering: boolean } {
+/** 上一次对外上报(回退检测用;仅诊断,不参与取值)。 */
+const lastExit = new Map<string, { disp: number; pos: number; songId: string }>();
+
+export function pollCore(srv: SendspinServer | null, clientId: string): { playing: boolean; paused: boolean; positionMs: number; durationMs: number; buffering: boolean; displayPositionMs: number } {
   // ⚠️ 必须读**实际所属**的组(resolveLiveGroup):设备若在用户组内,
   // srv.group(clientId) 是单设备组,其 paused/current 不反映真实播放态 ——
   // 只读它会导致暂停后仍报 playing(HA 卡片进度条不锁帧、暂停键常显"播放")。
@@ -960,15 +977,42 @@ export function pollCore(srv: SendspinServer | null, clientId: string): { playin
   // 泵尚未建立时的兜底（如进程启动后还没起播就查状态）。两者不一致会让
   // 「音频按 A 倍速生成、进度按 B 倍速显示」—— 这类错不抛异常，只能靠单一口径规避。
   const rate = normalizePlaybackSpeed(peekPump(g)?.playbackRate ?? (g as any).playbackRate ?? 1);
+  const posOut = Math.round(g.positionMs * rate);
+  // 显示位置 = 泵维护的 displayPositionMs(可听位置 + 粘住的桥 lead,已钳到时长)。
+  //   这里是**纯读取**,不再做"历史最大值"钳位 —— 那种钳位是补丁:它挡住了曲末回退,
+  //   同时也把 seek 往回拖死(进度条卡在旧值直到播过它)。真正的根因在泵侧所有权
+  //   (见 streamEngine 的 displaySongId/displayLeadMs 注释)。
+  const dispOut = Math.round(
+    (typeof (g as any).displayPositionMs === "number" ? (g as any).displayPositionMs : g.positionMs) * rate,
+  );
+  // [定位 2026-11-21] 出口级回退打点:任何一次对外位置下降都留痕(带内部量),
+  //   用来终结「曲末进度往回跳」的猜谜 —— 之前六种猜测全没挡住,说明还有未知路径。
+  {
+    const l = lastExit.get(clientId);
+    const sid = String((g as any).current?.songId ?? "");
+    if (l && l.songId === sid && (dispOut < l.disp - 500 || posOut < l.pos - 500)) {
+      const pump = peekPump(g) as any;
+      log.warn(
+        `[pos-back] client=${clientId} song=${sid} disp ${l.disp}->${dispOut} pos ${l.pos}->${posOut}` +
+          ` g.pos=${Math.round(g.positionMs)} g.disp=${Math.round((g as any).displayPositionMs ?? -1)}` +
+          ` started=${(g as any).audibleStarted} paused=${!!g.paused}` +
+          ` hasCur=${!!g.current} dur=${Math.round(((g as any).current?.durationMs ?? (g as any).frozenDurationMs ?? 0))}` +
+          ` cursor=${Math.round(pump?.playCursorMs ?? -1)} bridges=${(g as any).bridges?.size ?? -1}`,
+      );
+    }
+    lastExit.set(clientId, { disp: dispOut, pos: posOut, songId: sid });
+  }
   return {
     playing: !!g.current,
     paused: !!g.paused,
     // 泵时间轴是输出流毫秒(倍速已压缩音频)⇒ 换算回内容毫秒再对外。
-    positionMs: Math.round(g.positionMs * rate),
+    positionMs: posOut,
     // durationMs 本身就是内容时长(current.durationMs / frozenDurationMs 均在写入时保留内容口径)。
     durationMs: (g as any).current?.durationMs ?? (g as any).frozenDurationMs ?? 0,
     // 可听前(静默预填充/seek 重建)报 buffering:stub 组无此字段(undefined)退化 false。
     buffering: !!g.current && !g.paused && (g as any).audibleStarted === false,
+    // 显示位置(真实 + 桥 lead);无该字段的组(未起播/旧组)用 positionMs 兜底。
+    displayPositionMs: dispOut,
   };
 }
 

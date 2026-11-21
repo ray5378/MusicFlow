@@ -235,9 +235,12 @@ function subscribeAndForward(ws: WebSocket): () => void {
     // 否则 Web/HA 会在上一首没播完时先显示下一首封面歌名。
     const hold = getQueueController()?.displayHoldState?.(deviceId);
     const media = hold ? hold.media : getCurrentMedia(deviceId);
+    // 显示口径:桥组带 displayPosition(真实 + 设备 lead),判定/库内仍用 position。
     const state = hold && typeof hold.position === "number"
       ? { ...st, position: hold.position, duration: hold.duration }
-      : st;
+      : (typeof (st as any)?.displayPosition === "number"
+        ? { ...st, position: (st as any).displayPosition }
+        : st);
     // debug:推给前端的最终状态 —— 进度条「拖动后跳回」是前端渲染 vs 服务端权威值
     // 的分歧,而服务端权威值就是以这一行为准(前端进度条按 pos/dur 渲染)。
     // 拖动瞬间若看到 pos 从目标值掉回旧值,说明回退发生在服务端外推/上报侧,

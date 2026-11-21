@@ -16,7 +16,9 @@ export enum PlaybackState {
 export interface PlayerState {
   playerId: string;          // dlna:<deviceId> (未来 universal:<id>)
   playbackState: PlaybackState;
-  position: number;          // 秒
+  position: number;          // 秒(判定用:真实可听位置)
+  /** 对外显示用位置(秒)。缺省时用 position —— 只有桥组会带上「距离开播」的 lead。 */
+  displayPosition?: number;
   duration: number;          // 秒
   mediaUri?: string;         // 当前流 URL,用于检测曲目切换
   updatedAt: number;         // ms epoch,状态最后一次刷新

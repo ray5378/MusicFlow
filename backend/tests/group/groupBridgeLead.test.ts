@@ -256,7 +256,7 @@ describe("getGroupStatus:位置与设备侧真相同源(不二次扣 lead)", () 
       path.resolve(process.cwd(), "src/services/group/protocolPlayer.ts"),
       "utf8",
     );
-    expect(src).toContain("position: Math.max(0, Math.floor(st.positionMs / 1000)),");
+    expect(src).toContain("displayPositionMs ?? st.positionMs");
     expect(src).not.toContain("st.positionMs / 1000 - ");
     expect(src).not.toContain("gst.positionMs / 1000 - ");
   });

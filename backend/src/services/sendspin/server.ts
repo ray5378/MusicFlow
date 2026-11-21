@@ -731,6 +731,14 @@ export class SendspinGroup {
    *  只写给宣告了 `set_static_delay` 的设备,未宣告一律不发。 */
   staticDelayMs = 0;
   positionMs = 0;
+  /** 对外显示用位置(真实可听 + 桥 commandedLead)。唱完/切歌判定仍用 positionMs。 */
+  displayPositionMs = 0;
+  /** 显示位置已归属的 songId(按**组**记,不按泵实例记)。曲末泵换代(handover)时
+   *  新泵实例的同名曲首帧不能清零显示,否则「曲末 pin 到时长 → 换代回真实值」= 回退 9s。 */
+  displaySongId = "";
+  /** 显示口径里已加回的桥 lead(ms)。按曲粘住:曲末桥会话收尾瞬间 hasBridges() 会翻 false,
+   *  若跟着翻 0,显示位置当场掉 2.05s(实测 243→241)。 */
+  displayLeadMs = 0;
   /** 可听进度是否已越过上报下界:未越过(静默预填充/seek 重建中)时 pollCore 报 buffering,
    *  客户端据 playbackState!=PLAYING 停止本地插值,修复「切歌进度前进~2s 又跳回 0」循环。 */
   audibleStarted = false;

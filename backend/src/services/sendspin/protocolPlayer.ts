@@ -180,6 +180,7 @@ export function createSendspinGroupPlayer(
           : st.playing ? ((st as any).buffering ? PlaybackState.BUFFERING : PlaybackState.PLAYING)
           : PlaybackState.IDLE,
         position: st.positionMs / 1000,
+        ...(typeof (st as any).displayPositionMs === "number" ? { displayPosition: (st as any).displayPositionMs / 1000 } : {}),
         duration: st.durationMs / 1000,
         updatedAt: Date.now(),
         unavailable,
@@ -333,6 +334,7 @@ function createSendspinInprocPlayer(clientId: string): ProtocolPlayer {
           : st.playing ? ((st as any).buffering ? PlaybackState.BUFFERING : PlaybackState.PLAYING)
           : PlaybackState.IDLE,
         position: st.positionMs / 1000,
+        ...(typeof (st as any).displayPositionMs === "number" ? { displayPosition: (st as any).displayPositionMs / 1000 } : {}),
         duration: st.durationMs / 1000,
         updatedAt: Date.now(),
       };
@@ -420,6 +422,7 @@ function createSendspinProxyPlayer(clientId: string): ProtocolPlayer {
           : st.playing ? ((st as any).buffering ? PlaybackState.BUFFERING : PlaybackState.PLAYING)
           : PlaybackState.IDLE,
         position: st.positionMs / 1000,
+        ...(typeof (st as any).displayPositionMs === "number" ? { displayPosition: (st as any).displayPositionMs / 1000 } : {}),
         duration: st.durationMs / 1000,
         updatedAt: Date.now(),
         unavailable,
