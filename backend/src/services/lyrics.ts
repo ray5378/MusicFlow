@@ -149,6 +149,64 @@ function decodeLrcBytes(buf: Buffer): string {
 
 // 读取 sidecar .lrc(本地文件 / WebDAV 同目录 URL / SMB 同目录文件)。离线优先、最准;
 // web 歌曲 path 不是 w:/l:/s: 前缀,直接返回 null。
+/**
+ * 这份 LRC 到底是不是这首歌的？
+ *
+ * 为什么要它（2026-11-21 真机）：`狂信者 / 黄立行` 的歌词里存的是 `分开旅行`（同歌手
+ * 另一首）的整篇 —— 历史误匹配落库后，「①落库缓存」永远优先，provider 再也不会被问到。
+ * 更恶性的情况存在：provider 按 id 取回的 LRC 也可能是别的歌（服务端 id 串了），
+ * 不校验就会把错词写进库里、永久错误。
+ *
+ * 判据只认**首部标题行**（大多数 LRC 有 `[00:00.00]艺人 - 歌名` 这种行）：
+ *   - 找不到标题行（纯时间轴歌词）→ 放行（无从判断，宁放不误杀）；
+ *   - 找到标题行但**任何一段**都对不上歌名 → 判为不属于这首歌；
+ *   - 歌名对得上（含互含/繁简统一/去括号）→ 放行。
+ * 另外补一条时长上界：末行时间戳比歌曲时长还长 30s 以上 → 显然不是同一首。
+ */
+export function lrcBelongsToSong(
+  content: string,
+  song: { title?: string | null; artist?: string | null; duration?: number | null },
+): boolean {
+  if (!content) return false;
+  const norm = (v: unknown) =>
+    applyVariant(String(v ?? "").toLowerCase(), "simplified")
+      .replace(/[\s\p{P}\p{S}]+/gu, "")
+      .replace(/[（(【\[].*?[)）】\]]/g, "");
+  const wantTitle = norm(song.title);
+  const head = content.split(/\r?\n/).slice(0, 8);
+  let headerLine: string | null = null;
+  for (const raw of head) {
+    const t = raw.replace(/^\[[^\]]*\]/g, "").trim();
+    if (!t) continue;
+    if (/^(作词|作曲|编曲|词|曲|混音|制作|录音|和声|吉他|贝斯|鼓|母带|演唱|原唱|出品|监制)/.test(t)) continue;
+    if (/\[\d{1,2}:\d{1,2}/.test(t)) continue; // 逐字行
+    if (/[-–—]/.test(t)) { headerLine = t; break; }
+  }
+  if (headerLine && wantTitle) {
+    const parts = headerLine.split(/[-–—]/).map(norm).filter((x) => x.length >= 2);
+    const titleHit = parts.some((p) => p.includes(wantTitle) || wantTitle.includes(p));
+    if (!titleHit) {
+      // 标题对不上时,再看**歌手**是否出现在同一行:出现了就是「同歌手的另一首歌」的标题行
+      // (狂信者 → 刘若英、黄立行 - 分开旅行),必须否决。
+      // 歌手也对不上 ⇒ 这行本来就只是歌词正文(正文常带连字符,如 a-only),放行避免误杀。
+      const wantArtist = norm(song.artist);
+      const artistHit =
+        wantArtist.length >= 2 &&
+        parts.some((p) => p.includes(wantArtist) || wantArtist.includes(p));
+      if (artistHit) return false;
+    }
+  }
+  // 时长上界:末行时间戳远超歌曲时长 ⇒ 是另一首(更长的)歌。
+  const d = Number(song.duration) || 0;
+  if (d > 0) {
+    const times = [...content.matchAll(/\[(\d{1,2}):(\d{1,2})(?:[.:](\d{1,3}))?\]/g)]
+      .map((m) => Number(m[1]) * 60 + Number(m[2]));
+    const maxTs = times.length > 0 ? Math.max(...times) : 0;
+    if (maxTs > d + 30) return false;
+  }
+  return true;
+}
+
 async function readSidecarLrc(song: SongRow): Promise<string | null> {
   try {
     const colon1 = song.path.indexOf(":");
@@ -171,14 +229,24 @@ async function readSidecarLrc(song: SongRow): Promise<string | null> {
     const config = JSON.parse(source.config || "{}");
 
     if (prefix === "w") {
-      const base = config.url?.replace(/\/+$/, "");
-      if (!base) {
+      const rawBase = config.url?.replace(/\/+$/, "");
+      if (!rawBase) {
         // D21 修复:WebDAV 源没配 url ⇒ 无法拼地址,补日志便于排障(此前静默返回 null)。
         log.warn(`readSidecarLrc: WebDAV 源缺少 url 配置(source=${sourceId}),跳过 sidecar`);
         return null;
       }
-      // D21 修复:保留源配置里的子目录(如 /music/),不要只取 origin 把路径丢掉;
-      // 同时 base 与 lrcPath 之间补一个 "/",避免拼成 "host名专辑" 这种非法地址。
+      // ⚠️ 2026-11-21 修:源配置的 url 常带子目录(如 http://host:5444/dav),而 song.path 里的
+      //   filePath **也**从 /dav 开始(出流侧 getWebDAVUrl 用的是 origin + filePath)。旧实现
+      //   `base + lrcPath` 拼成 http://host:5444/dav/dav/... ⇒ 恒 404,WebDAV 同目录 .lrc
+      //   一次都读不到。这里与服务端其它地方对齐:filePath 已包含 base 的路径段 ⇒ 只用 origin。
+      let base = rawBase;
+      try {
+        const u = new URL(rawBase);
+        const basePath = u.pathname.replace(/\/+$/, "");
+        if (basePath && basePath !== "/" && (lrcPath === basePath || lrcPath.startsWith(basePath + "/"))) {
+          base = u.origin;
+        }
+      } catch { /* 非法 URL 就按原样拼接 */ }
       const url = base + (lrcPath.startsWith("/") ? "" : "/") + lrcPath;
       const headers: Record<string, string> = { Range: "bytes=0-65535" };
       if (config.username && config.password) {
@@ -245,12 +313,31 @@ export async function fetchLrcForSong(song: SongRow): Promise<string | null> {
   if (!isStudy) {
     try {
       const row = sqlite.prepare("SELECT lyrics FROM songs WHERE id = ?").get(song.id) as any;
-      if (row?.lyrics) content = resolveLyricContent(row.lyrics);
+      if (row?.lyrics) {
+        const cached = resolveLyricContent(row.lyrics);
+        if (cached && lrcBelongsToSong(cached, song as any)) {
+          content = cached;
+        } else if (cached) {
+          // 错词自愈:丢弃后继续走 ②③,命中正确歌词时由 persist 覆盖落库。
+          log.warn(
+            `[lyrics] 落库歌词与曲目不符,已忽略 song=${song.id} title=${song.title ?? "-"} ` +
+              `artist=${song.artist ?? "-"}`,
+          );
+        }
+      }
     } catch { /* ignore */ }
   }
 
   // ② sidecar .lrc(离线优先、最准)
-  if (!content) content = await readSidecarLrc(song);
+  if (!content) {
+    const side = await readSidecarLrc(song);
+    if (side && lrcBelongsToSong(side, song as any)) content = side;
+    else if (side) {
+      log.warn(
+        `[lyrics] sidecar 歌词与曲目不符,已忽略 song=${song.id} title=${song.title ?? "-"}`,
+      );
+    }
+  }
 
   // ③ 在线按需(A 开关):sidecar/落库都没有时,问 lyricProvider 插件
   if (!content && !isStudy && getSettingBool("lyrics.onDemand", true) && hasLyricProvider()) {
@@ -267,7 +354,13 @@ export async function fetchLrcForSong(song: SongRow): Promise<string | null> {
       source: sourceData?.source || undefined,
       extra: sourceData?.extra || null,
     });
-    if (fromProviders) {
+    if (fromProviders && !lrcBelongsToSong(fromProviders, song as any)) {
+      // provider 按 id 取回来的也可能是别的歌(服务端 id 串了)—— 不校验就会把错词写进库里。
+      log.warn(
+        `[lyrics] 在线歌词与曲目不符,已丢弃 song=${song.id} title=${song.title ?? "-"} ` +
+          `artist=${song.artist ?? "-"}`,
+      );
+    } else if (fromProviders) {
       // 生产侧先转一次：B 落库会把这个字符串写成 online-lyrics/<id>.lrc 文件，
       // 让**落盘产物**也随设置字形（否则文件里是繁体、界面显示简体，两处不一致）。
       content = applyVariant(fromProviders, variant);
