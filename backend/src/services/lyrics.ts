@@ -184,7 +184,13 @@ export function lrcBelongsToSong(
   }
   if (headerLine && wantTitle) {
     const parts = headerLine.split(/[-–—]/).map(norm).filter((x) => x.length >= 2);
-    const titleHit = parts.some((p) => p.includes(wantTitle) || wantTitle.includes(p));
+    // 顺序无关:`歌名 - 艺人` 与 `艺人 - 歌名` 都认 —— 逐个分段比对即可。
+    // 但**歌名本身带连字符**时(如「A-B」),分段会把歌名切碎 ⇒ 必须同时拿整行去比。
+    const wholeLine = norm(headerLine);
+    const titleHit =
+      wholeLine.includes(wantTitle) ||
+      wantTitle.includes(wholeLine) ||
+      parts.some((p) => p.includes(wantTitle) || wantTitle.includes(p));
     if (!titleHit) {
       // 标题对不上时,再看**歌手**是否出现在同一行:出现了就是「同歌手的另一首歌」的标题行
       // (狂信者 → 刘若英、黄立行 - 分开旅行),必须否决。

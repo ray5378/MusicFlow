@@ -56,3 +56,23 @@ describe("lrcBelongsToSong 不误杀", () => {
     expect(lrcBelongsToSong(lrc, { title: "狂信者", artist: "黄立行", duration: 221 })).toBe(false);
   });
 });
+
+describe("lrcBelongsToSong 标题顺序与连字符", () => {
+  it("歌名 - 艺人（我们自己的命名规则）→ 认", () => {
+    expect(
+      lrcBelongsToSong("[00:00.00]狂信者 - 黄立行", { title: "狂信者", artist: "黄立行", duration: 221 }),
+    ).toBe(true);
+  });
+
+  it("艺人 - 歌名 → 同样认（顺序无关）", () => {
+    expect(
+      lrcBelongsToSong("[00:00.00]黄立行 - 狂信者", { title: "狂信者", artist: "黄立行", duration: 221 }),
+    ).toBe(true);
+  });
+
+  it("歌名本身带连字符（A-B）→ 整行比对仍认得出", () => {
+    expect(
+      lrcBelongsToSong("[00:00.00]A-B - 歌手", { title: "A-B", artist: "歌手", duration: 200 }),
+    ).toBe(true);
+  });
+});
