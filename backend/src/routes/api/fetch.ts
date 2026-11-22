@@ -11,6 +11,7 @@
 // 分片循环的关键：每一片都是一次**独立**的 runBatchJob（不在一片里循环所有片），
 // 这样每片结束即释放全局批量闸，不会把 scan/backfill/每日推荐堵住几十分钟。
 import type { Hono } from "hono";
+import { sqlite } from "../../db/index.js";
 import {
   BusinessErrorCode,
   adminMiddleware,
@@ -77,6 +78,14 @@ import {
   stopTagRepair,
   type TagRepairMode,
 } from "../../services/fetch/tagRepair.js";
+import {
+  getWdavRepairState,
+  isWdavRepairRunning,
+  previewWdavRepair,
+  startWdavRepair,
+  stopWdavRepair,
+} from "../../services/fetch/tagRepairWdavRunner.js";
+import { wdavCtxOfSource, wdavList } from "../../services/fetch/wdavIO.js";
 
 /** 客户端入参 → FetchTarget[]（宽容归一化：缺 id 补位、缺 title 置空）。 */
 function normalizeTargets(input: unknown): FetchTarget[] {
@@ -747,6 +756,85 @@ export function registerFetch(app: Hono): void {
     });
     return c.json({ success: true, started: true, mode, scope, force });
   });
+  // ==================== WebDAV 云盘标签修复（纯内存 + 可续跑，2026-11-22） ====================
+  // 与上面本地修复互不影响：这条链路是「整文件读进内存 → 改 metadata → PUT 临时名 → MOVE 覆盖」，
+  // 全程不落盘、一首一首串行，进度落在 settings 里，重启后自动接着跑。
+
+  /** 可选的云盘源（kind=music 且 config 里带 url）。 */
+  app.get("/v1/fetch/tag-repair/wdav/sources", adminMiddleware, (c) => {
+    const rows = sqlite
+      .prepare("SELECT id, name, config FROM media_sources WHERE kind = 'music' ORDER BY name")
+      .all() as Array<{ id: string; name: string; config: string | null }>;
+    const items = rows
+      .map((r) => {
+        let cfg: any = {};
+        try {
+          cfg = r.config ? JSON.parse(r.config) : {};
+        } catch {
+          cfg = {};
+        }
+        if (!cfg?.url) return null;
+        const songCount = (
+          sqlite.prepare("SELECT COUNT(*) AS c FROM songs WHERE path LIKE ?").get(`w:${r.id}:%`) as {
+            c: number;
+          }
+        ).c;
+        return { id: r.id, name: r.name, songCount, rootUrl: String(cfg.url) };
+      })
+      .filter(Boolean);
+    return c.json({ success: true, items });
+  });
+
+  /** 列一层目录（给前端选目录用；只列文件夹与音频文件，隐藏文件跳过）。 */
+  app.get("/v1/fetch/tag-repair/wdav/browse", adminMiddleware, async (c) => {
+    const sourceId = String(c.req.query("sourceId") || "").trim();
+    const dir = String(c.req.query("dir") || "/").trim() || "/";
+    if (!sourceId) return c.json({ success: false, error: "缺少 sourceId" }, 400);
+    const ctx = wdavCtxOfSource(sourceId);
+    if (!ctx) return c.json({ success: false, error: "源不可用（配置缺 url/凭据）" }, 400);
+    try {
+      const entries = await wdavList(ctx, dir);
+      return c.json({ success: true, dir, entries });
+    } catch (e: any) {
+      return c.json({ success: false, error: e?.message || String(e) }, 502);
+    }
+  });
+
+  /** 预演：只统计候选与预估耗时，不读文件、不写任何东西。 */
+  app.post("/v1/fetch/tag-repair/wdav/preview", adminMiddleware, async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { targets?: Array<{ sourceId: string; dir: string }> };
+    try {
+      const r = previewWdavRepair(body.targets ?? []);
+      return c.json({ success: true, ...r });
+    } catch (e: any) {
+      return c.json({ success: false, error: e?.message || String(e) }, 400);
+    }
+  });
+
+  /** 启动（或续跑）云盘修复。body { targets?, resume? }。 */
+  app.post("/v1/fetch/tag-repair/wdav/run", adminMiddleware, async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as {
+      targets?: Array<{ sourceId: string; dir: string }>;
+      resume?: boolean;
+    };
+    if (isWdavRepairRunning()) return c.json({ success: false, busy: true }, 409);
+    try {
+      const st = await startWdavRepair({ targets: body.targets ?? [], resume: body.resume === true });
+      return c.json({ success: true, state: st });
+    } catch (e: any) {
+      return c.json({ success: false, error: e?.message || String(e) }, 400);
+    }
+  });
+
+  app.get("/v1/fetch/tag-repair/wdav/status", adminMiddleware, (c) => {
+    return c.json({ success: true, state: getWdavRepairState() });
+  });
+
+  app.post("/v1/fetch/tag-repair/wdav/stop", adminMiddleware, (c) => {
+    const r = stopWdavRepair();
+    return c.json({ success: true, ...r });
+  });
+
   // 立刻停止一轮标签修复（协作式）：置停止标志，正在处理的那首跑完后不再开始下一首。
   // 未完成的候选保留在快照里，但该快照会被标记为「已停止」，重启容器后**不会**自动续跑
   // （可稍后手动重新发起）；同时顺延定时常规修复一个周期，避免刚停又被定时拉起重扫。

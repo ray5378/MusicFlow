@@ -354,6 +354,7 @@ import { startUpgradeScheduler } from "./services/fetch/upgradeScheduler.js";
 import { startLibraryScheduler } from "./services/fetch/libraryScheduler.js";
 import { registerFetchImportTrigger } from "./services/fetch/importTrigger.js";
 import { startTagRepairScheduler, resumeInterruptedTagRepair, TAG_REPAIR_RESUME_DELAY_MS } from "./services/fetch/tagRepair.js";
+import { resumeWdavRepairOnBoot } from "./services/fetch/tagRepairWdavRunner.js";
 import { startScanScheduler } from "./services/source/scanScheduler.js";
 import { startStreamProbeScheduler } from "./services/source/streamProbe.js";
 import { ensureDownloadSource } from "./services/fetch/source.js";
@@ -446,6 +447,14 @@ setTimeout(() => {
     if (r.resumed) log.info(`[TAG-REPAIR] boot 恢复：续跑进行中的${r.mode}一轮标签修复`);
   } catch (e: any) { log.error(`[TAG-REPAIR] boot 恢复失败: ${e?.message || e}`); }
 }, TAG_REPAIR_RESUME_DELAY_MS);
+
+// 云盘（WebDAV）标签修复的断点续跑：同一延迟窗口，独立快照键，互不干扰。
+setTimeout(() => {
+  try {
+    const r = resumeWdavRepairOnBoot();
+    if (r.resumed) log.info(`[WDAV-REPAIR] boot 恢复：续跑剩余 ${r.remaining} 首云盘标签修复`);
+  } catch (e: any) { log.error(`[WDAV-REPAIR] boot 恢复失败: ${e?.message || e}`); }
+}, TAG_REPAIR_RESUME_DELAY_MS + 1000);
 
 // 写目录启动探针 + 缓存清空：挂载权限配错第一时间在日志给出修复指引；
 // 缓存目录内容（上次进程遗留的下载子目录 / .part 半成品）整目录清空（不碰成品目录）。
