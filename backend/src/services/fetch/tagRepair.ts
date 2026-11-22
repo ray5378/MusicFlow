@@ -909,7 +909,7 @@ export async function repairSongTags(songId: string, cfg: FetchConfig): Promise<
         if (
           lrcBelongsToSong(
             text,
-            { title: songInput.title, artist: songInput.artist, duration: songInput.duration },
+            { title: songInput.title, artist: songInput.artist, album: songInput.album, duration: songInput.duration },
             { strictArtist: true },
           )
         ) {

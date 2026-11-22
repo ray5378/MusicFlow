@@ -24,7 +24,7 @@ export const MIN_LYRIC_LINES = 5;
  */
 export function lrcBelongsToSong(
   content: string,
-  song: { title?: string | null; artist?: string | null; duration?: number | null },
+  song: { title?: string | null; artist?: string | null; album?: string | null; duration?: number | null },
   opts: {
     /**
      * 严格模式（**写文件**用）：标题行/[ar:] 里的歌手必须与本曲一致。
@@ -61,6 +61,17 @@ export function lrcBelongsToSong(
   //   My Eyes Don't Lie(Billy Cate) 的歌词 [ar:卫兰]、差词(C allstar) 的歌词 [ar:逻辑 Lawgitech]。
   // 这些是"同名不同人/不同版本"的歌词，写进文件后无法自动纠正，必须在写入前拦下。
   // 占位歌手（未知/群星/Various Artists）不参与否决。
+  // 专辑兜底（方案 C，2026-11-23）：歌手对不上时，若 LRC 的 [al:] 与本曲专辑一致，
+  // 说明是同专辑的歌词（A-Lin ↔ 黄丽玲、BEYOND ↔ 黄家驹 这类本名/成员名场景常同专辑），放行。
+  const alTag = content.match(/\[al:\s*([^\]]+)\]/i);
+  const localAlbumNorm = norm(song.album ?? "");
+  const albumRescue = (() => {
+    if (!alTag || !localAlbumNorm) return false;
+    const lrcAlbum = norm(alTag[1]);
+    if (!lrcAlbum) return false;
+    return lrcAlbum.includes(localAlbumNorm) || localAlbumNorm.includes(lrcAlbum);
+  })();
+
   const arTag = content.match(/\[ar:\s*([^\]]+)\]/i);
   if (opts.strictArtist && arTag && String(song.artist ?? "").trim()) {
     const placeholder =
@@ -84,7 +95,7 @@ export function lrcBelongsToSong(
     const localT = tok(String(song.artist ?? ""));
     if (arT.length && localT.length) {
       const hit = arT.some((a) => localT.some((l) => a.includes(l) || l.includes(a)));
-      if (!hit) return false;
+      if (!hit && !albumRescue) return false;
     }
   }
 
@@ -143,7 +154,7 @@ export function lrcBelongsToSong(
           const cjk = (v: string) => /[一-鿿]/.test(v);
           // 一边中文一边英文：可能是音译/英文艺名（周杰伦 ↔ Jay Chou），放行避免误杀；
           // 同一语言体系下歌手对不上 ⇒ 判定为别的版本，否决。
-          if (cjk(cand) === cjk(String(song.artist ?? ""))) return false;
+          if (cjk(cand) === cjk(String(song.artist ?? "")) && !albumRescue) return false;
         }
       }
     }

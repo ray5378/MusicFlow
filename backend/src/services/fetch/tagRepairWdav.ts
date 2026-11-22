@@ -264,7 +264,7 @@ export async function repairWebdavSongTags(
         lrc &&
         lrcBelongsToSong(
           lrc,
-          { title: row.title, artist: row.artist, duration: row.duration },
+          { title: row.title, artist: row.artist, album: row.album, duration: row.duration },
           { strictArtist: true },
         )
       ) {

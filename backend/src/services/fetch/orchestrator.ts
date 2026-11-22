@@ -1025,7 +1025,7 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
         if (
           lrcBelongsToSong(
             lyric,
-            { title: songInput.title, artist: songInput.artist, duration: songInput.duration },
+            { title: songInput.title, artist: songInput.artist, album: songInput.album, duration: songInput.duration },
             { strictArtist: true },
           )
         ) {
