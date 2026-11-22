@@ -34,6 +34,47 @@ export function artistTokens(v: unknown): string[] {
     .filter((x) => x.length >= 2 && !PLACEHOLDER_ARTISTS.test(x));
 }
 
+/**
+ * 异体字/人名用字的近似判定（2026-11-23）：
+ * 简繁表（OpenCC T2S）只覆盖「繁→简」，不合并异体字（蒨/倩、峯/峰、喆/哲…）。
+ * 歌手名同长度且**只差一个字**、且两边都是汉字时视为同一人 ——
+ * 实测「叶蒨文 vs 叶倩文」这种就是异体字写法差异，不该判成两个人。
+ * 限定长度 ≥3：两字名（王菲/王非）差一个字就可能是别人，不放过。
+ */
+export function nameCloseMatch(a: unknown, b: unknown): boolean {
+  const x = String(a ?? "").trim();
+  const y = String(b ?? "").trim();
+  if (!x || !y) return false;
+  if (x === y) return true;
+  if (x.length !== y.length || x.length < 3) return false;
+  if (!/[一-鿿]/.test(x) || !/[一-鿿]/.test(y)) return false;
+  let diff = 0;
+  for (let i = 0; i < x.length; i++) {
+    if (x[i] !== y[i]) {
+      diff += 1;
+      if (diff > 1) return false;
+    }
+  }
+  return diff === 1;
+}
+
+/**
+ * 在长串里找「近似包含」：用于标题行里带括注/英文名的写法
+ * （"叶倩文(Sally Yeh)" 归一后是 "叶倩文sallyyeh"），整串比长度不等会漏，
+ * 这里按窗口逐段比，任一段与目标近似即可。
+ */
+export function containsClose(hay: unknown, needle: unknown): boolean {
+  const h = String(hay ?? "");
+  const n = String(needle ?? "");
+  if (!h || !n) return false;
+  if (h.includes(n)) return true;
+  if (n.length < 3 || h.length < n.length) return false;
+  for (let i = 0; i + n.length <= h.length; i++) {
+    if (nameCloseMatch(h.slice(i, i + n.length), n)) return true;
+  }
+  return false;
+}
+
 /** 歌手是否一致：分词后有交集即视为一致；任一侧无可信歌手 ⇒ 不否决（true）。 */
 export function artistMatches(local: unknown, remote: unknown): boolean {
   const a = artistTokens(local);

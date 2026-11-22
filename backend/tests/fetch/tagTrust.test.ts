@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
   albumIsPlaceholder,
+  containsClose,
+  nameCloseMatch,
   artistMatches,
   coverAllowed,
   needLyricByFile,
@@ -113,5 +115,28 @@ describe("tagTrust — 歌词判定只看文件", () => {
     expect(needLyricByFile(undefined)).toBe(true);
     expect(needLyricByFile("   ")).toBe(true);
     expect(needLyricByFile("[00:01.00]词")).toBe(false);
+  });
+});
+
+describe("tagTrust — 异体字/人名近似", () => {
+  it("同长度只差一个汉字且≥3 字 ⇒ 视为同一人（叶蒨文 vs 叶倩文）", () => {
+    expect(nameCloseMatch("叶蒨文", "叶倩文")).toBe(true);
+    expect(nameCloseMatch("张国荣", "张国荣")).toBe(true);
+  });
+
+  it("两字名差一个字 ⇒ 不认（王菲 vs 王非）", () => {
+    expect(nameCloseMatch("王菲", "王非")).toBe(false);
+  });
+
+  it("长度不同 / 差两个字 / 含非汉字 ⇒ 不认", () => {
+    expect(nameCloseMatch("A-Lin", "黄丽玲")).toBe(false);
+    expect(nameCloseMatch("陈百强", "陈百强强")).toBe(false);
+    expect(nameCloseMatch("周杰伦", "周杰偷")).toBe(true); // 只差一字，交给其它闸门兜底
+  });
+
+  it("containsClose：带括注/英文名也能命中（叶倩文(Sally Yeh) vs 叶蒨文）", () => {
+    expect(containsClose("叶倩文sallyyeh", "叶蒨文")).toBe(true);
+    expect(containsClose("周杰伦jaychou", "周杰伦")).toBe(true);
+    expect(containsClose("卫兰janice", "叶蒨文")).toBe(false);
   });
 });
