@@ -141,7 +141,7 @@ const DETAIL_TRAD = {
   },
 };
 
-const LYRIC_JSON = { code: 0, lyric: "[ti:告白气球]\n[ar:周杰伦]\n[00:00.00]告白气球" };
+const LYRIC_JSON = { code: 0, lyric: "[ti:告白气球]\n[ar:周杰伦]\n[00:00.00]告白气球\n[00:10.00]塞纳河畔\n[00:20.00]第三句\n[00:30.00]第四句" };
 
 // ---------- 网易云音乐（QQ 拿不到时的兜底链路）真实响应样本 ----------
 // 素材：2026-10-17 在 240 生产容器内经系统代理真机探测（POST /api/search/get）。
@@ -186,7 +186,7 @@ const NS_DETAIL = {
 };
 
 /** 网易云歌词响应：歌词在 lrc.lyric（与 QQ 的 `{lyric}` 不同）。 */
-const NS_LYRIC = { code: 200, lrc: { lyric: "[00:00.000]告白气球\n[00:01.000]塞纳河畔" } };
+const NS_LYRIC = { code: 200, lrc: { lyric: "[00:00.000]告白气球\n[00:01.000]塞纳河畔\n[00:10.000]第三句\n[00:20.000]第四句\n[00:30.000]第五句" } };
 
 /** QQ 搜索“零结果”（data.song.list 为空）→ 触发网易云兜底。 */
 const SEARCH_EMPTY = { code: 0, data: { song: { list: [] } } };
@@ -1034,13 +1034,13 @@ describe("tag-provider — searchLyrics 闸门与歌词解析", () => {
   });
 
   it("歌词含 [ar:] 标签 → 原样返回(不解码)", async () => {
-    const raw = "[ar:周杰伦]\n[00:01.00]歌词";
+    const raw = "[ar:周杰伦]\n[00:01.00]歌词\n[00:10.00]第二句\n[00:20.00]第三句\n[00:30.00]第四句";
     const host = routeHost({ map: { [F_QQ_SEARCH]: SEARCH, [F_QQ_LYRIC]: { code: 0, lyric: raw } } });
     expect((await tagProviderPlugin.searchLyrics(host, SONG))?.lrc).toBe(raw);
   });
 
   it("歌词仅含时间戳(无 [ti:/[ar:) → 原样返回", async () => {
-    const raw = "[00:01.00]只有时间戳";
+    const raw = "[00:01.00]只有时间戳\n[00:10.00]第二句\n[00:20.00]第三句\n[00:30.00]第四句";
     const host = routeHost({ map: { [F_QQ_SEARCH]: SEARCH, [F_QQ_LYRIC]: { code: 0, lyric: raw } } });
     expect((await tagProviderPlugin.searchLyrics(host, SONG))?.lrc).toBe(raw);
   });
@@ -1193,6 +1193,9 @@ describe("tag-provider — 酷狗 / 酷我 扩源", () => {
         lrclist: [
           { time: "1.5", lineLyric: "第一句" },
           { time: "61.25", lineLyric: "第二句" },
+          { time: "90.0", lineLyric: "第三句" },
+          { time: "120.0", lineLyric: "第四句" },
+          { time: "150.0", lineLyric: "第五句" },
         ],
       },
     };
@@ -1204,11 +1207,11 @@ describe("tag-provider — 酷狗 / 酷我 扩源", () => {
     expect(meta?.platform).toBe("kuwo");
     expect(meta?.album).toBe("周杰伦的床边故事");
     const lrc = (await tagProviderPlugin.searchLyrics(host, SONG))?.lrc;
-    expect(lrc).toBe("[00:01.50]第一句\n[01:01.25]第二句");
+    expect(lrc).toBe("[00:01.50]第一句\n[01:01.25]第二句\n[01:30.00]第三句\n[02:00.00]第四句\n[02:30.00]第五句");
   });
 
   it("酷狗歌词走 lyrics.kugou.com 搜索+下载(base64 LRC)，旧 krc.php 不再调用", async () => {
-    const lrc = "[ti:告白气球]\n[00:01.00]塞纳河畔";
+    const lrc = "[ti:告白气球]\n[00:01.00]塞纳河畔\n[00:10.00]第二句\n[00:20.00]第三句\n[00:30.00]第四句";
     const host = routeHost({
       map: {
         [F_QQ_SEARCH]: SEARCH_EMPTY,
@@ -1668,11 +1671,11 @@ describe("tag-provider — 酷狗字段缺失与歌词边界（覆盖率补强�
         [F_QQ_SEARCH]: SEARCH_EMPTY,
         [F_KG_SEARCH]: KG_SEARCH,
         [F_KG_LYRIC_SEARCH]: { candidates: [{ id: "ly1", accesskey: "ak", duration: 215000 }] },
-        [F_KG_LYRIC_DL]: { content: Buffer.from("[00:01.00]词", "utf8").toString("base64") },
+        [F_KG_LYRIC_DL]: { content: Buffer.from("[00:01.00]词\n[00:10.00]第二句\n[00:20.00]第三句\n[00:30.00]第四句", "utf8").toString("base64") },
       },
     });
-    expect((await tagProviderPlugin.searchLyrics(host, SONG))?.lrc).toBe("[00:01.00]词");
-    expect((await tagProviderPlugin.searchLyrics(host, SONG))?.lrc).toBe("[00:01.00]词");
+    expect((await tagProviderPlugin.searchLyrics(host, SONG))?.lrc).toBe("[00:01.00]词\n[00:10.00]第二句\n[00:20.00]第三句\n[00:30.00]第四句");
+    expect((await tagProviderPlugin.searchLyrics(host, SONG))?.lrc).toBe("[00:01.00]词\n[00:10.00]第二句\n[00:20.00]第三句\n[00:30.00]第四句");
     expect(host.calls.filter((u: string) => u.includes(F_KG_LYRIC_SEARCH)).length).toBe(1);
   });
 
@@ -1687,10 +1690,10 @@ describe("tag-provider — 酷狗字段缺失与歌词边界（覆盖率补强�
         [F_QQ_SEARCH]: SEARCH_EMPTY,
         [F_KG_SEARCH]: kg,
         [F_KG_LYRIC_SEARCH]: { candidates: [{ id: "ly_first", duration: 0 }, { id: "ly_second", duration: 215000 }] },
-        [F_KG_LYRIC_DL]: { content: Buffer.from("[00:01.00]词", "utf8").toString("base64") },
+        [F_KG_LYRIC_DL]: { content: Buffer.from("[00:01.00]词\n[00:10.00]第二句\n[00:20.00]第三句\n[00:30.00]第四句", "utf8").toString("base64") },
       },
     });
-    expect((await tagProviderPlugin.searchLyrics(host, emptySong({ artist: "Unknown Artist" })))?.lrc).toBe("[00:01.00]词");
+    expect((await tagProviderPlugin.searchLyrics(host, emptySong({ artist: "Unknown Artist" })))?.lrc).toBe("[00:01.00]词\n[00:10.00]第二句\n[00:20.00]第三句\n[00:30.00]第四句");
     const url = host.calls.find((u: string) => u.includes(F_KG_LYRIC_SEARCH))!;
     expect(url).toContain(encodeURIComponent("告白气球"));
     expect(url).not.toContain("Unknown");

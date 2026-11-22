@@ -8,7 +8,8 @@
 //     cover.* 前缀正确(见 settings.ts L164-165 坑注释)。
 // MUST be the first import: redirects DATA_DIR to an isolated temp dir.
 import "../plugins/_env.js";
-
+// 2026-11-22:歌词内容闸门要求≥5 行，非空假歌词统一补足（空串保持为空）。
+const L5 = (s: string) => s + "\n[00:10.00]l2\n[00:20.00]l3\n[00:30.00]l4\n[00:40.00]l5";
 import { describe, it, expect, beforeAll, beforeEach } from "vitest";
 import { Hono } from "hono";
 import md5 from "md5";
@@ -123,9 +124,9 @@ describe("filterProvidersByPreference", () => {
 describe("searchLyrics/searchCover 按优先级取源", () => {
   it("searchLyrics:优先级顺序;首个命中即止;未列出插件不被调用", async () => {
     const calls: string[] = [];
-    enablePlugin("ly-a", ["lyricProvider"], { searchLyrics: async () => { calls.push("a"); return { lrc: "[00:00.00]A" }; } });
-    enablePlugin("ly-b", ["lyricProvider"], { searchLyrics: async () => { calls.push("b"); return { lrc: "[00:00.00]B" }; } });
-    enablePlugin("ly-c", ["lyricProvider"], { searchLyrics: async () => { calls.push("c"); return { lrc: "[00:00.00]C" }; } });
+    enablePlugin("ly-a", ["lyricProvider"], { searchLyrics: async () => { calls.push("a"); return { lrc: L5("[00:00.00]A") }; } });
+    enablePlugin("ly-b", ["lyricProvider"], { searchLyrics: async () => { calls.push("b"); return { lrc: L5("[00:00.00]B") }; } });
+    enablePlugin("ly-c", ["lyricProvider"], { searchLyrics: async () => { calls.push("c"); return { lrc: L5("[00:00.00]C") }; } });
     setSetting("lyrics.providerPriority", JSON.stringify(["ly-b", "ly-c"]));
     setSetting("lyrics.providerId", "ly-b");
 
@@ -137,7 +138,7 @@ describe("searchLyrics/searchCover 按优先级取源", () => {
   it("searchLyrics:首个返空 → 自动换下一个命中", async () => {
     const calls: string[] = [];
     enablePlugin("ly-a", ["lyricProvider"], { searchLyrics: async () => { calls.push("a"); return { lrc: "" }; } }); // 空
-    enablePlugin("ly-b", ["lyricProvider"], { searchLyrics: async () => { calls.push("b"); return { lrc: "[00:00.00]B" }; } });
+    enablePlugin("ly-b", ["lyricProvider"], { searchLyrics: async () => { calls.push("b"); return { lrc: L5("[00:00.00]B") }; } });
     setSetting("lyrics.providerPriority", JSON.stringify(["ly-a", "ly-b"]));
 
     const r = await searchLyrics({ title: "x", artist: "y" });
@@ -148,7 +149,7 @@ describe("searchLyrics/searchCover 按优先级取源", () => {
   it("searchLyrics:列表为空 → 全部启用,注册序 first-match-wins", async () => {
     const seq: string[] = [];
     enablePlugin("ly-a", ["lyricProvider"], { searchLyrics: async () => { seq.push("a"); return { lrc: "" }; } }); // 空 → 继续
-    enablePlugin("ly-b", ["lyricProvider"], { searchLyrics: async () => { seq.push("b"); return { lrc: "[00:00.00]B" }; } });
+    enablePlugin("ly-b", ["lyricProvider"], { searchLyrics: async () => { seq.push("b"); return { lrc: L5("[00:00.00]B") }; } });
     setSetting("lyrics.providerPriority", "");
     setSetting("lyrics.providerId", "");
 
@@ -159,8 +160,8 @@ describe("searchLyrics/searchCover 按优先级取源", () => {
 
   it("searchLyrics:兼容旧单源 providerId(无 priority)→ 只查它", async () => {
     const calls: string[] = [];
-    enablePlugin("ly-a", ["lyricProvider"], { searchLyrics: async () => { calls.push("a"); return { lrc: "[00:00.00]A" }; } });
-    enablePlugin("ly-b", ["lyricProvider"], { searchLyrics: async () => { calls.push("b"); return { lrc: "[00:00.00]B" }; } });
+    enablePlugin("ly-a", ["lyricProvider"], { searchLyrics: async () => { calls.push("a"); return { lrc: L5("[00:00.00]A") }; } });
+    enablePlugin("ly-b", ["lyricProvider"], { searchLyrics: async () => { calls.push("b"); return { lrc: L5("[00:00.00]B") }; } });
     setSetting("lyrics.providerPriority", "");
     setSetting("lyrics.providerId", "ly-b");
 

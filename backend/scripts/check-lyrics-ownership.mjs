@@ -126,9 +126,10 @@ check(
   "首源返回占位文本就把整条链收口 ⇒ 永远取不到正确歌词",
 );
 check(
-  "标签源层：候选歌词不可用 ⇒ 返回 null 让 firstAvailable 换下一个候选",
-  tp.includes("if (song && (!normalized || !lrcBelongsToSong(normalized, song))) return null;"),
-  "候选不轮换 ⇒ 第一个候选是占位文本就结束",
+  "标签源层保持「只取词、不判内容」（判内容在 provider 调度层，避免候选轮换的语义漂移）",
+  tp.includes("async function lyricFor(host: PluginHost, c: PlatformCandidate)") &&
+    !tp.includes("lrcBelongsToSong"),
+  "在 lyricFor 里判内容会改变 candidate 轮换与请求计数语义（tagProvider 用例族依赖），已回退",
 );
 
 console.log("===== L5 落库(persist)在校验通过的分支内 =====");

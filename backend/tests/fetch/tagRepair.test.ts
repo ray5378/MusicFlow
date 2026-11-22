@@ -302,13 +302,13 @@ describe("repairSongTags", () => {
     const p = join(root, "d.flac");
     insertSong("s6", p, { hasLyrics: 0 });
     parseFileMock.mockResolvedValueOnce(probe({ lyric: false }));
-    searchLyricsMock.mockResolvedValueOnce("[00:01.00]测试歌词");
+    searchLyricsMock.mockResolvedValueOnce("[00:01.00]测试歌词\n[00:10.00]第二句\n[00:20.00]第三句\n[00:30.00]第四句\n[00:40.00]第五句");
 
     const r = await repairSongTags("s6", cfg());
     expect(r.outcome).toBe("fixed");
     expect(r.lyric).toBe(true);
     const tags = writeTagsMock.mock.calls[0][1];
-    expect(tags.lyric).toBe("[00:01.00]测试歌词");
+    expect(tags.lyric).toBe("[00:01.00]测试歌词\n[00:10.00]第二句\n[00:20.00]第三句\n[00:30.00]第四句\n[00:40.00]第五句");
     const row = sqlite.prepare("SELECT has_lyrics FROM songs WHERE id='s6'").get() as { has_lyrics: number };
     expect(row.has_lyrics).toBe(1);
   });
@@ -431,7 +431,7 @@ describe("repairSongTags", () => {
     const p = join(root, "mark-after.flac");
     insertSong("s-ma", p, { hasLyrics: 0 });
     parseFileMock.mockResolvedValue(probe({ lyric: false }));
-    searchLyricsMock.mockResolvedValueOnce("[00:01.00]测试歌词");
+    searchLyricsMock.mockResolvedValueOnce("[00:01.00]测试歌词\n[00:10.00]第二句\n[00:20.00]第三句\n[00:30.00]第四句\n[00:40.00]第五句");
 
     const r = await repairSongTags("s-ma", cfg());
     expect(r.outcome).toBe("fixed");
@@ -707,7 +707,7 @@ describe("tagRepair stats/progress", () => {
 
     // 跑一轮常规修复：t1 缺歌词、provider 给词 → 修复 1 首，真写入即打完成标记 → repaired +1。
     parseFileMock.mockResolvedValue(probe({ lyric: false }));
-    searchLyricsMock.mockResolvedValue("[00:01]词");
+    searchLyricsMock.mockResolvedValue("[00:01]词\n[00:10]第二句\n[00:20]第三句\n[00:30]第四句\n[00:40]第五句");
     const { busy } = await runTagRepairOnce("media", cfg());
     expect(busy).toBe(false);
     expect(getTagRepairRepairedTotal()).toBe(1);
@@ -776,7 +776,7 @@ describe("tagRepair stats/progress", () => {
     const gate = new Promise<void>((r) => (release = r));
     searchLyricsMock.mockImplementation(async () => {
       await gate;
-      return "[00:01]词";
+      return "[00:01]词\n[00:10]第二句\n[00:20]第三句\n[00:30]第四句\n[00:40]第五句";
     });
 
     const p = runTagRepairOnce("media", cfg());
@@ -839,7 +839,7 @@ describe("tagRepair scope", () => {
     saveFetchConfigOverride({ downloadRoot: dl, losslessRoot: ll } as Partial<FetchConfig>);
     const c = currentFetchConfig();
     parseFileMock.mockResolvedValue(probe({ lyric: false, cover: false }));
-    searchLyricsMock.mockResolvedValue("[00:01]词");
+    searchLyricsMock.mockResolvedValue("[00:01]词\n[00:10]第二句\n[00:20]第三句\n[00:30]第四句\n[00:40]第五句");
 
     const rBoth = await runTagRepairOnce("media", c); // 缺省 → cfg.tagRepairScope=both
     expect(rBoth.result?.checked).toBe(2);
@@ -1110,7 +1110,7 @@ describe("tagRepair 队列与全量扫的异常分支", () => {
     const p = join(root, "q-throw.flac");
     insertSong("s-qth", p);
     parseFileMock.mockResolvedValue(probe({ lyric: false }));
-    searchLyricsMock.mockResolvedValue("[00:01]词");
+    searchLyricsMock.mockResolvedValue("[00:01]词\n[00:10]第二句\n[00:20]第三句\n[00:30]第四句\n[00:40]第五句");
     // 非 TAG_FAILED（TIMEOUT）→ 直接上抛 → 被队列 catch 兜住
     writeTagsMock.mockRejectedValueOnce(new MockFetchTagError("TIMEOUT", "slow", p));
     enqueueTagRepairs(["s-qth"]);
@@ -1152,7 +1152,7 @@ describe("tagRepair 队列与全量扫的异常分支", () => {
     const p = join(root, "all-throw.flac");
     insertSong("s-allth", p);
     parseFileMock.mockResolvedValue(probe({ lyric: false }));
-    searchLyricsMock.mockResolvedValue("[00:01]词");
+    searchLyricsMock.mockResolvedValue("[00:01]词\n[00:10]第二句\n[00:20]第三句\n[00:30]第四句\n[00:40]第五句");
     writeTagsMock.mockRejectedValueOnce(new MockFetchTagError("TIMEOUT", "slow", p));
     const { result } = await runTagRepairOnce("all", cfg());
     expect(result?.unobtainable).toBe(1);
@@ -1480,7 +1480,7 @@ describe("续跑快照 / 立刻停止", () => {
     const gate = new Promise<void>((r) => (release = r));
     searchLyricsMock.mockImplementation(async () => {
       await gate;
-      return "[00:01]词";
+      return "[00:01]词\n[00:10]第二句\n[00:20]第三句\n[00:30]第四句\n[00:40]第五句";
     });
     const p = runTagRepairOnce("all", undefined, "both", base);
     await vi.waitFor(() => expect(getTagRepairProgress()).not.toBeNull());

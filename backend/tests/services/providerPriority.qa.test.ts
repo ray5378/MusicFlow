@@ -9,7 +9,8 @@
 //     并探测"providerPriority 传非数组"这一畸形入参的真实行为。
 // MUST be the first import: redirects DATA_DIR to an isolated temp dir.
 import "../plugins/_env.js";
-
+// 2026-11-22:歌词内容闸门要求≥5 行，非空假歌词统一补足（空串保持为空）。
+const L5 = (s: string) => s + "\n[00:10.00]l2\n[00:20.00]l3\n[00:30.00]l4\n[00:40.00]l5";
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
 import { Hono } from "hono";
 import md5 from "md5";
@@ -131,29 +132,29 @@ describe("QA:filterProvidersByPreference 边界", () => {
 describe("QA:searchLyrics/searchCover 按优先级", () => {
   it("B1 priority 顺序覆盖注册序;命中即止;未列出不被调用", async () => {
     const calls: string[] = [];
-    reg("zq-a", ["lyricProvider"], { searchLyrics: async () => { calls.push("a"); return { lrc: "A" }; } });
-    reg("zq-b", ["lyricProvider"], { searchLyrics: async () => { calls.push("b"); return { lrc: "B" }; } });
-    reg("zq-c", ["lyricProvider"], { searchLyrics: async () => { calls.push("c"); return { lrc: "C" }; } });
+    reg("zq-a", ["lyricProvider"], { searchLyrics: async () => { calls.push("a"); return { lrc: L5("A") }; } });
+    reg("zq-b", ["lyricProvider"], { searchLyrics: async () => { calls.push("b"); return { lrc: L5("B") }; } });
+    reg("zq-c", ["lyricProvider"], { searchLyrics: async () => { calls.push("c"); return { lrc: L5("C") }; } });
     setSetting("lyrics.providerPriority", JSON.stringify(["zq-c", "zq-a"])); // c 先于 a;b 未列出
 
     const r = await searchLyrics({ title: "x", artist: "y" });
-    expect(r).toBe("C");
+    expect(r).toBe(L5("C"));
     expect(calls).toEqual(["c"]); // 注册序是 a,b,c;优先级把 c 提到最前 → 证明确实按列表
   });
 
   it("B2 priority 含 ghost → 跳过 ghost 继续下一个命中", async () => {
     const calls: string[] = [];
-    reg("zq-a", ["lyricProvider"], { searchLyrics: async () => { calls.push("a"); return { lrc: "A" }; } });
+    reg("zq-a", ["lyricProvider"], { searchLyrics: async () => { calls.push("a"); return { lrc: L5("A") }; } });
     setSetting("lyrics.providerPriority", JSON.stringify(["ghost-ly", "zq-a"]));
 
     const r = await searchLyrics({ title: "x", artist: "y" });
-    expect(r).toBe("A");
+    expect(r).toBe(L5("A"));
     expect(calls).toEqual(["a"]);
   });
 
   it("B3 priority 全 ghost → providers 为空 → null(有启用 provider 也不兜底)", async () => {
     const calls: string[] = [];
-    reg("zq-live", ["lyricProvider"], { searchLyrics: async () => { calls.push("live"); return { lrc: "LIVE" }; } });
+    reg("zq-live", ["lyricProvider"], { searchLyrics: async () => { calls.push("live"); return { lrc: L5("LIVE") }; } });
     setSetting("lyrics.providerPriority", JSON.stringify(["ghost-x"]));
 
     const r = await searchLyrics({ title: "x", artist: "y" });
@@ -175,12 +176,12 @@ describe("QA:searchLyrics/searchCover 按优先级", () => {
   it("B5 空列表 → 全部启用(注册序 first-match-wins)", async () => {
     const seq: string[] = [];
     reg("zq-e1", ["lyricProvider"], { searchLyrics: async () => { seq.push("1"); return { lrc: "" }; } });
-    reg("zq-e2", ["lyricProvider"], { searchLyrics: async () => { seq.push("2"); return { lrc: "E2" }; } });
+    reg("zq-e2", ["lyricProvider"], { searchLyrics: async () => { seq.push("2"); return { lrc: L5("E2") }; } });
     setSetting("lyrics.providerPriority", "");
     setSetting("lyrics.providerId", "");
 
     const r = await searchLyrics({ title: "x", artist: "y" });
-    expect(r).toBe("E2");
+    expect(r).toBe(L5("E2"));
     expect(seq).toEqual(["1", "2"]);
   });
 });

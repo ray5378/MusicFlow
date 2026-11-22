@@ -28,7 +28,7 @@ const failLyric: PluginManifest = { id: "mock-lyric-fail", name: "Fail Lyric", v
 const failLyricImpl: LyricProviderPlugin = { searchLyrics: async () => { throw new Error("boom"); } };
 
 const okLyric: PluginManifest = { id: "mock-lyric-ok", name: "OK Lyric", version: "1", type: "lyrics", capabilities: ["lyricProvider"], configSchema: [] };
-const okLyricImpl: LyricProviderPlugin = { searchLyrics: async () => ({ text: "mock lyrics" }) };
+const okLyricImpl: LyricProviderPlugin = { searchLyrics: async () => ({ text: "mock lyrics\nline two\nline three\nline four\nline five" }) };
 
 const okCover: PluginManifest = { id: "mock-cover-ok", name: "OK Cover", version: "1", type: "cover", capabilities: ["coverProvider"], configSchema: [] };
 const okCoverImpl: CoverProviderPlugin = { searchCover: async () => ({ url: "http://cover/x" }) };
@@ -95,7 +95,9 @@ describe("provider presence", () => {
 describe("lyric provider (first-match-wins)", () => {
   it("skips a throwing provider and returns the first that answers", async () => {
     const r = await searchLyrics({ url: "http://s", title: "T", artist: "A", duration: 1000 });
-    expect(r).toBe("mock lyrics");
+    expect(r).toBe(
+      "mock lyrics\nline two\nline three\nline four\nline five",
+    );
     // health reflects the skip + the win
     expect(getHealth("mock-lyric-fail").status).toBe("yellow");
     expect(getHealth("mock-lyric-ok").status).toBe("green");
