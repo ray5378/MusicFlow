@@ -43,6 +43,28 @@ export function lrcBelongsToSong(
   const timeStampCount = (content.match(/\[[\d]{1,2}:\d{1,2}(?:[.:]\d{1,3})?\]/g) || []).length;
   const contentUnits = Math.max(contentLines.length, timeStampCount);
   if (contentUnits < MIN_LYRIC_LINES) return false;
+  // LRC 元数据里的歌手必须与本曲一致（2026-11-23 复核发现 3 例）：
+  //   Guang Hui Sui Yue(Beyond) 的歌词 [ar:SATURDAY星期六乐队]、
+  //   My Eyes Don't Lie(Billy Cate) 的歌词 [ar:卫兰]、差词(C allstar) 的歌词 [ar:逻辑 Lawgitech]。
+  // 这些是"同名不同人/不同版本"的歌词，写进文件后无法自动纠正，必须在写入前拦下。
+  // 占位歌手（未知/群星/Various Artists）不参与否决。
+  const arTag = content.match(/\[ar:\s*([^\]]+)\]/i);
+  if (arTag && String(song.artist ?? "").trim()) {
+    const placeholder =
+      /^(未知|未知歌手|群星|华语群星|佚名|unknown|various|various artists)/i;
+    const tok = (v: string) =>
+      v
+        .split(/[、,，/&;；|·]+|\s+/)
+        .map((x) => x.trim().toLowerCase())
+        .filter((x) => x.length >= 2 && !placeholder.test(x));
+    const arT = tok(arTag[1]);
+    const localT = tok(String(song.artist ?? ""));
+    if (arT.length && localT.length) {
+      const hit = arT.some((a) => localT.some((l) => a.includes(l) || l.includes(a)));
+      if (!hit) return false;
+    }
+  }
+
   const norm = (v: unknown) =>
     applyVariant(String(v ?? "").toLowerCase(), "simplified")
       .replace(/[\s\p{P}\p{S}]+/gu, "")

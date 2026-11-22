@@ -117,4 +117,60 @@ describe("lrcBelongsToSong 多歌手分词（2026-11-22 大宝剑实例）", () 
       lrcBelongsToSong(lrc, { title: "大宝剑", artist: "王麟,新街口组合", duration: 254 }),
     ).toBe(true);
   });
+
+  // 2026-11-23 复核：LRC 的 [ar:] 写的是别的歌手 ⇒ 同名不同人/不同版本，必须否决
+  const lrcOf = (...parts: string[]) => parts.join("\n");
+
+  it("[ar:] 与本曲歌手不一致 → 否决（My Eyes Don't Lie / Billy Cate vs 卫兰）", () => {
+    const lrc = lrcOf(
+      "[ti:My Eyes Don't Lie]",
+      "[ar:卫兰]",
+      "[00:10.00]a",
+      "[00:20.00]b",
+      "[00:30.00]c",
+      "[00:40.00]d",
+      "[00:50.00]e",
+    );
+    expect(
+      lrcBelongsToSong(lrc, { title: "My Eyes Don't Lie", artist: "Billy Cate", duration: 210 }),
+    ).toBe(false);
+  });
+
+  it("[ar:] 是别的乐队 → 否决（Guang Hui Sui Yue / Beyond vs SATURDAY星期六乐队）", () => {
+    const lrc = lrcOf(
+      "[ti:GUANGHUISUIYUE]",
+      "[ar:SATURDAY星期六乐队]",
+      "[00:10.00]a",
+      "[00:20.00]b",
+      "[00:30.00]c",
+      "[00:40.00]d",
+      "[00:50.00]e",
+    );
+    expect(
+      lrcBelongsToSong(lrc, { title: "Guang Hui Sui Yue", artist: "Beyond", duration: 300 }),
+    ).toBe(false);
+  });
+
+  it("[ar:] 与本曲歌手一致，或 [ar:] 为空 → 放行", () => {
+    const ok = lrcOf(
+      "[ti:狂信者]",
+      "[ar:黄立行]",
+      "[00:10.00]a",
+      "[00:20.00]b",
+      "[00:30.00]c",
+      "[00:40.00]d",
+      "[00:50.00]e",
+    );
+    expect(lrcBelongsToSong(ok, SONG)).toBe(true);
+    const emptyAr = lrcOf(
+      "[ti:]",
+      "[ar:]",
+      "[00:10.00]a",
+      "[00:20.00]b",
+      "[00:30.00]c",
+      "[00:40.00]d",
+      "[00:50.00]e",
+    );
+    expect(lrcBelongsToSong(emptyAr, SONG)).toBe(true);
+  });
 });
