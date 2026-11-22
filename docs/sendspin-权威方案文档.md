@@ -461,6 +461,10 @@ await sleep(dueMs - Date.now());   // 自校正，±0.5ms 振荡
   （`cursorUs` 与 `nowUs()` 同为 host monotonic 时钟，可直接相减）。取帧仍用 `playCursorMs`，只有对外上报换口径。
 - **保住 seek 语义**：可听位置带**下界** `reportedFloorMs`（本轮起播位置 / seek 目标）。正常起播下界为 0 → 开播即 `00:00`；拖到 40s 时下界为 40s → UI 立刻显示目标值，不会被「缓冲还没建立」拉低（对齐 MA `controller.py` 的 `elapsed_time` 防回跳）。
 - **可听前报 BUFFERING（v4.8.1）**：静默预填充 / seek 重建期间（位置钳在下界）`pollCore` 返回 `buffering:true`（`SendspinGroup.audibleStarted`：play/seek/rehost/起播复位，pushLoop 与曲末排空首次越过下界置位），四处映射成 `BUFFERING` 瞬态——三端（HA 卡片 / Web 前端 / 客户端）据非 PLAYING **停止本地插值**，修复「切歌进度前进 ~2s 又跳回 0」循环（详见 [group-权威方案文档.md](./group-权威方案文档.md) §4.5）。
+- **（v4.14.30 补充，原文保留）置位点是三处**：pushLoop、曲末排空、**暂停恢复重锚**（重锚**不**复位、但要置位，理由见 group 文档 §4.6）。
+- **（v4.14.30）出声即事件**：首越下界那一帧把 `audibleStarted` 经 IPC `audibleStarted` 事件上报主进程；主进程立刻 `releaseDisplayHold("audible-started")` 并按 `floorMs` 广播状态 —— 封面/进度不再等 400ms 观察器 + fork RPC（旧路径实测迟 1~2s，且第一眼是「02 秒」）。
+- **（v4.14.30/31）显示口径单独派生**：`displayPositionMs = min(dur, framePos − depth + displayLeadMs)` 再过物理上界「内容起点 + 已流逝墙钟 × 倍速」；`displayLeadMs` 按曲粘住（桥组 2.05s）。**判定仍只看 `positionMs`** —— 两者混用会同时制造「曲末提前切歌」和「新曲 02 秒」。
+- **（v4.14.30）状态推送**：本进程的组此前不发 `state_changed`，现在由主进程 `QueueController.broadcastState` 在每轮 `pollAllDevices`（5s）采样后转发，出声瞬间另推一次；ws 消费方（App / HA）据此不必再纯靠轮询。
 
 ## 2.9 推流循环落后时**必须让出宏任务**
 

@@ -426,9 +426,67 @@ DLNA 设备区块仍然渲染在群组页左侧（`index.vue:51-123`，`data-laz
 
 **修复**：可听前上报 BUFFERING 瞬态——
 - `SendspinGroup.audibleStarted` 标志：play()/seek()/rehost()/cast 起播**复位**；pushLoop 与曲末排空循环首次越过上报下界（严格大于 `floorMs`）**置位**。时间线重锚分支**不**复位（防 mid-play 重锚误报）。
+  - **（v4.14.30 补充，原文保留）置位点其实是三处**：上述两处 + **暂停恢复重锚**（重锚只把时间线平移到「现在 + lead」，不改变「这首已经在出声」的事实；不置位会退化成假 BUFFERING，测试 `queueModes` 据此断言）。守卫 G14 的置位计数已同步为 3。出声的那一帧还会经 IPC 上报主进程，见 §4.6。
 - `pollCore` 返回新增 `buffering`（stub 组 undefined 退化 false）；四处映射为 `BUFFERING`：`sendspin/protocolPlayer.ts` 组 / 单设备 in-proc / fork proxy 三处 + `group/protocolPlayer.ts::getGroupStatus` 两处 sendspin 分支。
 - **三端零改动**：客户端 `playing => state=='PLAYING'`、Web 前端 `statePlaying` 白名单、HA 集成 `STATE_MAP` 早已映射 `BUFFERING` ⇒ 可听前自动停止本地插值，进度停在下界直到真正出声。
 - 安全性：PlaybackTracker 把 BUFFERING 当瞬态（不判自然结束 / 不清 lastPlaying / 不计冻结宽限）；fork RPC 透传，旧子进程缺字段退化旧行为。
+
+### 4.6 显示口径：displayHold + 显示位置上界 + 出声事件（v4.11.12 → v4.14.30）
+
+同一条用户观感线索的三个阶段，**旧结论都仍然成立**，本节只记录它演进到了哪一步：
+
+| 阶段 | 问题 | 当时的做法 | 遗留 |
+|---|---|---|---|
+| v4.11.12（A 方案） | 显示提前切到下一首（内部已 advance，新曲还没出声） | `QueueController.displayHold` 按住旧曲，`snapshot()` 返回旧 index/shufflePos | 放开判定靠 5s 轮询 ⇒ 出声后 ~3.1s 才切封面 |
+| v4.11.20 | 上一首没播完就切封面 / 新曲第一眼 02 秒 | 400ms 轻量观察器（只做放开判定）+ 硬顶 `until + 20s` + 显示位置加**物理上界** | 观察器仍要问设备位置（fork RPC 往返 1~2s） |
+| **v4.14.30** | 上面两个残余 | **出声即事件**：泵上报 `audibleStarted`，主进程立刻放开并按 `floorMs` 广播 | — |
+
+**一、两个位置，各管一件事（唯一可信口径）**
+
+- `positionMs`（**判定**）：可听位置 = 已推送 − 缓冲深度，被 `reportedFloorMs` 钳在 ≥0。曲末轮询拿它撞 `durationMs` 决定 advance。
+- `displayPositionMs`（**显示**，纯派生）：`min(duration, framePos − depth + displayLeadMs)`，再过量级上界
+  `capDisplayByElapsed()` = **内容起点 + 已流逝墙钟 × 倍速**（只在更小时生效，稳态不变）。
+  - 上界存在的理由：接续切歌时时间线锚点可能落在过去，`framePos − depth + lead` 一上来就是 1~2 秒 ⇒ 界面「02 秒」。
+  - **禁止**用 `Math.max(历史值)` 之类做单调保护：seek 往回拖会卡死。回退只有「换曲 / seek」两个合法来源，分别由 `displaySongId` 与 seek 的显式复位负责。
+- `displayLeadMs`（**曲级粘住，只升不降**）：桥组加 `AUDIBLE_DEVICE_LEAD_MS`（2.05s；MUZO/Linkplay 收到即播、不等 RTP ts）。曲末桥会话收尾会让 `hasBridges()` 翻 false，跟着翻 0 会让显示位置当场掉 2.05s。
+
+**二、displayHold 的生命周期**
+
+`setDisplayHold`（advance 决策时）记录旧曲 index / 位置 / 可听尾长：
+
+- `until = now + wallRemainMs`，其中 `wallRemainMs = remainSec × 1000 / speed` —— **倍速必须折算**，否则 2x 下按 1x 持有，声音先走、进度条还在旧曲爬。
+- `releaseAt = until + 20000`：硬顶兜底（旧曲尾 ≈8.5s + 新曲 BUFFERING 起播 ≈8.5s ≈ 17s，取 20s 留裕量）。
+- 放开三条路径（优先级从高到低）：
+  1. **`audible-started`**（v4.14.30，主路径）：泵上报新曲出声 → 主进程立刻放开，实测时延 **~0.1s**；
+  2. `maybeReleaseDisplayHold`：400ms 观察器（`watchTimer`，**只做放开判定**，不写 lastPos、不进 handleDecision，避免「poll 侧再造触发器」的链式跳歌）；
+  3. `hard-timeout`：硬顶到点。
+- 放开瞬间补推一次状态。`audible-started` 这条**不再补采样** —— 采样读数是 1~2s 后的位置，会把刚广播的精确 0 覆盖掉。
+
+**三、出声事件链路（v4.14.30）**
+
+```
+泵 pushLoop / 曲末排空首帧越过下界 → audibleStarted = true
+   └─ IPC `audibleStarted{clientId, songId, positionMs, durationMs}`（ipcProtocol 新事件）
+        └─ supervisor.dispatchSendspinChildEvent → SupervisorHooks.onAudibleStarted
+             └─ sendspin/index：组名归一化（group: / ug: / 裸 id → 裸 id）
+                  ├─ qc.releaseDisplayHold(bareId, "audible-started")
+                  └─ qc.broadcastState(bareId, {state: PLAYING, position: floorMs, duration})
+```
+
+- 上报值**必须是 `floorMs`（起播下界）**：新曲为 0、seek 为目标，天然精确。用 `positionMs` 或 `displayPositionMs` 都会在接续切歌时带上 1~2s（这两个值那时已经越过下界了）。
+- 组名必须归一化：泵里可能是 `group:<id>` / `ug:<id>` / 裸 id 三种形态，不剥干净 `clearDisplayHold` 找不到持有者，会静默退回 400ms 轮询（实测时延回到 2s）。
+
+**四、状态推送的节奏（v4.14.30）**
+
+- 整个后端原先只有 DLNA 的 GENA 会 emit `state_changed`，**sendspin / 桥组一条都不发** ⇒ ws 的 `player_state_changed` 对这类组是断的（App 2s 轮询、HA 30s peer 轮询）。
+- 现在：`pollAllDevices`（5s）每轮采样后 `broadcastState` 转发一次；显示持有放开与出声瞬间再各推一次。实测日志 `[ws][state]` 5s 一拍、切歌段 1s 一拍。
+- `broadcastState` 会补 `state` 字符串（`state_changed` 消费方直接读），并做裸 id 归一化。
+
+**五、验收（240 真机，v4.14.30 / v4.14.32）**
+
+- 5 首连播 0.5s 采样：每首首样本 `0.00`、末位 ≈ `dur − 0.3`、速率 0.997~0.998、**回退 0、冻结 0**；6 次交界全部「末位 ≈ dur → 新曲 0.00」。
+- 放开显示 8 次**全部** `audible-started`；`hard-timeout` 与「设备已进入新曲」兜底各 **0** 次。
+- ws 在出声瞬间推的是 `pos=0`（250 / 224 / 229 / 216 四条实证）。
 
 ---
 
