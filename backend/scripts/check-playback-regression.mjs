@@ -7,9 +7,13 @@
 //   R1 组倍速重投保留起点(e9895a3f):组 playMedia 的 startMs 必须透传给
 //      三条扇出路径(sendspin 组泵 / DLNA 成员 / solo AirPlay),且组内不得再
 //      出现硬编码 0 的 playMedia 起点。
-//   R2 组状态扣除桥成员 lead(00def316):getGroupStatus 两条 sendspin 分支的
-//      position 都要减 bridgeLeadContentSec(写入未出声 × 倍速折算内容秒),
-//      并钳 0;扣除函数本体必须还在。
+//   R2 组状态位置口径(00def316 → 2026-11-20 **反转**,旧结论保留在此):
+//      00def316 当时在 getGroupStatus 里再扣一次桥 lead(bridgeLeadContentSec,写入未出声 ×
+//      倍速折算内容秒)。后来 streamEngine.audiblePositionMs 的 positionMs 已经是「设备此刻
+//      正在响」的位置(depthMs 已扣),再扣一次让对外进度恒落后 ~2.05s:歌没播完 UI 到不了
+//      终点、seek 落点少 2s(240 实测:同源分支自然播完 pos==dur 15/15,扣减分支少 2~3s)。
+//      ⇒ 现在两条 sendspin 分支统一 `displayPositionMs ?? positionMs` 并钳 0,
+//      bridgeLeadContentSec **不得回流**。
 //   R3 DLNA RelTime 判死(e9895a3f):设备**真报正 RelTime**才允许把本次采样
 //      当可信基线(MUZO/Linkplay 转码流恒回 0,castContentOffsetSec 不算读数);
 //      无基线就地播种时以偏移为锚(pos = max(0, state.position)),否则重投后
@@ -84,18 +88,18 @@ check("R1d 组内不存在硬编码 0 起点的 playMedia 调用",
 // ---------------------------------------------------------------------------
 console.log("R2 组状态扣除桥成员 lead(group/protocolPlayer.ts)");
 // ---------------------------------------------------------------------------
-check("R2a bridgeLeadContentSec 函数本体在",
-  gpLines.some((l) => l.startsWith("function bridgeLeadContentSec(groupId: string): number {")),
-  "扣除函数被删 ⇒ 进度恒领先声音");
-check("R2b 共享组泵分支 position 扣 lead 并钳 0",
-  gpLines.some((l) => l.includes("position: Math.max(0, Math.floor(st.positionMs / 1000 - bridgeLeadContentSec(groupId)))")),
-  "st 分支必须 - bridgeLeadContentSec(groupId) 且 Math.max(0, …)");
-check("R2c 组轮询分支 position 扣 lead 并钳 0",
-  gpLines.some((l) => l.includes("position: Math.max(0, Math.floor(gst.positionMs / 1000 - bridgeLeadContentSec(groupId)))")),
-  "gst 分支必须 - bridgeLeadContentSec(groupId) 且 Math.max(0, …)");
-check("R2d lead 按倍速折算内容秒(× getPlaybackSpeed(groupId))",
-  gpLines.some((l) => l.includes("(maxMs / 1000) * getPlaybackSpeed(groupId)")),
-  "折算式丢了倍速因子 ⇒ 高倍速时进度重新领先");
+check("R2a bridgeLeadContentSec 不得回流(二次扣 lead ⇒ 进度恒落后 2.05s)",
+  !gpLines.some((l) => l.includes("bridgeLeadContentSec")),
+  "回流即复发「歌没播完 UI 到不了终点 / seek 少 2s」——扣减已收口在 audiblePositionMs 一处");
+check("R2b 共享组泵分支 position 取显示位置并钳 0",
+  gpLines.some((l) => l.includes("position: Math.max(0, Math.floor(((st as any).displayPositionMs ?? st.positionMs) / 1000))")),
+  "st 分支必须 displayPositionMs ?? positionMs(且 Math.max(0, …)),不再减 lead");
+check("R2c 组轮询分支 position 取显示位置并钳 0",
+  gpLines.some((l) => l.includes("position: Math.max(0, Math.floor(((gst as any).displayPositionMs ?? gst.positionMs) / 1000))")),
+  "gst 分支必须 displayPositionMs ?? positionMs(且 Math.max(0, …)),不再减 lead");
+check("R2d 两条 sendspin 分支口径一致(不得只剩一条带 displayPositionMs)",
+  gpLines.filter((l) => l.includes("displayPositionMs ?? ")).length >= 2,
+  "只改一条 ⇒ 另一条又退回真实位置,两台设备进度不一致");
 
 // ---------------------------------------------------------------------------
 console.log("R3 DLNA RelTime 判死(dlna/control.ts)");
