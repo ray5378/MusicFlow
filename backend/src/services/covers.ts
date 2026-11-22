@@ -9,8 +9,12 @@ import { db, sqlite } from "../db/index.js";
 import { songs, albums } from "../db/schema.js";
 import { inArray, eq } from "drizzle-orm";
 import { hasCoverProvider, searchCover } from "../plugins/providers.js";
+import { coverAllowed } from "./fetch/tagTrust.js";
 import { cacheRemoteCover, resolveCoverFile } from "./playlistCover.js";
 import { getSettingBool } from "./settings.js";
+import { createLogger } from "../utils/logger.js";
+
+const log = createLogger("cover");
 
 export interface CoverSongInput {
   id: string;
@@ -102,15 +106,46 @@ export async function fetchCoverForSong(song: CoverSongInput, force = false): Pr
   if (!getSettingBool("cover.onDemand", true) || !hasCoverProvider()) return null;
 
   let url: string | null = null;
+  // 归属闸门（2026-11-23）：在线导入/补全的封面原来**没有任何校验**，搜到哪张就用哪张。
+  // 这里记录来源插件是否内置：外置来源按标题松匹配（实测会拿到别的歌/别的专辑的图），
+  // 明确非内置时直接丢弃；内置来源有标题/歌手/时长/版本严格评分，可信。
+  let coverProvider: string | null = null;
+  let builtinCover: boolean | undefined;
   try {
-    url = await searchCover({
-      title: song.title,
-      artist: song.artist || undefined,
-      album: song.album || undefined,
-      duration: song.duration ?? undefined,
-    });
+    url = await searchCover(
+      {
+        title: song.title,
+        artist: song.artist || undefined,
+        album: song.album || undefined,
+        duration: song.duration ?? undefined,
+      },
+      {
+        onMatch: (pid, builtin) => {
+          coverProvider = pid;
+          builtinCover = builtin;
+        },
+      },
+    );
   } catch {
     url = null;
+  }
+  if (url) {
+    const decision = coverAllowed({
+      title: song.title,
+      artist: song.artist,
+      // 在线歌曲的 album/artist 来自平台元数据，本身就是"本曲已知信息"，据它校验：
+      // 歌手必须对得上；专辑只要能对齐就用，对不上再看是否同源。
+      dbAlbum: song.album,
+      metaAlbum: song.album,
+      metaArtist: song.artist,
+      coverProvider,
+      builtinCover,
+    });
+    if (!decision.allowed) {
+      log.warn(`[cover] 封面来源不可信，跳过 song=${song.id} title=${song.title} 原因=${decision.reason}`);
+      markAttempt(song.id, force);
+      return null;
+    }
   }
 
   if (!url) {
