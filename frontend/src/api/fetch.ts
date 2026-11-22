@@ -483,3 +483,73 @@ export async function stopTagRepair(): Promise<{ stopped: boolean; running: bool
   const res = await api.post(`${BASE}/tag-repair/stop`);
   return { stopped: Boolean(res.data?.stopped), running: Boolean(res.data?.running) };
 }
+
+// ==================== 云盘（WebDAV）标签修复（2026-11-22） ====================
+// 与本地修复完全独立：整文件进内存 → 改标签 → PUT 临时名 → 替换；一首一首串行，可续跑。
+
+export interface WdavTarget {
+  sourceId: string;
+  /** 与 songs.path 前缀一致的目录（含源 base 路径段，如 /dav/共享/...） */
+  dir: string;
+}
+
+export interface WdavSourceItem {
+  id: string;
+  name: string;
+  songCount: number;
+  rootUrl?: string;
+}
+
+export interface WdavEntry {
+  name: string;
+  path: string;
+  isDir: boolean;
+  size?: number;
+}
+
+export interface WdavRepairState {
+  running: boolean;
+  dryRun: boolean;
+  stopping: boolean;
+  targets: WdavTarget[];
+  total: number;
+  done: number;
+  fixed: number;
+  skipped: number;
+  failed: number;
+  current: { songId: string; title: string } | null;
+  startedAt: number;
+  updatedAt: number;
+  finishedAt: number | null;
+  lastError: string | null;
+}
+
+export async function getWdavSources(): Promise<WdavSourceItem[]> {
+  const res = await api.get(`${BASE}/tag-repair/wdav/sources`);
+  return (res.data?.items ?? []) as WdavSourceItem[];
+}
+
+export async function browseWdav(sourceId: string, dir: string): Promise<WdavEntry[]> {
+  const res = await api.get(`${BASE}/tag-repair/wdav/browse`, { params: { sourceId, dir } });
+  return (res.data?.entries ?? []) as WdavEntry[];
+}
+
+export async function previewWdav(targets: WdavTarget[]): Promise<{ candidates: number; estSeconds: number }> {
+  const res = await api.post(`${BASE}/tag-repair/wdav/preview`, { targets });
+  return { candidates: Number(res.data?.candidates ?? 0), estSeconds: Number(res.data?.estSeconds ?? 0) };
+}
+
+export async function runWdavRepair(targets: WdavTarget[]): Promise<WdavRepairState | null> {
+  const res = await api.post(`${BASE}/tag-repair/wdav/run`, { targets });
+  return (res.data?.state ?? null) as WdavRepairState | null;
+}
+
+export async function getWdavStatus(): Promise<WdavRepairState | null> {
+  const res = await api.get(`${BASE}/tag-repair/wdav/status`);
+  return (res.data?.state ?? null) as WdavRepairState | null;
+}
+
+export async function stopWdavRepair(): Promise<{ requested: boolean; running: boolean }> {
+  const res = await api.post(`${BASE}/tag-repair/wdav/stop`);
+  return { requested: Boolean(res.data?.requested), running: Boolean(res.data?.running) };
+}

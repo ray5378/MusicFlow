@@ -433,6 +433,53 @@
             </div>
             <div class="hint tag-repair-hint">{{ t('admin.fetch.tagRepair.forceHint') }}</div>
 
+            <el-divider content-position="left">{{ t('admin.fetch.tagRepair.wdavTitle') }}</el-divider>
+            <div class="hint tag-repair-hint">{{ t('admin.fetch.tagRepair.wdavDesc') }}</div>
+            <div class="config-grid">
+              <el-form-item :label="t('admin.fetch.tagRepair.wdavSource')">
+                <el-select v-model="wdavSourceId" style="width: 100%" :disabled="wdavRunning" @change="onWdavSourceChange">
+                  <el-option v-for="s in wdavSources" :key="s.id" :label="s.name + '（' + s.songCount + ' ' + t('admin.fetch.tagRepair.wdavSongUnit') + '）'" :value="s.id" />
+                </el-select>
+              </el-form-item>
+            </div>
+            <div class="wdav-browser">
+              <div class="wdav-crumbs">
+                <el-button size="small" :disabled="!wdavDir || wdavDir === '/' || wdavBrowsing" @click="wdavGoUp">{{ t('admin.fetch.tagRepair.wdavUp') }}</el-button>
+                <span class="hint wdav-path">{{ wdavDir || '/' }}</span>
+                <el-button size="small" :loading="wdavBrowsing" @click="reloadWdavDir">{{ t('admin.fetch.tagRepair.reload') }}</el-button>
+              </div>
+              <div class="wdav-list">
+                <div v-for="e in wdavEntries" :key="e.path" class="wdav-row">
+                  <el-button size="small" text class="wdav-name" @click="e.isDir ? enterWdavDir(e.path) : undefined">
+                    {{ e.isDir ? '📁' : '🎵' }} {{ e.name }}
+                  </el-button>
+                  <el-button v-if="e.isDir" size="small" type="primary" link @click="toggleWdavTarget(e.path)">
+                    {{ isWdavTarget(e.path) ? t('admin.fetch.tagRepair.wdavUnpick') : t('admin.fetch.tagRepair.wdavPick') }}
+                  </el-button>
+                </div>
+                <div v-if="!wdavEntries.length" class="hint">{{ t('admin.fetch.tagRepair.wdavEmpty') }}</div>
+              </div>
+            </div>
+            <div v-if="wdavTargets.length" class="wdav-targets">
+              <el-tag v-for="tg in wdavTargets" :key="tg.dir" closable class="wdav-tag" @close="removeWdavTarget(tg.dir)">{{ tg.dir }}</el-tag>
+            </div>
+            <div class="tag-repair-actions">
+              <el-button :loading="wdavPreviewing" :disabled="!wdavTargets.length || wdavRunning" @click="onWdavPreview">{{ t('admin.fetch.tagRepair.wdavPreview') }}</el-button>
+              <el-button type="primary" :loading="wdavStarting" :disabled="!wdavTargets.length || wdavRunning" @click="onWdavRun">{{ t('admin.fetch.tagRepair.wdavRun') }}</el-button>
+              <el-button v-if="wdavRunning" :loading="wdavStopping" @click="onWdavStop">{{ t('admin.fetch.tagRepair.wdavStop') }}</el-button>
+            </div>
+            <div v-if="wdavPreview" class="hint tag-repair-hint">
+              {{ t('admin.fetch.tagRepair.wdavPreviewResult', { n: wdavPreview.candidates, min: Math.max(1, Math.round(wdavPreview.estSeconds / 60)) }) }}
+            </div>
+            <div v-if="wdavState" class="wdav-progress">
+              <el-progress :percentage="wdavPercent" :status="wdavState.running ? undefined : 'success'" />
+              <div class="hint">
+                {{ t('admin.fetch.tagRepair.wdavProgress', { done: wdavState.done, total: wdavState.total, fixed: wdavState.fixed, skipped: wdavState.skipped, failed: wdavState.failed }) }}
+              </div>
+              <div v-if="wdavState.current" class="hint">{{ t('admin.fetch.tagRepair.wdavCurrent') }}：{{ wdavState.current.title }}</div>
+              <div v-if="wdavState.lastError" class="hint wdav-err">{{ t('admin.fetch.tagRepair.wdavLastError') }}：{{ wdavState.lastError }}</div>
+            </div>
+
             <div class="hint tag-repair-write-hint">{{ t('admin.fetch.tagRepair.writeHint') }}</div>
           </el-form>
         </div>
@@ -479,6 +526,12 @@ import {
   getTagRepairStatus,
   runTagRepair,
   stopTagRepair,
+  getWdavSources,
+  browseWdav,
+  previewWdav,
+  runWdavRepair,
+  getWdavStatus,
+  stopWdavRepair,
 } from "@/api/fetch";
 import type {
   FetchConfig,
@@ -489,6 +542,10 @@ import type {
   LibraryPlan,
   TagRepairMode,
   TagRepairStatus,
+  WdavEntry,
+  WdavSourceItem,
+  WdavTarget,
+  WdavRepairState,
 } from "@/api/fetch";
 
 const { t } = useI18n();
@@ -1133,6 +1190,7 @@ function formatDuration(sec?: number): string {
 }
 
 onMounted(() => {
+  void initWdav();
   // 首屏只拉「配置」页签真正要用的两个接口；洗版配置 / 标签修复状态各由自己的页签激活时再拉，
   // 避免默认停在配置页也要等 4 个请求（其中 tag-repair 状态含集合查询，冷缓存可达数百毫秒）。
   loadConfig();
@@ -1142,9 +1200,167 @@ onMounted(() => {
   // 全部非默认页签都用 el-tab-pane `lazy` 懒挂载：切到对应页签才 mount 并自拉，不在这里重复请求。
 });
 
+// ==================== 云盘（WebDAV）标签修复 ====================
+// 独立于本地修复：选定云盘目录 → 预演（只统计）→ 开始（一首一首串行，可续跑）。
+const wdavSources = ref<WdavSourceItem[]>([]);
+const wdavSourceId = ref("");
+const wdavDir = ref("");
+const wdavEntries = ref<WdavEntry[]>([]);
+const wdavTargets = ref<WdavTarget[]>([]);
+const wdavBrowsing = ref(false);
+const wdavPreviewing = ref(false);
+const wdavStarting = ref(false);
+const wdavStopping = ref(false);
+const wdavPreview = ref<{ candidates: number; estSeconds: number } | null>(null);
+const wdavState = ref<WdavRepairState | null>(null);
+const wdavRunning = computed(() => wdavState.value?.running === true);
+const wdavPercent = computed(() => {
+  const st = wdavState.value;
+  if (!st || !st.total) return 0;
+  return Math.min(100, Math.round((st.done / st.total) * 100));
+});
+let wdavPoll: ReturnType<typeof setInterval> | null = null;
+let wdavDisposed = false;
+
+async function loadWdavSources() {
+  try {
+    wdavSources.value = await getWdavSources();
+    if (!wdavSourceId.value && wdavSources.value.length) {
+      wdavSourceId.value = wdavSources.value[0].id;
+      await reloadWdavDir();
+    }
+  } catch {
+    /* 云盘源不可用时静默（面板仍可用本地修复） */
+  }
+}
+
+async function onWdavSourceChange() {
+  wdavDir.value = "";
+  wdavEntries.value = [];
+  wdavTargets.value = [];
+  wdavPreview.value = null;
+  await reloadWdavDir();
+}
+
+async function reloadWdavDir() {
+  if (!wdavSourceId.value) return;
+  wdavBrowsing.value = true;
+  try {
+    wdavEntries.value = await browseWdav(wdavSourceId.value, wdavDir.value || "/");
+  } catch (e: any) {
+    ElMessage.error(apiErrorText(e, t("admin.fetch.tagRepair.wdavFailed")));
+    wdavEntries.value = [];
+  } finally {
+    wdavBrowsing.value = false;
+  }
+}
+
+async function enterWdavDir(path: string) {
+  wdavDir.value = path;
+  await reloadWdavDir();
+}
+
+async function wdavGoUp() {
+  const cur = wdavDir.value || "/";
+  const i = cur.lastIndexOf("/");
+  wdavDir.value = i <= 0 ? "" : cur.slice(0, i);
+  await reloadWdavDir();
+}
+
+function isWdavTarget(dir: string): boolean {
+  return wdavTargets.value.some((t) => t.dir === dir);
+}
+
+function toggleWdavTarget(dir: string) {
+  if (!wdavSourceId.value) return;
+  if (isWdavTarget(dir)) {
+    wdavTargets.value = wdavTargets.value.filter((t) => t.dir !== dir);
+  } else {
+    wdavTargets.value = [...wdavTargets.value, { sourceId: wdavSourceId.value, dir }];
+  }
+  wdavPreview.value = null;
+}
+
+function removeWdavTarget(dir: string) {
+  wdavTargets.value = wdavTargets.value.filter((t) => t.dir !== dir);
+  wdavPreview.value = null;
+}
+
+async function onWdavPreview() {
+  wdavPreviewing.value = true;
+  try {
+    wdavPreview.value = await previewWdav(wdavTargets.value);
+  } catch (e: any) {
+    ElMessage.error(apiErrorText(e, t("admin.fetch.tagRepair.wdavFailed")));
+  } finally {
+    wdavPreviewing.value = false;
+  }
+}
+
+function startWdavPoll() {
+  if (wdavPoll) clearInterval(wdavPoll);
+  wdavPoll = setInterval(async () => {
+    if (wdavDisposed) return;
+    try {
+      const st = await getWdavStatus();
+      if (wdavDisposed) return;
+      wdavState.value = st;
+      if (!st?.running && wdavPoll) {
+        clearInterval(wdavPoll);
+        wdavPoll = null;
+      }
+    } catch {
+      /* 轮询失败忽略，下一拍再试 */
+    }
+  }, 3000);
+}
+
+async function onWdavRun() {
+  wdavStarting.value = true;
+  try {
+    const st = await runWdavRepair(wdavTargets.value);
+    wdavState.value = st;
+    ElMessage.success(t("admin.fetch.tagRepair.wdavStarted"));
+    startWdavPoll();
+  } catch (e: any) {
+    ElMessage.error(apiErrorText(e, t("admin.fetch.tagRepair.wdavFailed")));
+  } finally {
+    wdavStarting.value = false;
+  }
+}
+
+async function onWdavStop() {
+  wdavStopping.value = true;
+  try {
+    await stopWdavRepair();
+    ElMessage.info(t("admin.fetch.tagRepair.wdavStopping"));
+  } catch (e: any) {
+    ElMessage.error(apiErrorText(e, t("admin.fetch.tagRepair.wdavFailed")));
+  } finally {
+    wdavStopping.value = false;
+  }
+}
+
+async function initWdav() {
+  await loadWdavSources();
+  try {
+    const st = await getWdavStatus();
+    if (wdavDisposed) return;
+    wdavState.value = st;
+    if (st?.running) startWdavPoll();
+  } catch {
+    /* 忽略 */
+  }
+}
+
 // 离开页面必须清掉标签修复轮询定时器（2026-10-16 修正）：否则切走后定时器仍在后台
 // 每 5s 空转发请求，白耗资源（且可能对着已卸载组件 set 状态）。
 onUnmounted(() => {
+  wdavDisposed = true;
+  if (wdavPoll) {
+    clearInterval(wdavPoll);
+    wdavPoll = null;
+  }
   tagRepairDisposed = true;
   if (tagRepairPoll) {
     clearInterval(tagRepairPoll);
@@ -1211,6 +1427,56 @@ watch(activeTab, (v) => {
 </script>
 
 <style lang="scss" scoped>
+.wdav-browser {
+  margin-top: 8px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+  padding: 8px;
+}
+.wdav-crumbs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.wdav-path {
+  flex: 1;
+  word-break: break-all;
+}
+.wdav-list {
+  max-height: 240px;
+  overflow: auto;
+}
+.wdav-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 2px 0;
+}
+.wdav-name {
+  flex: 1;
+  justify-content: flex-start;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wdav-targets {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.wdav-tag {
+  max-width: 100%;
+}
+.wdav-progress {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.wdav-err {
+  color: var(--el-color-danger);
+}
 .admin-fetch { padding: 24px 32px 130px; max-width: 1400px; margin: 0 auto; }
 .page-header {
   display: flex; justify-content: space-between; align-items: center;
