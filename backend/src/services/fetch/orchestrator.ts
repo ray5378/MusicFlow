@@ -1023,11 +1023,11 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
       if (lyric && lyric.trim()) {
         // 归属闸门（2026-11-23）：provider 按 id 取回的可能是别的歌，写进文件后很难回收。
         if (
-          lrcBelongsToSong(lyric, {
-            title: songInput.title,
-            artist: songInput.artist,
-            duration: songInput.duration,
-          })
+          lrcBelongsToSong(
+            lyric,
+            { title: songInput.title, artist: songInput.artist, duration: songInput.duration },
+            { strictArtist: true },
+          )
         ) {
           extra.lyric = lyric;
         } else {

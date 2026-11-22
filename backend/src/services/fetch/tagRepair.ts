@@ -906,7 +906,13 @@ export async function repairSongTags(songId: string, cfg: FetchConfig): Promise<
         // 2026-11-22:写入文件前必须过归属闸门。provider 按 id 取回的可能是别的歌
         //   (真机:狂信者 → 分开旅行;本地 4 万 flac 里实测 1395 个文件的歌词标签是错的),
         //   写进文件后无法自动修复,比显示层的错词更贵。
-        if (lrcBelongsToSong(text, { title: songInput.title, artist: songInput.artist, duration: songInput.duration })) {
+        if (
+          lrcBelongsToSong(
+            text,
+            { title: songInput.title, artist: songInput.artist, duration: songInput.duration },
+            { strictArtist: true },
+          )
+        ) {
           tags.lyric = text;
         } else {
           log.warn(

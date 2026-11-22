@@ -25,6 +25,14 @@ export const MIN_LYRIC_LINES = 5;
 export function lrcBelongsToSong(
   content: string,
   song: { title?: string | null; artist?: string | null; duration?: number | null },
+  opts: {
+    /**
+     * 严格模式（**写文件**用）：标题行/[ar:] 里的歌手必须与本曲一致。
+     * 显示层默认关 —— 别名/本名/成员名/音译（A-Lin↔黄丽玲、BEYOND↔黄家驹、G-Friend↔여자친구）
+     * 会被误杀，实测约 2%（2 万条回放 418 条），写文件宁缺勿错，显示层宽松优先。
+     */
+    strictArtist?: boolean;
+  } = {},
 ): boolean {
   if (!content) return false;
   // 内容可用性(2026-11-22 真机):少于 MIN_LYRIC_LINES(5)行的「歌词」几乎都是占位文本 ——
@@ -43,21 +51,36 @@ export function lrcBelongsToSong(
   const timeStampCount = (content.match(/\[[\d]{1,2}:\d{1,2}(?:[.:]\d{1,3})?\]/g) || []).length;
   const contentUnits = Math.max(contentLines.length, timeStampCount);
   if (contentUnits < MIN_LYRIC_LINES) return false;
+  const norm = (v: unknown) =>
+    applyVariant(String(v ?? "").toLowerCase(), "simplified")
+      .replace(/[\s\p{P}\p{S}]+/gu, "")
+      .replace(/[（(【\[].*?[)）】\]]/g, "");
+
   // LRC 元数据里的歌手必须与本曲一致（2026-11-23 复核发现 3 例）：
   //   Guang Hui Sui Yue(Beyond) 的歌词 [ar:SATURDAY星期六乐队]、
   //   My Eyes Don't Lie(Billy Cate) 的歌词 [ar:卫兰]、差词(C allstar) 的歌词 [ar:逻辑 Lawgitech]。
   // 这些是"同名不同人/不同版本"的歌词，写进文件后无法自动纠正，必须在写入前拦下。
   // 占位歌手（未知/群星/Various Artists）不参与否决。
   const arTag = content.match(/\[ar:\s*([^\]]+)\]/i);
-  if (arTag && String(song.artist ?? "").trim()) {
+  if (opts.strictArtist && arTag && String(song.artist ?? "").trim()) {
     const placeholder =
       /^(未知|未知歌手|群星|华语群星|佚名|unknown|various|various artists)/i;
+    // 与标题行同一套归一（简繁 + 去标点），否则 A*Teens ↔ A-Teens、陈百强 ↔ 陈百強 会误判。
     const tok = (v: string) =>
       v
         .split(/[、,，/&;；|·]+|\s+/)
-        .map((x) => x.trim().toLowerCase())
+        .map(norm)
         .filter((x) => x.length >= 2 && !placeholder.test(x));
-    const arT = tok(arTag[1]);
+    // ti/ar 写反的 LRC（[ti:张国荣][ar:妒忌]）不参与否决
+    const tiTag = content.match(/\[ti:\s*([^\]]+)\]/i);
+    const swapped = Boolean(
+      tiTag &&
+        // [ar] 的内容其实是本曲标题、[ti] 的内容其实是本曲歌手
+        norm(arTag[1]) === norm(song.title) &&
+        song.artist &&
+        norm(tiTag[1]).includes(norm(song.artist)),
+    );
+    const arT = swapped ? [] : tok(arTag[1]);
     const localT = tok(String(song.artist ?? ""));
     if (arT.length && localT.length) {
       const hit = arT.some((a) => localT.some((l) => a.includes(l) || l.includes(a)));
@@ -65,10 +88,6 @@ export function lrcBelongsToSong(
     }
   }
 
-  const norm = (v: unknown) =>
-    applyVariant(String(v ?? "").toLowerCase(), "simplified")
-      .replace(/[\s\p{P}\p{S}]+/gu, "")
-      .replace(/[（(【\[].*?[)）】\]]/g, "");
   const wantTitle = norm(song.title);
   const head = content.split(/\r?\n/).slice(0, 8);
   let headerLine: string | null = null;
@@ -103,6 +122,30 @@ export function lrcBelongsToSong(
         parts.some((p) => p.includes(t) || t.includes(p)),
       );
       if (artistHit) return false;
+    } else if (opts.strictArtist) {
+      // 标题命中 ⇒ 标题行里的**其余分段**就是候选歌手串，必须与本曲歌手自适应对齐。
+      // LRC 的写法是「歌名 - 歌手」或「歌手 - 歌名」，两种顺序都认（parts 逐段比对即可），
+      // 所以 [ar:] 缺失时这里就是唯一的身份判据（实测 84.7% 的歌词没有 [ar:]）。
+      // 实测病灶：My Eyes Don't Lie(Billy Cate) 拿到「My Eyes Don't Lie - 卫兰」的歌词 ——
+      // 标题命中、歌手是别人，旧逻辑直接放行。
+      const others = parts.filter((p) => !(p.includes(wantTitle) || wantTitle.includes(p)));
+      const cand = others.join("");
+      const placeholder =
+        /(未知歌手|未知|群星|华语群星|佚名|unknown artist|various artists)/i;
+      const localTokens = String(song.artist ?? "")
+        .split(/[、,，/&;；|·]+|\s+/)
+        .map(norm)
+        .filter((t) => t.length >= 2 && !placeholder.test(t));
+      // 候选串里出现占位署名（"华语群星"/"群星"）⇒ 不算身份冲突，放行
+      if (cand && localTokens.length && !placeholder.test(others.join(""))) {
+        const hit = localTokens.some((t) => cand.includes(t) || t.includes(cand));
+        if (!hit) {
+          const cjk = (v: string) => /[一-鿿]/.test(v);
+          // 一边中文一边英文：可能是音译/英文艺名（周杰伦 ↔ Jay Chou），放行避免误杀；
+          // 同一语言体系下歌手对不上 ⇒ 判定为别的版本，否决。
+          if (cjk(cand) === cjk(String(song.artist ?? ""))) return false;
+        }
+      }
     }
   }
   // 时长上界:末行时间戳远超歌曲时长 ⇒ 是另一首(更长的)歌。

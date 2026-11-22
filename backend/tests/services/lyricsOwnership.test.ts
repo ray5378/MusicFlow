@@ -131,9 +131,13 @@ describe("lrcBelongsToSong 多歌手分词（2026-11-22 大宝剑实例）", () 
       "[00:40.00]d",
       "[00:50.00]e",
     );
+    // 写文件用严格模式；显示层宽松（别名/本名不误杀），两者行为都在这里钉住
+    expect(
+      lrcBelongsToSong(lrc, { title: "My Eyes Don't Lie", artist: "Billy Cate", duration: 210 }, { strictArtist: true }),
+    ).toBe(false);
     expect(
       lrcBelongsToSong(lrc, { title: "My Eyes Don't Lie", artist: "Billy Cate", duration: 210 }),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("[ar:] 是别的乐队 → 否决（Guang Hui Sui Yue / Beyond vs SATURDAY星期六乐队）", () => {
@@ -147,7 +151,7 @@ describe("lrcBelongsToSong 多歌手分词（2026-11-22 大宝剑实例）", () 
       "[00:50.00]e",
     );
     expect(
-      lrcBelongsToSong(lrc, { title: "Guang Hui Sui Yue", artist: "Beyond", duration: 300 }),
+      lrcBelongsToSong(lrc, { title: "Guang Hui Sui Yue", artist: "Beyond", duration: 300 }, { strictArtist: true }),
     ).toBe(false);
   });
 
@@ -161,7 +165,7 @@ describe("lrcBelongsToSong 多歌手分词（2026-11-22 大宝剑实例）", () 
       "[00:40.00]d",
       "[00:50.00]e",
     );
-    expect(lrcBelongsToSong(ok, SONG)).toBe(true);
+    expect(lrcBelongsToSong(ok, SONG, { strictArtist: true })).toBe(true);
     const emptyAr = lrcOf(
       "[ti:]",
       "[ar:]",
@@ -171,6 +175,6 @@ describe("lrcBelongsToSong 多歌手分词（2026-11-22 大宝剑实例）", () 
       "[00:40.00]d",
       "[00:50.00]e",
     );
-    expect(lrcBelongsToSong(emptyAr, SONG)).toBe(true);
+    expect(lrcBelongsToSong(emptyAr, SONG, { strictArtist: true })).toBe(true);
   });
 });

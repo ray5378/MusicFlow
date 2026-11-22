@@ -260,7 +260,14 @@ export async function repairWebdavSongTags(
   if (needLyric) {
     try {
       const lrc = await searchLyrics(songInput as any);
-      if (lrc && lrcBelongsToSong(lrc, { title: row.title, artist: row.artist, duration: row.duration })) {
+      if (
+        lrc &&
+        lrcBelongsToSong(
+          lrc,
+          { title: row.title, artist: row.artist, duration: row.duration },
+          { strictArtist: true },
+        )
+      ) {
         tags.lyric = lrc;
       } else if (lrc) {
         log.warn(`[wdav-repair] 歌词与曲目不符，不写入 song=${row.id} title=${row.title}`);
