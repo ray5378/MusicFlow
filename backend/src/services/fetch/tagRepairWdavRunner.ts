@@ -236,9 +236,11 @@ export async function startWdavRepair(opts: {
       prev &&
       prev.targets.length === targets.length &&
       prev.targets.every((t) => targets.some((x) => x.sourceId === t.sourceId && x.dir === t.dir));
-    if (!opts.fresh && prev && !prev.finished && sameTargets) {
+    // 同一目标再次「开始」：无论上轮是跑完还是被停止，都从已有游标继续 —— 只有 fresh 才清零。
+    if (!opts.fresh && prev && sameTargets) {
       p = prev;
-      log.info(`[wdav-repair] 目标与未完成进度一致 ⇒ 继续（已完成 ${p.done}/${p.total}）`);
+      p.finished = false;
+      log.info(`[wdav-repair] 目标与已有进度一致 ⇒ 继续（已完成 ${p.done}/${p.total}）`);
     } else if (!targets.length) {
       if (!prev) throw new Error("未选择任何云盘目录");
       p = prev;
