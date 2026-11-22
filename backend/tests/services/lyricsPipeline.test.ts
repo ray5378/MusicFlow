@@ -9,6 +9,9 @@ import { sqlite, db } from "../../src/db/index.js";
 import { songs } from "../../src/db/schema.js";
 import { eq } from "drizzle-orm";
 import { parseLrc } from "../../src/services/lyrics.js";
+// 2026-11-22:歌词要过「内容可用性」闸门（<3 行视为占位文本），假歌词统一补足行数。
+const L3 = (s: string) => s + "\n[00:10.00]second\n[00:20.00]third\n[00:30.00]fourth\n[00:40.00]fifth";
+
 
 const H = vi.hoisted(() => {
   return {
@@ -123,15 +126,15 @@ afterAll(() => {
 describe("fetchLrcForSong 缓存面", () => {
   it("缓存命中时不再查库、不再问 provider(第二次调用零外部 IO)", async () => {
     const id = "c1";
-    seedSong(id, { lyrics: "[00:01.00]缓存行" });
-    H.store.resolveLyricContent.mockReturnValue("[00:02.00]第二次" as any);
+    seedSong(id, { lyrics: L3("[00:01.00]缓存行") });
+    H.store.resolveLyricContent.mockReturnValue(L3("[00:02.00]第二次") as any);
 
     const first = await fetchLrcForSong({ id, path: "l:s/c1.mp3", title: "T" } as any);
-    expect(first).toBe("[00:02.00]第二次");
+    expect(first).toBe(L3("[00:02.00]第二次"));
 
     const before = H.providers.searchLyrics.mock.calls.length;
     const second = await fetchLrcForSong({ id, path: "l:s/c1.mp3", title: "T" } as any);
-    expect(second).toBe("[00:02.00]第二次");
+    expect(second).toBe(L3("[00:02.00]第二次"));
     expect(H.providers.searchLyrics.mock.calls.length).toBe(before);
     expect(getLyricsCacheEntries()).toBe(1);
   });
@@ -147,13 +150,13 @@ describe("fetchLrcForSong 缓存面", () => {
     expect(getLyricsCacheEntries()).toBe(1);
 
     // provider 这回「有货了」,但缓存 ttl(10min) 内不该回头再问
-    H.providers.searchLyrics.mockResolvedValue("[00:03.00]迟到");
+    H.providers.searchLyrics.mockResolvedValue(L3("[00:03.00]迟到"));
     expect(await fetchLrcForSong({ id, path: "l:s/c2.mp3", title: "T" } as any)).toBeNull();
     expect(H.providers.searchLyrics).toHaveBeenCalledTimes(1);
   });
 
   it("clearLyricsCache 清空条目数(供空闲内存回收)", async () => {
-    seedSong("c3", { lyrics: "[00:01.00]x" });
+    seedSong("c3", { lyrics: L3("[00:01.00]x") });
     await fetchLrcForSong({ id: "c3", path: "l:s/c3.mp3", title: "T" } as any);
     expect(getLyricsCacheEntries()).toBeGreaterThan(0);
     clearLyricsCache();
@@ -166,19 +169,19 @@ describe("fetchLrcForSong ① 落库歌词", () => {
   it("① 优先:落库有词时不再去读 sidecar / provider", async () => {
     const id = "d1";
     seedSong(id, { lyrics: "online-lyrics/d1.lrc" });
-    H.store.resolveLyricContent.mockReturnValue("[00:05.00]落库词" as any);
+    H.store.resolveLyricContent.mockReturnValue(L3("[00:05.00]落库词") as any);
 
     const r = await fetchLrcForSong({ id, path: "w:src1/a/x.mp3", url: "http://x/y.mp3" } as any);
-    expect(r).toBe("[00:05.00]落库词");
+    expect(r).toBe(L3("[00:05.00]落库词"));
     expect(H.providers.searchLyrics).not.toHaveBeenCalled();
   });
 
   it("① 查询抛错被吞掉,继续走 ② sidecar", async () => {
     const id = "d2";
     seedSong(id, { lyrics: "online-lyrics/d2.lrc" });
-    H.store.resolveLyricContent.mockReturnValue("[00:06.00]落库" as any);
+    H.store.resolveLyricContent.mockReturnValue(L3("[00:06.00]落库") as any);
     H.providers.hasLyricProvider.mockReturnValue(true);
-    H.providers.searchLyrics.mockResolvedValue("[00:07.00]" + "provider" as any);
+    H.providers.searchLyrics.mockResolvedValue(L3("[00:07.00]provider") as any);
     defaultSettings(true);
     seedSource("src1", { url: "http://webdav.local/music/" });
 
@@ -189,7 +192,7 @@ describe("fetchLrcForSong ① 落库歌词", () => {
     const r = await fetchLrcForSong({ id, path: "w:src1/a/x.mp3", url: "http://x/y.mp3" } as any);
     spy.mockRestore();
     // SELECT 抛错 → 当作无落库歌词;接着 provider 命中
-    expect(r).toBe("[00:07.00]provider");
+    expect(r).toBe(L3("[00:07.00]provider"));
   });
 
   it("落库 lyrics 为 null 时不碰 resolveLyricContent,直接落到下一级兜底", async () => {
@@ -197,11 +200,11 @@ describe("fetchLrcForSong ① 落库歌词", () => {
     seedSong(id, { lyrics: null });
     H.store.resolveLyricContent.mockReturnValue(null);
     H.providers.hasLyricProvider.mockReturnValue(true);
-    H.providers.searchLyrics.mockResolvedValue("[00:08.00]provider" as any);
+    H.providers.searchLyrics.mockResolvedValue(L3("[00:08.00]provider") as any);
     defaultSettings(true);
 
     const r = await fetchLrcForSong({ id, path: "l:src1/a/x.mp3", title: "T" } as any);
-    expect(r).toBe("[00:08.00]provider");
+    expect(r).toBe(L3("[00:08.00]provider"));
     expect(H.store.resolveLyricContent).not.toHaveBeenCalled();
   });
 });
@@ -231,12 +234,12 @@ describe("fetchLrcForSong ② sidecar .lrc", () => {
     const os = await import("node:fs");
     const osPath = await import("node:path");
     const rel = makeLocalTrack(os, osPath);
-    os.writeFileSync(`${rel.base}.lrc`, "[00:01.00]本地 sidecar");
+    os.writeFileSync(`${rel.base}.lrc`, L3("[00:01.00]本地 sidecar"));
 
     seedSource("lsrc", { url: "http://irrelevant" });
     // path 一律用「相对 CWD」的形态:readSidecarLrc 的 l: 分支是直接 existsSync(相对路径)
     const r = await fetchLrcForSong({ id: "s5", path: `l:lsrc:${rel.path}.mp3`, title: "T" } as any);
-    expect(r).toBe("[00:01.00]本地 sidecar");
+    expect(r).toBe(L3("[00:01.00]本地 sidecar"));
   });
 
   it("本地歌 l: 同目录没有 .lrc → 继续用 provider(不报错)", async () => {
@@ -245,20 +248,20 @@ describe("fetchLrcForSong ② sidecar .lrc", () => {
     const rel = makeLocalTrack(os, osPath);
     seedSource("lsrc2", { url: "http://irrelevant" });
     H.providers.hasLyricProvider.mockReturnValue(true);
-    H.providers.searchLyrics.mockResolvedValue("[00:09.00]provider" as any);
+    H.providers.searchLyrics.mockResolvedValue(L3("[00:09.00]provider") as any);
     defaultSettings(true);
 
     const r = await fetchLrcForSong({ id: "s6", path: `l:lsrc2:${rel.path}.mp3`, title: "T" } as any);
-    expect(r).toBe("[00:09.00]provider");
+    expect(r).toBe(L3("[00:09.00]provider"));
   });
 
   it("webdav(w:) 走同目录 URL,尾斜杠被去掉、不带凭据时不带 Authorization 头", async () => {
     seedSource("wsrc", { url: "http://webdav.local/music///" });
-    const fetchMock = vi.fn().mockResolvedValue({ ok: true, text: async () => "[00:11.00]WebDAV sidecar" } as any);
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, text: async () => L3("[00:11.00]WebDAV sidecar") } as any);
     vi.stubGlobal("fetch", fetchMock);
 
     const r = await fetchLrcForSong({ id: "s7", path: "w:wsrc:album/track.mp3", title: "T" } as any);
-    expect(r).toBe("[00:11.00]WebDAV sidecar");
+    expect(r).toBe(L3("[00:11.00]WebDAV sidecar"));
     const [url, init] = fetchMock.mock.calls[0] as any;
     // D21 修复:拼地址时保留源配置里的子目录 (/music/),并在 base 与 lrcPath 之间补 "/",
     // 不再拼成 "host名专辑" 这种非法 URL。期望拼成 http://webdav.local/music/album/track.lrc。
@@ -270,11 +273,11 @@ describe("fetchLrcForSong ② sidecar .lrc", () => {
 
   it("webdav(w:) 配了用户名密码 → 带 Basic 头", async () => {
     seedSource("wsrc2", { url: "http://webdav.local/music", username: "u1", password: "p1" });
-    const fetchMock = vi.fn().mockResolvedValue({ ok: true, text: async () => "[00:12.00]带凭据" } as any);
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, text: async () => L3("[00:12.00]带凭据") } as any);
     vi.stubGlobal("fetch", fetchMock);
 
     const r = await fetchLrcForSong({ id: "s8", path: "w:wsrc2:album/track.mp3", title: "T" } as any);
-    expect(r).toBe("[00:12.00]带凭据");
+    expect(r).toBe(L3("[00:12.00]带凭据"));
     const [, init] = fetchMock.mock.calls[0] as any;
     expect(init.headers.Authorization).toBe(
       "Basic " + Buffer.from("u1:p1").toString("base64"),
@@ -284,7 +287,7 @@ describe("fetchLrcForSong ② sidecar .lrc", () => {
 
   it("webdav(w:) 只填了用户名没密码 → 不带 Authorization 头", async () => {
     seedSource("wsrc3", { url: "http://webdav.local/music", username: "u1" });
-    const fetchMock = vi.fn().mockResolvedValue({ ok: true, text: async () => "[00:13.00]半凭据" } as any);
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, text: async () => L3("[00:13.00]半凭据") } as any);
     vi.stubGlobal("fetch", fetchMock);
 
     await fetchLrcForSong({ id: "s9", path: "w:wsrc3:album/track.mp3", title: "T" } as any);
@@ -322,11 +325,11 @@ describe("fetchLrcForSong ② sidecar .lrc", () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 404 } as any);
     vi.stubGlobal("fetch", fetchMock);
     H.providers.hasLyricProvider.mockReturnValue(true);
-    H.providers.searchLyrics.mockResolvedValue("[00:14.00]provider" as any);
+    H.providers.searchLyrics.mockResolvedValue(L3("[00:14.00]provider") as any);
     defaultSettings(true);
 
     const r = await fetchLrcForSong({ id: "s12", path: "w:wsrc6:album/track.mp3", title: "T" } as any);
-    expect(r).toBe("[00:14.00]provider");
+    expect(r).toBe(L3("[00:14.00]provider"));
     fetchMock.mockRestore();
   });
 });
@@ -337,7 +340,7 @@ describe("fetchLrcForSong ③ 在线 provider", () => {
       k === "lyrics.onDemand" ? false : d,
     );
     H.providers.hasLyricProvider.mockReturnValue(true);
-    H.providers.searchLyrics.mockResolvedValue("[00:20.00]provider" as any);
+    H.providers.searchLyrics.mockResolvedValue(L3("[00:20.00]provider") as any);
 
     const r = await fetchLrcForSong({ id: "p1", path: "l:src1/a.mp3", title: "T" } as any);
     expect(r).toBeNull();
@@ -346,7 +349,7 @@ describe("fetchLrcForSong ③ 在线 provider", () => {
 
   it("没有启用任何 lyricProvider → 不进 provider 分支", async () => {
     H.providers.hasLyricProvider.mockReturnValue(false);
-    H.providers.searchLyrics.mockResolvedValue("[00:21.00]provider" as any);
+    H.providers.searchLyrics.mockResolvedValue(L3("[00:21.00]provider") as any);
     defaultSettings(true);
 
     const r = await fetchLrcForSong({ id: "p2", path: "l:src1/a.mp3", title: "T" } as any);
@@ -371,11 +374,11 @@ describe("fetchLrcForSong ③ 在线 provider", () => {
     const id = "p4";
     seedSong(id);
     H.providers.hasLyricProvider.mockReturnValue(true);
-    H.providers.searchLyrics.mockResolvedValue("[00:22.00]provider词" as any);
+    H.providers.searchLyrics.mockResolvedValue(L3("[00:22.00]provider词") as any);
     defaultSettings(true, false);
 
     const r = await fetchLrcForSong(row(id) as any);
-    expect(r).toBe("[00:22.00]provider词");
+    expect(r).toBe(L3("[00:22.00]provider词"));
     expect(H.store.saveLyricFile).not.toHaveBeenCalled();
     // 只改内存缓存,库里 lyrics 仍是 null
     expect(row(id).lyrics).toBeNull();
@@ -385,13 +388,13 @@ describe("fetchLrcForSong ③ 在线 provider", () => {
     const id = "p5";
     seedSong(id);
     H.providers.hasLyricProvider.mockReturnValue(true);
-    H.providers.searchLyrics.mockResolvedValue("[00:23.00]provider词" as any);
+    H.providers.searchLyrics.mockResolvedValue(L3("[00:23.00]provider词") as any);
     defaultSettings(true, true);
     H.store.saveLyricFile.mockReturnValue("p5.lrc");
 
     const r = await fetchLrcForSong(row(id) as any);
-    expect(r).toBe("[00:23.00]provider词");
-    expect(H.store.saveLyricFile).toHaveBeenCalledWith(id, "[00:23.00]provider词");
+    expect(r).toBe(L3("[00:23.00]provider词"));
+    expect(H.store.saveLyricFile).toHaveBeenCalledWith(id, L3("[00:23.00]provider词"));
     expect(row(id).lyrics).toBe("p5.lrc");
   });
 
@@ -399,12 +402,12 @@ describe("fetchLrcForSong ③ 在线 provider", () => {
     const id = "p6";
     seedSong(id);
     H.providers.hasLyricProvider.mockReturnValue(true);
-    H.providers.searchLyrics.mockResolvedValue("[00:24.00]provider词" as any);
+    H.providers.searchLyrics.mockResolvedValue(L3("[00:24.00]provider词") as any);
     defaultSettings(true, true);
     H.store.saveLyricFile.mockReturnValue(null);
 
     const r = await fetchLrcForSong(row(id) as any);
-    expect(r).toBe("[00:24.00]provider词");
+    expect(r).toBe(L3("[00:24.00]provider词"));
     expect(row(id).lyrics).toBeNull();
   });
 
@@ -412,7 +415,7 @@ describe("fetchLrcForSong ③ 在线 provider", () => {
     const id = "p7";
     seedSong(id, { sourceData: JSON.stringify({ source: "qq", extra: { a: 1 } }) });
     H.providers.hasLyricProvider.mockReturnValue(true);
-    H.providers.searchLyrics.mockResolvedValue("[00:25.00]x" as any);
+    H.providers.searchLyrics.mockResolvedValue(L3("[00:25.00]x") as any);
     defaultSettings(true);
 
     await fetchLrcForSong({ id, path: "l:src1/a.mp3", title: "歌名", artist: "歌手", album: "专辑", url: "http://u/s.mp3", duration: 240, sourceData: JSON.stringify({ source: "qq", extra: { a: 1 } }) } as any);
@@ -432,11 +435,11 @@ describe("fetchLrcForSong ③ 在线 provider", () => {
     const id = "p8";
     seedSong(id, { sourceData: "{bad" });
     H.providers.hasLyricProvider.mockReturnValue(true);
-    H.providers.searchLyrics.mockResolvedValue("[00:26.00]x" as any);
+    H.providers.searchLyrics.mockResolvedValue(L3("[00:26.00]x") as any);
     defaultSettings(true);
 
     const r = await fetchLrcForSong(row(id) as any);
-    expect(r).toBe("[00:26.00]x");
+    expect(r).toBe(L3("[00:26.00]x"));
     expect(H.providers.searchLyrics).toHaveBeenCalledWith(
       expect.objectContaining({ source: undefined, extra: null }),
     );
@@ -489,11 +492,11 @@ describe("fetchLrcForSong ④ web 源插件 lyricUrl", () => {
     seedSong("w5", { type: "web", pluginEntry: "go-music-dl" });
     H.registry.getPluginImpl.mockReturnValue({ lyricUrl: () => "http://legacy/lyric.mp3" });
     H.registry.getPluginConfig.mockReturnValue({ token: "t" });
-    const fetchMock = vi.fn().mockResolvedValue({ ok: true, text: async () => "[00:30.00]插件词" } as any);
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, text: async () => L3("[00:30.00]插件词") } as any);
     vi.stubGlobal("fetch", fetchMock);
 
     const r = await fetchLrcForSong(row("w5") as any);
-    expect(r).toBe("[00:30.00]插件词");
+    expect(r).toBe(L3("[00:30.00]插件词"));
     expect(fetchMock.mock.calls[0][0]).toBe("http://legacy/lyric.mp3");
     expect(H.registry.getPluginConfig).toHaveBeenCalledWith("go-music-dl");
   });
@@ -503,7 +506,7 @@ describe("fetchLrcForSong ④ web 源插件 lyricUrl", () => {
     const urlFn = vi.fn().mockReturnValue("http://legacy/lyric.mp3");
     H.registry.getPluginImpl.mockReturnValue({ lyricUrl: urlFn });
     H.registry.getPluginConfig.mockReturnValue(null);
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, text: async () => "[00:31.00]x" } as any));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, text: async () => L3("[00:31.00]x") } as any));
 
     await fetchLrcForSong(row("w6") as any);
     expect(H.registry.getPluginConfig).toHaveBeenCalledWith("go-music-dl");
@@ -562,7 +565,7 @@ describe("fetchLrcForSong ④ web 源插件 lyricUrl", () => {
     seedSong("w12", { type: "web", pluginEntry: "go-music-dl" });
     const urlFn = vi.fn().mockReturnValue("http://legacy/lyric.mp3");
     H.registry.getPluginImpl.mockReturnValue({ lyricUrl: urlFn });
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, text: async () => "[00:32.00]x" } as any));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, text: async () => L3("[00:32.00]x") } as any));
 
     await fetchLrcForSong(row("w12") as any);
     expect(urlFn).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
@@ -586,13 +589,18 @@ describe("getLyricsForSongId / getLyricsForSong", () => {
   it("库里有歌词 → 解析成带时间轴的行", async () => {
     const id = "g1";
     seedSong(id, { lyrics: "g1.lrc" });
-    H.store.resolveLyricContent.mockReturnValue("[00:01.00]第一\n[00:02.00]第二");
+    H.store.resolveLyricContent.mockReturnValue(
+      "[00:01.00]第一\n[00:02.00]第二\n[00:03.00]第三\n[00:04.00]第四\n[00:05.00]第五",
+    );
     H.store.saveLyricFile.mockReturnValue(null);
 
     const lines = await getLyricsForSongId(id);
     expect(lines).toEqual([
       { time: 1, text: "第一" },
       { time: 2, text: "第二" },
+      { time: 3, text: "第三" },
+      { time: 4, text: "第四" },
+      { time: 5, text: "第五" },
     ]);
   });
 
@@ -600,13 +608,18 @@ describe("getLyricsForSongId / getLyricsForSong", () => {
     const id = "g2";
     seedSong(id);
     H.providers.hasLyricProvider.mockReturnValue(true);
-    H.providers.searchLyrics.mockResolvedValue("[00:33.00]x\n[00:34.00]y" as any);
+    H.providers.searchLyrics.mockResolvedValue(
+      "[00:33.00]x\n[00:34.00]y\n[00:35.00]z\n[00:36.00]w\n[00:37.00]v" as any,
+    );
     defaultSettings(true);
 
     const lines = await getLyricsForSongId(id);
     expect(lines).toEqual([
       { time: 33, text: "x" },
       { time: 34, text: "y" },
+      { time: 35, text: "z" },
+      { time: 36, text: "w" },
+      { time: 37, text: "v" },
     ]);
   });
 
@@ -620,7 +633,9 @@ describe("getLyricsForSongId / getLyricsForSong", () => {
 
   it("getLyricsForSong 接受未入库的虚拟歌曲(远程直放复用同一管线)", async () => {
     H.providers.hasLyricProvider.mockReturnValue(true);
-    H.providers.searchLyrics.mockResolvedValue("[00:40.00]远程词" as any);
+    H.providers.searchLyrics.mockResolvedValue(
+      "[00:40.00]远程词\n[00:41.00]a\n[00:42.00]b\n[00:43.00]c\n[00:44.00]d" as any,
+    );
     defaultSettings(true);
 
     const lines = await getLyricsForSong({
@@ -629,7 +644,13 @@ describe("getLyricsForSongId / getLyricsForSong", () => {
       url: "http://x/y.mp3",
       type: "web",
     });
-    expect(lines).toEqual([{ time: 40, text: "远程词" }]);
+    expect(lines).toEqual([
+      { time: 40, text: "远程词" },
+      { time: 41, text: "a" },
+      { time: 42, text: "b" },
+      { time: 43, text: "c" },
+      { time: 44, text: "d" },
+    ]);
   });
 
   it("getLyricsForSong:有内容但解析不出任何行 → null", async () => {

@@ -7,6 +7,9 @@ import { getSettingBool } from "./settings.js";
 import { saveLyricFile, resolveLyricContent } from "./lyricsStore.js";
 import { createLogger } from "../utils/logger.js";
 import { applyVariant } from "../utils/chineseConv.js";
+import { lrcBelongsToSong, MIN_LYRIC_LINES } from "./lyricsMatch.js";
+export { lrcBelongsToSong } from "./lyricsMatch.js";
+export { MIN_LYRIC_LINES };
 import { currentFetchConfig } from "./fetch/configStore.js";
 
 const log = createLogger("lyrics");
@@ -149,69 +152,6 @@ function decodeLrcBytes(buf: Buffer): string {
 
 // 读取 sidecar .lrc(本地文件 / WebDAV 同目录 URL / SMB 同目录文件)。离线优先、最准;
 // web 歌曲 path 不是 w:/l:/s: 前缀,直接返回 null。
-/**
- * 这份 LRC 到底是不是这首歌的？
- *
- * 为什么要它（2026-11-21 真机）：`狂信者 / 黄立行` 的歌词里存的是 `分开旅行`（同歌手
- * 另一首）的整篇 —— 历史误匹配落库后，「①落库缓存」永远优先，provider 再也不会被问到。
- * 更恶性的情况存在：provider 按 id 取回的 LRC 也可能是别的歌（服务端 id 串了），
- * 不校验就会把错词写进库里、永久错误。
- *
- * 判据只认**首部标题行**（大多数 LRC 有 `[00:00.00]艺人 - 歌名` 这种行）：
- *   - 找不到标题行（纯时间轴歌词）→ 放行（无从判断，宁放不误杀）；
- *   - 找到标题行但**任何一段**都对不上歌名 → 判为不属于这首歌；
- *   - 歌名对得上（含互含/繁简统一/去括号）→ 放行。
- * 另外补一条时长上界：末行时间戳比歌曲时长还长 30s 以上 → 显然不是同一首。
- */
-export function lrcBelongsToSong(
-  content: string,
-  song: { title?: string | null; artist?: string | null; duration?: number | null },
-): boolean {
-  if (!content) return false;
-  const norm = (v: unknown) =>
-    applyVariant(String(v ?? "").toLowerCase(), "simplified")
-      .replace(/[\s\p{P}\p{S}]+/gu, "")
-      .replace(/[（(【\[].*?[)）】\]]/g, "");
-  const wantTitle = norm(song.title);
-  const head = content.split(/\r?\n/).slice(0, 8);
-  let headerLine: string | null = null;
-  for (const raw of head) {
-    const t = raw.replace(/^\[[^\]]*\]/g, "").trim();
-    if (!t) continue;
-    if (/^(作词|作曲|编曲|词|曲|混音|制作|录音|和声|吉他|贝斯|鼓|母带|演唱|原唱|出品|监制)/.test(t)) continue;
-    if (/\[\d{1,2}:\d{1,2}/.test(t)) continue; // 逐字行
-    if (/[-–—]/.test(t)) { headerLine = t; break; }
-  }
-  if (headerLine && wantTitle) {
-    const parts = headerLine.split(/[-–—]/).map(norm).filter((x) => x.length >= 2);
-    // 顺序无关:`歌名 - 艺人` 与 `艺人 - 歌名` 都认 —— 逐个分段比对即可。
-    // 但**歌名本身带连字符**时(如「A-B」),分段会把歌名切碎 ⇒ 必须同时拿整行去比。
-    const wholeLine = norm(headerLine);
-    const titleHit =
-      wholeLine.includes(wantTitle) ||
-      wantTitle.includes(wholeLine) ||
-      parts.some((p) => p.includes(wantTitle) || wantTitle.includes(p));
-    if (!titleHit) {
-      // 标题对不上时,再看**歌手**是否出现在同一行:出现了就是「同歌手的另一首歌」的标题行
-      // (狂信者 → 刘若英、黄立行 - 分开旅行),必须否决。
-      // 歌手也对不上 ⇒ 这行本来就只是歌词正文(正文常带连字符,如 a-only),放行避免误杀。
-      const wantArtist = norm(song.artist);
-      const artistHit =
-        wantArtist.length >= 2 &&
-        parts.some((p) => p.includes(wantArtist) || wantArtist.includes(p));
-      if (artistHit) return false;
-    }
-  }
-  // 时长上界:末行时间戳远超歌曲时长 ⇒ 是另一首(更长的)歌。
-  const d = Number(song.duration) || 0;
-  if (d > 0) {
-    const times = [...content.matchAll(/\[(\d{1,2}):(\d{1,2})(?:[.:](\d{1,3}))?\]/g)]
-      .map((m) => Number(m[1]) * 60 + Number(m[2]));
-    const maxTs = times.length > 0 ? Math.max(...times) : 0;
-    if (maxTs > d + 30) return false;
-  }
-  return true;
-}
 
 async function readSidecarLrc(song: SongRow): Promise<string | null> {
   try {

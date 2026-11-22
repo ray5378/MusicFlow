@@ -79,6 +79,7 @@ import type {
 } from "../../plugins/types.js";
 import type { PluginHost } from "../../plugins/host.js";
 // 中文简繁字形表(200KB+ 词表,与 tagWriter 写入侧共用同一份):仅用于**匹配比较**。
+import { lrcBelongsToSong } from "../lyricsMatch.js";
 import { applyVariant } from "../../utils/chineseConv.js";
 
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36";
@@ -1335,11 +1336,25 @@ async function coverFor(
 }
 
 /** 某候选的歌词。 */
-async function lyricFor(host: PluginHost, c: PlatformCandidate): Promise<string | null> {
-  if (c.platform === "qq") return qqLyric(host, c.id);
-  if (c.platform === "netease") return nsLyric(host, c.id);
-  if (c.platform === "kugou") return kugouLyric(host, c);
-  return kuwoLyric(host, c.id);
+async function lyricFor(
+  host: PluginHost,
+  c: PlatformCandidate,
+  song?: LyricSongInput,
+): Promise<string | null> {
+  const raw =
+    c.platform === "qq"
+      ? await qqLyric(host, c.id)
+      : c.platform === "netease"
+        ? await nsLyric(host, c.id)
+        : c.platform === "kugou"
+          ? await kugouLyric(host, c)
+          : await kuwoLyric(host, c.id);
+  if (!raw) return null;
+  // 2026-11-22:内容不可用（占位文本/简介/行数不足）⇒ 返回 null，让 firstAvailable 换下一个候选。
+  //   真机实例：该死的温柔 的「歌词」是一句作者简介（1 行），却把整条链收口了。
+  const normalized = normalizeLrc(raw);
+  if (song && (!normalized || !lrcBelongsToSong(normalized, song))) return null;
+  return raw;
 }
 
 /**

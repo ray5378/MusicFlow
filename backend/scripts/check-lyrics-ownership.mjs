@@ -30,7 +30,10 @@ import { stripComments } from "./lib/strip-comments.mjs";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const read = (rel) => stripComments(readFileSync(join(root, rel), "utf8"));
 
+const LYRIC_MATCH = "backend/src/services/lyricsMatch.ts";
 const LYRICS = "backend/src/services/lyrics.ts";
+const PROVIDERS = "backend/src/plugins/providers.ts";
+const TAG_PROVIDER = "backend/src/services/plugin/tagProvider.ts";
 const LYRIC_STORE = "backend/src/services/lyricsStore.ts";
 const TAG_REPAIR = "backend/src/services/fetch/tagRepair.ts";
 const CANDIDATES = "backend/src/services/fetch/candidates.ts";
@@ -47,27 +50,41 @@ function check(name, ok, detail) {
 }
 const count = (s, needle) => s.split(needle).length - 1;
 
+const lm = read(LYRIC_MATCH);
 const ly = read(LYRICS);
+const pv = read(PROVIDERS);
+const tp = read(TAG_PROVIDER);
 const tr = read(TAG_REPAIR);
 const cd = read(CANDIDATES);
 
 console.log("===== L1 归属判据本体 =====");
 check(
-  "lrcBelongsToSong 已导出（显示层与标签修复共用同一把尺）",
-  ly.includes("export function lrcBelongsToSong("),
-  "改名/内联 ⇒ 两条链路各自的判据会漂移",
+  "lrcBelongsToSong 已导出（显示层 / 标签修复 / provider 调度共用同一把尺）",
+  lm.includes("export function lrcBelongsToSong("),
+  "改名/内联 ⇒ 三条链路各自的判据会漂移",
+);
+check(
+  "判据在独立模块里（providers 反向 import 不形成循环）",
+  LYRIC_MATCH.endsWith("lyricsMatch.ts") && !lm.includes("from \"./lyrics.js\""),
+  "塞回 lyrics.ts 会让 providers.ts 循环依赖",
 );
 check(
   "判据含「顺序无关分段 + 整行兜底」",
-  ly.includes("const wholeLine = norm(headerLine);") &&
-    ly.includes("wholeLine.includes(wantTitle)") &&
-    ly.includes("parts.some((p) => p.includes(wantTitle) || wantTitle.includes(p))"),
+  lm.includes("const wholeLine = norm(headerLine);") &&
+    lm.includes("wholeLine.includes(wantTitle)") &&
+    lm.includes("parts.some((p) => p.includes(wantTitle) || wantTitle.includes(p))"),
   "歌名自带连字符（A-B）时只分段会误杀",
 );
 check(
   "标题对不上但同行出现本曲歌手 ⇒ 否决（同歌手另一首的典型形态）",
-  ly.includes("const artistHit =") && ly.includes("if (artistHit) return false;"),
+  lm.includes("const artistHit =") && lm.includes("if (artistHit) return false;"),
   "缺这一层 ⇒ 狂信者/分开旅行 这类会被放行",
+);
+check(
+  "内容可用性：少于 MIN_LYRIC_LINES(5) 行视为占位文本",
+  lm.includes("export const MIN_LYRIC_LINES = 5;") &&
+    lm.includes("if (contentLines.length < MIN_LYRIC_LINES) return false;"),
+  "缺这一层 ⇒ 「纯音乐请欣赏 / 作者简介」被当成歌词整首显示（该死的温柔 实例）",
 );
 
 console.log("===== L2/L3/L4 三处入口全过闸 =====");
@@ -88,6 +105,18 @@ check(
     ly.indexOf("!lrcBelongsToSong(fromProviders, song as any)") <
       ly.indexOf("} else if (fromProviders) {"),
   "顺序写反 ⇒ 错词照样落库，只是多打一条日志",
+);
+
+console.log("===== L4b 不可用 ⇒ 自动换源 / 换候选 =====");
+check(
+  "provider 层：拿到的歌词不可用 ⇒ 继续下一个源（不收口）",
+  pv.includes("if (!lrcBelongsToSong(text, song)) {") && pv.includes("继续下一个源"),
+  "首源返回占位文本就把整条链收口 ⇒ 永远取不到正确歌词",
+);
+check(
+  "标签源层：候选歌词不可用 ⇒ 返回 null 让 firstAvailable 换下一个候选",
+  tp.includes("if (song && (!normalized || !lrcBelongsToSong(normalized, song))) return null;"),
+  "候选不轮换 ⇒ 第一个候选是占位文本就结束",
 );
 
 console.log("===== L5 落库(persist)在校验通过的分支内 =====");

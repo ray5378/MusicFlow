@@ -13,6 +13,7 @@
 import { getEnabledByCapability, getPluginConfig } from "./registry.js";
 import type { RegisteredPlugin } from "./registry.js";
 import { createPluginHost } from "./host.js";
+import { lrcBelongsToSong } from "../services/lyricsMatch.js";
 import { recordSuccess, recordFailure } from "./health.js";
 import { getSetting } from "../services/settings.js";
 import type { LyricSongInput, SongMetadata } from "./types.js";
@@ -139,10 +140,17 @@ export async function searchLyrics(song: LyricSongInput, opts?: ProviderMatchOpt
     const host = createPluginHost(manifest, cfg, APP_VERSION);
     try {
       const r = await impl.searchLyrics(host, song);
-      if (r && (r.lrc || r.text)) {
-        recordSuccess(manifest.id);
-        opts?.onMatch?.(manifest.id, manifest.builtinTagSource === true);
-        return r.lrc || r.text || null;
+      const text = r ? r.lrc || r.text || "" : "";
+      if (text) {
+        // 2026-11-22:「拿到了但不可用」也要换下一个 provider —— 否则一个 provider 返回
+        //   占位文本（纯音乐请欣赏 / 作者简介 / 行数太少）就会把整条链收口掉。
+        if (!lrcBelongsToSong(text, song)) {
+          log.debug(`provider ${manifest.id} 返回的歌词不可用(归属或内容不符),继续下一个源`);
+        } else {
+          recordSuccess(manifest.id);
+          opts?.onMatch?.(manifest.id, manifest.builtinTagSource === true);
+          return text;
+        }
       }
       // Provider responded but had nothing for this song — keep trying others.
     } catch (e: any) {
