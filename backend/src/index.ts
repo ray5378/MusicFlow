@@ -457,9 +457,14 @@ try {
     log.info(`[ARTIST-ALIAS] 内置种子 v${seeded.version} 已灌入 ${seeded.rows} 条`);
   }
 } catch (e: any) { log.warn(`[ARTIST-ALIAS] 种子灌入失败: ${e?.message || e}`); }
-try {
-  startArtistAliasScheduler();
-} catch (e: any) { log.warn(`[ARTIST-ALIAS] 定时同步启动失败: ${e?.message || e}`); }
+// 运行期**默认不联网**：别名子集随镜像内置（种子），更新走发版/手动生成。
+// 只有显式设 MF_ALIAS_SYNC=1 时才启用「每 6 小时向 MusicBrainz 增补」这条在线路径。
+if (process.env.MF_ALIAS_SYNC === "1") {
+  try {
+    startArtistAliasScheduler();
+    log.info("[ARTIST-ALIAS] 已启用在线增补（MF_ALIAS_SYNC=1）");
+  } catch (e: any) { log.warn(`[ARTIST-ALIAS] 定时同步启动失败: ${e?.message || e}`); }
+}
 
 // 云盘（WebDAV）标签修复的断点续跑：同一延迟窗口，独立快照键，互不干扰。
 setTimeout(() => {
