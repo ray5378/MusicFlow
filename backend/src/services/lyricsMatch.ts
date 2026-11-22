@@ -5,6 +5,7 @@
 // 若把它留在 lyrics.ts 里，providers.ts 反向 import 会形成循环。
 import { applyVariant } from "../utils/chineseConv.js";
 import { containsClose, nameCloseMatch } from "./fetch/tagTrust.js";
+import { artistAliasMatch } from "./artistAlias.js";
 
 /** 少于这么多非空行的「歌词」一律视为占位文本（纯音乐请欣赏 / 作者简介 / 版权声明）。 */
 export const MIN_LYRIC_LINES = 5;
@@ -97,7 +98,7 @@ export function lrcBelongsToSong(
     if (arT.length && localT.length) {
       const hit = arT.some((a) =>
         localT.some((l) => a.includes(l) || l.includes(a) || nameCloseMatch(a, l)),
-      );
+      ) || artistAliasMatch(song.artist, arTag[1]);
       if (!hit && !albumRescue) return false;
     }
   }
@@ -156,13 +157,14 @@ export function lrcBelongsToSong(
           .split(/[、,，/&;；|·\s]+/)
           .map((x) => x.trim())
           .filter((x) => x.length >= 2);
-        const hit = localTokens.some(
-          (t) =>
-            cand.includes(t) ||
-            t.includes(cand) ||
-            containsClose(cand, t) ||
-            candTokens.some((c) => nameCloseMatch(c, t)),
-        );
+        const hit =
+          localTokens.some(
+            (t) =>
+              cand.includes(t) ||
+              t.includes(cand) ||
+              containsClose(cand, t) ||
+              candTokens.some((c) => nameCloseMatch(c, t)),
+          ) || artistAliasMatch(song.artist, cand);
         if (!hit) {
           const cjk = (v: string) => /[一-鿿]/.test(v);
           // 一边中文一边英文：可能是音译/英文艺名（周杰伦 ↔ Jay Chou），放行避免误杀；

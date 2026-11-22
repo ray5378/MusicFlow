@@ -37,6 +37,12 @@ const PROD_COLS: Record<string, string[]> = {
   tag_repair_done: [
     "fs_path", "size", "mtime_ms", "src", "at", "platform", "outcome",
   ],
+  artist_alias: [
+    "alias", "alias_norm", "canonical", "canonical_norm", "kind", "source", "updated_at",
+  ],
+  artist_alias_sync: [
+    "artist", "norm", "mbid", "status", "updated_at",
+  ],
 };
 
 function cols(table: string): string[] {

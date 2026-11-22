@@ -68,3 +68,8 @@ backend/scripts-local/
 backend/public/
 _dev/
 _p6b/
+
+# 内置运行期资源（2026-11-23）：艺人别名种子随源码入库，保证离线可用。
+# 注意：上面的 `data/` 会连 backend/src/data 一起忽略，这里显式放开。
+!backend/src/data/
+!backend/src/data/**

@@ -783,6 +783,30 @@ export function initDatabase() {
       at TEXT NOT NULL DEFAULT ''
     );
     CREATE INDEX IF NOT EXISTS idx_tag_repair_done_at ON tag_repair_done(at);
+
+    -- 艺人别名 / 成员关系（2026-11-23）：来自 MusicBrainz（CC0），由后端定时自动同步，
+    -- 只同步本曲库里含汉字的艺人。用于歌词归属判定里的「A-Lin = 黄丽玲」这类实体别名。
+    CREATE TABLE IF NOT EXISTS artist_alias (
+      alias TEXT NOT NULL,
+      alias_norm TEXT NOT NULL,
+      canonical TEXT NOT NULL,
+      canonical_norm TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'alias',
+      source TEXT NOT NULL DEFAULT 'musicbrainz',
+      updated_at TEXT NOT NULL DEFAULT ''
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_artist_alias ON artist_alias(alias_norm, canonical_norm);
+    CREATE INDEX IF NOT EXISTS idx_artist_alias_norm ON artist_alias(alias_norm);
+
+    -- 同步台账：每个艺人一行，避免重复请求 MusicBrainz（180 天后重查）
+    CREATE TABLE IF NOT EXISTS artist_alias_sync (
+      artist TEXT PRIMARY KEY,
+      norm TEXT NOT NULL,
+      mbid TEXT,
+      status TEXT NOT NULL DEFAULT 'done',
+      updated_at TEXT NOT NULL DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_artist_alias_sync_norm ON artist_alias_sync(norm);
   `);
 
   // media_sources.song_count（每源已入库曲目数）：新库由上面的 CREATE TABLE 建好，

@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, real, primaryKey } from "drizzle-orm/sqlite-core";
+import { sqliteTable, uniqueIndex, text, integer, real, primaryKey } from "drizzle-orm/sqlite-core";
 
 export const users = sqliteTable("users", {
   id: text("id").primaryKey(),
@@ -635,4 +635,30 @@ export const audioAnalysis = sqliteTable("audio_analysis", {
   // 提供方私有扩展(JSON 文本,MA extra_data 同构)
   extraData: text("extra_data"),
   measuredAt: text("measured_at").default(""),
+});
+
+/** 艺人别名 / 成员关系（MusicBrainz CC0，后端自动同步；drizzle 侧镜像）。 */
+export const artistAlias = sqliteTable(
+  "artist_alias",
+  {
+    alias: text("alias").notNull(),
+    aliasNorm: text("alias_norm").notNull(),
+    canonical: text("canonical").notNull(),
+    canonicalNorm: text("canonical_norm").notNull(),
+    kind: text("kind").notNull().default("alias"),
+    source: text("source").notNull().default("musicbrainz"),
+    updatedAt: text("updated_at").notNull().default(""),
+  },
+  (t) => ({
+    uq: uniqueIndex("uq_artist_alias").on(t.aliasNorm, t.canonicalNorm),
+  }),
+);
+
+/** 别名同步台账。 */
+export const artistAliasSync = sqliteTable("artist_alias_sync", {
+  artist: text("artist").primaryKey(),
+  norm: text("norm").notNull(),
+  mbid: text("mbid"),
+  status: text("status").notNull().default("done"),
+  updatedAt: text("updated_at").notNull().default(""),
 });

@@ -355,6 +355,8 @@ import { startLibraryScheduler } from "./services/fetch/libraryScheduler.js";
 import { registerFetchImportTrigger } from "./services/fetch/importTrigger.js";
 import { startTagRepairScheduler, resumeInterruptedTagRepair, TAG_REPAIR_RESUME_DELAY_MS } from "./services/fetch/tagRepair.js";
 import { resumeWdavRepairOnBoot } from "./services/fetch/tagRepairWdavRunner.js";
+import { applySeedIfNeeded } from "./services/artistAliasSeed.js";
+import { startArtistAliasScheduler } from "./services/artistAlias.js";
 import { startScanScheduler } from "./services/source/scanScheduler.js";
 import { startStreamProbeScheduler } from "./services/source/streamProbe.js";
 import { ensureDownloadSource } from "./services/fetch/source.js";
@@ -448,11 +450,22 @@ setTimeout(() => {
   } catch (e: any) { log.error(`[TAG-REPAIR] boot 恢复失败: ${e?.message || e}`); }
 }, TAG_REPAIR_RESUME_DELAY_MS);
 
+// 艺人别名内置种子：随镜像发布，启动即灌库（无网络也能用）。之后再启动定时增补。
+try {
+  const seeded = applySeedIfNeeded();
+  if (seeded.applied) {
+    log.info(`[ARTIST-ALIAS] 内置种子 v${seeded.version} 已灌入 ${seeded.rows} 条`);
+  }
+} catch (e: any) { log.warn(`[ARTIST-ALIAS] 种子灌入失败: ${e?.message || e}`); }
+try {
+  startArtistAliasScheduler();
+} catch (e: any) { log.warn(`[ARTIST-ALIAS] 定时同步启动失败: ${e?.message || e}`); }
+
 // 云盘（WebDAV）标签修复的断点续跑：同一延迟窗口，独立快照键，互不干扰。
 setTimeout(() => {
   try {
     const r = resumeWdavRepairOnBoot();
-    if (r.resumed) log.info(`[WDAV-REPAIR] boot 恢复：续跑剩余 ${r.remaining} 首云盘标签修复`);
+    if (r.resumed) log.info(`[WDAV-REPAIR] boot 恢复：续跑云盘标签修复（已完成 ${r.done}/${r.total}）`);
   } catch (e: any) { log.error(`[WDAV-REPAIR] boot 恢复失败: ${e?.message || e}`); }
 }, TAG_REPAIR_RESUME_DELAY_MS + 1000);
 
