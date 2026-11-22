@@ -201,7 +201,10 @@ export function wdavTmpNameFor(filePath: string, songId: string): string {
   const i = filePath.lastIndexOf("/");
   const dir = filePath.slice(0, i + 1);
   const name = filePath.slice(i + 1);
-  return `${dir}.mf-up-${songId}-${name}`;
+  // ⚠️ 必须带随机后缀：用 songId 做名字时，同一首重跑会产生**同名**临时文件，
+  //    天翼网关对"覆盖已存在的隐藏文件"回 405（实测「人间半途」两首），任务就会卡在这里。
+  const rnd = Math.random().toString(36).slice(2, 8);
+  return `${dir}.mf-up-${songId}-${rnd}-${name}`;
 }
 
 /** 把任意形式的目录换算成「与 songs.path 前缀一致」的规范形态（含 base 路径段）。 */

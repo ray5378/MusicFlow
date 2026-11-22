@@ -173,7 +173,10 @@ export function coverAllowed(ctx: CoverContext): CoverDecision {
     if (metaAlbum && albumIsPlaceholder(metaAlbum, ctx.title)) {
       return { allowed: true, reason: "元数据专辑即单曲名" };
     }
-    if (sameProvider) return { allowed: true, reason: `同一来源命中(${ctx.metaProvider})` };
+    // ⚠️ 2026-11-23 真机教训：**同源命中不能当放行理由**。
+    //   吴奇隆《思念就像一条河流》被 provider 命中到《追风少年》那张专辑，
+    //   元数据与封面同源、标题也对得上，图却属于另一张专辑 —— 这类只能靠专辑对齐，
+    //   本曲专辑不可用时一律不写（缺图好过错图）。
     return {
       allowed: false,
       reason: `本曲专辑未知，无法用元数据专辑对齐(db=${dbAlbum || "空"} meta=${metaAlbum || "空"})`,

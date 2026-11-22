@@ -59,6 +59,8 @@ export interface WdavProgress {
 
 const PROGRESS_KEY = "fetch.tagrepair.wdavProgress";
 const BATCH = 200;
+/** 连续写盘失败熔断阈值（网关整段拒绝写入时及时收手） */
+const MAX_CONSECUTIVE_ERRORS = 5;
 
 let state: WdavRepairState | null = null;
 let stopRequested = false;
@@ -174,6 +176,7 @@ async function runLoop(p: WdavProgress): Promise<void> {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   let cursor = p.lastPath;
   let sinceYield = 0;
+  let consecutiveErrors = 0;
 
   while (!stopRequested) {
     const rows = selectWdavRows(p.targets, cursor, BATCH);
@@ -184,14 +187,37 @@ async function runLoop(p: WdavProgress): Promise<void> {
       try {
         const out = await repairWebdavSongTags(row, cfg);
         if (out.outcome === "fixed") p.fixed += 1;
-        else p.skipped += 1;
+        else if (out.outcome === "error") {
+          // 写盘失败：**不前进游标**，这首歌留在原位等下一轮重试；
+          // 连续失败到阈值就熔断（网关整段拒绝写入时，继续跑只会把剩下的全标成失败）。
+          p.failed += 1;
+          consecutiveErrors += 1;
+          if (state) state.lastError = out.note ?? "写盘失败";
+          log.warn(`[wdav-repair] 写盘失败 song=${row.id} ${row.title}: ${out.note ?? ""}`);
+          if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+            log.error(
+              `[wdav-repair] 连续 ${consecutiveErrors} 首写入失败，熔断本轮（进度停在 ${p.done}/${p.total}）`,
+            );
+            break;
+          }
+          saveProgress(p);
+          syncState(p);
+          if (++sinceYield % 50 === 0) await sleep(200);
+          continue; // 游标不动
+        } else p.skipped += 1;
         if (out.note) log.info(`[wdav-repair] ${row.title}: ${out.note}`);
       } catch (e) {
         p.failed += 1;
         const msg = e instanceof Error ? e.message : String(e);
         log.warn(`[wdav-repair] 失败 song=${row.id} ${msg}`);
         if (state) state.lastError = msg;
+        consecutiveErrors += 1;
+        if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) break;
+        saveProgress(p);
+        syncState(p);
+        continue;
       }
+      consecutiveErrors = 0;
       p.done += 1;
       cursor = row.path;
       p.lastPath = cursor;

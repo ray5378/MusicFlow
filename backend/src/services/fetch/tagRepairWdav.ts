@@ -53,7 +53,8 @@ export interface WdavRepairRow {
 }
 
 export interface WdavRepairOutcome {
-  outcome: "fixed" | "unobtainable" | "skip";
+  /** error = 写盘/上传失败（**不可当 skip**：游标不能前进，否则这首歌永久漏掉） */
+  outcome: "fixed" | "unobtainable" | "skip" | "error";
   cover: boolean;
   lyric: boolean;
   album: boolean;
@@ -319,7 +320,7 @@ export async function repairWebdavSongTags(
     await wdavPut(ctx, tmpPath, out);
   } catch (e) {
     await wdavDelete(ctx, tmpPath);
-    return none(`上传失败: ${e instanceof Error ? e.message : e}`);
+    return { ...none(`上传失败: ${e instanceof Error ? e.message : e}`), outcome: "error" };
   }
 
   // 校验上传内容（PUT 到临时名后读回头部解析，确认标签真的在）
@@ -327,7 +328,7 @@ export async function repairWebdavSongTags(
     const remoteSize = await wdavSize(ctx, tmpPath);
     if (remoteSize !== null && remoteSize !== out.length) {
       await wdavDelete(ctx, tmpPath);
-      return none(`上传字节数不符(远端 ${remoteSize} / 本地 ${out.length})`);
+      return { ...none(`上传字节数不符(远端 ${remoteSize} / 本地 ${out.length})`), outcome: "error" };
     }
     const head = await wdavGetRange(ctx, tmpPath, Math.min(out.length - 1, 256 * 1024));
     const check = readTags(head, container);
@@ -336,11 +337,11 @@ export async function repairWebdavSongTags(
     const wantAlbum = patch.album !== undefined;
     if ((wantLyric && !check.lyric) || (wantCover && !check.cover) || (wantAlbum && !check.album)) {
       await wdavDelete(ctx, tmpPath);
-      return none("上传后回读校验未通过（标签没写进去）");
+      return { ...none("上传后回读校验未通过（标签没写进去）"), outcome: "error" };
     }
   } catch (e) {
     await wdavDelete(ctx, tmpPath);
-    return none(`上传校验失败: ${e instanceof Error ? e.message : e}`);
+    return { ...none(`上传校验失败: ${e instanceof Error ? e.message : e}`), outcome: "error" };
   }
 
   try {
@@ -348,7 +349,7 @@ export async function repairWebdavSongTags(
     await wdavReplaceFile(ctx, tmpPath, parts.filePath, out);
   } catch (e) {
     await wdavDelete(ctx, tmpPath);
-    return none(`替换失败: ${e instanceof Error ? e.message : e}`);
+    return { ...none(`替换失败: ${e instanceof Error ? e.message : e}`), outcome: "error" };
   }
 
   // 7) 回写 DB（只补空白维度，不覆盖既有值）

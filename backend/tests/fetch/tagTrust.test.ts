@@ -86,7 +86,7 @@ describe("tagTrust — 封面归属", () => {
     expect(d.allowed).toBe(false);
   });
 
-  it("本曲专辑未知，但元数据与封面同源命中 ⇒ 允许", () => {
+  it("本曲专辑未知时，即使元数据与封面同源也拒绝（吴奇隆《思念就像一条河流》踩过）", () => {
     const d = coverAllowed({
       title: "某单曲",
       artist: "某人",
@@ -96,7 +96,7 @@ describe("tagTrust — 封面归属", () => {
       metaProvider: "tag-provider",
       coverProvider: "tag-provider",
     });
-    expect(d.allowed).toBe(true);
+    expect(d.allowed).toBe(false);
   });
 
   it("没有元数据：外置来源拒绝，内置/未上报放行", () => {
