@@ -2,6 +2,38 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.14.33] - 2026-11-22
+
+### Fix / 歌词：内容不足 5 行视作无歌词 + 歌手分词 + 自动换源
+
+真机两次错词，根因不同但都在同一把尺上：
+
+- 该死的温柔：缓存里存的**根本不是歌词**，是作者简介（1 行「四川音乐学院毕业…未经许可,
+  不得翻唱或使用」）。归属闸门只判「是不是这首」，判不了「是不是歌词」。
+- 大宝剑：同目录 sidecar `.lrc` 装的是同专辑同名曲《From Boys to Men》的歌词；判据里
+  「歌手同现否决」用整串比对，`王麟,新街口组合` 与标题行的 `新街口组合/大宝Bles.P`
+  互不包含 ⇒ 漏判放行。
+
+改动：
+
+- 抽出 `services/lyricsMatch.ts`（纯函数，避免 providers→lyrics 循环），
+  `MIN_LYRIC_LINES = 5`：内容量取「非空文本行数」与「时间戳个数」的**较大者**，
+  不足 5 视为占位文本（纯音乐请欣赏 / 作者简介 / 只有 `[ti:]` 头）。
+  - 取较大者的原因：逐字/卡拉OK 歌词是**一行到底**，只按物理行数会把它们整片误杀
+    （实测 MELANCHOLY 等一批）。
+- 歌手判据改为**分词比对**（`、,，/&;；|·` 与空白），多歌手串任一 token 命中标题行即否决。
+- **自动换源**：`plugins/providers.ts` 里 provider 返回的歌词不可用 ⇒ 不 recordSuccess、
+  不返回，继续下一个源（以前首个源的占位文本会把整条链收口）。
+- 四处入口（①落库缓存 / ②sidecar / ③在线 / 标签修复写文件）继续共用同一把尺。
+
+### Test / 回归守卫
+
+- 新增 `scripts/check-lyrics-ownership.mjs`（21 条）与 `scripts/check-display-progress.mjs`
+  （19 条），挂 ci.yml 新 job `lyrics-display-guard`。
+- 复活三个「写了但没挂 CI」的守卫：`check-playback-regression.mjs`（R2 按 2026-11-20 反转后的
+  「displayPositionMs ?? positionMs」更新）、`check-frontend-no-qr.mjs`、`check-runtime-identity.mjs`；
+  另加 `check-workflow-syntax.mjs`（同一 step 重复 run/name/uses ⇒ GitHub 判整个 workflow 无效）。
+
 ## [4.14.32] - 2026-11-22
 
 ### Fix / 标签修复写歌词前过归属闸门
