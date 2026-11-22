@@ -69,11 +69,17 @@ export function lrcBelongsToSong(
     if (!titleHit) {
       // 标题对不上时,再看**歌手**是否出现在同一行:出现了就是「同歌手的另一首歌」的标题行
       // (狂信者 → 刘若英、黄立行 - 分开旅行),必须否决。
-      // 歌手也对不上 ⇒ 这行本来就只是歌词正文(正文常带连字符,如 a-only),放行避免误杀。
-      const wantArtist = norm(song.artist);
-      const artistHit =
-        wantArtist.length >= 2 &&
-        parts.some((p) => p.includes(wantArtist) || wantArtist.includes(p));
+      // ⚠️ 必须**按歌手分词**逐个比:多歌手串（"王麟,新街口组合"）整串比较时，只要有一个
+      //   名字没出现在标题行里就判断不出来 —— 真机:大宝剑 拿到的是同专辑《From Boys to Men》
+      //   的歌词，标题行写的是「新街口组合/大宝Bles.P」，整串比对漏过 ⇒ 放行了别人的歌。
+      // 歌手也对不上 ⇒ 这行本来就只是歌词正文（正文常带连字符,如 a-only）,放行避免误杀。
+      const artistTokens = String(song.artist ?? "")
+        .split(/[、,，/&;；|·]+|\s+/)
+        .map(norm)
+        .filter((t) => t.length >= 2);
+      const artistHit = artistTokens.some((t) =>
+        parts.some((p) => p.includes(t) || t.includes(p)),
+      );
       if (artistHit) return false;
     }
   }

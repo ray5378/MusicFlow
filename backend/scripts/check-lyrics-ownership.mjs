@@ -81,10 +81,22 @@ check(
   "缺这一层 ⇒ 狂信者/分开旅行 这类会被放行",
 );
 check(
-  "内容可用性：少于 MIN_LYRIC_LINES(5) 行视为占位文本",
+  "歌手判据按分词逐个比（多歌手串只出现一个名字也能认出）",
+  lm.includes("const artistTokens = String(song.artist ?? \"\")") &&
+    lm.includes("artistTokens.some((t) =>"),
+  "整串比较 ⇒ 「王麟,新街口组合」对不上标题行里的「新街口组合/大宝Bles.P」，别人的歌被放行（大宝剑实例）",
+);
+check(
+  "内容可用性：内容量 < MIN_LYRIC_LINES(5) 视为占位文本",
   lm.includes("export const MIN_LYRIC_LINES = 5;") &&
-    lm.includes("if (contentLines.length < MIN_LYRIC_LINES) return false;"),
+    lm.includes("const contentUnits = Math.max(contentLines.length, timeStampCount);") &&
+    lm.includes("if (contentUnits < MIN_LYRIC_LINES) return false;"),
   "缺这一层 ⇒ 「纯音乐请欣赏 / 作者简介」被当成歌词整首显示（该死的温柔 实例）",
+);
+check(
+  "内容量取「文本行数」与「时间戳个数」的较大者（逐字歌词不被误杀）",
+  lm.includes("const timeStampCount = (content.match("),
+  "只按物理行数 ⇒ 一行到底的逐字/卡拉OK 歌词整片误杀（MELANCHOLY 实例）",
 );
 
 console.log("===== L2/L3/L4 三处入口全过闸 =====");

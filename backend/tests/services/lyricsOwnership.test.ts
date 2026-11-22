@@ -100,3 +100,21 @@ describe("lrcBelongsToSong 内容可用性（非歌词文本）", () => {
     expect(lrcBelongsToSong(lrc, { title: "在树上唱歌", duration: 250 })).toBe(true);
   });
 });
+
+describe("lrcBelongsToSong 多歌手分词（2026-11-22 大宝剑实例）", () => {
+  it("标题行是专辑同名曲（只出现其中一个歌手）→ 否决", () => {
+    const lrc =
+      "[00:00.00]From Boys to Men - 新街口组合/大宝Bles.P\n[00:10.00]词：某人\n[00:20.00]第一句正文\n[00:30.00]第二句正文\n[00:40.00]第三句正文";
+    expect(
+      lrcBelongsToSong(lrc, { title: "大宝剑", artist: "王麟,新街口组合", duration: 254 }),
+    ).toBe(false);
+  });
+
+  it("标题行含全部歌手 → 放行（同一首的常见写法）", () => {
+    const lrc =
+      "[00:00.00]大宝剑 - 王麟/新街口组合\n[00:10.00]第一句正文\n[00:20.00]第二句正文\n[00:30.00]第三句正文\n[00:40.00]第四句正文";
+    expect(
+      lrcBelongsToSong(lrc, { title: "大宝剑", artist: "王麟,新街口组合", duration: 254 }),
+    ).toBe(true);
+  });
+});
