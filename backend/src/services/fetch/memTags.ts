@@ -24,7 +24,8 @@ export interface MemTags {
   album?: string;
   /** 纯文本歌词（无时间轴也可；跟 tagWriter 的 lyric 口径一致） */
   lyric?: string;
-  cover?: CoverImage;
+  /** 封面：undefined=不动，null=删掉现有封面，对象=替换 */
+  cover?: CoverImage | null;
 }
 
 export function containerOfName(name: string): Container | null {
@@ -183,7 +184,10 @@ export function flacWriteTags(buf: Buffer, patch: MemTags): Buffer {
   if (vcIdx >= 0) blocks[vcIdx] = { type: 4, body: newComment };
   else blocks.splice(Math.min(1, blocks.length), 0, { type: 4, body: newComment });
 
-  if (patch.cover) {
+  if (patch.cover === null) {
+    const picIdx = blocks.findIndex((b) => b.type === 6);
+    if (picIdx >= 0) blocks.splice(picIdx, 1);
+  } else if (patch.cover) {
     const picIdx = blocks.findIndex((b) => b.type === 6);
     const body = flacBuildPicture(patch.cover);
     if (picIdx >= 0) blocks[picIdx] = { type: 6, body };

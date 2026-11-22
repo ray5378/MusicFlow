@@ -25,6 +25,7 @@ import { db } from "../../db/index.js";
 import { songs } from "../../db/schema.js";
 import { downloadToFile, probeRemoteSize, type DownloadResult } from "../../utils/httpDownload.js";
 import { searchAlbumConsensus, searchCover, searchLyrics, searchMetadata } from "../../plugins/providers.js";
+import { lrcBelongsToSong } from "../lyricsMatch.js";
 import type { LyricSongInput } from "../../plugins/types.js";
 import { markTagRepairDone } from "./tagRepairMarker.js";
 import { collectCandidates, type FetchTarget } from "./candidates.js";
@@ -1019,7 +1020,20 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
     // 歌词：provider 可能并发多插件，套短超时护栏。
     try {
       const lyric = await withTimeout(deps.searchLyrics(songInput, { onMatch }), ENRICH_TIMEOUT_MS);
-      if (lyric && lyric.trim()) extra.lyric = lyric;
+      if (lyric && lyric.trim()) {
+        // 归属闸门（2026-11-23）：provider 按 id 取回的可能是别的歌，写进文件后很难回收。
+        if (
+          lrcBelongsToSong(lyric, {
+            title: songInput.title,
+            artist: songInput.artist,
+            duration: songInput.duration,
+          })
+        ) {
+          extra.lyric = lyric;
+        } else {
+          warnings.push("歌词与曲目不符(已丢弃)");
+        }
+      }
     } catch (e) {
       warnings.push(`歌词获取失败(忽略，不影响入库): ${msgOf(e)}`);
     }
@@ -1029,8 +1043,21 @@ export async function runFetchPipeline(opts: RunFetchPipelineOptions): Promise<F
       try {
         let coverUrl = cand.coverUrl;
         if (!coverUrl) {
-          const u = await withTimeout(deps.searchCover(songInput, { onMatch }), ENRICH_TIMEOUT_MS);
-          if (u) coverUrl = u;
+          // 回落 provider 时只采信内置标签来源（严格评分），外置来源的封面不采信：
+          // 实测外置来源按标题松匹配，会把别的歌/别的专辑的封面写进文件。
+          let fallbackBuiltin: boolean | undefined;
+          const u = await withTimeout(
+            deps.searchCover(songInput, {
+              onMatch: (pid, builtin) => {
+                onMatch(pid, builtin);
+                fallbackBuiltin = builtin;
+              },
+            }),
+            ENRICH_TIMEOUT_MS,
+          );
+          // 明确来自外置来源（builtin=false）时不采信；未上报来源按历史行为放行。
+          if (u && fallbackBuiltin !== false) coverUrl = u;
+          else if (u) warnings.push("封面来源非内置(不采信)");
         }
         if (coverUrl) {
           const buf = await fetchCoverBuffer(coverUrl);

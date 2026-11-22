@@ -497,7 +497,7 @@ describe("runFetchPipeline", () => {
         },
       ],
       writeTags,
-      searchLyrics: (async () => "[00:01.00]la la") as any,
+      searchLyrics: (async () => "[00:01.00]la la\n[00:02.00]la la\n[00:03.00]la la\n[00:04.00]la la\n[00:05.00]la la") as any,
       searchCover: coverSearch as any,
     });
     const r = await run({
@@ -507,7 +507,7 @@ describe("runFetchPipeline", () => {
     });
     expect(r.items[0].status).toBe("done");
     expect(got.genre).toBe("Pop");
-    expect(got.lyric).toBe("[00:01.00]la la");
+    expect(got.lyric).toBe("[00:01.00]la la\n[00:02.00]la la\n[00:03.00]la la\n[00:04.00]la la\n[00:05.00]la la");
     expect(Buffer.isBuffer(got.cover)).toBe(true);
     expect((got.cover as Buffer).length).toBeGreaterThan(0);
     expect(coverSearch).not.toHaveBeenCalled(); // 候选自带 coverUrl → 不调 provider

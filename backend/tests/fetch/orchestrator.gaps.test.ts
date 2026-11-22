@@ -727,7 +727,7 @@ describe("orchestrator — 缺口补齐", () => {
       },
       searchLyrics: (async (_i: unknown, o: { onMatch?: (id: string, b: boolean) => void }) => {
         o?.onMatch?.("builtin-x", true); // 内置来源命中 → 落盘后登记修复标记
-        return "[00:01.00]la";
+        return "[00:01.00]la\n[00:02.00]la\n[00:03.00]la\n[00:04.00]la\n[00:05.00]la";
       }) as never,
       searchCover: (async () => {
         throw new Error("封面 provider boom");
@@ -745,7 +745,7 @@ describe("orchestrator — 缺口补齐", () => {
     expect(got.year).toBe(1999);
     expect(got.genre).toBe("Rock");
     expect(got.album).toBe("Alb");
-    expect(got.lyric).toBe("[00:01.00]la");
+    expect(got.lyric).toBe("[00:01.00]la\n[00:02.00]la\n[00:03.00]la\n[00:04.00]la\n[00:05.00]la");
     expect(got.comment).toContain("44kHz"); // describeQuality 的采样率分支
     expect(r.warnings.some((w) => w.includes("封面获取失败"))).toBe(true);
     expect(r.warnings.some((w) => w.includes("标签告警"))).toBe(true);

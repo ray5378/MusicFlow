@@ -74,6 +74,7 @@ import { createLogger } from "../../utils/logger.js";
 import { getDataDir } from "../../utils/env.js";
 import { getSetting, setSetting } from "../settings.js";
 import { searchAlbumConsensus, searchCover, searchLyrics, searchMetadata } from "../../plugins/providers.js";
+import { coverAllowed, needLyricByFile, writableAlbum } from "./tagTrust.js";
 import { lrcBelongsToSong } from "../lyrics.js";
 import { needsAlbumConsensus } from "../source/tagRecovery.js";
 import { cacheRemoteCover, resolveCoverFile } from "../playlistCover.js";
@@ -737,7 +738,8 @@ export async function repairSongTags(songId: string, cfg: FetchConfig): Promise<
   // （否则把「无专辑」变成假专辑名），也不作为 needMeta 的「DB 已有值」依据（转为走网络补全）。
   const dbAlbum = isAlbumPlaceholder(dbAlbumRaw) ? "" : dbAlbumRaw;
   const needCover = !embedded.cover;
-  const needLyric = !embedded.lyric && !row.has_lyrics;
+  // 只看文件里有没有（不再信 DB has_lyrics：云盘扫描出来的这一列经常是脏的）
+  const needLyric = needLyricByFile(embedded.lyric);
   const needAlbum = !embedded.album && Boolean(dbAlbum); // DB 声明值兜底，无需网络
   // 歌名 / 歌手：只在内嵌缺失时补（2026-11-12 产品要求），其余字段一律不采集。
   const needTitle = !embedded.title;
@@ -813,22 +815,82 @@ export async function repairSongTags(songId: string, cfg: FetchConfig): Promise<
 
   if (consensusAlbum) {
     // 多平台一致结论优先于 DB 声明值（DB 值本身可能就是「空」这类无法自证的值）。
-    tags.album = consensusAlbum;
+    const al = writableAlbum({ dbAlbum: consensusAlbum, title: row.title });
+    if (al) tags.album = al;
   } else if (needAlbum) {
-    // 专辑：DB 声明值即权威（下载时 provider 元数据），直接写，无需网络。
-    tags.album = dbAlbum;
+    // 专辑：DB 声明值即权威（下载时 provider 元数据）；但「专辑=歌名」是 scanner 的占位写法，
+    // 写进文件等于把占位值固化（2026-11-23 真机：三首被写成「专辑=歌名」）。
+    const al = writableAlbum({ dbAlbum, title: row.title });
+    if (al) tags.album = al;
+    else log.info(`专辑为占位值(=歌名/未知)，不写入 song=${songId} album=${dbAlbum}`);
+  }
+
+  // 封面归属：先拿元数据（同时也是 needMeta 的来源），再判「这张图是不是这首歌的」。
+  // 实测错图（2026-11-23）：何韵诗《好奇心杀死猫》→ SNOW THA PRODUCT 的封面；
+  // 吴奇隆《思念就像一条河流》→《追风少年》的封面。都是"搜到了别的专辑的图"。
+  let metaAlbum = "";
+  let metaArtist = "";
+  let metaProvider: string | null = null;
+  if (needCover || needMeta) {
+    try {
+      const meta = await searchMetadata(songInput, {
+        onMatch: (pid, builtin) => {
+          onMatch(pid, builtin);
+          metaProvider = pid;
+        },
+      });
+      if (meta) {
+        if (typeof meta.platform === "string" && meta.platform) platformId = meta.platform;
+        metaAlbum = String(meta.album ?? "");
+        metaArtist = String(meta.artist ?? "");
+        if (needTitle && meta.title) {
+          tags.title = meta.title;
+          metaWrote = true;
+        }
+        if (needArtist && meta.artist) {
+          tags.artist = meta.artist;
+          metaWrote = true;
+        }
+      }
+    } catch (e) {
+      log.warn(`元数据探测失败(不计入，进退避重试): song=${songId} err=${e instanceof Error ? e.message : e}`);
+    }
   }
 
   if (needCover) {
     try {
-      const url = await withCoverLimit(() => searchCover(songInput, { onMatch }));
+      let coverProvider: string | null = null;
+      let builtinCover: boolean | undefined;
+      const url = await withCoverLimit(() =>
+        searchCover(songInput, {
+          onMatch: (pid, builtin) => {
+            onMatch(pid, builtin);
+            coverProvider = pid;
+            builtinCover = builtin;
+          },
+        }),
+      );
       if (url) {
+        const decision = coverAllowed({
+          title: row.title,
+          artist: row.artist,
+          dbAlbum: row.album,
+          metaAlbum,
+          metaArtist,
+          metaProvider,
+          coverProvider,
+          builtinCover,
+        });
+        if (!decision.allowed) {
+          log.warn(`封面不可信，跳过 song=${songId} title=${row.title} 原因=${decision.reason}`);
+        } else {
         // cacheRemoteCover：复用封面下载全局限流 + SSRF 防护 + 本地缓存目录。
         const ref = await cacheRemoteCover(url, `tagfix-${songId}`);
-        if (ref) {
-          const local = resolveCoverFile(ref);
-          if (local && existsSync(local)) {
-            tags.cover = local;
+          if (ref) {
+            const local = resolveCoverFile(ref);
+            if (local && existsSync(local)) {
+              tags.cover = local;
+            }
           }
         }
       }
@@ -864,24 +926,7 @@ export async function repairSongTags(songId: string, cfg: FetchConfig): Promise<
   // 歌名 / 歌手补全（2026-11-12）：只在内嵌缺失时调用一次 searchMetadata，
   // **只取 title / artist**；album 仍只认多平台一致结论，其余字段（albumArtist/track/
   // year/genre）一律忽略、不写。
-  if (needMeta) {
-    try {
-      const meta = await searchMetadata(songInput, { onMatch });
-      if (meta) {
-        if (typeof meta.platform === "string" && meta.platform) platformId = meta.platform;
-        if (needTitle && meta.title) {
-          tags.title = meta.title;
-          metaWrote = true;
-        }
-        if (needArtist && meta.artist) {
-          tags.artist = meta.artist;
-          metaWrote = true;
-        }
-      }
-    } catch (e) {
-      log.warn(`歌名/歌手补全失败(不计入，进退避重试): song=${songId} err=${e instanceof Error ? e.message : e}`);
-    }
-  }
+  // 元数据已在封面之前统一取过（needCover || needMeta 一次调用），此处不再重复请求。
 
   const gotCover = Boolean(tags.cover);
   const gotLyric = Boolean(tags.lyric);

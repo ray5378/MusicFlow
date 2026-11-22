@@ -19,6 +19,7 @@ const log = createLogger("wdav-repair");
 import { applyTagsVariant, type SongTags } from "./tagWriter.js";
 import { containerOfName, readTags, writeTags, type Container, type MemTags } from "./memTags.js";
 import { lrcBelongsToSong } from "../lyricsMatch.js";
+import { albumIsPlaceholder, coverAllowed, isPlaceholderAlbum, needLyricByFile, writableAlbum } from "./tagTrust.js";
 import {
   searchCover,
   searchLyrics,
@@ -70,12 +71,10 @@ const none = (note?: string): WdavRepairOutcome => ({
   note,
 });
 
-const PLACEHOLDER_ALBUMS = new Set(["unknown album", "未知专辑"]);
-
+/** DB 专辑值归一（占位/空 → 空串）。 */
 function dbAlbumOf(raw: string | null | undefined): string {
-  const s = String(raw ?? "").trim();
-  if (!s) return "";
-  return PLACEHOLDER_ALBUMS.has(s.toLowerCase()) ? "" : s;
+  const v = String(raw ?? "").trim();
+  return isPlaceholderAlbum(v) ? "" : v;
 }
 
 /** 下载封面图（插件会给 URL），上限 8MB，失败返回 null。 */
@@ -134,9 +133,14 @@ export async function repairWebdavSongTags(
   }
 
   const dbAlbum = dbAlbumOf(row.album);
+  // 专辑占位判定：DB 里的专辑等于歌名（scanner 对"无专辑"文件的兜底写法）⇒ 不可信。
+  // 实测（2026-11-23）：三首被写进「专辑=歌名」的文件，全是这种占位值。
+  const dbAlbumIsPlaceholder = albumIsPlaceholder(dbAlbum, row.title);
   let needCover = !embedded.cover;
-  let needLyric = !embedded.lyric && !row.has_lyrics;
-  let needAlbum = !embedded.album && Boolean(dbAlbum);
+  // 歌词只看文件本身：DB 的 has_lyrics 对云盘经常是脏的（实测 has_lyrics=1 但文件无词、
+  // 同目录也没有 .lrc）——信它会让歌词永远补不上。
+  let needLyric = needLyricByFile(embedded.lyric);
+  let needAlbum = !embedded.album && Boolean(dbAlbum) && !dbAlbumIsPlaceholder;
   let needTitle = !embedded.title;
   let needArtist = !embedded.artist;
   let needMeta = needTitle || needArtist;
@@ -203,24 +207,60 @@ export async function repairWebdavSongTags(
 
   const tags: SongTags = {};
   let gotCover: { data: Buffer; mime: string } | null = null;
-  let gotLyric: string | null = null;
-  let meta: { title?: string; artist?: string; album?: string } | null = null;
 
-  // 3) 按需取（拿得到才写）
-  if (needCover) {
+  // 先拿元数据：它是「这首歌到底是谁的」唯一严格判据（标题精确 + 歌手分词 + 时长闸门），
+  // 也是封面可否采信的前置条件。没有强命中的元数据时，宁可不写封面 ——
+  // 实测：何韵诗《好奇心杀死猫》被写进 SNOW THA PRODUCT 的封面、吴奇隆《思念就像一条河流》
+  // 被写进《追风少年》的封面，都是「只按标题/歌手拿到了别的专辑的图」。
+  let meta: { title?: string; artist?: string; album?: string } | null = null;
+  if (needCover || needAlbum || needMeta) {
     try {
-      const coverUrl = await searchCover(songInput as any);
-      if (coverUrl) gotCover = await fetchImageBytes(coverUrl);
-      if (gotCover) tags.cover = gotCover.data;
+      const m = await searchMetadata(songInput as any);
+      if (m) meta = { title: m.title, artist: m.artist, album: m.album };
     } catch (e) {
-      log.warn(`[wdav-repair] 取封面失败 song=${row.id}: ${e instanceof Error ? e.message : e}`);
+      log.warn(`[wdav-repair] 取元数据失败 song=${row.id}: ${e instanceof Error ? e.message : e}`);
     }
   }
+
+  const metaAlbum = String(meta?.album ?? "").trim();
+
+  let coverProvider: string | null = null;
+  let builtinCover: boolean | undefined;
+  if (needCover) {
+    const coverDecision = coverAllowed({
+      title: row.title,
+      artist: row.artist,
+      dbAlbum,
+      metaAlbum,
+      metaArtist: meta?.artist,
+      coverProvider,
+      builtinCover,
+    });
+    if (!coverDecision.allowed) {
+      log.warn(
+        `[wdav-repair] 封面跳过(${coverDecision.reason}) song=${row.id} title=${row.title} ` +
+          `meta=${meta ? `${meta.title}/${meta.artist}/${meta.album}` : "null"}`,
+      );
+    } else {
+      try {
+        const coverUrl = await searchCover(songInput as any, {
+          onMatch: (pid: string, builtin: boolean) => {
+            coverProvider = pid;
+            builtinCover = builtin;
+          },
+        });
+        if (coverUrl) gotCover = await fetchImageBytes(coverUrl);
+        if (gotCover) tags.cover = gotCover.data;
+      } catch (e) {
+        log.warn(`[wdav-repair] 取封面失败 song=${row.id}: ${e instanceof Error ? e.message : e}`);
+      }
+    }
+  }
+
   if (needLyric) {
     try {
       const lrc = await searchLyrics(songInput as any);
       if (lrc && lrcBelongsToSong(lrc, { title: row.title, artist: row.artist, duration: row.duration })) {
-        gotLyric = lrc;
         tags.lyric = lrc;
       } else if (lrc) {
         log.warn(`[wdav-repair] 歌词与曲目不符，不写入 song=${row.id} title=${row.title}`);
@@ -229,21 +269,14 @@ export async function repairWebdavSongTags(
       log.warn(`[wdav-repair] 取歌词失败 song=${row.id}: ${e instanceof Error ? e.message : e}`);
     }
   }
-  if (needMeta || (needAlbum && !dbAlbum)) {
-    try {
-      const m = await searchMetadata(songInput as any);
-      if (m) {
-        meta = { title: m.title, artist: m.artist, album: m.album };
-      }
-    } catch (e) {
-      log.warn(`[wdav-repair] 取元数据失败 song=${row.id}: ${e instanceof Error ? e.message : e}`);
-    }
-  }
 
-  // 4) 组装要写的字段（只写缺的；已有值一律不动）
+  // 专辑：DB 值可信就用 DB 值，否则用元数据的专辑；**「专辑=歌名」一律不写**（占位值）。
+  if (needAlbum) {
+    const target = writableAlbum({ dbAlbum, metaAlbum, title: row.title });
+    if (target) tags.album = target;
+  }
   if (needTitle && meta?.title) tags.title = meta.title;
   if (needArtist && meta?.artist) tags.artist = meta.artist;
-  if (needAlbum) tags.album = dbAlbum || meta?.album || undefined;
 
   applyTagsVariant(tags, cfg.chineseVariant);
 

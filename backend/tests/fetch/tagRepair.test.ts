@@ -439,9 +439,14 @@ describe("repairSongTags", () => {
     expect(isTagRepairMarked(p)).toBe(true);
     // 强制重试：第二轮即便有标记也重新探针；DB has_lyrics 已对齐 1 → 文件齐备，直接 skip。
     parseFileMock.mockClear();
+    // 2026-11-23：歌词判定改为「只看文件」后，mock 仍报文件无词 ⇒ 第二轮会再取一次词并再写一遍。
+    // 本用例要守的是「完成标记不阻止重探」，不是「第二轮必然 skip」。
+    searchLyricsMock.mockResolvedValueOnce(
+      "[00:01.00]测试歌词\n[00:10.00]第二句\n[00:20.00]第三句\n[00:30.00]第四句\n[00:40.00]第五句",
+    );
     const r2 = await repairSongTags("s-ma", cfg());
     expect(parseFileMock).toHaveBeenCalled();
-    expect(r2.outcome).toBe("skip");
+    expect(r2.outcome).toBe("fixed");
   });
 
   it("修正6（选项C）：unobtainable（真缺但拿不到）→ 登记标记；单首函数不判终态（终态在扫描候选层收敛）", async () => {
