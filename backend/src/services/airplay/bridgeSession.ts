@@ -1403,7 +1403,19 @@ export class BridgeSession {
     this.ringTimer = setInterval(() => {
       if (this.closed) return;
       this.ringPullCount += 1;
-      const budgetUs = this.ringPrefilled ? 250_000 : 6_000_000;
+      // 水位伺服（2026-11-25 级联缓冲调参）：下泄预算 = 补齐「inQueue 目标 − 当前
+      // inQueue」与 1.05x 实时速率的较大者 —— 设备侧 inQueue（RAOP 发送队列）
+      // 保持在目标水位附近，既不饿死也不锯齿。旧实现固定 250ms/100ms（2.5x），
+      // 与父侧 250ms 伺服突发叠加成「锯齿振荡」（inQ 0~125ms、late 缓涨）。
+      // 6s 首灌（prefilled=false 阶段）保留 —— 冷启动快速建立缓冲。
+      // 对标 MA PushStream 按成员水位供给（playback.py:947-963）。
+      const inQueueTargetUs = 2_000_000;
+      const inQueueNowUs = BigInt(Math.round(this.backlogMs() * 1000));
+      const servoUs = inQueueNowUs >= BigInt(inQueueTargetUs) ? 0n : BigInt(inQueueTargetUs) - inQueueNowUs;
+      const realtimeUs = 105_000; // 1.05x 实时速率：防父侧短暂欠供时缓冲缓降
+      const budgetUs = this.ringPrefilled
+        ? servoUs > realtimeUs ? servoUs : realtimeUs
+        : 6_000_000;
       let taken = 0;
       let n = 0;
       while (this.ringBuf.length > 0) {
