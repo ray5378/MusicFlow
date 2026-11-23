@@ -108,24 +108,19 @@ describe("bridgeBroadcastTick — 游标对称跳转接线（按设备键）", (
     return BigInt(Math.round((g as any).commonSendAheadUs()));
   }
 
-  it("② 游标落后 1.5s（相对可听域下沿）⇒ dir=behind 跳到下沿，窗口内帧照常投出", () => {
+  it("② 游标落后 1.5s（调度锚定后）⇒ 无跳转，积压帧按 now 调度补发（快进追赶）", () => {
     const b = bridgeStub("ap-1");
     const g = groupWith([b]);
     const now = nowUs();
     const A = aheadOf(g);
     seedEpoch(g);
-    // 新 floor = now + A + 1.8s（behind 跳转落点：内容超前墙钟 1.8s）；
-    // seeded 比 floor 再落后 1.5s ⇒ 触发 behind 跳
-    const floorTs = now + A + 1_800_000n; // 实际 floor = now + DELIVER_LOOKAHEAD + ahead − BEHIND_GRACE = now+A+2s−200ms+200ms…按实现=now+A+1.8s
-    const seeded = floorTs - 1_500_000n;
-    const frameTs = floorTs + 100_000n; // 跳转后窗口内的帧（≥floor）
+    const seeded = now + A - 1_500_000n; // 名义游标落后墙钟 1.5s
+    const frameTs = seeded + 250_000n;
     addRingFrame(g, frameTs);
     (g as any).bcCursor.set("ap-1", seeded);
     (g as any).bridgeBroadcastTick(now);
-    const jump = (g as any).logs.find((l: string) => l.includes("bridge-cursor-jump")) as string;
-    expect(jump).toBeDefined();
-    expect(jump).toContain("dir=behind");
-    expect(jump).toContain("deltaMs=" + Math.round(Number(seeded - now) / 1000));
+    // 调度锚定后无 behind 跳转：积压帧按 now 起排补发（无迟到）
+    expect((g as any).logs.some((l: string) => l.includes("bridge-cursor-jump") && l.includes("dir=behind"))).toBe(false);
     expect(b.pushed.length).toBeGreaterThan(0);
     expect((g as any).bcCursor.get("ap-1")).toBe(frameTs);
   });

@@ -1467,7 +1467,6 @@ export class SendspinGroup {
       let cursor = this.bcCursor.get(deviceId) ?? 0n;
       // behind 跳转落点：内容超前墙钟 1.8s（投递 ts' = now+1.3s，包提前到达设备）。
       // 旧落点(now+ahead−200ms)让 ts'≈now−0.2s，每包迟到 ~200ms ⇒ late 88/分钟。
-      const floor = now + BigInt(Math.round(DELIVER_LOOKAHEAD_US)) + ahead - BigInt(Math.round(BEHIND_GRACE_US));
       // [S8 任务 2]逐设备投递窗口上沿(审计采纳项):缺省 = now+2s+ahead;
       // 该设备持有深度大(主进程经 bridgeHealth rpc 转发的 holdDepthMs)⇒ 给足
       // 「持有 + 500ms 抖动余量」。审计依据:MA 设备稳态持有 ~1s(min_buffer 自报),
@@ -1503,16 +1502,12 @@ export class SendspinGroup {
       //   · 大缺口（>1.3s，积压帧已被挤出环 / 挨饿期间子进程垫的静音已把
       //     时间线偏移）：跳到可听域下沿 + BOUNDARY{seek} 清缓冲重锚
       //     （真机 00:12 实测：大缺口不重锚 ⇒ delta 差 3.1s、每帧迟到 late 4 万+）。
-      const behindGapUs = cursor !== 0n && cursor < floor ? floor - cursor : 0n;
-      if (behindGapUs > BigInt(Math.round(BEHIND_GRACE_US)) + 1_100_000n) {
-        this.server.log("warn", `bridge-cursor-jump dev=${deviceId} dir=behind deltaMs=${Math.round(Number(cursor - now) / 1000)} fromMs=${Math.round(Number(cursor - now) / 1000)} toMs=${Math.round(Number(floor - now) / 1000)}`);
-        cursor = floor;
-        try {
-          handle.sendBoundary("seek");
-        } catch { /* 单设备重锚失败不连累组 */ }
-      } else if (cursor > ceil) {
-        // 超前跳回 **now**（不是 ceil）：落后的内容（now~cursor 之间）已经错过，
-        // 把游标放回 now 让后续新内容立即可投（设为 ceil 会让窗口内帧全被旧游标挡住 = 白跳）。
+      // [2026-11-25 调度锚定后废弃 behind 跳转] 名义时间线漂移被调度锚定吸收：
+      // 落后设备的积压帧按「现在」调度补发，快进追上实时，无迟到无跳变
+      // （对齐 MA join-catchup 补发语义；旧实现按名义 ts 投递才会过期 ⇒ 跳转）。
+      // ahead 兜底护栏保留：游标超前墙钟过多（理论上调度锚定下不再发生）时拉回。
+      if (cursor > ceil) {
+        // 超前兜底：游标拉回 now，后续帧按 now 起排（调度锚定，无迟到）。
         this.server.log("warn", `bridge-cursor-jump dev=${deviceId} dir=ahead deltaMs=${Math.round(Number(cursor - now) / 1000)} fromMs=${Math.round(Number(cursor - now) / 1000)} toMs=0`);
         cursor = now;
       }
@@ -1530,22 +1525,29 @@ export class SendspinGroup {
       let firstCand = 0n;
       let candCount = 0;
       let staleSkip = 0;
+      // [2026-11-25 调度锚定投递，对齐 MA _commit_pending_chunks 的
+      //  timeline_start_us = commit_start_us − produced_audio_us 语义]
+      // 时间线锚定**真实消费**：每帧投递 ts 从 now 起排（首帧 = now + shift），
+      // 后续逐帧 +dur。名义时间线（e.tsUs）的漂移被调度本身吸收 ——
+      // 长播不再出现「名义 ts 落后墙钟 ⇒ RAOP 补发过期包 ⇒ 秒级卡顿」。
+      // shift（成员延迟补偿，正=更晚出声）加在调度起点。
+      let sched = now + shift;
       for (const e of ring) {
         if (e.ep !== epoch) { staleSkip += 1; continue; }
         if (e.tsUs <= cursor) continue;
         if (firstCand === 0n) firstCand = e.tsUs;
         if (e.tsUs > horizonFinal) break; // 视界：max(墙钟窗口, 游标+目标水位)
-        if (cursor + BigInt(Math.round(e.durUs)) > ceil) break; // 绝对上限：游标不得超前墙钟 ahead+3s（长播漂移防线）
         if (deliveredUs >= dueUs) break; // 水位到目标：停（等设备消费）
         candCount += 1;
         try {
-          handle.pushAudio(e.data, e.tsUs - ahead + shift);
+          handle.pushAudio(e.data, sched);
         } catch (err) {
           this.server.log("warn", `bridge-servo-err dev=${deviceId} pushAudio 抛错: ${(err as Error).message}`);
           break;
         }
+        sched += BigInt(Math.round(e.durUs));
         cursor = e.tsUs;
-        deliveredUs += BigInt(Math.round((e.durUs)));
+        deliveredUs += BigInt(Math.round(e.durUs));
       }
       this.bcCursor.set(deviceId, cursor);
       // 伺服诊断（2s 节流，与逐设备诊断共用节流表）

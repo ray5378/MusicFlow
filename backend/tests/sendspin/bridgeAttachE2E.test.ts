@@ -200,8 +200,15 @@ describe("B) 组泵 → 真桥 E2E(出口判据:组泵 PCM 逐字节到 MFAB AUD
       g.bridgePushTick();
       expect(got).toBe(960); // BLK-01:无真实成员也照常产出
       await until(() => recv.audio.length >= 2, "audio x2");
-      expect(recv.audio[0]).toMatchObject({ tsUs: ts0 - ahead, generation: 0, sequence: 1 });
-      expect(recv.audio[1]!.tsUs).toBe(ts0 - ahead + BigInt(Math.round((480 * 1_000_000) / 48000))); // 逐 chunk 真实起点(转换后)
+      // [2026-11-25 调度锚定] 投递 ts 不再取名义时间线，而是 tick 时刻起排（now 附近）；
+      // 帧间距仍 = 逐 chunk 真实时长。字节一致 + generation/sequence 语义不变。
+      expect(recv.audio[0]).toMatchObject({ generation: 0, sequence: 1 });
+      {
+        const tNow = nowUs();
+        expect(recv.audio[0]!.tsUs).toBeGreaterThanOrEqual(tNow - 500_000n);
+        expect(recv.audio[0]!.tsUs).toBeLessThanOrEqual(tNow + 2_000_000n);
+      }
+      expect(recv.audio[1]!.tsUs).toBeGreaterThan(recv.audio[0]!.tsUs); // 调度锚定：跨 tick 单调递增
       expect(Buffer.from(recv.audio[0]!.payload).equals(payload0)).toBe(true);
       expect(Buffer.from(recv.audio[1]!.payload).equals(payload1)).toBe(true);
 
