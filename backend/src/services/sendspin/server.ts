@@ -1548,6 +1548,15 @@ export class SendspinGroup {
         sched = floorSched;
         cursor = now; // 跳过 now 之前的存量帧（已由 BOUNDARY 舍弃），只投未来内容
       }
+      // [2026-11-25 07:41 真机] 调度 ts 必须与内容游标**严格同步映射**：
+      // 旧写法 `sched += dur` 独立累加，而 cursor 走名义 tsUs —— 名义间隔与帧时长
+      // 一旦不一致（静音缝隙/名义跳跃），两者就漂开（真机 iEAST cursor +3484ms
+      // 而 sched 只 +1259ms ⇒ 设备队列只剩 209ms，随时饿死）。
+      // 正确：本拍首帧 = schedBase，第 k 帧 = schedBase + (该帧ts − 本拍起始游标)。
+      // 内容间隔如实保留（有缝就缝），与内容一一对应，不产生人为空洞。
+      // 基准 = 本拍**首帧**（不是 cursor）：首拍 cursor=0 时相对偏移会爆成绝对时戳。
+      let anchorTs = 0n;
+      let lastSchedTs = sched;
       let deliveredUs = 0n;
       let firstCand = 0n;
       let candCount = 0;
@@ -1559,17 +1568,19 @@ export class SendspinGroup {
         if (e.tsUs > horizonFinal) break; // 固定墙钟视界
         if (deliveredUs >= dueUs) break; // 水位到目标：停（等设备消费）
         candCount += 1;
+        if (anchorTs === 0n) anchorTs = e.tsUs;
+        const schedTs = sched + (e.tsUs - anchorTs);
         try {
-          handle.pushAudio(e.data, sched + shift);
+          handle.pushAudio(e.data, schedTs + shift);
         } catch (err) {
           this.server.log("warn", `bridge-servo-err dev=${deviceId} pushAudio 抛错: ${(err as Error).message}`);
           break;
         }
-        sched += BigInt(Math.round(e.durUs));
+        lastSchedTs = schedTs + BigInt(Math.round(e.durUs));
         cursor = e.tsUs;
         deliveredUs += BigInt(Math.round(e.durUs));
       }
-      this.bcSchedUs.set(deviceId, sched);
+      this.bcSchedUs.set(deviceId, lastSchedTs);
       this.bcCursor.set(deviceId, cursor);
       // 伺服诊断（2s 节流，与逐设备诊断共用节流表）
       {
