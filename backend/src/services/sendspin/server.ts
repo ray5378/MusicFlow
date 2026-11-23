@@ -1675,20 +1675,38 @@ export class SendspinGroup {
       const targetMs = Math.max(2000, backlogMs + 500);
       const dueUs = BigInt(Math.max(0, Math.round((targetMs - backlogMs) * 1000)));
       let deliveredUs = 0n;
+      let firstCand = 0n;
+      let candCount = 0;
+      let staleSkip = 0;
       for (const e of ring) {
-        if (e.ep !== epoch) continue;
+        if (e.ep !== epoch) { staleSkip += 1; continue; }
         if (e.tsUs <= cursor) continue;
+        if (firstCand === 0n) firstCand = e.tsUs;
         if (e.tsUs > horizon) break; // 绝对上沿：内容再超前也不预灌
         if (deliveredUs >= dueUs) break; // 水位到目标：停（等设备消费）
+        candCount += 1;
         try {
           handle.pushAudio(e.data, e.tsUs - ahead + shift);
-        } catch {
-          break; // 该设备投递异常：只影响自己，下一拍重试
+        } catch (err) {
+          this.server.log("warn", `bridge-servo-err dev=${deviceId} pushAudio 抛错: ${(err as Error).message}`);
+          break;
         }
         cursor = e.tsUs;
         deliveredUs += BigInt(Math.round((e.durUs)));
       }
       this.bcCursor.set(deviceId, cursor);
+      // 伺服诊断（2s 节流，与逐设备诊断共用节流表）
+      {
+        const t0 = nowUs();
+        const last = this.bridgeDiagLogAt.get(deviceId) ?? 0n;
+        if (t0 - last > BRIDGE_WINDOW_DIAG_THROTTLE_US) {
+          this.bridgeDiagLogAt.set(deviceId, t0);
+          this.server.log(
+            "info",
+            `bridge-servo dev=${deviceId} cursorVsNow=${Math.round(Number(cursor - now) / 1000)}ms backlogMs=${backlogMs} targetMs=${targetMs} dueMs=${Math.round(Number(dueUs) / 1000)} deliveredMs=${Math.round(Number(deliveredUs) / 1000)} aheadMs=${Math.round(Number(ahead) / 1000)} horizonMs=${Math.round(Number(horizon - now) / 1000)} firstCandVsNow=${firstCand === 0n ? "null" : String(Math.round(Number(firstCand - now) / 1000))} cand=${candCount} oldEp=${staleSkip}`,
+          );
+        }
+      }
     }
 
     // 逐设备诊断（2s 节流）：游标相对 now 的位置与内容尾
