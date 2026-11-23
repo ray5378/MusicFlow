@@ -1603,6 +1603,12 @@ export class SendspinGroup {
     // 预灌：新设备/换代后一次投够（设备侧缓冲否则从 0 起播，必然饥荒）。
     // 稳态每拍仍只投一小段，避免把设备队列顶穿。
     bc.flush(needPrefill ? 1_600 : 80);
+    // 同步推进 legacy 水位：泵/续产判定（currentGenDeliverableUs、bridgeHealth）
+    // 都读这些 watermark 当作「已消费到哪」。广播模式下不写它们，泵会以为
+    // 一直没被消费而停止产出（真机实测：pushed 停在 1693 帧 ≈42s 后彻底静音）。
+    for (const [deviceId, s1] of Object.entries(bc.stats())) {
+      if (s1.lastTsUs > 0) this.bridgeWatermarks.set(deviceId, BigInt(s1.lastTsUs));
+    }
 
     // 逐设备诊断（2s 节流）：积压/丢弃/最后投出时刻
     const st = bc.stats();

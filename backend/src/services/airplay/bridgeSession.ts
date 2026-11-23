@@ -1271,64 +1271,71 @@ export class BridgeSession {
   /** 48k s16le 入队(bridgeServer AUDIO 回调)。返回输入积压 ms(§4.4 overflow 判定)。
    *  Phase 5:旧 generation 的迟到帧(BOUNDARY 清队后的在途残余)直接丢弃并计数
    *  —— BLK-02 判据「旧 generation 帧丢弃计数 > 0」的落点(绝不入队、绝不立锚)。 */
-  /** 隔离模式下的本进程缓冲环（子进程自己持游标，父侧只广播）。 */
-  private audioRing: PlayerRing | null = null;
+  /** 隔离模式下的本进程缓冲（到达节拍制，不用墙钟判过期）。
+   *
+   *  ⚠️ 2026-11-23 实测教训：`a.tsUs` 是**内容时间线**口径（父侧已减去 sendAhead），
+   *  拿 `nowUs()` 去比"是否过期"会把每一帧都判掉（buffered 恒 0、pushed 停在 1693）。
+   *  真正需要的是：按到达节奏排队（父侧本来就是 1x 投递），开局预灌一段让设备有垫子。
+   */
+  private ringBuf: Array<{ tsUs: number; nFrames: number; data: Uint8Array }> = [];
+  private ringBufUs = 0;
   private ringSeq = 0;
   private ringPrefilled = false;
   private ringTimer: NodeJS.Timeout | null = null;
   private ringPushCount = 0;
   private ringPullCount = 0;
-  private ringPulledFrames = 0;
+  private ringDropOld = 0;
 
   private ingestAudio(a: BridgeAudioEvent): number {
     if (this.closed) return this.backlogMs();
-    // 隔离模式：帧先进本进程的环（去重/过期丢弃），由 ringTimer 按节拍取出发送。
-    // 预灌因此落在**本进程**（旧路径靠父侧 bulk 回填，2026-11-23 实测）。
-    if (playerIsolationEnabled() && a.tsUs !== 0n) {
-      // 换代（切歌/seek）：内容时间线整体重锚，ts 重新起算 ⇒ 环必须重建，
-      // 否则旧游标远在新 ts 之前，新帧全被判“已过期”丢弃（真机实测：pushed 停在 1693）。
-      if (this.audioRing && a.generation !== 0 && a.generation !== this.generation) {
-        this.audioRing = new PlayerRing({ horizonUs: 20_000_000, graceUs: 1_500_000 });
-        this.ringPrefilled = false;
-        log.warn(`[ring-diag] dev=${this.deviceId} 换代重建环 gen ${this.generation}→${a.generation}`);
-      }
-      if (!this.audioRing) {
-        this.audioRing = new PlayerRing({ horizonUs: 20_000_000, graceUs: 1_500_000 });
-        this.startRingDrain();
-      }
-      const pushed = this.audioRing.push(
-        { tsUs: Number(a.tsUs), nFrames: a.payload.byteLength >> 2, data: a.payload },
-        Number(nowUs()),
-      );
-      this.ringPushCount += 1;
-      if (this.ringPushCount === 1) {
-        log.warn(
-          `[ring-diag] dev=${this.deviceId} 首帧进环 tsVsNowUs=${Number(a.tsUs) - Number(nowUs())} nFrames=${a.payload.byteLength >> 2} ringSize=${this.audioRing.size}`,
-        );
-      }
+    if (!playerIsolationEnabled() || a.tsUs === 0n) return this.ingestAudioDirect(a);
+
+    // 换代（切歌/seek）：内容时间线重锚 ⇒ 旧缓冲作废
+    if (a.generation !== 0 && a.generation !== this.generation && this.ringBuf.length > 0) {
+      this.resetRingBuf();
+      log.warn(`[ring-diag] dev=${this.deviceId} 换代清缓冲 gen ${this.generation}→${a.generation}`);
+    }
+    const ts = Number(a.tsUs);
+    const nFrames = a.payload.byteLength >> 2;
+    const durUs = (nFrames / 48_000) * 1e6;
+    const last = this.ringBuf.length > 0 ? this.ringBuf[this.ringBuf.length - 1].tsUs : null;
+    if (last !== null && ts <= last) {
+      this.ringDropOld += 1; // 重复/回退（换代由 reset 负责，这里只防乱序）
       return this.backlogMs();
     }
-    return this.ingestAudioDirect(a);
+    this.ringBuf.push({ tsUs: ts, nFrames, data: a.payload });
+    this.ringBufUs += durUs;
+    this.ringPushCount += 1;
+    // 容量上限 20s：超了丢最旧（保实时）
+    while (this.ringBufUs > 20_000_000 && this.ringBuf.length > 1) {
+      const f = this.ringBuf.shift()!;
+      this.ringBufUs -= (f.nFrames / 48_000) * 1e6;
+      this.ringDropOld += 1;
+    }
+    if (!this.ringTimer) this.startRingDrain();
+    if (this.ringPushCount === 1) {
+      log.warn(`[ring-diag] dev=${this.deviceId} 首帧入队 ts=${ts} nFrames=${nFrames}`);
+    }
+    return this.backlogMs();
   }
 
-  /** 环 → 设备：首拍一次灌满（等价旧 bulk 回填 6s），之后 100ms 节拍 1x 续杯。 */
+  /** 到达节拍制：首拍一次灌 6s（等价旧 bulk 回填），之后每 100ms 最多 250ms。 */
   private startRingDrain(): void {
     if (this.ringTimer) return;
     this.ringTimer = setInterval(() => {
-      const ring = this.audioRing;
-      if (!ring || this.closed) return;
-      const nowUsNow = Number(nowUs());
-      const leadUs = this.ringPrefilled ? 1_500_000 : 6_000_000;
-      const maxUs = this.ringPrefilled ? 250_000 : 6_000_000;
-      const r = ring.pull(nowUsNow, leadUs, maxUs);
+      if (this.closed) return;
       this.ringPullCount += 1;
-      this.ringPulledFrames += r.frames.length;
-      if (this.ringPullCount <= 5 || this.ringPullCount % 20 === 0) {
-        log.warn(
-          `[ring-diag] dev=${this.deviceId} pull#${this.ringPullCount} n=${r.frames.length} buffered=${ring.size} jumped=${Math.round(r.jumpedUs / 1000)}ms prefilled=${this.ringPrefilled} pushed=${this.ringPushCount} firstTs=${this.firstFrameTsUs === null ? "null" : "set"}`,
-        );
-      }
-      for (const f of r.frames) {
+      const budgetUs = this.ringPrefilled ? 250_000 : 6_000_000;
+      let taken = 0;
+      let n = 0;
+      while (this.ringBuf.length > 0) {
+        const f = this.ringBuf[0];
+        const durUs = (f.nFrames / 48_000) * 1e6;
+        if (taken + durUs > budgetUs) break;
+        this.ringBuf.shift();
+        this.ringBufUs -= durUs;
+        taken += durUs;
+        n += 1;
         this.ringSeq += 1;
         this.ingestAudioDirect({
           tsUs: BigInt(f.tsUs),
@@ -1337,9 +1344,21 @@ export class BridgeSession {
           payload: f.data,
         });
       }
-      if (!this.ringPrefilled && r.frames.length > 0) this.ringPrefilled = true;
+      if (!this.ringPrefilled && n > 0) this.ringPrefilled = true;
+      if (this.ringPullCount <= 3 || this.ringPullCount % 50 === 0) {
+        log.warn(
+          `[ring-diag] dev=${this.deviceId} pull#${this.ringPullCount} n=${n} buffered=${this.ringBuf.length} bufferedMs=${Math.round(this.ringBufUs / 1000)} prefilled=${this.ringPrefilled} pushed=${this.ringPushCount} dropOld=${this.ringDropOld}`,
+        );
+      }
     }, 100);
     this.ringTimer.unref?.();
+  }
+
+  /** 换代：清空缓冲（内容时间线重锚）。 */
+  private resetRingBuf(): void {
+    this.ringBuf.length = 0;
+    this.ringBufUs = 0;
+    this.ringPrefilled = false;
   }
 
   private ingestAudioDirect(a: BridgeAudioEvent): number {
