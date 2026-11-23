@@ -973,6 +973,22 @@ export class SendspinGroup {
       this.ensureBridgePushTimer();
       return;
     }
+    // S6（2026-11-23 真机实证）：**单台设备的会话重建（rehost）不是内容换代**。
+    //   组时间线没变，若在这里 bridgeContentEpoch++ ⇒ 所有设备的水位被清、环里的帧被判旧代次，
+    //   其他设备只能靠 skip 追平 —— 实测 kill 掉一台子进程后，另一台 skip+=625,117 帧
+    //   （≈14.2s，「突然跳进度」）。
+    //   多设备时直接跳过换代；单设备时仍按老流程（它自己就是全部，没有连累对象）。
+    if (reason === "rehost" && this.bridges.size > 1) {
+      this.server.log(
+        "info",
+        `bridge-generation group=${this.name} gen=${generation} reason=rehost 单设备重建 ⇒ 跳过换代（保组时间线与各设备水位）`,
+      );
+      // 跳过换代后，重建的那台没有「换代 bulk 回填」可依赖（它的会话是新的、设备缓冲是空的）
+      // ⇒ 单独给它登记 bulk 预灌；其余设备的水位没被动过，走稳态续杯不受影响。
+      for (const deviceId of this.bridges.keys()) this.bridgeBulkPending.add(deviceId);
+      this.ensureBridgePushTimer();
+      return;
+    }
     this.server.log("info", `bridge-generation group=${this.name} gen=${generation} reason=${reason} bridges=${this.bridges.size}`);
     for (const b of this.bridges.values()) {
       try { b.notifyGeneration(generation, reason); } catch { /* 单桥失败不连累 */ }
