@@ -1409,11 +1409,17 @@ export class BridgeSession {
       // 与父侧 250ms 伺服突发叠加成「锯齿振荡」（inQ 0~125ms、late 缓涨）。
       // 6s 首灌（prefilled=false 阶段）保留 —— 冷启动快速建立缓冲。
       // 对标 MA PushStream 按成员水位供给（playback.py:947-963）。
+      // [2026-11-25 07:57 对齐 MA 桥喂 CLI 语义] 反馈量必须是**设备侧水位**
+      // （RAOP 发送队列 inBytes），绝不能是总缓冲 —— ringBuf 是子进程手里的存量，
+      // 设备拿不到。用总缓冲判断会出现：ringBuf 1.5s + inQueue 175ms ⇒ 总缓冲 1.7s
+      // ≈ 目标 ⇒ 判定「水位够」⇒ 只按 1.05x 喂 ⇒ 设备永远只有 200ms ⇒ 秒级卡顿
+      // （真机 ring-diag pull n=4 / inQueueMs=175 实锤）。
+      // MA sendspin_bridge.py 喂 CLI：只要设备缓冲 < MAX_DEVICE_BUFFER_SECONDS(8s)
+      // 就持续喂，存量尽快送进设备。
       const inQueueTargetUs = 2_000_000;
-      const inQueueNowUs = BigInt(Math.round(this.backlogMs() * 1000));
+      const inQueueNowMs = Math.round((this.inBytes / BRIDGE_PCM_BYTES_PER_SEC) * 1000);
+      const inQueueNowUs = BigInt(inQueueNowMs * 1000);
       const servoUs = inQueueNowUs >= BigInt(inQueueTargetUs) ? 0n : BigInt(inQueueTargetUs) - inQueueNowUs;
-      // （backlogMs 现为总缓冲 = inBytes + ringBuf：ringBuf 有货时 inQueue 补齐不触发，
-      //   总量稳定在 2s；ringBuf 排空且 inQueue < 2s 时按差量补 —— 平滑无锯齿）
       const realtimeUs = 105_000; // 1.05x 实时速率：防父侧短暂欠供时缓冲缓降
       const budgetUs = this.ringPrefilled
         ? servoUs > realtimeUs ? servoUs : realtimeUs
@@ -1439,7 +1445,7 @@ export class BridgeSession {
       if (!this.ringPrefilled && n > 0) this.ringPrefilled = true;
       if (this.ringPullCount <= 3 || this.ringPullCount % 50 === 0) {
         log.warn(
-          `[ring-diag] dev=${this.deviceId} pull#${this.ringPullCount} n=${n} buffered=${this.ringBuf.length} bufferedMs=${Math.round(this.ringBufUs / 1000)} prefilled=${this.ringPrefilled} pushed=${this.ringPushCount} dropOld=${this.ringDropOld}`,
+          `[ring-diag] dev=${this.deviceId} pull#${this.ringPullCount} n=${n} buffered=${this.ringBuf.length} bufferedMs=${Math.round(this.ringBufUs / 1000)} inQueueMs=${inQueueNowMs} budgetMs=${Math.round(Number(budgetUs) / 1000)} prefilled=${this.ringPrefilled} pushed=${this.ringPushCount} dropOld=${this.ringDropOld}`,
         );
       }
     }, 100);
