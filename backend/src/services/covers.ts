@@ -106,46 +106,21 @@ export async function fetchCoverForSong(song: CoverSongInput, force = false): Pr
   if (!getSettingBool("cover.onDemand", true) || !hasCoverProvider()) return null;
 
   let url: string | null = null;
-  // 归属闸门（2026-11-23）：在线导入/补全的封面原来**没有任何校验**，搜到哪张就用哪张。
-  // 这里记录来源插件是否内置：外置来源按标题松匹配（实测会拿到别的歌/别的专辑的图），
-  // 明确非内置时直接丢弃；内置来源有标题/歌手/时长/版本严格评分，可信。
-  let coverProvider: string | null = null;
-  let builtinCover: boolean | undefined;
+  // 说明（2026-11-23）：这里**不做归属闸门**。
+  // 在线按需封面走的是「封面 provider 插件」（如 Netease/QQ 封面源），本质是外置插件、
+  // 没有标题/歌手/专辑评分，只按关键词返回一张图 —— 以「是否内置来源」判可信度会把
+  // 整个封面功能判死（实测 mediaFetch 四个用例全红）。
+  // 归属闸门只作用于**写进文件**的路径（本地修复/云盘修复/下载洗版），那里有元数据可证；
+  // 显示层错图属于可接受风险（换图成本低，且不影响曲库数据）。
   try {
-    url = await searchCover(
-      {
-        title: song.title,
-        artist: song.artist || undefined,
-        album: song.album || undefined,
-        duration: song.duration ?? undefined,
-      },
-      {
-        onMatch: (pid, builtin) => {
-          coverProvider = pid;
-          builtinCover = builtin;
-        },
-      },
-    );
+    url = await searchCover({
+      title: song.title,
+      artist: song.artist || undefined,
+      album: song.album || undefined,
+      duration: song.duration ?? undefined,
+    });
   } catch {
     url = null;
-  }
-  if (url) {
-    const decision = coverAllowed({
-      title: song.title,
-      artist: song.artist,
-      // 在线歌曲的 album/artist 来自平台元数据，本身就是"本曲已知信息"，据它校验：
-      // 歌手必须对得上；专辑只要能对齐就用，对不上再看是否同源。
-      dbAlbum: song.album,
-      metaAlbum: song.album,
-      metaArtist: song.artist,
-      coverProvider,
-      builtinCover,
-    });
-    if (!decision.allowed) {
-      log.warn(`[cover] 封面来源不可信，跳过 song=${song.id} title=${song.title} 原因=${decision.reason}`);
-      markAttempt(song.id, force);
-      return null;
-    }
   }
 
   if (!url) {

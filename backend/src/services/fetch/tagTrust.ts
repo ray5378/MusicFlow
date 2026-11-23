@@ -130,6 +130,11 @@ export interface CoverContext {
   coverProvider?: string | null;
   /** 封面来源是否内置（内置=有严格评分）；undefined=调用方未上报 */
   builtinCover?: boolean;
+  /**
+   * true = 传入的 meta 就是本曲自身信息（在线封面按需补全场景）。
+   * 此时「歌手/专辑一致」是同义反复，不能当归属证据 —— 只校验来源是否可信。
+   */
+  selfMeta?: boolean;
 }
 
 export interface CoverDecision {
@@ -146,6 +151,13 @@ export interface CoverDecision {
  * 其余一律拒绝——实测错图都是"歌手没对上 / 专辑是别的专辑"。
  */
 export function coverAllowed(ctx: CoverContext): CoverDecision {
+  // 在线按需补封面：meta 来自本曲自身，归属无法自证 ⇒ 只信「内置来源」这一条
+  if (ctx.selfMeta) {
+    if (ctx.builtinCover === false) {
+      return { allowed: false, reason: `外置来源松匹配（${ctx.coverProvider ?? "unknown"}）` };
+    }
+    return { allowed: true, reason: "本曲自身元数据 + 内置/未上报来源" };
+  }
   const dbAlbum = String(ctx.dbAlbum ?? "").trim();
   const metaAlbum = String(ctx.metaAlbum ?? "").trim();
   const hasMeta = Boolean(metaAlbum || String(ctx.metaArtist ?? "").trim());

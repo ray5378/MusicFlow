@@ -789,14 +789,25 @@ export function registerFetch(app: Hono): void {
   app.get("/v1/fetch/tag-repair/wdav/browse", adminMiddleware, async (c) => {
     const sourceId = String(c.req.query("sourceId") || "").trim();
     const dir = String(c.req.query("dir") || "/").trim() || "/";
-    if (!sourceId) return c.json({ success: false, error: "缺少 sourceId" }, 400);
+    if (!sourceId)
+      return c.json(
+        apiError(BusinessErrorCode.INVALID_PARAM, "缺少 sourceId"),
+        apiErrorStatus(BusinessErrorCode.INVALID_PARAM),
+      );
     const ctx = wdavCtxOfSource(sourceId);
-    if (!ctx) return c.json({ success: false, error: "源不可用（配置缺 url/凭据）" }, 400);
+    if (!ctx)
+      return c.json(
+        apiError(BusinessErrorCode.INVALID_PARAM, "源不可用（配置缺 url/凭据）"),
+        apiErrorStatus(BusinessErrorCode.INVALID_PARAM),
+      );
     try {
       const entries = await wdavList(ctx, dir);
       return c.json({ success: true, dir, entries });
     } catch (e: any) {
-      return c.json({ success: false, error: e?.message || String(e) }, 502);
+      return c.json(
+        apiError(BusinessErrorCode.UPSTREAM_ERROR, e?.message || String(e)),
+        apiErrorStatus(BusinessErrorCode.UPSTREAM_ERROR),
+      );
     }
   });
 
@@ -807,7 +818,10 @@ export function registerFetch(app: Hono): void {
       const r = previewWdavRepair(body.targets ?? []);
       return c.json({ success: true, ...r });
     } catch (e: any) {
-      return c.json({ success: false, error: e?.message || String(e) }, 400);
+      return c.json(
+        apiError(BusinessErrorCode.INVALID_PARAM, e?.message || String(e)),
+        apiErrorStatus(BusinessErrorCode.INVALID_PARAM),
+      );
     }
   });
 
@@ -817,12 +831,19 @@ export function registerFetch(app: Hono): void {
       targets?: Array<{ sourceId: string; dir: string }>;
       resume?: boolean;
     };
-    if (isWdavRepairRunning()) return c.json({ success: false, busy: true }, 409);
+    if (isWdavRepairRunning())
+      return c.json(
+        { ...apiError(BusinessErrorCode.BUSY, "已有云盘修复任务在跑"), busy: true },
+        apiErrorStatus(BusinessErrorCode.BUSY),
+      );
     try {
       const st = await startWdavRepair({ targets: body.targets ?? [], resume: body.resume === true });
       return c.json({ success: true, state: st });
     } catch (e: any) {
-      return c.json({ success: false, error: e?.message || String(e) }, 400);
+      return c.json(
+        apiError(BusinessErrorCode.INVALID_PARAM, e?.message || String(e)),
+        apiErrorStatus(BusinessErrorCode.INVALID_PARAM),
+      );
     }
   });
 
