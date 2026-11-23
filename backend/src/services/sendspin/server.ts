@@ -1490,7 +1490,12 @@ export class SendspinGroup {
       // 超前跳转阈值保持墙钟锚定：内容超前墙钟超过 lookahead+ahead 才算真超前
       //（跟随游标的 horizonCur 只用于伺服补量，若用它做跳转阈值，
       //  超前 10s 的遗留游标永不触发跳回）
-      const ceil = horizon;
+      // [2026-11-25 长播漂移修复] 超前跳回阈值必须是**墙钟绝对上限**：
+      // 旧实现 ceil = horizon（含 holdMs）—— 积压越大阈值越高，时间线偏移
+      // 每次挨饿恢复 +2.3s 棘轮（真机长播 4h：cursor−now 漂到 +10.5s、
+      // inQueue 16.5s、late 62 万 ⇒ 用户听到秒级卡顿）。绝对上限 =
+      // now + ahead + lookahead(2s) + 1s 余量，超过即拉回 + BOUNDARY 重锚。
+      const ceil = now + ahead + BigInt(Math.round(DELIVER_LOOKAHEAD_US + 1_000_000));
       // 分级恢复（对齐 MA join-catchup：playback.py:293 落后成员从已提交历史重放、
       // 追上实时尾才晋升管线；历史被挤出才放弃重放）：
       //   · 小缺口（≤1.3s，子进程 late-guard 1.5s 宽限内）：不跳、不重锚 ——
@@ -1530,6 +1535,7 @@ export class SendspinGroup {
         if (e.tsUs <= cursor) continue;
         if (firstCand === 0n) firstCand = e.tsUs;
         if (e.tsUs > horizonFinal) break; // 视界：max(墙钟窗口, 游标+目标水位)
+        if (cursor + BigInt(Math.round(e.durUs)) > ceil) break; // 绝对上限：游标不得超前墙钟 ahead+3s（长播漂移防线）
         if (deliveredUs >= dueUs) break; // 水位到目标：停（等设备消费）
         candCount += 1;
         try {
