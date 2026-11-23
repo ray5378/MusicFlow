@@ -117,4 +117,107 @@ class AirplaySupervisor extends RendererHostSupervisor<
   }
 }
 
-export const airplaySupervisor = new AirplaySupervisor();
+/** 建一台 airplay 子进程宿主（每台播放器一台，见下方 router）。 */
+export function createAirplaySupervisor(): AirplaySupervisor {
+  return new AirplaySupervisor();
+}
+
+/**
+ * 子进程路由（2026-11-23 播放器隔离改造 S4）。
+ *
+ * MA 的做法是「每播放器一个 cliairplay 进程」（providers/airplay/stream.py:327）。
+ * 我们此前是**一个** airplay 子进程承载所有桥会话 —— 一台设备的协议层卡顿/长阻塞
+ * 会占满同一个事件循环，连带影响其他设备。
+ *
+ * 这里把单例改成按 deviceId 路由：`MF_PLAYER_ISOLATION=1` 时每台设备独立子进程，
+ * 关闭时全部落到同一个 ``_legacy`` 宿主（与改造前行为完全一致，便于 A/B 回滚）。
+ *
+ * 调用点无需改动：仍然只看到 `airplaySupervisor.rpc(method, params)`，
+ * deviceId 从 params 里取（token 类调用走 bridgePrepare 时登记的映射）。
+ */
+export class AirplaySupervisorRouter {
+  private readonly hosts = new Map<string, AirplaySupervisor>();
+  private readonly tokenDev = new Map<string, string>();
+  private hooks: AirplayHostHooks | null = null;
+  private mergedMirror: AirplayMirror = { sessions: new Map() };
+
+  private isolated(): boolean {
+    return process.env.MF_PLAYER_ISOLATION === "1";
+  }
+
+  private keyOf(params: unknown): string {
+    if (!this.isolated()) return "_legacy";
+    const p = (params ?? {}) as { deviceId?: unknown; token?: unknown };
+    const dev =
+      typeof p.deviceId === "string" && p.deviceId
+        ? p.deviceId
+        : typeof p.token === "string"
+          ? this.tokenDev.get(p.token)
+          : undefined;
+    return dev || "_legacy";
+  }
+
+  /** 合并视图：调用点读 .mirror.sessions（主进程判定「该设备是否有会话」）。 */
+  get mirror(): AirplayMirror {
+    if (!this.isolated()) return this.hosts.get("_legacy")?.mirror ?? this.mergedMirror;
+    const sessions = new Map<string, AirplaySessionMirrorRow>();
+    for (const h of this.hosts.values()) {
+      for (const [k, v] of h.mirror.sessions) sessions.set(k, v);
+    }
+    this.mergedMirror = { sessions };
+    return this.mergedMirror;
+  }
+
+  setHooks(hooks: AirplayHostHooks): void {
+    this.hooks = hooks;
+    for (const h of this.hosts.values()) h.setHooks(hooks);
+  }
+
+  isRunning(): boolean {
+    if (!this.isolated()) return this.hosts.get("_legacy")?.isRunning() ?? false;
+    for (const h of this.hosts.values()) if (h.isRunning()) return true;
+    return false;
+  }
+
+  /** 隔离模式下不预热（子进程按设备懒启动）；非隔离模式与旧行为一致。 */
+  async start(): Promise<void> {
+    if (!this.isolated()) await this.ensure("_legacy");
+  }
+
+  async stop(): Promise<void> {
+    const all = [...this.hosts.values()];
+    this.hosts.clear();
+    this.tokenDev.clear();
+    await Promise.all(all.map((h) => h.stop().catch(() => undefined)));
+  }
+
+  private async ensure(key: string): Promise<AirplaySupervisor> {
+    let host = this.hosts.get(key);
+    if (!host) {
+      host = createAirplaySupervisor();
+      if (this.hooks) host.setHooks(this.hooks);
+      this.hosts.set(key, host);
+    }
+    if (!host.isRunning()) await host.start();
+    return host;
+  }
+
+  async rpc<R = unknown>(method: string, params?: unknown): Promise<R> {
+    const p = (params ?? {}) as { deviceId?: string; token?: string };
+    // bridgePrepare 建立 token → device 的映射（stop/manual 这类只带 token）
+    if (method === "bridgePrepare" && typeof p.token === "string" && typeof p.deviceId === "string") {
+      this.tokenDev.set(p.token, p.deviceId);
+    }
+    if (method === "bridgeStop" && typeof p.token === "string") {
+      const dev = this.tokenDev.get(p.token);
+      const host = await this.ensure(this.keyOf(params));
+      const r = await host.rpc<R>(method, params);
+      if (dev) this.tokenDev.delete(p.token);
+      return r;
+    }
+    const host = await this.ensure(this.keyOf(params));
+    return host.rpc<R>(method, params);
+  }
+}
+
+export const airplaySupervisor = new AirplaySupervisorRouter();
