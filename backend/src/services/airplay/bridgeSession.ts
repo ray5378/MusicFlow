@@ -58,6 +58,8 @@ import { DEFAULT_AIRPLAY_VOLUME } from "./volumeDefault.js";
 import { degreesToDb } from "./decoder.js";
 import { AP2_SEND_ERROR_LIMIT, Ap2StreamSession, type Ap2StreamOptions, type Ap2StreamState } from "./ap2/ap2Stream.js";
 import { createLogger } from "../../utils/logger.js";
+import { PlayerRing } from "../playerHost/playerRing.js";
+import { playerIsolationEnabled } from "../playerHost/isolationFlag.js";
 
 /**
  * exp4 实验开关(全部缺省关闭 = 现行为):
@@ -1269,7 +1271,55 @@ export class BridgeSession {
   /** 48k s16le 入队(bridgeServer AUDIO 回调)。返回输入积压 ms(§4.4 overflow 判定)。
    *  Phase 5:旧 generation 的迟到帧(BOUNDARY 清队后的在途残余)直接丢弃并计数
    *  —— BLK-02 判据「旧 generation 帧丢弃计数 > 0」的落点(绝不入队、绝不立锚)。 */
+  /** 隔离模式下的本进程缓冲环（子进程自己持游标，父侧只广播）。 */
+  private audioRing: PlayerRing | null = null;
+  private ringSeq = 0;
+  private ringPrefilled = false;
+  private ringTimer: NodeJS.Timeout | null = null;
+
   private ingestAudio(a: BridgeAudioEvent): number {
+    if (this.closed) return this.backlogMs();
+    // 隔离模式：帧先进本进程的环（去重/过期丢弃），由 ringTimer 按节拍取出发送。
+    // 预灌因此落在**本进程**（旧路径靠父侧 bulk 回填，2026-11-23 实测）。
+    if (playerIsolationEnabled() && a.tsUs !== 0n) {
+      if (!this.audioRing) {
+        this.audioRing = new PlayerRing({ horizonUs: 20_000_000, graceUs: 1_500_000 });
+        this.startRingDrain();
+      }
+      this.audioRing.push(
+        { tsUs: Number(a.tsUs), nFrames: a.payload.byteLength >> 2, data: a.payload },
+        Date.now() * 1000,
+      );
+      return this.backlogMs();
+    }
+    return this.ingestAudioDirect(a);
+  }
+
+  /** 环 → 设备：首拍一次灌满（等价旧 bulk 回填 6s），之后 100ms 节拍 1x 续杯。 */
+  private startRingDrain(): void {
+    if (this.ringTimer) return;
+    this.ringTimer = setInterval(() => {
+      const ring = this.audioRing;
+      if (!ring || this.closed) return;
+      const nowUs = Date.now() * 1000;
+      const leadUs = this.ringPrefilled ? 1_500_000 : 6_000_000;
+      const maxUs = this.ringPrefilled ? 250_000 : 6_000_000;
+      const r = ring.pull(nowUs, leadUs, maxUs);
+      for (const f of r.frames) {
+        this.ringSeq += 1;
+        this.ingestAudioDirect({
+          tsUs: BigInt(f.tsUs),
+          generation: this.generation,
+          sequence: this.ringSeq,
+          payload: f.data,
+        });
+      }
+      if (!this.ringPrefilled && r.frames.length > 0) this.ringPrefilled = true;
+    }, 100);
+    this.ringTimer.unref?.();
+  }
+
+  private ingestAudioDirect(a: BridgeAudioEvent): number {
     if (this.closed) return this.backlogMs();
     if (a.tsUs !== 0n && a.generation !== 0 && a.generation < this.generation) {
       this.stats.staleFramesDropped += a.payload.byteLength >> 2;
