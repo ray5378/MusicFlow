@@ -19,13 +19,24 @@ import { createLogger } from "../../utils/logger.js";
 const log = createLogger("airplay-bias");
 
 const KEY = "airplay.latencyBias";
+/** 触顶告警节流表（设备 → 上次告警时刻） */
+const saturateLoggedAt = new Map<string, number>();
 /** 起学阈值：|残差| 小于它视为稳态噪声 */
 const MIN_US = 40_000;
 /** 同向稳定判定次数 */
 const HITS_NEEDED = 5;
-/** 单次最大步进 / 总偏置上限 */
+/** 慢通道单次最大步进（收敛稳一点，避免一次学飞） */
 const STEP_CAP_US = 500_000;
-const BIAS_CAP_US = 2_000_000;
+/** fast 通道单次最大步进（成员变更/风暴时允许一次多走） */
+const FAST_STEP_CAP_US = 2_000_000;
+/**
+ * 总偏置上限 = min(成员延迟量程 ±30s, 桥 insertCap 10s) = **10s**。
+ * 2026-11-23 修正：原值 2s 是我照搬「非组同步模式」的 insertCap 拍的，比组同步模式
+ * 真正的 10s 对齐窗口还小 ⇒ 2~10s 的残差会静默饱和，永远追不进去。
+ */
+const BIAS_CAP_US = 10_000_000;
+/** 触顶告警节流（同一设备 60s 只报一次） */
+const SATURATE_LOG_GAP_MS = 60_000;
 
 export interface BiasRecord {
   /** 施加到锚点的偏置（µs，正 = 把锚点往后推） */
@@ -106,7 +117,7 @@ export function fastStep(prev: BiasRecord | null, driftUs: number, now = Date.no
   if (!Number.isFinite(driftUs) || Math.abs(driftUs) < MIN_US) {
     return { ...base, hits: 0, lastDriftUs: driftUs, updatedAt: now };
   }
-  const step = Math.max(-STEP_CAP_US, Math.min(STEP_CAP_US, Math.round(driftUs)));
+  const step = Math.max(-FAST_STEP_CAP_US, Math.min(FAST_STEP_CAP_US, Math.round(driftUs)));
   const biasUs = Math.max(-BIAS_CAP_US, Math.min(BIAS_CAP_US, base.biasUs + step));
   return { biasUs, hits: 0, lastDriftUs: driftUs, updatedAt: now };
 }
@@ -124,6 +135,17 @@ export function observeLatencyBias(
   const changed = next.biasUs !== (prev?.biasUs ?? 0);
   map[deviceId] = next;
   saveMap(map);
+  // 触顶告警：偏置已到上限但残差仍同向 ⇒ 不是「固件缓存差」，是会话/内容轴异常，必须人看。
+  if (Math.abs(next.biasUs) >= BIAS_CAP_US && Math.sign(driftUs) === Math.sign(next.biasUs)) {
+    const now = Date.now();
+    const prevAt = saturateLoggedAt.get(deviceId) ?? 0;
+    if (now - prevAt > SATURATE_LOG_GAP_MS) {
+      saturateLoggedAt.set(deviceId, now);
+      log.warn(
+        `[airplay-bias] saturated device=${deviceId} bias=${next.biasUs}µs 残差仍为 ${Math.round(driftUs)}µs —— 已到 ${BIAS_CAP_US / 1e6}s 上限，需人工排查会话/内容轴`,
+      );
+    }
+  }
   if (changed) {
     log.info(
       `[airplay-bias] device=${deviceId} 学到偏置 ${next.biasUs}µs（上次残差 ${Math.round(driftUs)}µs）`,
