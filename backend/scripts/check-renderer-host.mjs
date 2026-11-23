@@ -35,7 +35,9 @@ const RENDERER_BIZ = ["sendspin", "airplay"];
 const EXEMPT_RE = /\/\/\s*allow-main-process-render:\s*(\S.*)/;
 
 // 允许出现 child_process.fork 的**唯一**位置:通用宿主自己。
-const FORK_ALLOWED = [`${HOST_DIR_REL}/supervisor.ts`];
+// playerHost 是「每播放器一子进程」隔离架构的第二个宿主族（2026-11-24 播放器
+// 隔离改造）：与 rendererHost 同层的基础设施，自带 fork/心跳/判死/退避重启。
+const FORK_ALLOWED = [`${HOST_DIR_REL}/supervisor.ts`, `backend/src/services/playerHost/host.ts`];
 
 // 「deadline-driven 循环」的形态特征:三条全中才判定(避免关键词误报)。
 const BEAT_SIGNS = [
