@@ -1467,6 +1467,11 @@ export class SendspinGroup {
     if (!ring || ring.length === 0) return;
 
     const ahead = BigInt(this.commonSendAheadUs());
+    // 两个常量必须与「实测积压」完全解耦（2026-11-25 07:35/07:41 两次事故的教训）：
+    //   Q_TARGET_MS      = 水位目标（设备缓冲目标，MA min_buffer 量级）
+    //   BRIDGE_FEED_CAP_US = 投递上沿（允许超前投多少，MA MAX_DEVICE_BUFFER_SECONDS=8s）
+    const Q_TARGET_MS = 2000;
+    const BRIDGE_FEED_CAP_US = 8_000_000;
     for (const [deviceId, handle] of this.bridges) {
       let cursor = this.bcCursor.get(deviceId) ?? 0n;
       // behind 跳转落点：内容超前墙钟 1.8s（投递 ts' = now+1.3s，包提前到达设备）。
@@ -1485,7 +1490,12 @@ export class SendspinGroup {
       // 积压越大 ⇒ 视界越宽 ⇒ 灌得更多 ⇒ 积压更大。真机 iEAST backlog 冲到 22s、目标
       // 22.5s、调度起点排到 22.5s 之后，HiVi queueMs 掉到 202ms ⇒ 用户听到秒级卡顿。
       // MA 从不这么干：视界/窗口是常量量级，实测积压只用于「生产者反压上限」。
-      const horizonFinal = now + BigInt(Math.round(DELIVER_LOOKAHEAD_US)) + ahead + 1_000_000n;
+      // 投递上沿 = **8s**（MA 桥喂 CLI 的封顶 MAX_DEVICE_BUFFER_SECONDS
+      // sendspin_bridge.py:83-89）。视界 ≠ 水位目标：视界是「允许超前投多少」，
+      // 水位目标是「想让设备缓冲多少」（Q_TARGET_MS=2s）。两者都必须是常量：
+      //   · 视界 2s ⇒ 泵产出 30s 却只能投 3.5s，设备永远补不满（真机 queueMs 210ms）；
+      //   · 视界随积压放大 ⇒ 正反馈自激（iEAST backlog 22s 事故）。
+      const horizonFinal = now + BigInt(BRIDGE_FEED_CAP_US) + ahead;
       // 超前跳转阈值保持墙钟锚定：内容超前墙钟超过 lookahead+ahead 才算真超前
       //（跟随游标的 horizonCur 只用于伺服补量，若用它做跳转阈值，
       //  超前 10s 的遗留游标永不触发跳回）
