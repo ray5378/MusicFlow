@@ -828,7 +828,6 @@ export class SendspinGroup {
   private readonly broadcasters = new Map<string, GroupBroadcaster>();
   private readonly bcCursor = new Map<string, bigint>();
   private readonly bcEpoch = new Map<string, number>();
-  private readonly bcDiagAt = new Map<string, bigint>();
   private isolationOn(): boolean {
     return playerIsolationEnabled();
   }
@@ -1566,12 +1565,7 @@ export class SendspinGroup {
     // 内容只有一份，慢设备由各自 sink 的背压 + 丢最旧处理，不需要拦泵。
     // （漏了这一步：设备侧空缓冲 → 请求被挂着 → 泵不再产出 → 环里只有开局两帧，
     //   真机实测 pushed=2、inQueueMs=0、late 7695。）
-    {
-      const ring0 = this.recentByGroup.get(this.encoderKey("pcm", 100));
-      const tail0 = ring0 && ring0.length > 0 ? ring0[ring0.length - 1].tsUs : 0n;
-      const shortOfContent = tail0 === 0n || tail0 < now + 6_000_000n;
-      for (let i = 0; i < 8 && paceBumpBus.peek() > 0 && shortOfContent; i++) paceBumpBus.approve();
-    }
+    for (let i = 0; i < 8 && paceBumpBus.peek() > 0; i++) paceBumpBus.approve();
     const key = this.encoderKey("pcm", 100);
     const ring = this.recentByGroup.get(key);
     const epoch = this.bridgeContentEpoch;
@@ -1617,25 +1611,9 @@ export class SendspinGroup {
       if (!this.bridges.has(id)) bc.removeSink(id);
     }
 
-    // 内容侧诊断（3s 节流）：环里有多少帧、游标落后多少 —— 用于判断是「泵不产」还是「投不出」
-    {
-      const t0 = nowUs();
-      const last = this.bcDiagAt.get(key) ?? 0n;
-      if (t0 - last > 3_000_000n) {
-        this.bcDiagAt.set(key, t0);
-        const cur = this.bcCursor.get(key) ?? 0n;
-        const tail = ring && ring.length > 0 ? ring[ring.length - 1].tsUs : 0n;
-        this.server.log(
-          "info",
-          `bridge-broadcast-diag group=${this.name} ring=${ring?.length ?? 0} cursorVsNowUs=${cur === 0n ? "null" : String(Number(cur - t0))} tailVsNowUs=${tail === 0n ? "null" : String(Number(tail - t0))} bumpQ=${paceBumpBus.peek()}`,
-        );
-      }
-    }
     if (ring && ring.length > 0) {
       let cursor = this.bcCursor.get(key) ?? 0n;
-      // 窗口固定 2s：内容前沿可能被泵推到几十秒之后（实测 tailVsNow=59s），
-      // 用「前沿 − ahead」当上界会让窗口完全落空（第一帧就 > 上界 ⇒ 一帧都投不出）。
-      const horizon = now + 4_000_000n;
+      const horizon = now + BigInt(BRIDGE_PUSH_HORIZON_US) + BigInt(this.commonSendAheadUs());
       for (const e of ring) {
         if (e.ep !== epoch) continue;
         if (e.tsUs <= cursor) continue;
@@ -1643,22 +1621,11 @@ export class SendspinGroup {
         bc.broadcast({ tsUs: Number(e.tsUs), nFrames: Math.round((e.durUs / 1e6) * 48_000), data: e.data });
         cursor = e.tsUs;
       }
-      // 游标下限：内容环有容量上限，落后太多时旧帧已被挤出环。
-      // 若继续按帧追赶，会永远差一大截（真机实测 cursorVsNow 从 -1.5s 一路掉到 -16s，
-      // 设备侧则彻底饿死）。这里把游标拉到「现在 + sendAhead」，跳过的部分不再补。
-      const floor = now;
-      if (cursor < floor) {
-        this.server.log(
-          "warn",
-          `bridge-broadcast-cursor-jump group=${this.name} from=${String(Number(cursor - now))}us to=${String(Number(floor - now))}us（环内旧帧已被挤出，跳过过期内容）`,
-        );
-        cursor = floor;
-      }
       this.bcCursor.set(key, cursor);
     }
     // 预灌：新设备/换代后一次投够（设备侧缓冲否则从 0 起播，必然饥荒）。
     // 稳态每拍仍只投一小段，避免把设备队列顶穿。
-    bc.flush(needPrefill ? 1_600 : 200);
+    bc.flush(needPrefill ? 1_600 : 80);
     // 同步推进 legacy 水位：泵/续产判定（currentGenDeliverableUs、bridgeHealth）
     // 都读这些 watermark 当作「已消费到哪」。广播模式下不写它们，泵会以为
     // 一直没被消费而停止产出（真机实测：pushed 停在 1693 帧 ≈42s 后彻底静音）。
@@ -1691,11 +1658,107 @@ export class SendspinGroup {
       return;
     }
     const now = nowUs();
-    // 控制段（与投递解耦，必须每拍都跑）：
+    // 控制段（两种模式共用，不能跳过）：
     //   [C 2026-11-03] 自动换歌空窗期先把静音尾追到「下沿 + 1 tick」再投递。
+    //   放在 per-bridge 循环之前 —— ring 是组共享的,只需补一次。
+    // ⚠️ 2026-11-23 教训：广播路径早期实现把这一句连同投递段一起 return 掉了，
+    //    结果曲末没有静音尾补位 ⇒ 环耗尽 ⇒ 泵停 ⇒ 播放停在半途。
     this.fillBridgeAutoTrackGap(now);
-    // 唯一投递路径：组内容一次解码 → 广播给每台设备的独立队列/背压。
-    this.bridgeBroadcastTick(now);
+    if (broadcastDeliveryEnabled()) {
+      this.bridgeBroadcastTick(now);
+      return;
+    }
+    for (const [deviceId, b] of this.bridges) {
+      try {
+        // S3(QA):ring 获取与公共 sendAhead 计算都可能触到异常成员/组状态,
+        // 挪进 per-bridge try —— tick 内任何异常都不得冒泡打断定时器循环。
+        const ring = this.recentByGroup.get(this.encoderKey("pcm", 100));
+        if (!ring || ring.length === 0) return;
+        const ahead = BigInt(this.commonSendAheadUs());
+        // 同 backfillBridge(D1):窗口/投递戳不含成员补偿,全成员同源。
+        const shift = this.bridgeDeliveryShiftUs(deviceId);
+        const lo = now + BigInt(BRIDGE_PUSH_FLOOR_US) + ahead - shift;
+        const hi = now + BigInt(BRIDGE_PUSH_HORIZON_US) + ahead - shift;
+        // [诊断 2026-10-31] 窗口对位只读采样(2s 节流)。**不影响投递**,见
+        //  logBridgeWindowDiag:tailVsHiUs 恒 >0 = 内容永久超前窗口上沿(稳态断粮)。
+        this.logBridgeWindowDiag(b, deviceId, ring, lo, hi);
+        // 加压准入（判断「是否需要补」的唯一落点）：
+        //   补 = 让泵更早产出 ⇒ 只有「真的缺料」时才有意义。
+        //   若 ring 里已堆着 ≥6s 未投出去的内容（currentGenDeliverableUs 大），
+        //   瓶颈在投递而非供给 —— 补只会把内容推得更远，丢弃请求。
+        //   240 2026-11-19 18:42 事故：前沿超前 34.96s、连补 287 次、queueMs=0
+        //   ⇒ 一帧都投不出，越补越死。
+        if (paceBumpBus.peek() > 0) {
+          const wm = this.bridgeWatermarks.get(deviceId) ?? 0n;
+          const deliverableUs = this.currentGenDeliverableUs(ring, lo, wm);
+          const deliverableMs = Math.round(Number(deliverableUs) / 1000);
+          if (deliverableUs >= BigInt(BRIDGE_BUMP_MAX_DELIVERABLE_MS) * 1000n) {
+            const deficitMs = paceBumpBus.peekDeficit();
+            const dropped = paceBumpBus.reject();
+            if (deficitMs > 0) this.bridgeBulkDeficitMs.set(deviceId, deficitMs);
+            // [Fix G 2026-11-19] 有料投不出 ⇒ 不是缺料，是**缓冲需要重建**。
+            //   诊断实证（23:48）：投递机制完全正常（n=10、budget 15000、水位逐拍前进），
+            //   但窗口宽度只有 hi−lo=1.5s，每拍只放 250ms；设备侧那 5.5s 缓冲是
+            //   bulkBackfillBridge 一次性灌出来的。inQueue 一旦归零，1x 续杯永远补不回来。
+            //   此前这里只 reject（不补也不重建），于是一直干涸到重启。
+            this.bridgeBulkPending.add(deviceId);
+            this.server.log(
+              "warn",
+              `bridge-push-bulk-rebuild device=${deviceId} deliverableMs=${deliverableMs}` +
+                ` droppedMs=${dropped} deficitMs=${deficitMs} ⇒ 有料投不出，触发 bulk 重建缓冲`,
+            );
+          } else if (
+            // [Fix H 2026-11-20] 桥队列低于目标水位(桥侧 deficit>0)但 ring 里有货(≥6s)
+            //   ⇒ 有效动作是**灌桥**,不是让泵加速吐。窗口投递带宽由时间轴门控
+            //   (窗口宽度 1.5s/拍),泵产得再早也投不进桥队列:240 2026-11-20
+            //   实测 3 次共请求 6000ms,inQueue 只 +2225,其余全堆进 deliverable
+            //   (6025→8225) 撞 8s 天花板才被动转 bulk。deficitMs 由桥侧按
+            //   「目标水位-实际水位」算好,bulkBackfillBridge 会照它限流,
+            //   不会把垫子顶过设备天花板。
+            paceBumpBus.peekDeficit() > 0 &&
+            deliverableUs >= BigInt(BRIDGE_BACKFILL_MAX_US)
+          ) {
+            const deficitMs = paceBumpBus.peekDeficit();
+            const dropped = paceBumpBus.reject();
+            this.bridgeBulkDeficitMs.set(deviceId, deficitMs);
+            this.bridgeBulkPending.add(deviceId);
+            this.server.log(
+              "warn",
+              `bridge-push-topup-bulk device=${deviceId} deliverableMs=${deliverableMs}` +
+                ` inQueueDeficitMs=${deficitMs} droppedMs=${dropped}` +
+                ` ⇒ 桥队列缺料且 ring 有货，直接 bulk 灌桥（泵加速对投递窗口无效）`,
+            );
+          } else {
+            paceBumpBus.approve();
+            this.server.log(
+              "info",
+              `bridge-push-approve-bump device=${deviceId} deliverableMs=${deliverableMs} ⇒ 真缺料，放行`,
+            );
+          }
+        }
+        // 开局 bulk(曲中失声根因修复):换代后等「本代新料 ≥ 6s」一次性批量投递。
+        // 不够 6s 就不触发(换代瞬间 ring 必空,硬投只能投到残羹),tick 照旧 1x 续杯。
+        if (this.bridgeBulkInFlight.has(deviceId)) continue; // bulk 分片让出期间跳过窗口投递(防乱序双写)
+        if (this.bridgeBulkPending.has(deviceId)) {
+          // [Fix 2026-10-31] 判据改为「真实可投存量」(见 currentGenDeliverableUs):
+          // 旧 tailUs 会被垫片/锚点 lead 顶成幻影值,判据成立时可投量远小于 6s。
+          const deliverableUs = this.currentGenDeliverableUs(
+            ring,
+            lo,
+            this.bridgeWatermarks.get(deviceId) ?? 0n,
+          );
+          if (deliverableUs >= BigInt(BRIDGE_BACKFILL_MAX_US)) {
+            this.bridgeBulkPending.delete(deviceId);
+            this.bridgeBulkInFlight.add(deviceId);
+            void this.bulkBackfillBridge(deviceId)
+              .catch(() => { /* 单桥失败不连累组泵 */ })
+              .finally(() => { this.bridgeBulkInFlight.delete(deviceId); });
+            continue;
+          }
+        }
+        this.deliverBridgeWindow(b, deviceId, ring, lo, hi, ahead);
+      } catch { /* 单桥失败不连累组泵 */ }
+    }
   }
 
   /** 单桥窗口投递:从水位(缺失/0n 哨兵 = 当前代次尚未投递)向后扫描 ring:
