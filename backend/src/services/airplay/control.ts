@@ -1505,9 +1505,21 @@ export async function ensureAirplayHost(): Promise<void> {
         void handleAirplaySessionEnded(deviceId, info?.loudnessStderr ?? "", undefined, info),
       // Phase 5(§5.2):子进程崩溃重启成功后重建桥路由(原 token 重发 bridgePrepare,
       // 泵侧 BridgeMember 退避重连同 socketPath 即接上,BOUNDARY{rehost} 新 generation)。
-      onBridgeChildRestarted: () =>
+      // 隔离模式：只重建崩掉那一台（其他设备不受影响）；
+      // 单宿主模型：没有 deviceId，保持整组重建。
+      onBridgeChildRestarted: (deviceId?: string) =>
         void import("../group/protocolPlayer.js")
-          .then((m) => m.rebuildBridgeRoutes())
+          .then(async (m) => {
+            if (deviceId) {
+              await m.rebuildBridgeRouteForDevice(deviceId);
+              // 让泵侧只重置这一台的投递状态（清水位 + bulk 预灌），不动其他设备
+              await import("../sendspin/supervisor.js")
+                .then((sp) => sp.sendspinSupervisor.rpc("bridgeResetDelivery", { deviceId }))
+                .catch(() => undefined);
+            } else {
+              await m.rebuildBridgeRoutes();
+            }
+          })
           .catch((err) => log.warn("桥路由重建失败(忽略)", { err: (err as Error)?.message || err })),
       // 停播空闲回收(2026-11-11):子进程连续 ~3 分钟无 native/桥会话 → 直接停掉,
       // 下次投屏/建桥按 ensureAirplayHost 懒启动。停之前再核一次主进程侧事实

@@ -37,7 +37,9 @@ export interface AirplayHostHooks {
   onSessionEnded?: (deviceId: string, info?: AirplaySessionEndInfo) => void;
   /** Phase 5(§5.2):airplay 子进程崩溃退避重启完成 —— 主进程据此重建桥路由
    *  (原 token 重发 bridgePrepare,泵侧 BridgeMember 退避重连自动接上)。 */
-  onBridgeChildRestarted?: () => void;
+  /** 隔离模式下一台播放器一台子进程：带上 deviceId，主进程只重建那一台的桥路由。
+   *  缺省(undefined) = 旧单宿主模型，整组重建。 */
+  onBridgeChildRestarted?: (deviceId?: string) => void;
   /** 停播空闲回收:子进程连续 N 分钟无 native/桥会话 → 主进程停掉它(下次投屏懒启动)。 */
   onIdleReclaim?: (idleMs: number) => void;
 }
@@ -52,7 +54,7 @@ class AirplaySupervisor extends RendererHostSupervisor<
   AirplayChildEvent,
   AirplayHostHooks
 > {
-  constructor() {
+  constructor(readonly deviceKey: string = "_legacy") {
     super({
       name: "airplay",
       logName: "Airplay-supervisor",
@@ -67,7 +69,9 @@ class AirplaySupervisor extends RendererHostSupervisor<
       // Phase 5:子进程崩溃退避重启成功(respawn=true)→ 业务钩子重建桥路由。
       onChildReady: ({ respawn }) => {
         if (!respawn) return;
-        try { this.hooks?.onBridgeChildRestarted?.(); } catch { /* 重建失败不拖垮宿主 */ }
+        try {
+          this.hooks?.onBridgeChildRestarted?.(this.deviceKey === "_legacy" ? undefined : this.deviceKey);
+        } catch { /* 重建失败不拖垮宿主 */ }
       },
       onEvent: (ev, hooks) => {
         if (ev.t === "sessionEnded") {
@@ -119,8 +123,8 @@ class AirplaySupervisor extends RendererHostSupervisor<
 }
 
 /** 建一台 airplay 子进程宿主（每台播放器一台，见下方 router）。 */
-export function createAirplaySupervisor(): AirplaySupervisor {
-  return new AirplaySupervisor();
+export function createAirplaySupervisor(deviceKey = "_legacy"): AirplaySupervisor {
+  return new AirplaySupervisor(deviceKey);
 }
 
 /**
@@ -195,7 +199,7 @@ export class AirplaySupervisorRouter {
   private async ensure(key: string): Promise<AirplaySupervisor> {
     let host = this.hosts.get(key);
     if (!host) {
-      host = createAirplaySupervisor();
+      host = createAirplaySupervisor(key);
       if (this.hooks) host.setHooks(this.hooks);
       this.hosts.set(key, host);
     }

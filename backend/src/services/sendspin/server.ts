@@ -222,6 +222,13 @@ export interface NoRedialEntry {
 const NO_REDIAL_TTL_MS = 5 * 60 * 1000;
 
 export class SendspinServer {
+  /** 供 IPC 调用：单设备投递重置（水位/游标都在组对象里，转给它所属的组）。 */
+  resetDeviceDelivery(deviceId: string): void {
+    for (const g of this.groups.values()) {
+      (g as unknown as { resetDeviceDelivery(d: string): void }).resetDeviceDelivery(deviceId);
+    }
+  }
+
 
   identity: Identity;
   log: SendspinLog;
@@ -1972,6 +1979,24 @@ export class SendspinGroup {
         ` queueMs=${this.bridgeQueuedMs(b)} queuePeakMs=${queuePeakMs}` +
         ` deliverableMs=${Math.round(Number(this.currentGenDeliverableUs(ring, lo, this.bridgeWatermarks.get(deviceId) ?? 0n)) / 1000)}`,
     );
+  }
+
+  /**
+   * 单台设备重连后重置投递状态（子进程崩溃重启路径）。
+   *
+   * 为什么要单独清：它的新会话是全新的（gen 重新起算、设备缓冲空），但**组时间线没变** ——
+   * 若沿用旧水位，窗口里没有它该投的帧 ⇒ inQueueMs 恒 0、late 一路涨（真机实测 4313）。
+   * 清水位 + 登记 bulk 预灌，只影响这一台，其他设备的水位与游标一律不动。
+   */
+  resetDeviceDelivery(deviceId: string): void {
+    this.bridgeWatermarks.delete(deviceId);
+    this.bridgeShiftAtDelivery.delete(deviceId);
+    this.bridgeBulkInFlight.delete(deviceId);
+    this.bridgeBulkPending.add(deviceId);
+    this.broadcasters.forEach((bc) => bc.removeSink(deviceId));
+    this.bcCursor.delete(this.encoderKey("pcm", 100));
+    this.server.log("info", `bridge-reset-delivery device=${deviceId} ⇒ 清水位 + 登记 bulk 预灌`);
+    this.ensureBridgePushTimer();
   }
 
   /** 单座桥从组里摘除后的投递状态清理(bridgeAttach 同步/摘除路径调用)。 */

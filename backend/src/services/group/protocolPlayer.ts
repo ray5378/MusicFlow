@@ -177,6 +177,14 @@ export async function bridgeLeaveMember(groupId: string, deviceId: string): Prom
 /** airplay 子进程重启后的桥路由重建(§5.2「airplay 子进程崩溃」行):
  *  逐设备用**原 token** 重发 bridgePrepare(同 socketPath ⇒ 泵侧 BridgeMember
  *  退避重连即接上,BOUNDARY{rehost} 新 generation 自动产生)。幂等、全 best-effort。 */
+/** 只重建某一台设备的桥路由（子进程崩溃重启后调用；不碰组里其他设备）。 */
+export async function rebuildBridgeRouteForDevice(deviceId: string): Promise<boolean> {
+  const groupId = groupIdOfBridgeMember(deviceId);
+  if (!groupId) return false;
+  await bridgeLeaveMember(groupId, deviceId).catch(() => false);
+  return bridgeJoinMember(groupId, deviceId);
+}
+
 export async function rebuildBridgeRoutes(onlyGroupId?: string): Promise<number> {
   let ok = 0;
   for (const [groupId, route] of activeBridgeRoutes) {

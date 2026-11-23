@@ -130,6 +130,13 @@ export class SendspinChildController extends ChildRpcHost<SendspinChildToParent,
         }
         return true;
       }
+      case "bridgeResetDelivery": {
+        if (!srv) throw new Error("sendspin server 未运行");
+        const deviceId = String((p as { deviceId?: string } | undefined)?.deviceId || "");
+        if (!deviceId) throw new Error("bridgeResetDelivery 缺少 deviceId");
+        srv.resetDeviceDelivery(deviceId);
+        return true;
+      }
       case "setLogLevel": {
         // 运行期日志等级下发(2026-09-21)。子进程 stdio inherit,日志与主进程同汇
         // docker logs,但它有**独立的 logger 实例**:LOG_LEVEL 只在 fork 时读一次 env,
