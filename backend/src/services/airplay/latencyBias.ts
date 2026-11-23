@@ -123,11 +123,21 @@ export function fastStep(prev: BiasRecord | null, driftUs: number, now = Date.no
 }
 
 /** 观测一次残差并持久化；返回当前生效的偏置。 */
+/** 总开关：默认**关**。
+ *  2026-11-23 真机教训：把「对齐残差」当设备固有偏差去学是错的 —— iEAST 的残差来自
+ *  它自己的队空/抖动（realign 计数里大量是无动作的恒定漂移），学进去只会把偏置越推越大
+ *  （实测推到 800ms+ 后 iEAST 连续 19 分钟灌静音、deltaUs≈-1174s）。要开必须显式设
+ *  MF_AIRPLAY_BIAS=1，且只应在「残差稳定 + 队列健康」的前提下使用。 */
+function biasEnabled(): boolean {
+  return process.env.MF_AIRPLAY_BIAS === "1";
+}
+
 export function observeLatencyBias(
   deviceId: string,
   driftUs: number,
   opts: { fast?: boolean } = {},
 ): BiasObserveResult {
+  if (!biasEnabled()) return { biasUs: 0, changed: false, hits: 0 };
   const map = loadMap();
   const prev = map[deviceId] ?? null;
   // fast：组内成员变更/重对齐风暴时，不等 5 个 tick，直接按整步推进（仍然夹在上限内）。

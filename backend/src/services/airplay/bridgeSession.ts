@@ -2231,6 +2231,7 @@ export class BridgeSession {
           this.lastRealignAt > 0 &&
           now - this.lastRealignAt <= 3_000 &&
           rn - this.lastRealignSeen >= 6;
+        const realignDelta = rn - this.lastRealignSeen;
         if (storm || now > this.lastRealignAt) {
           this.lastRealignSeen = rn;
           this.lastRealignAt = now;
@@ -2238,7 +2239,7 @@ export class BridgeSession {
         const fast = storm || Date.now() < this.fastBiasUntil;
         const r = observeLatencyBias(this.deviceId, drift, { fast });
         if (r.changed) this.aligner?.shiftAnchor(r.biasUs - prev);
-        if (storm) log.warn(`[airplay-bias] 重对齐风暴 dev=${this.deviceId} 3s 内 ${rn - this.lastRealignSeen} 次，走 fast 纠偏`);
+        if (storm) log.warn(`[airplay-bias] 重对齐风暴 dev=${this.deviceId} 近 3s 内 ${realignDelta} 次（bias=${prev}µs）`);
         return drift;
       })(),
       deltaUs,
