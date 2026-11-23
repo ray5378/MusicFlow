@@ -1504,7 +1504,11 @@ export class SendspinGroup {
       // 每次挨饿恢复 +2.3s 棘轮（真机长播 4h：cursor−now 漂到 +10.5s、
       // inQueue 16.5s、late 62 万 ⇒ 用户听到秒级卡顿）。绝对上限 =
       // now + ahead + lookahead(2s) + 1s 余量，超过即拉回 + BOUNDARY 重锚。
-      const ceil = now + ahead + BigInt(Math.round(DELIVER_LOOKAHEAD_US + 1_000_000));
+      // [2026-11-25 07:51] ceil 必须与视界同源：视界 8s + ahead，而 ceil 还写死 3.5s
+      // ⇒ 投到 3.9s 就被判「超前」拉回 now，下一拍又投到 3.9s，循环打架
+      // （真机 bridge-cursor-jump dir=ahead 3890ms 每几十秒一次 = 用户听到的卡顿）。
+      // 由「投递循环自身受 horizonFinal 约束」保证 cursor 不超视界，ceil 只作异常兜底。
+      const ceil = horizonFinal + 1_000_000n;
       // 分级恢复（对齐 MA join-catchup：playback.py:293 落后成员从已提交历史重放、
       // 追上实时尾才晋升管线；历史被挤出才放弃重放）：
       //   · 小缺口（≤1.3s，子进程 late-guard 1.5s 宽限内）：不跳、不重锚 ——
@@ -1543,7 +1547,7 @@ export class SendspinGroup {
       if (sched < floorSched) {
         // 落后（新会话/换代/设备刚追上）⇒ 抬到 now+lead（首帧提前 1s 到达）
         sched = floorSched;
-      } else if (sched > floorSched + 3_000_000n) {
+      } else if (sched > floorSched + 12_000_000n) {
         // 超前超过 3s ⇒ 时间线棘轮，拉回（对应 MA 显著性 rebase；内容跳跃由
         // BOUNDARY 兜底，正常情况下永不触发）
         this.server.log("warn", `bridge-sched-rebase dev=${deviceId} fromMs=${Math.round(Number(sched - now) / 1000)} toMs=${Math.round(Number(floorSched - now) / 1000)}`);
