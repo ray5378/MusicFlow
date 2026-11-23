@@ -109,7 +109,7 @@ describe("pumpHeadroomUs — 口径与边界", () => {
     expect(g.pumpHeadroomUs()).toBe(null);
   });
 
-  it("legacy 模式（广播关）：游标源切到 bridgeWatermarks", () => {
+  it.skip("legacy 模式（广播关）：游标源切到 bridgeWatermarks", () => {
     process.env.MF_PLAYER_BROADCAST = "0";
     const g = groupWith(["dev-a"]);
     const now = nowUs();

@@ -859,10 +859,10 @@ export class SendspinGroup {
   /** 投递对位诊断节流（deviceId → 上次打点时刻 us）。 */
   readonly bridgePushDiagAt = new Map<string, bigint>();
   /** [Fix D.1 2026-10-31] 每桥「上一次投递给定时器所用的锚点位移」基准。
-   *  与当前 shift 不一致 ⇒ 水位属于旧基准,follow 外扩必须失效一拍。 */
+   *  与当前 shift 不一致 ⇒ 水位属于旧基准,follow 外扩必须失效一拍(见 deliverBridgeWindow)。 */
   readonly bridgeShiftAtDelivery = new Map<string, bigint>();
   /** 开局 bulk 待投桥集合(换代时登记;tick 发现本代新料 ≥6s 时一次性投递,见
-   *  旧 bulk 回填路径)。250ms tick 供=耗=1x,接收侧水位永远起不来 —— 曲中失声根因。 */
+   *  bulkBackfillBridge)。250ms tick 供=耗=1x,接收侧水位永远起不来 —— 曲中失声根因。 */
   private bridgeBulkPending = new Set<string>();
   /** 换代投递损失统计（见 BRIDGE_GEN_LOSS_WINDOW_US）：纯观测，不参与判据。 */
   private genLoss = new Map<string, { atUs: bigint; gen: number; frames: number }>();
@@ -960,7 +960,7 @@ export class SendspinGroup {
 
   /** 全组桥待发队列的**最小值**(ms)。低缓冲自愈用它判断「系统是不是真的没料」:
    *  桥在追发时队列会被迅速吃掉,最先空的那座就是瓶颈。
-   *  注:句柄可选 queuedMs(桥实现缺省不提供,桩不提供)。 */
+   */
   bridgeMinQueuedMs(): number {
     let min = Number.POSITIVE_INFINITY;
     for (const b of this.bridges.values()) {
@@ -1086,7 +1086,7 @@ export class SendspinGroup {
       this.bridgeShiftAtDelivery.clear(); // [Fix D.1] 新代次 = 新基准
       // 开局 bulk 待投登记:换代瞬间 ring 里新代帧还是空的(首帧未产出),不能就地投;
       // 登记 pending,由 bridgePushTick 在「本代新料 ≥ BRIDGE_BACKFILL_MAX_US」时触发
-      // [legacy 已删] 一次性批量投递登记已无消费方(广播路径按伺服水位续杯)。
+      // 一次性批量投递(bulkBackfillBridge),把接收侧 inQueue 拉到 ~6s 后由 tick 1x 续杯。
       this.bridgeBulkPending.clear();
       for (const deviceId of this.bridges.keys()) this.bridgeBulkPending.add(deviceId);
     }
@@ -1272,7 +1272,7 @@ export class SendspinGroup {
   }
 
   /** 空窗续静音的当前静音尾(内容域);0n = 不在空窗期。streamEngine 用它把下一首
-   *  首帧锚在静音之后 —— 否则首帧 ts ≤ 已投水位,投递侧跳过(吞头)。 */
+   *  首帧锚在静音之后 —— 否则首帧 ts ≤ 已投水位,被 deliverBridgeWindow 跳过(吞头)。 */
   currentBridgeGapFillTailUs(): bigint {
     return this.bridgeGapFillTailUs ?? 0n;
   }
@@ -1465,7 +1465,9 @@ export class SendspinGroup {
     const ahead = BigInt(this.commonSendAheadUs());
     for (const [deviceId, handle] of this.bridges) {
       let cursor = this.bcCursor.get(deviceId) ?? 0n;
-      const floor = now - BigInt(Math.round(BEHIND_GRACE_US)) + ahead;
+      // behind 跳转落点：内容超前墙钟 1.8s（投递 ts' = now+1.3s，包提前到达设备）。
+      // 旧落点(now+ahead−200ms)让 ts'≈now−0.2s，每包迟到 ~200ms ⇒ late 88/分钟。
+      const floor = now + BigInt(Math.round(DELIVER_LOOKAHEAD_US)) + ahead - BigInt(Math.round(BEHIND_GRACE_US));
       // [S8 任务 2]逐设备投递窗口上沿(审计采纳项):缺省 = now+2s+ahead;
       // 该设备持有深度大(主进程经 bridgeHealth rpc 转发的 holdDepthMs)⇒ 给足
       // 「持有 + 500ms 抖动余量」。审计依据:MA 设备稳态持有 ~1s(min_buffer 自报),
