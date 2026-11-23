@@ -1276,6 +1276,9 @@ export class BridgeSession {
   private ringSeq = 0;
   private ringPrefilled = false;
   private ringTimer: NodeJS.Timeout | null = null;
+  private ringPushCount = 0;
+  private ringPullCount = 0;
+  private ringPulledFrames = 0;
 
   private ingestAudio(a: BridgeAudioEvent): number {
     if (this.closed) return this.backlogMs();
@@ -1286,10 +1289,16 @@ export class BridgeSession {
         this.audioRing = new PlayerRing({ horizonUs: 20_000_000, graceUs: 1_500_000 });
         this.startRingDrain();
       }
-      this.audioRing.push(
+      const pushed = this.audioRing.push(
         { tsUs: Number(a.tsUs), nFrames: a.payload.byteLength >> 2, data: a.payload },
-        Date.now() * 1000,
+        Number(nowUs()),
       );
+      this.ringPushCount += 1;
+      if (this.ringPushCount === 1) {
+        log.warn(
+          `[ring-diag] dev=${this.deviceId} 首帧进环 tsVsNowUs=${Number(a.tsUs) - Number(nowUs())} nFrames=${a.payload.byteLength >> 2} ringSize=${this.audioRing.size}`,
+        );
+      }
       return this.backlogMs();
     }
     return this.ingestAudioDirect(a);
@@ -1301,10 +1310,17 @@ export class BridgeSession {
     this.ringTimer = setInterval(() => {
       const ring = this.audioRing;
       if (!ring || this.closed) return;
-      const nowUs = Date.now() * 1000;
+      const nowUsNow = Number(nowUs());
       const leadUs = this.ringPrefilled ? 1_500_000 : 6_000_000;
       const maxUs = this.ringPrefilled ? 250_000 : 6_000_000;
-      const r = ring.pull(nowUs, leadUs, maxUs);
+      const r = ring.pull(nowUsNow, leadUs, maxUs);
+      this.ringPullCount += 1;
+      this.ringPulledFrames += r.frames.length;
+      if (this.ringPullCount <= 5 || this.ringPullCount % 20 === 0) {
+        log.warn(
+          `[ring-diag] dev=${this.deviceId} pull#${this.ringPullCount} n=${r.frames.length} buffered=${ring.size} jumped=${Math.round(r.jumpedUs / 1000)}ms prefilled=${this.ringPrefilled} pushed=${this.ringPushCount} firstTs=${this.firstFrameTsUs === null ? "null" : "set"}`,
+        );
+      }
       for (const f of r.frames) {
         this.ringSeq += 1;
         this.ingestAudioDirect({
@@ -1329,7 +1345,8 @@ export class BridgeSession {
     const buf = Buffer.from(a.payload.buffer, a.payload.byteOffset, a.payload.byteLength);
     if (this.firstFrameTsUs === null && a.tsUs !== 0n) {
       this.firstFrameTsUs = a.tsUs;
-      void this.maybeBeginStream();
+      log.warn(`[ring-diag] dev=${this.deviceId} firstFrameTsUs 设置 → maybeBeginStream ts=${a.tsUs}`);
+      void this.maybeBeginStream().catch((e) => log.error(`[ring-diag] dev=${this.deviceId} beginStream 失败: ${(e as Error)?.message}`));
     }
     this.inQueue.push({ buf, tsUs: a.tsUs, generation: a.generation });
     this.inBytes += buf.length;

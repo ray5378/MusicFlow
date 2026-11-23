@@ -1538,6 +1538,11 @@ export class SendspinGroup {
    *  · 设备侧缓冲过深返回背压，帧留在自己队列里，超上限才丢最旧。
    */
   private bridgeBroadcastTick(now: bigint): void {
+    // 广播模式下没有 per-device 的「投不出/缺料」判定，泵的加压请求一律放行：
+    // 内容只有一份，慢设备由各自 sink 的背压 + 丢最旧处理，不需要拦泵。
+    // （漏了这一步：设备侧空缓冲 → 请求被挂着 → 泵不再产出 → 环里只有开局两帧，
+    //   真机实测 pushed=2、inQueueMs=0、late 7695。）
+    for (let i = 0; i < 8 && paceBumpBus.peek() > 0; i++) paceBumpBus.approve();
     const key = this.encoderKey("pcm", 100);
     const ring = this.recentByGroup.get(key);
     const epoch = this.bridgeContentEpoch;
