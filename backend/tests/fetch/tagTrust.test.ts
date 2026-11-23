@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   albumIsPlaceholder,
   containsClose,
+  isPlaceholderAlbum,
   nameCloseMatch,
   artistMatches,
   coverAllowed,
@@ -138,5 +139,51 @@ describe("tagTrust — 异体字/人名近似", () => {
     expect(containsClose("叶倩文sallyyeh", "叶蒨文")).toBe(true);
     expect(containsClose("周杰伦jaychou", "周杰伦")).toBe(true);
     expect(containsClose("卫兰janice", "叶蒨文")).toBe(false);
+  });
+});
+
+describe("tagTrust — 封面 selfMeta 与同源分支", () => {
+  it("selfMeta=true：外置来源拒绝、内置/未上报放行", () => {
+    expect(
+      coverAllowed({ title: "t", artist: "a", selfMeta: true, coverProvider: "lx", builtinCover: false }).allowed,
+    ).toBe(false);
+    expect(
+      coverAllowed({ title: "t", artist: "a", selfMeta: true, coverProvider: "q", builtinCover: true }).allowed,
+    ).toBe(true);
+    expect(coverAllowed({ title: "t", artist: "a", selfMeta: true }).allowed).toBe(true);
+  });
+
+  it("专辑可对齐 + 同源命中 ⇒ 放行并给出原因", () => {
+    const d = coverAllowed({
+      title: "歌",
+      artist: "甲",
+      dbAlbum: "专辑A",
+      metaAlbum: "专辑A",
+      metaArtist: "甲",
+      metaProvider: "q",
+      coverProvider: "q",
+    });
+    expect(d.allowed).toBe(true);
+    expect(d.reason).toContain("同一来源");
+  });
+
+  it("别名注入可救回艺名/本名差异", () => {
+    const aliasMatch = (a: unknown, b: unknown) => String(a) === "A-Lin" && String(b) === "黄丽玲";
+    const d = coverAllowed({
+      title: "歌",
+      artist: "A-Lin",
+      dbAlbum: "专辑A",
+      metaAlbum: "专辑A",
+      metaArtist: "黄丽玲",
+      aliasMatch,
+    });
+    expect(d.allowed).toBe(true);
+  });
+
+  it("isPlaceholderAlbum / writableAlbum 边界", () => {
+    expect(isPlaceholderAlbum("unknown album")).toBe(true);
+    expect(isPlaceholderAlbum("")).toBe(true);
+    expect(writableAlbum({ dbAlbum: "  ", metaAlbum: "  ", title: "t" })).toBeNull();
+    expect(writableAlbum({ dbAlbum: "专辑", metaAlbum: "", title: "t" })).toBe("专辑");
   });
 });

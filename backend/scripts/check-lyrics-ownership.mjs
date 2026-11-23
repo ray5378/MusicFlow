@@ -156,11 +156,13 @@ check(
 );
 
 console.log("===== L7 标签修复：写文件前过闸 =====");
+// 2026-11-23：调用点带上了 album 与 { strictArtist: true }，参数跨行书写；
+// 判据改为「闸门调用必须在写入之前，且必须显式要求严格模式」——意图不变，只是不再钉死字面量。
 check(
-  "tagRepair 在 tags.lyric = text 之前调用 lrcBelongsToSong",
-  count(tr, "lrcBelongsToSong(text, { title: songInput.title") === 1 &&
-    tr.indexOf("lrcBelongsToSong(text, { title: songInput.title") <
-      tr.indexOf("tags.lyric = text;"),
+  "tagRepair 在 tags.lyric = text 之前调用 lrcBelongsToSong（且严格模式）",
+  tr.indexOf("lrcBelongsToSong(") > 0 &&
+    tr.indexOf("lrcBelongsToSong(") < tr.indexOf("tags.lyric = text;") &&
+    tr.includes("strictArtist: true"),
   "写进文件后无法自动修复（本次全库实测 1,534 个文件被写坏）",
 );
 check(

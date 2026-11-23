@@ -177,6 +177,7 @@ async function runLoop(p: WdavProgress): Promise<void> {
   let cursor = p.lastPath;
   let sinceYield = 0;
   let consecutiveErrors = 0;
+  let aborted = false;
 
   while (!stopRequested) {
     const rows = selectWdavRows(p.targets, cursor, BATCH);
@@ -194,14 +195,16 @@ async function runLoop(p: WdavProgress): Promise<void> {
           consecutiveErrors += 1;
           if (state) state.lastError = out.note ?? "写盘失败";
           log.warn(`[wdav-repair] 写盘失败 song=${row.id} ${row.title}: ${out.note ?? ""}`);
+          // 先落盘+同步状态，再判熔断（否则 break 时界面看到的 failed 会少 1）
+          saveProgress(p);
+          syncState(p);
           if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
             log.error(
               `[wdav-repair] 连续 ${consecutiveErrors} 首写入失败，熔断本轮（进度停在 ${p.done}/${p.total}）`,
             );
+            aborted = true;
             break;
           }
-          saveProgress(p);
-          syncState(p);
           if (++sinceYield % 50 === 0) await sleep(200);
           continue; // 游标不动
         } else p.skipped += 1;
@@ -212,7 +215,10 @@ async function runLoop(p: WdavProgress): Promise<void> {
         log.warn(`[wdav-repair] 失败 song=${row.id} ${msg}`);
         if (state) state.lastError = msg;
         consecutiveErrors += 1;
-        if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) break;
+        if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+          aborted = true;
+          break;
+        }
         saveProgress(p);
         syncState(p);
         continue;
@@ -225,6 +231,8 @@ async function runLoop(p: WdavProgress): Promise<void> {
       syncState(p);
       if (++sinceYield % 50 === 0) await sleep(200); // 轻节流，给播放/其它请求让路
     }
+    // 熔断后必须跳出外层 while：游标没前进，再查还是同一行 ⇒ 会原地死循环。
+    if (aborted) break;
   }
 
   p.finished = true;
