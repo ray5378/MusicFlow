@@ -17,6 +17,7 @@ import { createWriteStream, mkdirSync, unlinkSync, type WriteStream } from "node
 import net from "node:net";
 import path from "node:path";
 
+import { isStaleFrame } from "./lateFrameGuard.js";
 import { nowUs } from "../../utils/hostClock.js";
 import {
   FrameDecoder,
@@ -305,7 +306,26 @@ export class BridgeServer {
   }
 
   /** AUDIO 分发:优先外部 onAudio;否则落盘模式;两者皆无则计数丢弃。 */
+  /** 过期帧：落后墙钟超过该值就不再往设备喂（只丢自己，不影响其他设备）。 */
+  private lateDropped = 0;
+  private lateLogAtUs = 0n;
+
   private dispatchAudio(frame: BridgeFrame): number | void {
+    // 播放器侧护栏（2026-11-23 隔离改造 S5a）：绝不把「过去的内容」投给设备。
+    // 父侧广播/水位一旦漂移，这里会把过期帧拦在自己这一台，避免
+    // 「喂过去的内容 ⇒ 设备全判 late ⇒ 队列 0 ⇒ 静音垫片」的连锁（真机实测 19 分钟无声）。
+    const nowT = nowUs();
+    // 只在隔离模式启用（开关关闭时与改造前完全一致；旧路径/单测不受影响）
+    if (process.env.MF_PLAYER_ISOLATION === "1" && isStaleFrame(frame.tsUs, nowT)) {
+      this.lateDropped += 1;
+      if (nowT - this.lateLogAtUs > 2_000_000n) {
+        this.lateLogAtUs = nowT;
+        this.log(
+          `late-drop dev=${this.opts.deviceId} gen=${frame.generation} 落后墙钟 ${Number(nowT - frame.tsUs) / 1000}ms（累计 ${this.lateDropped} 帧）`,
+        );
+      }
+      return 0;
+    }
     if (this.handlers.onAudio) {
       return this.handlers.onAudio({
         tsUs: frame.tsUs,
