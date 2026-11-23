@@ -131,6 +131,11 @@ export interface CoverContext {
   /** 封面来源是否内置（内置=有严格评分）；undefined=调用方未上报 */
   builtinCover?: boolean;
   /**
+   * 别名判定注入（artistAlias.artistAliasMatch）。tagTrust 是纯函数层，不能直接 import
+   * artistAlias（后者反过来依赖 tagTrust 的归一函数，会形成循环）。调用点按需传入。
+   */
+  aliasMatch?: (a: unknown, b: unknown) => boolean;
+  /**
    * true = 传入的 meta 就是本曲自身信息（在线封面按需补全场景）。
    * 此时「歌手/专辑一致」是同义反复，不能当归属证据 —— 只校验来源是否可信。
    */
@@ -165,7 +170,10 @@ export function coverAllowed(ctx: CoverContext): CoverDecision {
 
   // ① 元数据在，就按它校验归属（这是唯一能证明"图属于这首歌"的证据）
   if (hasMeta) {
-    if (!artistMatches(ctx.artist, ctx.metaArtist)) {
+    const artistOk =
+      artistMatches(ctx.artist, ctx.metaArtist) ||
+      (ctx.aliasMatch ? ctx.aliasMatch(ctx.artist, ctx.metaArtist) === true : false);
+    if (!artistOk) {
       return {
         allowed: false,
         reason: `歌手不一致(local=${String(ctx.artist ?? "")} meta=${String(ctx.metaArtist ?? "")})`,

@@ -20,6 +20,7 @@ import { applyTagsVariant, type SongTags } from "./tagWriter.js";
 import { containerOfName, readTags, writeTags, type Container, type MemTags } from "./memTags.js";
 import { lrcBelongsToSong } from "../lyricsMatch.js";
 import { albumIsPlaceholder, coverAllowed, isPlaceholderAlbum, needLyricByFile, writableAlbum } from "./tagTrust.js";
+import { artistAliasMatch } from "../artistAlias.js";
 import {
   searchCover,
   searchLyrics,
@@ -236,6 +237,7 @@ export async function repairWebdavSongTags(
       metaArtist: meta?.artist,
       coverProvider,
       builtinCover,
+      aliasMatch: artistAliasMatch,
     });
     if (!coverDecision.allowed) {
       log.warn(

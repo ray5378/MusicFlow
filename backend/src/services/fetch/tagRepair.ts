@@ -75,6 +75,7 @@ import { getDataDir } from "../../utils/env.js";
 import { getSetting, setSetting } from "../settings.js";
 import { searchAlbumConsensus, searchCover, searchLyrics, searchMetadata } from "../../plugins/providers.js";
 import { coverAllowed, needLyricByFile, writableAlbum } from "./tagTrust.js";
+import { artistAliasMatch } from "../artistAlias.js";
 import { lrcBelongsToSong } from "../lyrics.js";
 import { needsAlbumConsensus } from "../source/tagRecovery.js";
 import { cacheRemoteCover, resolveCoverFile } from "../playlistCover.js";
@@ -880,6 +881,7 @@ export async function repairSongTags(songId: string, cfg: FetchConfig): Promise<
           metaProvider,
           coverProvider,
           builtinCover,
+          aliasMatch: artistAliasMatch,
         });
         if (!decision.allowed) {
           log.warn(`封面不可信，跳过 song=${songId} title=${row.title} 原因=${decision.reason}`);
