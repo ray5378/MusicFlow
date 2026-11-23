@@ -1663,17 +1663,30 @@ export class SendspinGroup {
         this.server.log("warn", `bridge-cursor-jump dev=${deviceId} dir=ahead deltaMs=${Math.round(Number(cursor - now) / 1000)} fromMs=${Math.round(Number(cursor - now) / 1000)} toMs=0`);
         cursor = now;
       }
+      // ===== 水位伺服（对齐 MA PushStream 按成员水位供给，push_stream.py:947-963）=====
+      // 旧实现的缺陷：游标每拍推到窗口上沿（交付全部可投内容），下一拍新料只有
+      // 一个 tick 的量 ⇒ 供给速率恒等于消费速率，零余量 ⇒ 设备必然饿死
+      // （2026-11-25 02:13 真机：inQ 125/0、late 1.2 万）。
+      // 正确形态：目标水位 Q_target = max(2s, backlog+500ms)；本拍补量 =
+      // max(0, Q_target − backlogMs)。backlog 每 2s 由 airplay 子进程 tick 上报
+      // （bridgeBacklogMs），低于目标多补、到目标即停 —— 经典水位伺服。
       const shift = this.bridgeDeliveryShiftUs(deviceId);
+      const backlogMs = (this.server as { bridgeBacklogMs?: Map<string, number> }).bridgeBacklogMs?.get(deviceId) ?? 0;
+      const targetMs = Math.max(2000, backlogMs + 500);
+      const dueUs = BigInt(Math.max(0, Math.round((targetMs - backlogMs) * 1000)));
+      let deliveredUs = 0n;
       for (const e of ring) {
         if (e.ep !== epoch) continue;
         if (e.tsUs <= cursor) continue;
-        if (e.tsUs > horizon) break;
+        if (e.tsUs > horizon) break; // 绝对上沿：内容再超前也不预灌
+        if (deliveredUs >= dueUs) break; // 水位到目标：停（等设备消费）
         try {
           handle.pushAudio(e.data, e.tsUs - ahead + shift);
         } catch {
           break; // 该设备投递异常：只影响自己，下一拍重试
         }
         cursor = e.tsUs;
+        deliveredUs += BigInt(Math.round((e.durUs)));
       }
       this.bcCursor.set(deviceId, cursor);
     }
