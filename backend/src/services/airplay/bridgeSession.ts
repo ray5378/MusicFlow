@@ -58,7 +58,6 @@ import { DEFAULT_AIRPLAY_VOLUME } from "./volumeDefault.js";
 import { degreesToDb } from "./decoder.js";
 import { AP2_SEND_ERROR_LIMIT, Ap2StreamSession, type Ap2StreamOptions, type Ap2StreamState } from "./ap2/ap2Stream.js";
 import { createLogger } from "../../utils/logger.js";
-import { getLatencyBiasUs, observeLatencyBias } from "./latencyBias.js";
 
 /**
  * exp4 实验开关(全部缺省关闭 = 现行为):
@@ -258,9 +257,8 @@ export class BridgeTimelineAligner {
   private lastDrift = 0;
 
   constructor(
-    /** 对齐锚点 A(host µs):tsUs 内容时间线零点(第一帧有效 AUDIO 的 tsUs)。
-     *  非 readonly：自适应延迟偏置需要在运行期平移它（见 shiftAnchor）。 */
-    private anchorUs: bigint,
+    /** 对齐锚点 A(host µs):tsUs 内容时间线零点(第一帧有效 AUDIO 的 tsUs)。 */
+    private readonly anchorUs: bigint,
     /** 输出采样率(44.1k 重采样 / 48k 直通)。 */
     private readonly rate: number,
     /** 不动作阈值(帧;默认 441 ≈ 10ms,driftCorrection 同源)。 */
@@ -273,15 +271,6 @@ export class BridgeTimelineAligner {
   /** 内容零点(host µs):早于它的输入帧**整块丢弃、不补静音**(D5,MA `_drop_until_us`)。 */
   get contentAnchorUs(): bigint { return this.anchorUs; }
 
-  /**
-   * 运行期平移锚点（2026-11-23 自适应延迟偏置用）。
-   * 「判差 225ms → 插 225ms 静音 → 下个 tick 仍差 225ms」的死循环，本质是设备固有残差；
-   * 把锚点按残差平移一次即可让 target 与 pos 对齐，不必等下一次建立会话。
-   */
-  shiftAnchor(deltaUs: number): void {
-    if (!Number.isFinite(deltaUs) || deltaUs === 0) return;
-    this.anchorUs += BigInt(Math.round(deltaUs));
-  }
   get pendingDrops(): number { return this.drops; }
   get realignments(): number { return this.realignCount; }
   get lastDriftUs(): number { return this.lastDrift; }
@@ -1069,11 +1058,6 @@ export class BridgeSession {
   // ---- Phase 5:生命周期(代次重锚 / 暂停 / stall / RAOP 重连) ----
   /** 推流被终态打断(boundary/stall):producer 立刻返回 null,旧 streamBridge 循环退出。 */
   private streamAborted = false;
-  /** 组内成员变更后的快速自适应窗口（ms 时间戳）：窗口内不等 5 个 tick，直接整步纠偏。 */
-  private fastBiasUntil = 0;
-  /** 重对齐风暴检测：上一次采样时的 realign 计数与时刻。 */
-  private lastRealignSeen = 0;
-  private lastRealignAt = 0;
   /** 上一 tick 的内容前沿:用于判定「还有料可补」,冻结即跳过 pacing 重锚。 */
   private lastFrontierUs = 0n;
   /** A(垫片窗静音续流):token 递增令在跑 filler 退出;promise 供新流首包前收尾。 */
@@ -1572,8 +1556,7 @@ export class BridgeSession {
       rate,
       resampled: this.resampler !== null,
       nowUs: nowHostUs,
-      // 自适应延迟偏置：按设备学到的固有残差直接抬/压锚点（不改用户可见的成员延迟）
-      anchorShiftUs: (this.opts.anchorShiftUs ?? 0) + getLatencyBiasUs(this.deviceId),
+      anchorShiftUs: this.opts.anchorShiftUs ?? 0,
       forceNow: this.ap2Session === null && raopNowAnchorEnabled(),
       groupAnchorUs: sharedAnchorUs ?? undefined,
     });
@@ -2218,30 +2201,7 @@ export class BridgeSession {
       droppedFrames: this.stats.droppedFrames,
       skippedFrames: this.stats.skippedFrames,
       newgenSkipFrames: this.stats.newgenSkipFrames,
-      driftUs: (() => {
-        // 学一次设备固有残差：稳定同向累计到阈值才推进；推进时把差值即时折叠到当前锚点，
-        // 否则要等下一首歌才会生效（观测实锤：不折叠会一直灌静音到切歌）。
-        const drift = this.aligner?.lastDriftUs ?? 0;
-        const prev = getLatencyBiasUs(this.deviceId);
-        // 风暴判据：3 秒内 realign 次数增量 ≥6 ⇒ 说明在反复插/裁同一段残差，
-        // 立刻走 fast 通道一次到位（正常稳态每秒最多 0~1 次）。
-        const now = Date.now();
-        const rn = this.stats.realignments;
-        const storm =
-          this.lastRealignAt > 0 &&
-          now - this.lastRealignAt <= 3_000 &&
-          rn - this.lastRealignSeen >= 6;
-        const realignDelta = rn - this.lastRealignSeen;
-        if (storm || now > this.lastRealignAt) {
-          this.lastRealignSeen = rn;
-          this.lastRealignAt = now;
-        }
-        const fast = storm || Date.now() < this.fastBiasUntil;
-        const r = observeLatencyBias(this.deviceId, drift, { fast });
-        if (r.changed) this.aligner?.shiftAnchor(r.biasUs - prev);
-        if (storm) log.warn(`[airplay-bias] 重对齐风暴 dev=${this.deviceId} 近 3s 内 ${realignDelta} 次（bias=${prev}µs）`);
-        return drift;
-      })(),
+      driftUs: this.aligner?.lastDriftUs ?? 0,
       deltaUs,
       deltaP95Us: p95,
       samples: this.deltaSamples.length,
@@ -2542,12 +2502,6 @@ export class BridgeSession {
    *  @returns true = 已落到会话(opts 已更新;流在跑时已 retime);false = AP2 出口
    *  (无 RTP 时间线,只能重建桥)或参数非法。
    */
-  /** 组内成员变更（iEAST 加入/离开等）：打开 30s 快速自适应窗口。
-   *  成员一变，组时间线/lead 会重排，成员侧锚点立即失效 ⇒ 不能再等 5 个 tick 才学，
-   *  否则就是实测的「每 250ms 插 225ms 静音、10 秒后彻底无声」。 */
-  markFastBias(ms = 30_000): void {
-    this.fastBiasUntil = Date.now() + ms;
-  }
 
   applyAnchorShift(shiftUs: number): boolean {
     const next = Number.isFinite(shiftUs) ? Math.round(shiftUs) : 0;
@@ -2791,16 +2745,6 @@ export class BridgeSessionManager {
 
   /** D6(2026-11-01):按 deviceId **运行中改成员补偿**(命中即更新并平移设备侧映射)。
    *  @returns true = 设备有桥会话且已接受;false = 无会话(调用方按重建/加入兜底)。 */
-  /** 组内成员变更后，让所有在跑的桥打开快速自适应窗口（成员一多变，锚点全部失效）。 */
-  markAllFastBias(ms = 30_000): number {
-    this.pruneClosed();
-    let n = 0;
-    for (const s of this.sessions.values()) {
-      s.markFastBias(ms);
-      n += 1;
-    }
-    return n;
-  }
 
   setAnchorShift(deviceId: string, shiftUs: number): boolean {
     this.pruneClosed();
