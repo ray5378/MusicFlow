@@ -22,6 +22,27 @@
  *  运行期链路断 ⇒ snapshot().degraded=true,主进程看门狗摘桥并让该设备本流回落 solo cast
  *  (绝不在会话内切协议 = 绝不中途换锚点)。
  */
+//
+// ===== 对标 MA（隔离模式）=====
+// MA 位置：music_assistant/providers/airplay/stream.py:327（每播放器一个专属
+//          cliairplay 子进程：AsyncProcess(args, stdin=True, …)）、
+//          stream.py:1195-1197（「Audio is fed continuously on the process stdin;
+//          the binary reads it into a single ring buffer for the whole session
+//          lifetime (flushed and refilled in place on a seek, never reconnected)」）、
+//          airplay/sendspin_bridge.py:103-106（BRIDGE_MIN_BUFFER_MS=1000）与
+//          :511-517（set_timing(min_buffer_ms=BRIDGE_MIN_BUFFER_MS)）、
+//          sendspin/playback.py:55-64（live 源 send-ahead 固定在 min_buffer_ms floor）。
+// MA 语义：每台播放器的上游缓冲是**该播放器进程私有**的 stdin ring —— 整个会话
+//          生命周期一段缓冲（seek 原地 flush/refill，绝不重连）；供给节奏由
+//          Sendspin 按 min_buffer_ms(1s) 固定 send-ahead 持续维持，而不是由
+//          生产者一次性灌满。
+// 我们：隔离模式（playerIsolationEnabled()）下的 ringBuf + startRingDrain 就是
+//          这层「每设备私有缓冲 + 到达节拍消化」的等价物 —— 上游（组广播/泵）
+//          只管把帧送进本设备的 ring，ring 按 100ms 节拍定量下泄给原有投递链路
+//          （ingestAudioDirect）：设备之间互不共享、互不阻塞。
+//          差异：MA 的 ring 在黑盒二进制里由其自身消化；我们的 ring 在
+//          BridgeSession 内、由本文件定时器节拍显式驱动，参数（容量/节拍/预灌）
+//          因此显式可调、可观测（[ring-diag] 日志）。
 
 import { BridgeServer, type BridgeAudioEvent, type BridgeServerHandlers } from "./bridgeServer.js";
 import { bridgeSocketPath } from "./bridgeChannel.js";
@@ -1286,6 +1307,14 @@ export class BridgeSession {
   private ringPullCount = 0;
   private ringDropOld = 0;
 
+  /**
+   * 隔离模式入口（直通路径见 ingestAudioDirect）：上游帧先进本设备私有 ring，
+   * 再由 startRingDrain 按节拍下泄。
+   *
+   * 对标 MA「每 cliairplay 进程自有 stdin ring」（stream.py:327 每播放器一进程、
+   * :1195-1197 整会话一段 ring）—— 一台设备卡住只堵自己的缓冲，不影响组内
+   * 其它设备；这正是隔离模式要在会话内复刻的缓冲隔离面。
+   */
   private ingestAudio(a: BridgeAudioEvent): number {
     if (this.closed) return this.backlogMs();
     if (!playerIsolationEnabled() || a.tsUs === 0n) return this.ingestAudioDirect(a);
@@ -1306,7 +1335,11 @@ export class BridgeSession {
     this.ringBuf.push({ tsUs: ts, nFrames, data: a.payload });
     this.ringBufUs += durUs;
     this.ringPushCount += 1;
-    // 容量上限 20s：超了丢最旧（保实时）
+    // 容量上限 20s：超了丢最旧（保实时）。
+    // 对标 MA playback.py:82 _PRODUCER_BUFFER_LIMIT_US（值 30_000_000，语义=单成员
+    //   缓冲上限，超则生产者睡眠）。我们：20_000_000 —— 差异原因：MA 用「睡生产者」
+    //   反压，我们的上游是共享泵、不能被单设备反压，所以只能丢最旧；
+    //   私有 ring 只是隔离面缓冲，组侧另有共享环兜底（见 playerRing.ts 同口径注释）。
     while (this.ringBufUs > 20_000_000 && this.ringBuf.length > 1) {
       const f = this.ringBuf.shift()!;
       this.ringBufUs -= (f.nFrames / 48_000) * 1e6;
@@ -1319,7 +1352,20 @@ export class BridgeSession {
     return this.backlogMs();
   }
 
-  /** 到达节拍制：首拍一次灌 6s（等价旧 bulk 回填），之后每 100ms 最多 250ms。 */
+  /**
+   * 到达节拍制：首拍一次灌 6s（等价旧 bulk 回填），之后每 100ms 最多 250ms。
+   *
+   * 对标 MA（固定 send-ahead 的供给节奏）：MA 经 set_timing 声明
+   * min_buffer_ms=1s（sendspin_bridge.py:511-517，值取自 :106），Sendspin 由此
+   * 按**固定 send-ahead** 持续维持桥的 stdin ring（playback.py:55-64：live 源
+   * send-ahead 恒为 min_buffer floor，不随曲长增长）—— 「续杯」节奏由成员缓冲
+   * 水位驱动，不由生产者决定。
+   * 我们：6s 首灌取 MA cold start lead（4.5s = warm headroom 2.5s + connect 预算
+   * 2s，sendspin_bridge.py:92-98）量级偏上，吸收子进程冷启动；稳态 250ms/100ms
+   * = 每个节拍周期补一小步，与 MA「持续小步供给」同形。差异：MA 由库内调度器
+   * 按水位反压续杯，我们是显式定时器 —— ring 在自己代码里，水位/节拍显式
+   * 可观测（[ring-diag]）。
+   */
   private startRingDrain(): void {
     if (this.ringTimer) return;
     this.ringTimer = setInterval(() => {
