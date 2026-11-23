@@ -1614,17 +1614,25 @@ export class SendspinGroup {
     const horizon = now + BigInt(Math.round(DELIVER_LOOKAHEAD_US)) + ahead;
     for (const [deviceId, handle] of this.bridges) {
       let cursor = this.bcCursor.get(deviceId) ?? 0n;
-      // 双向护栏（对齐 MA ANCHOR_REBASE_SIGNIFICANT_US=500ms 的「显著偏移才动」语义）：
-      //   落后 > 500ms ⇒ 跳到可听域下沿（弃历史，不逐帧追）；
-      //   超前 > 2s    ⇒ 跳回窗口上沿（旧开环热切遗留态，设备饿到 now 追上为止）。
       const floor = now - BigInt(Math.round(BEHIND_GRACE_US)) + ahead;
       const ceil = now + BigInt(Math.round(DELIVER_LOOKAHEAD_US)) + ahead;
-      if (cursor !== 0n && cursor < floor) {
+      // 分级恢复（对齐 MA join-catchup：playback.py:293 落后成员从已提交历史重放、
+      // 追上实时尾才晋升管线；历史被挤出才放弃重放）：
+      //   · 小缺口（≤1.3s，子进程 late-guard 1.5s 宽限内）：不跳、不重锚 ——
+      //     循环按序补发积压帧，设备空队列立即回放，快进追上实时，无跳变感；
+      //   · 大缺口（>1.3s，积压帧已被挤出环 / 挨饿期间子进程垫的静音已把
+      //     时间线偏移）：跳到可听域下沿 + BOUNDARY{seek} 清缓冲重锚
+      //     （真机 00:12 实测：大缺口不重锚 ⇒ delta 差 3.1s、每帧迟到 late 4 万+）。
+      const behindGapUs = cursor !== 0n && cursor < floor ? floor - cursor : 0n;
+      if (behindGapUs > BigInt(Math.round(BEHIND_GRACE_US)) + 1_100_000n) {
         this.server.log("warn", `bridge-cursor-jump dev=${deviceId} dir=behind deltaMs=${Math.round(Number(cursor - now) / 1000)} fromMs=${Math.round(Number(cursor - now) / 1000)} toMs=${Math.round(Number(floor - now) / 1000)}`);
         cursor = floor;
+        try {
+          handle.sendBoundary("seek");
+        } catch { /* 单设备重锚失败不连累组 */ }
       } else if (cursor > ceil) {
         // 超前跳回 **now**（不是 ceil）：落后的内容（now~cursor 之间）已经错过，
-        // 把游标放回 now 让后续新内容立即可投（若设为 ceil，窗口内帧全被旧游标挡住 = 白跳）。
+        // 把游标放回 now 让后续新内容立即可投（设为 ceil 会让窗口内帧全被旧游标挡住 = 白跳）。
         this.server.log("warn", `bridge-cursor-jump dev=${deviceId} dir=ahead deltaMs=${Math.round(Number(cursor - now) / 1000)} fromMs=${Math.round(Number(cursor - now) / 1000)} toMs=0`);
         cursor = now;
       }
@@ -1656,6 +1664,8 @@ export class SendspinGroup {
       );
     }
   }
+
+
 
   /** 各设备游标的最小值（全无/全 0 ⇒ 返回 now，即「无历史，需求按 0 计」）。
    *  [S7 复核加固] 按 `bridges.has(id)` 过滤：摘桥残留游标（若有）不计入 min，
