@@ -8,7 +8,8 @@
 //
 // ===== 对标 MA =====
 // MA 位置：无直接对应物。最接近的语义锚点：music_assistant/providers/airplay/
-//          stream.py:333-338 —— connect(use_shared_ptp) 的 docstring：
+//          stream.py:305-320 —— connect(use_shared_ptp)（参数声明在 :307，
+//          「Session-wide decision…」docstring 在 :316-318）：
 //          「Session-wide decision on whether native AirPlay 2 members attach to
 //          the shared PTP clock daemon. The stream session passes the same value
 //          to every member so a group never mixes PTP and NTP timing.」
