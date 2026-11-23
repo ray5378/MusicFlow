@@ -24,7 +24,7 @@ import { randomBytes } from "node:crypto";
 import { loadOrCreateIdentity, type Identity } from "./identity.js";
 import { clearGroupBridges } from "./bridgeAttach.js";
 import { GroupBroadcaster } from "../playerHost/broadcaster.js";
-import { playerIsolationEnabled } from "../playerHost/isolationFlag.js";
+import { broadcastDeliveryEnabled, playerIsolationEnabled } from "../playerHost/isolationFlag.js";
 import { getDeviceVolumeState, DEFAULT_SENDSPIN_VOLUME } from "./deviceState.js";
 import { asInitiator, handshakePayload1, type NoiseSession, type NoiseSuite } from "./handshake.js";
 import { packJsonBody, unpackJsonBody, packAudioChunk, type JsonMessage } from "./framing.js";
@@ -1641,7 +1641,7 @@ export class SendspinGroup {
     // ⚠️ 2026-11-23 教训：广播路径早期实现把这一句连同投递段一起 return 掉了，
     //    结果曲末没有静音尾补位 ⇒ 环耗尽 ⇒ 泵停 ⇒ 播放停在半途。
     this.fillBridgeAutoTrackGap(now);
-    if (this.isolationOn()) {
+    if (broadcastDeliveryEnabled()) {
       this.bridgeBroadcastTick(now);
       return;
     }

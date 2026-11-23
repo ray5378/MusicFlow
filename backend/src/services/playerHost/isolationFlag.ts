@@ -19,3 +19,17 @@ export function playerIsolationEnabled(): boolean {
     return false;
   }
 }
+
+/** 广播投递（实验）：与「每设备子进程」分开，默认关。
+ *  原因（2026-11-23 实测）：广播路径需要把 sendspin 泵的续产耦合一起改写，
+ *  在改写完成前开着它会让播放 ~42s 后断流。隔离/子进程可以先独立启用。 */
+export function broadcastDeliveryEnabled(): boolean {
+  if (!playerIsolationEnabled()) return false;
+  if (process.env.MF_PLAYER_BROADCAST === "1") return true;
+  if (process.env.MF_PLAYER_BROADCAST === "0") return false;
+  try {
+    return fs.existsSync("/app/backend/data/player-broadcast.on");
+  } catch {
+    return false;
+  }
+}
