@@ -19,31 +19,12 @@
 //          进程内所有组走隔离/广播路径，不做逐组混合。差异原因：MA 的开关在
 //          代码/配置里改完重启即可；我们的容器改动成本高（见上），所以额外提供
 //          持久化卷上的标志文件做免重建 A/B —— 这是运维面差异，不是语义分歧。
-import fs from "node:fs";
-
 const DEFAULT_FLAG = "/app/backend/data/player-isolation.on";
 
 export function playerIsolationEnabled(): boolean {
-  if (process.env.MF_PLAYER_ISOLATION === "1") return true;
+  // 2026-11-25 起隔离模式是唯一架构（legacy 投递已删）：默认开启。
+  // 回滚通道：MF_PLAYER_ISOLATION=0 强制关闭（应急用，直连模式未经真机验证）。
   if (process.env.MF_PLAYER_ISOLATION === "0") return false;
-  const file = process.env.MF_ISOLATION_FLAG_FILE || DEFAULT_FLAG;
-  try {
-    return fs.existsSync(file);
-  } catch {
-    return false;
-  }
+  return true;
 }
 
-/** 广播投递（实验）：与「每设备子进程」分开，默认关。
- *  原因（2026-11-23 实测）：广播路径需要把 sendspin 泵的续产耦合一起改写，
- *  在改写完成前开着它会让播放 ~42s 后断流。隔离/子进程可以先独立启用。 */
-export function broadcastDeliveryEnabled(): boolean {
-  if (!playerIsolationEnabled()) return false;
-  if (process.env.MF_PLAYER_BROADCAST === "1") return true;
-  if (process.env.MF_PLAYER_BROADCAST === "0") return false;
-  try {
-    return fs.existsSync("/app/backend/data/player-broadcast.on");
-  } catch {
-    return false;
-  }
-}
