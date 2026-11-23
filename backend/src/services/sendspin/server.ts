@@ -846,6 +846,10 @@ export class SendspinGroup {
   /** deviceId → 桥投递句柄(BridgeMember 满足该接口;测试可注入桩)。 */
   readonly bridges = new Map<string, SendspinBridgeHandle>();
   private readonly bcCursor = new Map<string, bigint>();
+  /** 每设备投递时间线的**末端**（µs，不含 shift）。MA 的 timeline_start 是持续量：
+   *  新帧接上一拍末端而非每拍从 now 重启，否则新帧排到设备缓冲末端之后 ⇒ 空洞 ⇒ 饿死。
+   *  落后 floor ⇒ 抬到 now+lead；超前 >3s ⇒ 拉回；换代/摘桥清空。 */
+  private readonly bcSchedUs = new Map<string, bigint>();
   private readonly bcEpoch = new Map<string, number>();
   private isolationOn(): boolean {
     return playerIsolationEnabled();
@@ -1444,7 +1448,7 @@ export class SendspinGroup {
     if (this.bcEpoch.get(key) !== epoch) {
       this.bcEpoch.set(key, epoch);
       // 换代：内容时间线重锚 ⇒ 各设备游标清零（重灌按新时间线走）
-      for (const id of this.bridges.keys()) this.bcCursor.delete(id);
+      for (const id of this.bridges.keys()) { this.bcCursor.delete(id); this.bcSchedUs.delete(id); }
     }
     // 内容尾（当前代次；环空 ⇒ 0，视为内容不足）
     let tailUs = 0n;
@@ -1476,16 +1480,12 @@ export class SendspinGroup {
       // 无数据(legacy 直读等)⇒ 0 ⇒ 缺省 2s,行为不变。
       // 最小测试桩的 server 可能没有该字段(S8 前建的桩)⇒ 可选读取,缺省 0 = 缺省窗口
       // (与 pumpHeadroomUs 的可选调用同一兼容纪律:桩组零影响)。
-      const holdMs = (this.server as { bridgeBacklogMs?: Map<string, number> }).bridgeBacklogMs?.get(deviceId) ?? 0;
-      // 视界必须跟随「游标 + 目标水位」：墙钟锚定的视界（now+2.5s）在游标贴上它之后
-      // 每拍只放行一个 tick 的新料（供给=消费，零余量）⇒ 设备 backlog 卡 75ms、
-      // 伺服想补 1925ms 却被墙钟窗口封死（2026-11-25 02:2x 真机 bridge-servo 实锤：
-      // dueMs=1925 deliveredMs=250）。取两者较大者：墙钟形态用于游标归零/新时间线，
-      // 游标形态用于伺服补量。ceil 与投递 break 同值（S8 不变式）。
-      const horizon = now + BigInt(Math.round(Math.max(DELIVER_LOOKAHEAD_US, holdMs * 1000 + 500_000))) + ahead;
-      const targetMs = Math.max(2000, holdMs + 500);
-      const horizonCur = cursor + BigInt(targetMs * 1000);
-      const horizonFinal = horizon > horizonCur ? horizon : horizonCur;
+      // 视界 = **固定墙钟窗口**（now + lookahead + ahead + 1s 余量）。
+      // [2026-11-25 07:35 自激事故] 旧实现视界跟随「游标+目标水位」且目标=max(2s,积压+500ms)：
+      // 积压越大 ⇒ 视界越宽 ⇒ 灌得更多 ⇒ 积压更大。真机 iEAST backlog 冲到 22s、目标
+      // 22.5s、调度起点排到 22.5s 之后，HiVi queueMs 掉到 202ms ⇒ 用户听到秒级卡顿。
+      // MA 从不这么干：视界/窗口是常量量级，实测积压只用于「生产者反压上限」。
+      const horizonFinal = now + BigInt(Math.round(DELIVER_LOOKAHEAD_US)) + ahead + 1_000_000n;
       // 超前跳转阈值保持墙钟锚定：内容超前墙钟超过 lookahead+ahead 才算真超前
       //（跟随游标的 horizonCur 只用于伺服补量，若用它做跳转阈值，
       //  超前 10s 的遗留游标永不触发跳回）
@@ -1507,40 +1507,60 @@ export class SendspinGroup {
       // （对齐 MA join-catchup 补发语义；旧实现按名义 ts 投递才会过期 ⇒ 跳转）。
       // ahead 兜底护栏保留：游标超前墙钟过多（理论上调度锚定下不再发生）时拉回。
       if (cursor > ceil) {
-        // 超前兜底：游标拉回 now，后续帧按 now 起排（调度锚定，无迟到）。
+        // 超前兜底：游标拉回 now，时间线一并重置（后续帧从 now+lead 起排，无迟到）。
         this.server.log("warn", `bridge-cursor-jump dev=${deviceId} dir=ahead deltaMs=${Math.round(Number(cursor - now) / 1000)} fromMs=${Math.round(Number(cursor - now) / 1000)} toMs=0`);
         cursor = now;
+        this.bcSchedUs.delete(deviceId);
       }
-      // ===== 水位伺服（对齐 MA PushStream 按成员水位供给，push_stream.py:947-963）=====
-      // 旧实现的缺陷：游标每拍推到窗口上沿（交付全部可投内容），下一拍新料只有
-      // 一个 tick 的量 ⇒ 供给速率恒等于消费速率，零余量 ⇒ 设备必然饿死
-      // （2026-11-25 02:13 真机：inQ 125/0、late 1.2 万）。
-      // 正确形态：目标水位 Q_target = max(2s, backlog+500ms)；本拍补量 =
-      // max(0, Q_target − backlogMs)。backlog 每 2s 由 airplay 子进程 tick 上报
-      // （bridgeBacklogMs），低于目标多补、到目标即停 —— 经典水位伺服。
+      // ===== 每设备投递：连续时间线 + 固定水位目标（MA 语义）=====
+      // 概念纠正（2026-11-25 07:35 真机自激事故，两条都是把「实测值」当「设定值」）：
+      //   ① **水位目标必须是固定值**。MA 的 min_buffer 是设备自报常量（缺省 1000ms），
+      //      实测积压只用于生产者反压。我们把实测积压当目标 ⇒ 积压↑目标↑灌更多↑
+      //      积压↑↑（正反馈）。故目标固定 Q_TARGET_MS，补量钳在 [0, Q_TARGET_MS]。
+      //   ② **调度时间线必须连续单调**。MA 的 timeline_start = commit_start_us −
+      //      produced_audio_us 是持续量，不是每拍重置。每拍从 now+target 重启会让
+      //      新帧排到设备缓冲末端之后 ⇒ 空洞 ⇒ 设备队列耗尽（queueMs 202ms）⇒ 卡顿。
+      //      故 per-device 记 bcSchedUs，新帧接上一拍末端，仅在落后/超前过多时纠正。
+      const Q_TARGET_MS = 2000;           // 固定水位目标（MA min_buffer 量级）
+      const REQUIRED_LEAD_US = 1_000_000; // 首帧至少提前 1s 到达设备（MA required_lead）
       const shift = this.bridgeDeliveryShiftUs(deviceId);
       const backlogMs = (this.server as { bridgeBacklogMs?: Map<string, number> }).bridgeBacklogMs?.get(deviceId) ?? 0;
-      const dueUs = BigInt(Math.max(0, Math.round((targetMs - backlogMs) * 1000)));
+      // 本拍补量 = 目标 − 实测积压，钳在 [0, Q_TARGET_MS]。
+      // 上界钳制是防自激的关键：积压已超目标 ⇒ due=0 不补（子进程 drain 自然消化）。
+      const dueUs = BigInt(Math.max(0, Math.min(Q_TARGET_MS, Q_TARGET_MS - backlogMs)) * 1000);
+      const floorSched = now + BigInt(REQUIRED_LEAD_US);
+      let sched = this.bcSchedUs.get(deviceId) ?? 0n;
+      if (sched < floorSched) {
+        // 落后（新会话/换代/设备刚追上）⇒ 抬到 now+lead（首帧提前 1s 到达）
+        sched = floorSched;
+      } else if (sched > floorSched + 3_000_000n) {
+        // 超前超过 3s ⇒ 时间线棘轮，拉回（对应 MA 显著性 rebase；内容跳跃由
+        // BOUNDARY 兜底，正常情况下永不触发）
+        this.server.log("warn", `bridge-sched-rebase dev=${deviceId} fromMs=${Math.round(Number(sched - now) / 1000)} toMs=${Math.round(Number(floorSched - now) / 1000)}`);
+        sched = floorSched;
+      }
+      // 积压严重超目标（>3× 目标）⇒ 一次性自愈：BOUNDARY 清设备缓冲 + 时间线/游标重置。
+      // 22s 存量靠 drain 消化会让设备延迟 22s（能听但不正常），一次重锚更干净。
+      if (backlogMs > 3 * Q_TARGET_MS) {
+        this.server.log("warn", `bridge-backlog-reset dev=${deviceId} backlogMs=${backlogMs} limitMs=${3 * Q_TARGET_MS}`);
+        try { handle.sendBoundary("seek"); } catch { /* 单设备重锚失败不连累组 */ }
+        this.bcSchedUs.delete(deviceId);
+        sched = floorSched;
+        cursor = now; // 跳过 now 之前的存量帧（已由 BOUNDARY 舍弃），只投未来内容
+      }
       let deliveredUs = 0n;
       let firstCand = 0n;
       let candCount = 0;
       let staleSkip = 0;
-      // [2026-11-25 调度锚定投递，对齐 MA _commit_pending_chunks 的
-      //  timeline_start_us = commit_start_us − produced_audio_us 语义]
-      // 时间线锚定**真实消费**：每帧投递 ts 从 now 起排（首帧 = now + shift），
-      // 后续逐帧 +dur。名义时间线（e.tsUs）的漂移被调度本身吸收 ——
-      // 长播不再出现「名义 ts 落后墙钟 ⇒ RAOP 补发过期包 ⇒ 秒级卡顿」。
-      // shift（成员延迟补偿，正=更晚出声）加在调度起点。
-      let sched = now + shift;
       for (const e of ring) {
         if (e.ep !== epoch) { staleSkip += 1; continue; }
         if (e.tsUs <= cursor) continue;
         if (firstCand === 0n) firstCand = e.tsUs;
-        if (e.tsUs > horizonFinal) break; // 视界：max(墙钟窗口, 游标+目标水位)
+        if (e.tsUs > horizonFinal) break; // 固定墙钟视界
         if (deliveredUs >= dueUs) break; // 水位到目标：停（等设备消费）
         candCount += 1;
         try {
-          handle.pushAudio(e.data, sched);
+          handle.pushAudio(e.data, sched + shift);
         } catch (err) {
           this.server.log("warn", `bridge-servo-err dev=${deviceId} pushAudio 抛错: ${(err as Error).message}`);
           break;
@@ -1549,6 +1569,7 @@ export class SendspinGroup {
         cursor = e.tsUs;
         deliveredUs += BigInt(Math.round(e.durUs));
       }
+      this.bcSchedUs.set(deviceId, sched);
       this.bcCursor.set(deviceId, cursor);
       // 伺服诊断（2s 节流，与逐设备诊断共用节流表）
       {
@@ -1558,7 +1579,7 @@ export class SendspinGroup {
           this.bridgeDiagLogAt.set(deviceId, t0);
           this.server.log(
             "info",
-            `bridge-servo dev=${deviceId} cursorVsNow=${Math.round(Number(cursor - now) / 1000)}ms backlogMs=${backlogMs} targetMs=${targetMs} dueMs=${Math.round(Number(dueUs) / 1000)} deliveredMs=${Math.round(Number(deliveredUs) / 1000)} aheadMs=${Math.round(Number(ahead) / 1000)} horizonMs=${Math.round(Number(horizon - now) / 1000)} firstCandVsNow=${firstCand === 0n ? "null" : String(Math.round(Number(firstCand - now) / 1000))} cand=${candCount} oldEp=${staleSkip}`,
+            `bridge-servo dev=${deviceId} cursorVsNow=${Math.round(Number(cursor - now) / 1000)}ms schedVsNow=${Math.round(Number(sched - now) / 1000)}ms backlogMs=${backlogMs} targetMs=${Q_TARGET_MS} dueMs=${Math.round(Number(dueUs) / 1000)} deliveredMs=${Math.round(Number(deliveredUs) / 1000)} aheadMs=${Math.round(Number(ahead) / 1000)} horizonMs=${Math.round(Number(horizonFinal - now) / 1000)} firstCandVsNow=${firstCand === 0n ? "null" : String(Math.round(Number(firstCand - now) / 1000))} cand=${candCount} oldEp=${staleSkip}`,
           );
         }
       }
@@ -1649,6 +1670,7 @@ export class SendspinGroup {
       this.endBridgeAutoTrackGap("no-bridge");
       this.stopBridgePushTimer();
       this.bcCursor.clear();
+      this.bcSchedUs.clear();
       this.bcEpoch.clear();
       return;
     }
@@ -1683,6 +1705,7 @@ export class SendspinGroup {
     // deviceId 键控,删组键是永久 no-op;重连重置语义本就要求清**该设备**游标
     // （冻结游标残留会污染 minCursorOf/pumpHeadroomUs 的 min）。
     this.bcCursor.delete(deviceId);
+    this.bcSchedUs.delete(deviceId);
     this.server.log("info", `bridge-reset-delivery device=${deviceId} ⇒ 清水位 + 登记 bulk 预灌`);
     this.ensureBridgePushTimer();
   }
@@ -1702,6 +1725,7 @@ export class SendspinGroup {
     this.bridgeDiagLogAt.delete(deviceId);
     this.bridgePushDiagAt.delete(deviceId);
     this.bcCursor.delete(deviceId); // 摘桥必须同步摘游标（见上方注释,饿死链根因）
+    this.bcSchedUs.delete(deviceId); // 时间线末端同摘（与游标同一条饿死链）
     if (this.bridges.size === 0) this.stopBridgePushTimer();
   }
 

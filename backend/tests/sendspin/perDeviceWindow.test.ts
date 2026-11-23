@@ -27,8 +27,10 @@ const liveGroups: SendspinGroup[] = [];
  *  组 tick 经 this.server 读取。 */
 function makeServerStub() {
   const map = new Map<string, number>();
+  const logs: string[] = [];
   return {
-    log() {},
+    log(_level: string, m: string) { logs.push(String(m)); },
+    logs,
     bridgeBacklogMs: map,
     setBridgeBacklog(m: Record<string, number>) {
       map.clear();
@@ -48,7 +50,7 @@ function groupWith(bridges: string[]): { g: SendspinGroup; srv: ReturnType<typeo
       deviceId: id,
       pushed,
       pushAudio(data: Uint8Array, ts: bigint) { pushed.push({ data: Uint8Array.from(data), ts }); },
-      sendBoundary() {},
+      sendBoundary() { (this as any).boundaryCalls = ((this as any).boundaryCalls ?? 0) + 1; },
     } as any);
   }
   liveGroups.push(g);
@@ -87,21 +89,20 @@ describe("逐设备投递窗口 — broadcast tick(修复点)", () => {
     expect(b.pushed.length).toBe(0);
   });
 
-  it("holdDepth=4s ⇒ 窗口 4.5s:+4s 帧照常投出(修复点:下限不再贴 0)", () => {
+  it("积压已超目标(4s > 2s) ⇒ due=0 不补(防自激:积压不得放大目标)", () => {
     const { g, srv } = groupWith(["dev-a"]);
     const now = nowUs();
     seedEpoch(g);
-    addRingFrame(g, now + 4_000_000n);
+    addRingFrame(g, now + 1_000_000n);
     srv.setBridgeBacklog({ "dev-a": 4000 });
     const b = g.bridges.get("dev-a") as any;
     (g as any).bridgeBroadcastTick(now);
-    // max(2s, 4s+500ms) = 4.5s ⇒ +4s 帧落窗内 ⇒ 投出(缺省 2s 窗口下会被 break)
-    expect(b.pushed.length).toBeGreaterThan(0);
-    // 游标推进到该帧(S6 语义)
-    expect((g as any).bcCursor.get("dev-a")).toBe(now + 4_000_000n);
+    // 旧实现 max(2s, 积压+500ms) ⇒ 积压越大窗口越宽 ⇒ 灌更多 ⇒ 积压更大(正反馈,
+    // 真机 iEAST 22s 事故)。新语义:目标固定 2s,积压 4s 已超 ⇒ 本拍不补。
+    expect(b.pushed.length).toBe(0);
   });
 
-  it("holdDepth 超大(60s)⇒ 上沿跟着放大,但游标超前护栏用同值(不白放宽)", () => {
+  it("积压严重超目标(60s > 3×2s) ⇒ 一次性自愈:BOUNDARY 重锚 + 时间线/游标重置", () => {
     const { g, srv } = groupWith(["dev-a"]);
     const now = nowUs();
     seedEpoch(g);
@@ -109,8 +110,10 @@ describe("逐设备投递窗口 — broadcast tick(修复点)", () => {
     srv.setBridgeBacklog({ "dev-a": 60_000 });
     const b = g.bridges.get("dev-a") as any;
     (g as any).bridgeBroadcastTick(now);
-    // 上沿 = now+60.5s ⇒ +30s 帧投出;若护栏仍用 2s 旧值,+30s 游标早被跳回 = 白放宽
-    expect(b.pushed.length).toBeGreaterThan(0);
+    expect((b as any).boundaryCalls ?? 0).toBeGreaterThan(0);
+    expect((srv as any).logs.some((l: string) => l.includes("bridge-backlog-reset"))).toBe(true);
+    expect(b.pushed.length).toBe(0);
+    expect((g as any).bcCursor.get("dev-a")).toBe(now);
   });
 
   it("holdDepth 小(100ms)⇒ max(2s, 600ms) = 2s:行为与缺省一致", () => {
