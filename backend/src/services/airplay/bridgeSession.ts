@@ -1285,6 +1285,13 @@ export class BridgeSession {
     // 隔离模式：帧先进本进程的环（去重/过期丢弃），由 ringTimer 按节拍取出发送。
     // 预灌因此落在**本进程**（旧路径靠父侧 bulk 回填，2026-11-23 实测）。
     if (playerIsolationEnabled() && a.tsUs !== 0n) {
+      // 换代（切歌/seek）：内容时间线整体重锚，ts 重新起算 ⇒ 环必须重建，
+      // 否则旧游标远在新 ts 之前，新帧全被判“已过期”丢弃（真机实测：pushed 停在 1693）。
+      if (this.audioRing && a.generation !== 0 && a.generation !== this.generation) {
+        this.audioRing = new PlayerRing({ horizonUs: 20_000_000, graceUs: 1_500_000 });
+        this.ringPrefilled = false;
+        log.warn(`[ring-diag] dev=${this.deviceId} 换代重建环 gen ${this.generation}→${a.generation}`);
+      }
       if (!this.audioRing) {
         this.audioRing = new PlayerRing({ horizonUs: 20_000_000, graceUs: 1_500_000 });
         this.startRingDrain();

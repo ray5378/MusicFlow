@@ -1629,13 +1629,16 @@ export class SendspinGroup {
       return;
     }
     const now = nowUs();
+    // 控制段（两种模式共用，不能跳过）：
+    //   [C 2026-11-03] 自动换歌空窗期先把静音尾追到「下沿 + 1 tick」再投递。
+    //   放在 per-bridge 循环之前 —— ring 是组共享的,只需补一次。
+    // ⚠️ 2026-11-23 教训：广播路径早期实现把这一句连同投递段一起 return 掉了，
+    //    结果曲末没有静音尾补位 ⇒ 环耗尽 ⇒ 泵停 ⇒ 播放停在半途。
+    this.fillBridgeAutoTrackGap(now);
     if (this.isolationOn()) {
       this.bridgeBroadcastTick(now);
       return;
     }
-    // [C 2026-11-03] 自动换歌空窗期:先把静音尾追到「下沿 + 1 tick」再投递。
-    // 放在 per-bridge 循环之前 —— ring 是组共享的,只需补一次。
-    this.fillBridgeAutoTrackGap(now);
     for (const [deviceId, b] of this.bridges) {
       try {
         // S3(QA):ring 获取与公共 sendAhead 计算都可能触到异常成员/组状态,
