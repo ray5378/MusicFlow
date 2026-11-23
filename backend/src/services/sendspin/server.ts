@@ -23,6 +23,7 @@ import WebSocket, { WebSocketServer } from "ws";
 import { randomBytes } from "node:crypto";
 import { loadOrCreateIdentity, type Identity } from "./identity.js";
 import { clearGroupBridges } from "./bridgeAttach.js";
+import { GroupBroadcaster } from "../playerHost/broadcaster.js";
 import { getDeviceVolumeState, DEFAULT_SENDSPIN_VOLUME } from "./deviceState.js";
 import { asInitiator, handshakePayload1, type NoiseSession, type NoiseSuite } from "./handshake.js";
 import { packJsonBody, unpackJsonBody, packAudioChunk, type JsonMessage } from "./framing.js";
@@ -814,6 +815,14 @@ export class SendspinGroup {
   // 投递点在 pushFrame 的 pcm:100 编码组循环体里(BLK-01 虚拟组保证组存在)。
   /** deviceId → 桥投递句柄(BridgeMember 满足该接口;测试可注入桩)。 */
   readonly bridges = new Map<string, SendspinBridgeHandle>();
+  /** 新模型（MF_PLAYER_ISOLATION=1）：一次解码 → 广播 → 每设备独立队列/背压。
+   *  与旧的「共享 ring + 每设备单水位 + bulk 回填」并行存在，开关切换，互不影响。 */
+  private readonly broadcasters = new Map<string, GroupBroadcaster>();
+  private readonly bcCursor = new Map<string, bigint>();
+  private readonly bcEpoch = new Map<string, number>();
+  private isolationOn(): boolean {
+    return process.env.MF_PLAYER_ISOLATION === "1";
+  }
   /** 「控制端全断、仅剩桥在播」的终态回收定时器(见 armBridgeLonelyCleanup)。 */
   private bridgeLonelyTimer: ReturnType<typeof setTimeout> | null = null;
   /** 当前生效的桥规格(bridgeAttach 同步时记录;seekCore 重建路径据此透传)。 */
@@ -1519,13 +1528,96 @@ export class SendspinGroup {
 
   /** 补投 tick:把每座桥水位之后、落在可听域窗口内的当前代次帧推给桥。
    *  public 仅供单测确定性驱动(绕开真实定时器);生产由 ensureBridgePushTimer 调。 */
+  /**
+   * 新模型投递：组内容只解码一次 → 广播给每台设备的独立 sink。
+   *
+   * 替代旧路径里的 `bridgeWatermarks` / `bridgeBulkPending` / `deliverBridgeWindow`：
+   *  · 游标**全组一个**（内容时间线只有一个），不再出现「两台设备游标各漂各的」；
+   *  · 每台设备的积压、丢弃、背压各自独立（慢的设备只让自己丢帧）；
+   *  · 设备侧缓冲过深返回背压，帧留在自己队列里，超上限才丢最旧。
+   */
+  private bridgeBroadcastTick(now: bigint): void {
+    const key = this.encoderKey("pcm", 100);
+    const ring = this.recentByGroup.get(key);
+    const epoch = this.bridgeContentEpoch;
+
+    // 换代：内容时间线整体重锚 ⇒ 游标清零 + 清空所有设备队列
+    if (this.bcEpoch.get(key) !== epoch) {
+      this.bcEpoch.set(key, epoch);
+      this.bcCursor.set(key, 0n);
+      for (const bc of this.broadcasters.values()) bc.resetAll();
+    }
+    const bc = this.broadcasters.get(key) ?? new GroupBroadcaster();
+    this.broadcasters.set(key, bc);
+
+    // 设备进出：以 bridges 为准同步 sink 集合
+    for (const deviceId of this.bridges.keys()) {
+      if (!bc.has(deviceId)) {
+        bc.addSink(deviceId, {
+          maxQueue: 400,
+          push: (f) => {
+            const handle = this.bridges.get(deviceId);
+            if (!handle) return true; // 设备已摘除：直接丢弃
+            // 设备侧排队过深 ⇒ 背压（帧留在本设备队列里，不阻塞别人）
+            const queued = handle.queuedMs ?? 0;
+            if (queued > 4000) return false; // 设备侧排队 >4s：先背压，帧留在本设备队列
+            try {
+              handle.pushAudio(f.data, BigInt(f.tsUs));
+              return true;
+            } catch {
+              return false;
+            }
+          },
+        });
+      }
+    }
+    for (const id of bc.sinkIds()) {
+      if (!this.bridges.has(id)) bc.removeSink(id);
+    }
+
+    if (ring && ring.length > 0) {
+      let cursor = this.bcCursor.get(key) ?? 0n;
+      const horizon = now + BigInt(BRIDGE_PUSH_HORIZON_US) + BigInt(this.commonSendAheadUs());
+      for (const e of ring) {
+        if (e.ep !== epoch) continue;
+        if (e.tsUs <= cursor) continue;
+        if (e.tsUs > horizon) break;
+        bc.broadcast({ tsUs: Number(e.tsUs), nFrames: Math.round((e.durUs / 1e6) * 48_000), data: e.data });
+        cursor = e.tsUs;
+      }
+      this.bcCursor.set(key, cursor);
+    }
+    bc.flush();
+
+    // 逐设备诊断（2s 节流）：积压/丢弃/最后投出时刻
+    const st = bc.stats();
+    const t = nowUs();
+    for (const [deviceId, s1] of Object.entries(st)) {
+      const last = this.bridgeDiagLogAt.get(deviceId) ?? 0n;
+      if (t - last < BRIDGE_WINDOW_DIAG_THROTTLE_US) continue;
+      this.bridgeDiagLogAt.set(deviceId, t);
+      this.server.log(
+        "info",
+        `bridge-broadcast group=${this.name} device=${deviceId} queued=${s1.queued}` +
+          ` delivered=${s1.delivered} dropped=${s1.dropped} lastTsVsNowUs=${s1.lastTsUs === 0 ? "null" : String(Math.round(s1.lastTsUs - Number(t)))}`,
+      );
+    }
+  }
+
   bridgePushTick(): void {
     if (this.bridges.size === 0) {
       this.endBridgeAutoTrackGap("no-bridge");
       this.stopBridgePushTimer();
+      this.broadcasters.clear();
+      this.bcCursor.clear();
+      this.bcEpoch.clear();
       return;
     }
     const now = nowUs();
+    if (this.isolationOn()) {
+      this.bridgeBroadcastTick(now);
+      return;
+    }
     // [C 2026-11-03] 自动换歌空窗期:先把静音尾追到「下沿 + 1 tick」再投递。
     // 放在 per-bridge 循环之前 —— ring 是组共享的,只需补一次。
     this.fillBridgeAutoTrackGap(now);
