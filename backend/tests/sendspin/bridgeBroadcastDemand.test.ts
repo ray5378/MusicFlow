@@ -114,9 +114,11 @@ describe("bridgeBroadcastTick — 游标对称跳转接线（按设备键）", (
     const now = nowUs();
     const A = aheadOf(g);
     seedEpoch(g);
-    // 可听域下沿 floor = now + A − 200ms；再落后 1.5s 即触发 behind 跳
-    const seeded = now + A - 200_000n - 1_500_000n;
-    const frameTs = seeded + 1_600_000n; // 跳转后窗口内的帧（≥floor，≤horizon）
+    // 新 floor = now + A + 1.8s（behind 跳转落点：内容超前墙钟 1.8s）；
+    // seeded 比 floor 再落后 1.5s ⇒ 触发 behind 跳
+    const floorTs = now + A + 1_800_000n; // 实际 floor = now + DELIVER_LOOKAHEAD + ahead − BEHIND_GRACE = now+A+2s−200ms+200ms…按实现=now+A+1.8s
+    const seeded = floorTs - 1_500_000n;
+    const frameTs = floorTs + 100_000n; // 跳转后窗口内的帧（≥floor）
     addRingFrame(g, frameTs);
     (g as any).bcCursor.set("ap-1", seeded);
     (g as any).bridgeBroadcastTick(now);
@@ -154,8 +156,8 @@ describe("bridgeBroadcastTick — 游标对称跳转接线（按设备键）", (
     const now = nowUs();
     const A = aheadOf(g);
     seedEpoch(g);
-    addRingFrame(g, now + A + 250_000n);
-    (g as any).bcCursor.set("ap-1", now + A);
+    addRingFrame(g, now + A + 2_100_000n);
+    (g as any).bcCursor.set("ap-1", now + A + 1_800_000n);
     (g as any).bridgeBroadcastTick(now);
     expect((g as any).logs.some((l: string) => l.includes("bridge-cursor-jump"))).toBe(false);
   });
