@@ -1,9 +1,12 @@
 // ==================== 广播投递闭环：contentDemand 纯函数单测 ====================
 //
-// 钉死三件事（改动前是开环，真机表现为「内容堆到 59s 之外、设备饿死」）：
+// 钉死四件事（改动前是开环，真机表现为「内容堆到 59s 之外、设备饿死」）：
 //   ① 投递窗口：下沿贴已消费水位（最多回看 200ms）、上沿只前瞻 2s；
-//   ② 游标落后：> 1s 直接跳到 now（不追历史），≤ 1s 正常逐帧补；
-//   ③ 泵加速闸门：内容够就**不放行**，内容不足且设备落后才放行，设备水位未知按可放行。
+//   ② 游标偏离：落后 >500ms（MA ANCHOR_REBASE_SIGNIFICANT_US）或超前出窗口
+//      （> now + 2s）都直接跳回 now —— 落后跳弃历史、超前跳弃「够不着的未来」；
+//   ③ 泵加速闸门：内容够（≥30s，对齐 MA _PRODUCER_BUFFER_LIMIT_US）就**不放行**，
+//      内容不足且设备落后才放行，设备水位未知按可放行；
+//   ④ contentAheadUs：环空 0、正常值、过期钳 0。
 import { describe, it, expect } from "vitest";
 import {
   BEHIND_GRACE_US,
@@ -33,13 +36,18 @@ describe("deliverWindow — 投递窗口上下界", () => {
     expect(w.jumpToUs).toBe(null);
   });
 
-  it("游标在 now−200ms 之外（600ms 前）：下沿仍钳到 now−200ms —— 更老的帧不补", () => {
-    // 游标 = now − 600ms，比 now−200ms 更早 ⇒ 下沿取 now−200ms：
-    // 「刚刚错过」的只有 200ms，更早的帧投出去也来不及播（宁可缺口，不追历史）。
-    const w = deliverWindow(input({ cursorUs: NOW - 600_000 }));
+  it("游标在 (now−500ms, now−200ms] 区间：下沿钳到 now−200ms 且不跳（窗口余量内自然追赶）", () => {
+    // 游标 = now − 300ms：比 now−200ms 更早 ⇒ 下沿取 now−200ms（300ms 前的不补）；
+    // 但 ≤ 500ms 阈值 ⇒ 不触发跳转，靠窗口下沿自然丢弃更老的帧。
+    const w = deliverWindow(input({ cursorUs: NOW - 300_000 }));
     expect(w.loUs).toBe(NOW - BEHIND_GRACE_US);
     expect(w.hiUs).toBe(NOW + DELIVER_LOOKAHEAD_US);
     expect(w.jumpToUs).toBe(null);
+  });
+
+  it("游标落后 600ms（>500ms 阈值）⇒ 跳（跳转优先于窗口钳制）", () => {
+    const w = deliverWindow(input({ cursorUs: NOW - 600_000 }));
+    expect(w.jumpToUs).toBe(NOW);
   });
 
   it("游标未建立（cursorUs = 0）：下沿 = now − 200ms，且不触发跳转", () => {
@@ -48,16 +56,15 @@ describe("deliverWindow — 投递窗口上下界", () => {
     expect(w.jumpToUs).toBe(null);
   });
 
-  it("窗口恒非空：hiUs 严格大于 loUs（调用方无需特判空窗口）", () => {
-    const cases = [0, NOW - 1_000_000, NOW - 200_000, NOW - 50_000, NOW, NOW + 500_000];
-    for (const cursorUs of cases) {
-      const w = deliverWindow(input({ cursorUs }));
-      expect(w.hiUs).toBeGreaterThan(w.loUs);
-    }
+  it("游标超前但在窗口内（+1s）：下沿用游标、不跳（超前 < 2s 属正常追赶区）", () => {
+    const w = deliverWindow(input({ cursorUs: NOW + 1_000_000 }));
+    expect(w.loUs).toBe(NOW + 1_000_000);
+    expect(w.hiUs).toBe(NOW + DELIVER_LOOKAHEAD_US);
+    expect(w.jumpToUs).toBe(null);
   });
 });
 
-describe("deliverWindow — 游标落后触发跳转", () => {
+describe("deliverWindow — 游标落后触发跳转（阈值对齐 MA 500ms）", () => {
   it("游标落后 1.5s ⇒ jumpToUs = now（不追历史）", () => {
     const w = deliverWindow(input({ cursorUs: NOW - 1_500_000 }));
     expect(w.jumpToUs).toBe(NOW);
@@ -65,17 +72,17 @@ describe("deliverWindow — 游标落后触发跳转", () => {
     expect(w.loUs).toBe(NOW - BEHIND_GRACE_US);
   });
 
-  it("恰好落后 1s（阈值上，不满足严格小于）⇒ 不跳", () => {
+  it("恰好落后 500ms（阈值上，不满足严格小于）⇒ 不跳（自然追赶即可）", () => {
     const w = deliverWindow(input({ cursorUs: NOW - CURSOR_JUMP_BEHIND_US }));
     expect(w.jumpToUs).toBe(null);
   });
 
-  it("落后略超 1s（1.01s）⇒ 跳", () => {
+  it("落后略超 500ms（510ms）⇒ 跳", () => {
     const w = deliverWindow(input({ cursorUs: NOW - CURSOR_JUMP_BEHIND_US - 10_000 }));
     expect(w.jumpToUs).toBe(NOW);
   });
 
-  it("游标在 now 之后（已产出未来内容）⇒ 不跳", () => {
+  it("游标在 now 之后（已产出未来内容，窗口内）⇒ 不跳", () => {
     const w = deliverWindow(input({ cursorUs: NOW + 800_000 }));
     expect(w.jumpToUs).toBe(null);
     // 下沿由游标接管：不会回头重投
@@ -83,19 +90,49 @@ describe("deliverWindow — 游标落后触发跳转", () => {
   });
 });
 
-describe("shouldApproveBump — 泵加速闸门", () => {
-  it("内容充足（前沿 +6s 以上）且设备正常 ⇒ 不放行", () => {
+describe("deliverWindow — 游标超前触发对称跳回（2026-11-24 补）", () => {
+  it("游标超前 1s（窗口内）⇒ 不跳", () => {
+    const w = deliverWindow(input({ cursorUs: NOW + 1_000_000 }));
+    expect(w.jumpToUs).toBe(null);
+  });
+
+  it("游标恰好超前 2s（= 窗口上沿，不满足严格大于）⇒ 不跳", () => {
+    const w = deliverWindow(input({ cursorUs: NOW + DELIVER_LOOKAHEAD_US }));
+    expect(w.jumpToUs).toBe(null);
+  });
+
+  it("游标超前 2.01s（旧开环热切遗留态）⇒ jumpToUs = now（设备否则饿到 now 追上游标）", () => {
+    const w = deliverWindow(input({ cursorUs: NOW + DELIVER_LOOKAHEAD_US + 10_000 }));
+    expect(w.jumpToUs).toBe(NOW);
+  });
+
+  it("游标超前 59s（240 旧版实测的最坏值）⇒ 跳回 now", () => {
+    const w = deliverWindow(input({ cursorUs: NOW + 59_000_000 }));
+    expect(w.jumpToUs).toBe(NOW);
+  });
+});
+
+describe("shouldApproveBump — 泵加速闸门（缺省前瞻 30s，对齐 MA）", () => {
+  it("内容充足（前沿 +30s 以上，环已到 MA 缓冲上限）且设备正常 ⇒ 不放行", () => {
     const i = input({
       cursorUs: NOW,
-      tailUs: NOW + PUMP_LOOKAHEAD_DEFAULT_US + 1, // 比 6s 前瞻更远
+      tailUs: NOW + PUMP_LOOKAHEAD_DEFAULT_US + 1, // 比 30s 上限更远
       minDeviceTsUs: NOW + 2_000_000, // 设备已跑到 now+2s，不算落后
     });
     expect(shouldApproveBump(i)).toBe(false);
   });
 
-  it("内容充足但设备落后 ⇒ 仍不放行（瓶颈在设备/投递，不在供给）", () => {
+  it("内容恰好 +30s（阈值上，不满足严格小于）⇒ 不放行", () => {
     const i = input({
-      tailUs: NOW + 20_000_000,
+      tailUs: NOW + PUMP_LOOKAHEAD_DEFAULT_US,
+      minDeviceTsUs: NOW - 100_000,
+    });
+    expect(shouldApproveBump(i)).toBe(false);
+  });
+
+  it("内容充足（+35s，环容量的实际形状）但设备落后 ⇒ 仍不放行（瓶颈在设备/投递，不在供给）", () => {
+    const i = input({
+      tailUs: NOW + 35_000_000,
       minDeviceTsUs: NOW - 500_000,
     });
     expect(shouldApproveBump(i)).toBe(false);
@@ -103,7 +140,7 @@ describe("shouldApproveBump — 泵加速闸门", () => {
 
   it("内容不足且设备落后 ⇒ 放行", () => {
     const i = input({
-      tailUs: NOW + 1_000_000, // 只超前 1s < 6s 前瞻
+      tailUs: NOW + 1_000_000, // 只超前 1s < 30s 上限
       minDeviceTsUs: NOW - 300_000, // 设备落后
     });
     expect(shouldApproveBump(i)).toBe(true);
@@ -134,12 +171,12 @@ describe("shouldApproveBump — 泵加速闸门", () => {
     expect(shouldApproveBump(i)).toBe(false);
   });
 
-  it("自定义前瞻阈值生效（lookaheadUs = 2s）", () => {
-    const i = input({ tailUs: NOW + 3_000_000, minDeviceTsUs: NOW - 100_000 });
-    // 用 6s 缺省判据：3s < 6s ⇒ 内容不足 ⇒ 放行
-    expect(shouldApproveBump(i)).toBe(true);
-    // 自定义 2s：3s ≥ 2s ⇒ 内容够 ⇒ 不放行
-    expect(shouldApproveBump(i, 2_000_000)).toBe(false);
+  it("自定义前瞻阈值生效（lookaheadUs = 40s 覆盖缺省 30s）", () => {
+    const i = input({ tailUs: NOW + 31_000_000, minDeviceTsUs: NOW - 100_000 });
+    // 缺省 30s：31s ≥ 30s ⇒ 内容够 ⇒ 不放行
+    expect(shouldApproveBump(i)).toBe(false);
+    // 自定义 40s：31s < 40s ⇒ 内容不足 ⇒ 放行
+    expect(shouldApproveBump(i, 40_000_000)).toBe(true);
   });
 });
 

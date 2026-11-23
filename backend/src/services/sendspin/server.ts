@@ -1564,9 +1564,13 @@ export class SendspinGroup {
    * `contentDemand` 的纯函数算出，输入是**各设备已消费水位**（不是泵产了多少）：
    *  · 窗口上沿只前瞻 2s —— 写死 horizon（now + 4s + sendAhead）会把未来内容
    *    提前塞进设备队列，环里堆着永不被投递的内容，设备可听域永远落空；
-   *  · 游标落后 >1s 直接跳到 now（追不上了，别让设备持续吃旧帧）；
+   *  · 游标偏离 >500ms（对齐 MA `ANCHOR_REBASE_SIGNIFICANT_US`：锚点移动超 500ms
+   *    才算显著偏移、才值得重锚）⇒ 落后跳/超前跳回 now，并打 warn；
    *  · 泵加速请求只在「内容不够 **且** 设备落后」时放行，否则挂着不动 ——
-   *    避免越补越远（240 2026-11-19 18:42：前沿超前 34.96s、连补 287 次、queueMs=0）。
+   *    避免越补越远（240 2026-11-19 18:42：前沿超前 34.96s、连补 287 次、queueMs=0）；
+   *  · **闸门在环判空之外计算**：环空时 tailUs=0 ⇒ 按「内容不足」自然放行。
+   *    旧版（5fdf0657）把需求计算包在 `if (ring && ring.length > 0)` 里，环空那拍
+   *    永远不放行泵 —— 起播/换代瞬间请求挂着、泵不产出、环保持空 ⇒ 死锁形状。
    */
   private bridgeBroadcastTick(now: bigint): void {
     const key = this.encoderKey("pcm", 100);
@@ -1589,7 +1593,12 @@ export class SendspinGroup {
       if (!bc.has(deviceId)) {
         needPrefill = true;
         bc.addSink(deviceId, {
-          maxQueue: 400,
+          // 设备队列上限 1200 帧：环帧粒度 25ms ⇒ ≈30s。
+          // 对齐 MA `_PRODUCER_BUFFER_LIMIT_US`(30s)：MA 生产者把每播放器缓冲
+          // 灌到 30s 才睡眠；我们同样允许「设备长时间停滞时积压最多 30s」再丢最旧。
+          // 差异：MA 的 30s 是**正常态**（buffered 源自然跑满）；我们设备队列被
+          // 4s 背压闸压着，正常态只有 ~2-4s，30s 上限只在设备卡死时兜底。
+          maxQueue: 1_200,
           push: (f) => {
             const handle = this.bridges.get(deviceId);
             if (!handle) return true; // 设备已摘除：直接丢弃
@@ -1614,46 +1623,57 @@ export class SendspinGroup {
       if (!this.bridges.has(id)) bc.removeSink(id);
     }
 
+    // ---- 需求快照 + 泵闸门 + 窗口：**不依赖环非空**（纯函数，便于单测钉死边界） ----
+    // minDeviceTsUs = 所有 sink「最近一次成功投递的 ts」的最小**非零**值：
+    //   慢的那台才是瓶颈，取最小才反映真实可听域；0 = 还没有任何设备成功投递过。
+    const stBefore = bc.stats();
+    let minDeviceTsUs = 0;
+    for (const s1 of Object.values(stBefore)) {
+      if (s1.lastTsUs <= 0) continue; // 0 = 该设备尚未投出过任何帧，不参与取最小
+      if (minDeviceTsUs === 0 || s1.lastTsUs < minDeviceTsUs) minDeviceTsUs = s1.lastTsUs;
+    }
+    // 内容前沿：ring 的不变量是「追加顺序 = ts 递增」⇒ 当前代次最后一帧即最新帧。
+    // 环空/无当前代次帧 ⇒ tailUs = 0（= 未知/未产出，闸门按「内容不足」处理）。
+    let tailUs = 0;
     if (ring && ring.length > 0) {
-      // ---- 需求快照：窗口/闸门的**唯一**输入来源（纯函数，便于单测钉死边界） ----
-      // minDeviceTsUs = 所有 sink「最近一次成功投递的 ts」的最小**非零**值：
-      //   慢的那台才是瓶颈，取最小才反映真实可听域；0 = 还没有任何设备成功投递过。
-      const stBefore = bc.stats();
-      let minDeviceTsUs = 0;
-      for (const s1 of Object.values(stBefore)) {
-        if (s1.lastTsUs <= 0) continue; // 0 = 该设备尚未投出过任何帧，不参与取最小
-        if (minDeviceTsUs === 0 || s1.lastTsUs < minDeviceTsUs) minDeviceTsUs = s1.lastTsUs;
-      }
-      // 内容前沿：ring 的不变量是「追加顺序 = ts 递增」⇒ 当前代次最后一帧即最新帧。
-      let tailUs = 0;
       for (let idx = ring.length - 1; idx >= 0; idx--) {
         if (ring[idx].ep !== epoch) continue;
         tailUs = Number(ring[idx].tsUs);
         break;
       }
+    }
 
-      let cursor = this.bcCursor.get(key) ?? 0n;
-      const demand = { nowUs: Number(now), cursorUs: Number(cursor), tailUs, minDeviceTsUs };
+    let cursor = this.bcCursor.get(key) ?? 0n;
+    const demand = { nowUs: Number(now), cursorUs: Number(cursor), tailUs, minDeviceTsUs };
 
-      // 泵加速闸门：只有「内容不够且设备落后」才放行；否则请求**保持挂起**
-      // （不 reject —— 下一拍可能就真的缺料了，reject 会丢掉缺口信息）。
-      if (shouldApproveBump(demand)) {
-        for (let i = 0; i < 8 && paceBumpBus.peek() > 0; i++) paceBumpBus.approve();
-      }
+    // 泵加速闸门：只有「内容不够且设备落后」才放行；否则请求**保持挂起**
+    // （不 reject —— 下一拍可能就真的缺料了，reject 会丢掉缺口信息）。
+    if (shouldApproveBump(demand)) {
+      for (let i = 0; i < 8 && paceBumpBus.peek() > 0; i++) paceBumpBus.approve();
+    }
 
-      const win = deliverWindow(demand);
-      // 落后太多 ⇒ 直接跳到 now：逐帧追历史只会让设备持续吃旧帧（越播越晚）。
-      if (win.jumpToUs !== null) {
-        this.server.log(
-          "warn",
-          `bridge-broadcast-cursor-jump group=${this.name}` +
-            ` fromMs=${Math.round(Number(cursor) / 1000)} toMs=${Math.round(win.jumpToUs / 1000)}` +
-            ` behindMs=${Math.round((Number(now) - Number(cursor)) / 1000)}`,
-        );
-        cursor = BigInt(win.jumpToUs);
-        this.bcCursor.set(key, cursor);
-      }
+    let win = deliverWindow(demand);
+    // 游标偏离过大 ⇒ 直接跳到 now（对齐 MA ANCHOR_REBASE_SIGNIFICANT_US=500ms）：
+    //   dir=behind：落后太多，逐帧追历史只会让设备持续吃旧帧（越播越晚）→ 弃历史；
+    //   dir=ahead：游标被旧开环版本推到 59s 之外，窗口内帧全被 cursor 挡住
+    //     ⇒ 设备饿到 now 追上 cursor 为止 → 跳回 now（重复帧由设备按 ts 去重）。
+    if (win.jumpToUs !== null) {
+      const dir = Number(cursor) < Number(now) ? "behind" : "ahead";
+      this.server.log(
+        "warn",
+        `bridge-broadcast-cursor-jump group=${this.name} dir=${dir}` +
+          ` fromMs=${Math.round(Number(cursor) / 1000)} toMs=${Math.round(win.jumpToUs / 1000)}` +
+          ` deltaMs=${Math.round((Number(now) - Number(cursor)) / 1000)}`,
+      );
+      cursor = BigInt(win.jumpToUs);
+      this.bcCursor.set(key, cursor);
+      // 游标已归位 ⇒ 用归位后的游标**重算窗口**：loUs = max(now−200ms, cursor) 被
+      // 旧游标钳过（ahead 时 lo 被钳到未来 ⇒ 跳回后窗口内帧全被 continue 跳过，
+      // 等于白跳 —— 集成测试 ②b 钉死这一条）。
+      win = deliverWindow({ ...demand, cursorUs: Number(cursor) });
+    }
 
+    if (ring && ring.length > 0) {
       const hiUs = BigInt(win.hiUs);
       const loUs = BigInt(win.loUs);
       for (const e of ring) {
@@ -1668,6 +1688,10 @@ export class SendspinGroup {
     }
     // 预灌：新设备/换代后一次投够（设备侧缓冲否则从 0 起播，必然饥荒）。
     // 稳态每拍仍只投一小段，避免把设备队列顶穿。
+    // MA 对照：MA `_PRODUCER_BACKLOG_SIZE`(64) 是「生产者→提交者之间的积压块数」
+    // （生产粒度 100ms ⇒ ≈6.4s），是**生产侧**背压；我们这里 80/1600 是**投递侧**
+    // 每拍预算：80 帧 × 25ms = 2s = 恰好一个窗口宽度（DELIVER_LOOKAHEAD_US），
+    // 与 tick 250ms 组合 ⇒ 每拍可投出 8× 实时速率，投递频率不会成为饿死因子。
     bc.flush(needPrefill ? 1_600 : 80);
     // 同步推进 legacy 水位：泵/续产判定（currentGenDeliverableUs、bridgeHealth）
     // 都读这些 watermark 当作「已消费到哪」。广播模式下不写它们，泵会以为
