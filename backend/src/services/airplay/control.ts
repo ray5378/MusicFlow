@@ -432,6 +432,35 @@ export async function bridgeSetDelayDevice(deviceId: string, shiftUs: number): P
   }
 }
 
+// [S8 校准闭环]各设备累计校准微调量(µs)。基准 = delayCalib 用户补偿,校准在其上
+// 叠加、绝不覆盖用户值;同进程内存态(设备摘组/子进程重启自然归零 —— 会话重建后
+// 首包测量从头开始,累计量残留最多造成一次多余微调,迟滞 10s 内自动收敛)。
+const bridgeCalibCumulativeUs = new Map<string, number>();
+
+/** 主进程编排:S8 校准闭环的**执行端** —— 对某设备的成员补偿做增量微调。
+ *
+ *  数据链:bridgeSession 每 2s 上报 actualSendAtUs(首包实际发出) → supervisor
+ *  调 anchorCalib 判定(>500ms 显著 + 同设备 10s 迟滞,对标 MA
+ *  playback.py:90 ANCHOR_REBASE_SIGNIFICANT_US)→ 本函数下发。
+ *
+ *  绝对值 = delayCalib 用户补偿(秒→µs) + 累计校准 + 本次增量:
+ *  校准是「叠加在用户补偿之上的系统自校」,绝不能覆盖用户设置。
+ *  @param deltaUs 本次增量(正 = 出声晚 ⇒ 负向平移,见 anchorAdjustDecision)。 */
+export async function bridgeNudgeDelayDevice(deviceId: string, deltaUs: number): Promise<boolean> {
+  if (!Number.isFinite(deltaUs) || deltaUs === 0) return false;
+  const cum = (bridgeCalibCumulativeUs.get(deviceId) ?? 0) + Math.round(deltaUs);
+  bridgeCalibCumulativeUs.set(deviceId, cum);
+  let baseUs = 0;
+  try {
+    // groupIdOfBridgeMember 在 protocolPlayer(它静态 import 本文件)⇒ 动态 import 防环
+    const gid = await import("../group/protocolPlayer.js").then((m) => m.groupIdOfBridgeMember(deviceId));
+    if (gid) baseUs = Math.round(getMemberDelayMs(gid, `airplay:${deviceId}`) * 1000);
+  } catch { /* 基准读不到 ⇒ 只下发校准累计量 */ }
+  const target = baseUs + cum;
+  log.info(`[bridge-calib] device=${deviceId} driftNudgeUs=${Math.round(deltaUs)} cumulativeUs=${cum} targetShiftUs=${target}`);
+  return bridgeSetDelayDevice(deviceId, target);
+}
+
 /** 主进程编排:改某台 AirPlay 的成员补偿的**必生效**路径(D9,2026-11-01)。
  *  重建该设备侧 RTSP 会话(TEARDOWN → 新 ANNOUNCE/SETUP/RECORD),让设备重新吃一次
  *  RTP↔NTP 映射 —— SYNC 无回执,实测 GGMM 只在 RECORD 时采纳映射,运行中改值不保证生效。

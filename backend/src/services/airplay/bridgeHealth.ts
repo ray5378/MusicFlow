@@ -11,6 +11,9 @@
  */
 export interface BridgeHealthRow {
   inQueueMs: number;
+  /** [S8 任务 2]设备持有深度估计(ms,同 inQueueMs 口径)—— sendspin 逐设备
+   *  投递窗口(ceil = max(now+2s, now+holdDepth+500ms))的数据源。 */
+  holdDepthMs: number;
   at: number;
 }
 
@@ -24,15 +27,22 @@ const STALE_MS = 6_000;
  *  streamEngine 读到的 min() 恒为 Infinity）。挂全局对象是唯一可靠的跨模块共享。 */
 const GKEY = "__mf_bridgeHealth_v1";
 type Health = {
-  record(deviceId: string, inQueueMs: number): void;
+  record(deviceId: string, inQueueMs: number, holdDepthMs?: number): void;
   min(): number;
+  /** [S8 任务 2]全部有效设备的持有深度快照(key=deviceId)—— 转发 sendspin 用。 */
+  holdDepths(): Record<string, number>;
   reset(): void;
 };
 const existing = (globalThis as unknown as Record<string, Health | undefined>)[GKEY];
 export const bridgeHealth: Health = existing ?? {
-  record(deviceId: string, inQueueMs: number): void {
+  record(deviceId: string, inQueueMs: number, holdDepthMs?: number): void {
     if (!Number.isFinite(inQueueMs)) return;
-    rows.set(deviceId, { inQueueMs, at: Date.now() });
+    const prev = rows.get(deviceId);
+    rows.set(deviceId, {
+      inQueueMs,
+      holdDepthMs: Number.isFinite(holdDepthMs) ? (holdDepthMs as number) : (prev?.holdDepthMs ?? 0),
+      at: Date.now(),
+    });
   },
 
   /** 最薄那座桥的缓冲（ms）；无有效条目返回 Infinity（判据不成立）。 */
@@ -44,6 +54,16 @@ export const bridgeHealth: Health = existing ?? {
       if (v.inQueueMs < m) m = v.inQueueMs;
     }
     return m;
+  },
+
+  holdDepths(): Record<string, number> {
+    const now = Date.now();
+    const out: Record<string, number> = {};
+    for (const [id, v] of rows.entries()) {
+      if (now - v.at > STALE_MS) continue;
+      out[id] = v.holdDepthMs;
+    }
+    return out;
   },
 
   reset(): void {

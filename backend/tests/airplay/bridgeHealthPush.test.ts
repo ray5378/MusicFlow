@@ -35,20 +35,35 @@ describe("推送链路（子进程侧）", () => {
   it("bridgeSession 有 sink 且在 tick 里上报 backlogMs", () => {
     const s = read("bridgeSession.ts");
     expect(s).toContain("export function setBridgeStatsSink");
-    expect(s).toContain("bridgeStatsSink?.({ deviceId: this.deviceId, inQueueMs: bridgeInQ });");
+    // [S8 校准闭环]上报扩为多行(新增 actualSendAtUs/commandedAnchorUs/commandedLeadUs/holdDepthMs),
+    // 文本锁改为锁「sink 调用 + 扩展字段」两个锚点。
+    expect(s).toContain("bridgeStatsSink?.({");
+    expect(s).toContain("deviceId: this.deviceId,");
+    expect(s).toContain("inQueueMs: bridgeInQ,");
+    expect(s).toContain("actualSendAtUs: this.actualSendAtUs");
+    expect(s).toContain("commandedAnchorUs:");
+    expect(s).toContain("holdDepthMs: bridgeInQ");
   });
 
   it("childMain 在构造函数内接线（send 在作用域内）", () => {
     const s = read("childMain.ts");
     expect(s).toContain("setBridgeStatsSink(");
-    expect(s).toContain('send({ t: "bridgeStats"');
+    // [S8]上报改多行对象,文本锁改为锁事件类型 + 扩展字段透传
+    expect(s).toContain('t: "bridgeStats"');
+    expect(s).toContain("actualSendAtUs: row.actualSendAtUs");
+    expect(s).toContain("holdDepthMs: row.holdDepthMs");
   });
 
   it("事件类型与 supervisor 分支就位", () => {
     const ipc = read("ipcProtocol.ts");
-    expect(ipc).toContain('{ t: "bridgeStats"; deviceId: string; inQueueMs: number }');
+    // [S8]事件扩展字段文本锁(实测 actualSendAtUs/commandedLeadUs/holdDepthMs)
+    expect(ipc).toContain('{ t: "bridgeStats"; deviceId: string; inQueueMs: number; actualSendAtUs: number | null');
     const sup = read("supervisor.ts");
     expect(sup).toContain('ev.t === "bridgeStats"');
-    expect(sup).toContain("bridgeHealth.record(ev.deviceId, ev.inQueueMs)");
+    expect(sup).toContain("bridgeHealth.record(ev.deviceId, ev.inQueueMs, ev.holdDepthMs)");
+    // [S8]校准闭环接线:判定 + 微调下发
+    expect(sup).toContain("anchorDriftUs");
+    expect(sup).toContain("anchorAdjustDecision");
+    expect(sup).toContain("bridgeNudgeDelayDevice");
   });
 });

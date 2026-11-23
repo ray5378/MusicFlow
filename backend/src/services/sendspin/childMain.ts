@@ -428,6 +428,15 @@ export class SendspinChildController extends ChildRpcHost<SendspinChildToParent,
         // 只读、不改任何状态 —— 判定与自愈都发生在子进程内部的采样轮上。
         return srv?.sinkHealthOf(String(p?.clientId ?? "")) ?? "ok";
       }
+      case "bridgeHealth": {
+        // [S8 任务 2]主进程转发的逐设备持有深度(airplay bridgeStats → supervisor
+        // → 本 rpc)。整体替换进组对象,广播 tick 的逐设备投递窗口上沿用它
+        // (ceil = max(now+2s+ahead, now+holdDepth+500ms))。
+        // 7ba87e0d 之前 minInQueueMs 版本没有本接收端 ⇒ 转发被 catch 丢弃。
+        const m = (p as { holdDepthMs?: Record<string, number> }).holdDepthMs;
+        if (m && typeof m === "object") srv?.setBridgeHoldDepth(m);
+        return null;
+      }
       case "applyCfg": {
         // 配置热更新(主进程 DB 为单一可信源):只管 server 字段。
         const cfg = p as SendspinIpcConfig;

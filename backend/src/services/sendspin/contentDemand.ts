@@ -145,9 +145,12 @@ export interface DeliverWindow {
  * 窗口恒非空（`hiUs > loUs`：2s 前瞻 vs 最多回看 200ms 或 ≤ now 的游标），
  * 无需特判空窗口。
  */
-export function deliverWindow(i: DemandInput): DeliverWindow {
+export function deliverWindow(i: DemandInput, hiLookaheadUs: number = DELIVER_LOOKAHEAD_US): DeliverWindow {
   const loUs = Math.max(i.nowUs - BEHIND_GRACE_US, i.cursorUs);
-  const hiUs = i.nowUs + DELIVER_LOOKAHEAD_US;
+  // [S8 任务 2]hi 前瞻可逐设备覆盖:窗口 2s 量级没错(MA 设备稳态持有 ~1s =
+  // min_buffer 自报),错在「下限贴 0 无抖动余量」—— 持有深度大的设备给足
+  // 「持有 + 500ms」余量,缺省仍 2s(调用方不传 = 行为不变)。
+  const hiUs = i.nowUs + hiLookaheadUs;
   // 游标为 0（元数据缺失/换代刚重置）时不跳：此时没有「落后」概念，从头广播即可。
   const behind = i.cursorUs !== 0 && i.cursorUs < i.nowUs - CURSOR_JUMP_BEHIND_US;
   // 超前判定不需要 cursor!==0 前置：cursor > now + 2s 必然非 0。

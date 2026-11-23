@@ -49,9 +49,19 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
 
   constructor(send: ChildSend) {
     // 桥水位上报(低缓冲自愈的数据源)：单向 process.send，不依赖 RPC 的 running 状态。
+    // [S8 校准闭环]扩展:首包实际发出时刻/命令锚点/设备持有深度 一并上报
+    // (主进程 drift 判定 + 转发 sendspin 做逐设备投递窗口)。
     setBridgeStatsSink((row) => {
       try {
-        send({ t: "bridgeStats", deviceId: row.deviceId, inQueueMs: row.inQueueMs });
+        send({
+          t: "bridgeStats",
+          deviceId: row.deviceId,
+          inQueueMs: row.inQueueMs,
+          actualSendAtUs: row.actualSendAtUs,
+          commandedAnchorUs: row.commandedAnchorUs,
+          commandedLeadUs: row.commandedLeadUs,
+          holdDepthMs: row.holdDepthMs,
+        });
       } catch {
         /* 上报失败不影响推流 */
       }

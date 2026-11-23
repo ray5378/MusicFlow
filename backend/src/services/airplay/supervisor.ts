@@ -101,13 +101,36 @@ class AirplaySupervisor extends RendererHostSupervisor<
           return;
         }
         if (ev.t === "bridgeStats") {
-          bridgeHealth.record(ev.deviceId, ev.inQueueMs);
+          bridgeHealth.record(ev.deviceId, ev.inQueueMs, ev.holdDepthMs);
+          // [S8 校准闭环]测量 → 判定 → 微调:有首包测量且已锚定才判。
+          // anchorCalib 纯函数(>500ms 显著 + 10s 迟滞),执行走 control 的
+          // bridgeNudgeDelayDevice(动态 import,避免 airplay 内部循环依赖)。
+          // 外层回调非 async ⇒ 异步 IIFE 包裹(失败不连累水位转发)。
+          if (ev.actualSendAtUs !== null && ev.commandedAnchorUs > 0) {
+              void (async () => {
+              try {
+                const calib = await import("./anchorCalib.js");
+                if (ev.actualSendAtUs === null) return;
+                const drift = calib.anchorDriftUs(ev.actualSendAtUs, ev.commandedAnchorUs, ev.commandedLeadUs);
+                const adjust = calib.anchorAdjustDecision(ev.deviceId, drift, Date.now());
+                if (adjust !== null) {
+                  await import("./control.js")
+                    .then((m) => m.bridgeNudgeDelayDevice(ev.deviceId, adjust))
+                    .catch(() => { /* 下发失败不连累 tick;下一次 tick 重判 */ });
+                }
+              } catch { /* 判定异常不连累水位转发 */ }
+            })();
+          }
           // 转发给 sendspin 子进程（泵在那里，判据要用）：桥水位与泵分属两个子进程，
           // 必须经主进程中转。动态 import 避免 airplay ↔ sendspin 的静态循环依赖。
+          // [S8 任务 2]载荷扩展:逐设备 holdDepth(设备持有深度)—— 逐设备投递窗口
+          // ceil = max(now+2s+ahead, now+holdDepth+500ms)。sendspin 侧 childMain
+          // "bridgeHealth" rpc 落地(7ba87e0d 之前 minInQueueMs 版本无接收端,转发被丢)。
           const min = bridgeHealth.min();
-          if (Number.isFinite(min)) {
+          const holdDepths = bridgeHealth.holdDepths();
+          if (Number.isFinite(min) || Object.keys(holdDepths).length > 0) {
             void import("../sendspin/supervisor.js")
-              .then((m) => m.sendspinSupervisor.rpc("bridgeHealth", { minInQueueMs: min }))
+              .then((m) => m.sendspinSupervisor.rpc("bridgeHealth", { minInQueueMs: min, holdDepthMs: holdDepths }))
               .catch(() => {
                 /* sendspin 子进程未起（无播放）：丢弃即可，下一次 tick 再来 */
               });
