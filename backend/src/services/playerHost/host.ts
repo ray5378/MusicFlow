@@ -1,4 +1,17 @@
 // ==================== 每播放器一进程：父进程侧宿主 ====================
+//
+// ===== 对标 MA =====
+// MA 位置：music_assistant/providers/airplay/stream.py:327
+//          （AsyncProcess(args, stdin=True, stdout=True, stderr=True, name="cliairplay")
+//          —— 每台播放器一个专属子进程，connect() 挂起、start() 锚定、stop() 收尾）
+//          + stream.py:93-99（_STDIN_DRAIN_TIMEOUT=2s：stdin 排空超时 ⇒ 判定
+//          读取端卡死 ⇒ 「cold restart … is the right answer anyway」）。
+// MA 语义：一台播放器 = 一个专属进程；子进程卡死不做进程内抢救，直接进程级
+//          冷重启；故障域 = 单台设备，绝不牵连组内其它播放器。
+// 我们：fork 子进程 + 心跳(2s)/无响应判死(6s)/SIGKILL + 指数退避重启(250ms→8s)
+//          —— 同一哲学的 TS 实现。差异：MA 的活性信号是「写 stdin 是否能排空」
+//          （它有写路径可探）；我们契约里没有可写探针，用 ping/pong 心跳 +
+//          status 上报新鲜度作为等价活性信号。
 import { fork, type ChildProcess } from "node:child_process";
 import path from "node:path";
 import { resolveChildEntry } from "../rendererHost/paths.js";

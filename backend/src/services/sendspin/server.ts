@@ -1624,6 +1624,13 @@ export class SendspinGroup {
     }
 
     // ---- 需求快照 + 泵闸门 + 窗口：**不依赖环非空**（纯函数，便于单测钉死边界） ----
+    // 对标 MA（消费驱动语义）：MA aiosendspin 的 PushStream 按成员 send-ahead
+    //   调度消费（playback.py:52-76，send-ahead 固定在 min_buffer_ms / required_lead），
+    //   生产循环只向成员缓冲提交、由 sleep_to_limit_buffer(30s) 反压 —— 泵从不
+    //   主动往设备里推。我们把同一角色落在三处：①窗口 lo 贴已消费游标（本函数
+    //   扫环下沿）；②窗口 hi 只前瞻 2s（≈MA 桥 warm lead 2.5s / min_buffer 1s，
+    //   见 contentDemand 常量注释）；③泵闸门由「内容前沿 + 设备水位」双条件
+    //   反推（shouldApproveBump，双条件理由见其 docstring）。
     // minDeviceTsUs = 所有 sink「最近一次成功投递的 ts」的最小**非零**值：
     //   慢的那台才是瓶颈，取最小才反映真实可听域；0 = 还没有任何设备成功投递过。
     const stBefore = bc.stats();

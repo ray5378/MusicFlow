@@ -14,6 +14,18 @@
 //  · 投递按 ts 升序，游标单调前进；
 //  · 水位落后墙钟超过 LAG_RESET 时整体前跳到「最早未过期帧」，不逐帧追；
 //  · 任何输入都不会让游标倒退（对齐现有 bridgeShift 不变量）。
+//
+// ===== 对标 MA =====
+// MA 位置：music_assistant/providers/sendspin/playback.py:52-76（LIVE_MEDIA_TYPES
+//          注释段 + min_buffer_ms 语义）、playback.py:922（sleep_to_limit_buffer）
+//          ；缓冲面 = 每成员一条 PushStream（sendspin/player.py 角色模型）。
+// MA 语义：每个成员有自己的时间线缓冲与 send-ahead 调度 —— live 源播放开始后
+//          send-ahead 固定在 min_buffer_ms floor，buffered 源可涨到 required_lead；
+//          「产多少」由成员缓冲水位反压（超 30s 生产者睡眠），成员间互不影响。
+// 我们：PlayerRing = 广播/隔离路径下每台播放器的**本环**，等价 MA 的单成员
+//          PushStream 缓冲面。差异：MA 的缓冲调度在 aiosendspin 库内（成员连接里），
+//          我们在父进程内显式建模（horizon/grace/lagReset/maxBuffer 四参数），
+//          以便在「共享内容环广播」架构下复刻「落后只影响自己」的隔离性。
 
 export interface RingFrame {
   tsUs: number;
@@ -52,9 +64,25 @@ export class PlayerRing {
   private jumpTotal = 0;
 
   constructor(opts: PlayerRingOptions = {}) {
+    // 对标 MA playback.py:82 _PRODUCER_BUFFER_LIMIT_US（值 30_000_000，语义=单成员
+    //   缓冲上限，超则生产者睡眠）。
+    // 我们：20_000_000。差异原因：本环只是「隔离面」缓冲，组侧另有共享环(35s 上限)
+    //   兜底，20s 抗抖动已足且省内存（20s ≈ 7.5MB/台 @192KB/s）。
     this.horizonUs = opts.horizonUs ?? 20_000_000;
+    // 对标 MA playback.py:91 _HISTORY_KEEP_PAST_US（值 1_000_000，语义=提交历史
+    //   保留已消费 1s 供 late-join 回填）。
+    // 我们：300_000。差异原因：本环不承担回填职责（组环负责），只留「刚错过」的
+    //   最小余量防时钟抖动误丢；MA 的 1s 是为 join 追赶处理器预热 ffmpeg 缓冲，
+    //   我们没有 DSP 追赶管线，不需要那么多历史。
     this.graceUs = opts.graceUs ?? 300_000;
+    // 对标 MA playback.py:90 ANCHOR_REBASE_SIGNIFICANT_US（值 500_000，语义=锚点
+    //   偏移超此值才算显著、立即重锚）。
+    // 我们：1_500_000。差异原因：本环落后 0~1.5s 之间还能靠 grace 余量自然续上，
+    //   给「追得上」留余地，超 1.5s 才整体前跳；广播路径的跳转阈值已按 MA 收紧到
+    //   500ms（CURSOR_JUMP_BEHIND_US）—— 两条路径口径独立，互不影响。
     this.lagResetUs = opts.lagResetUs ?? 1_500_000;
+    // 容量兜底（帧总时长上限）：与 horizonUs 同量级，防「历史帧塞满」的内存膨胀；
+    // MA 的对应物是 PushStream 的固定容量队列，语义相同。
     this.maxBufferUs = opts.maxBufferUs ?? 20_000_000;
   }
 
@@ -119,7 +147,18 @@ export class PlayerRing {
   }
 
   /**
-   * 取出本次应投递的帧。
+   * 取出本次应投递的帧（节拍续杯：每 tick 最多 maxUs，由消费进度驱动）。
+   *
+   * 对标 MA（预灌/续杯）：MA 的 send-ahead 语义（playback.py:52-76）= 播放开始后
+   * send-ahead 固定在 min_buffer_ms（live 源 floor；buffered 源可涨到
+   * required_lead），aiosendspin 按该 lead 调度成员消费 —— 产多少由成员缓冲水位
+   * 决定，不由生产者决定。
+   * 我们：`leadUs` 就是该设备的 send-ahead（组 lead + 成员延迟补偿），取料上沿 =
+   * `nowUs + leadUs` —— 设备消费到哪、就补到哪（消费驱动续杯，与广播路径的
+   * 需求闸门同一哲学）；`maxUs` 限制单拍取量 = 稳态节拍灌注，避免把设备队列
+   * 瞬间顶穿。MA 的对应角色是 `sleep_to_limit_buffer`（限**生产**），我们限
+   * **投递** —— 方向相反，因为我们的瓶颈面在投递侧（泵是共享的）。
+   *
    * @param nowUs 墙钟
    * @param leadUs 该设备需要的提前量（组 lead + 成员延迟）
    * @param maxUs  本次最多取多少内容（µs，节拍用）
