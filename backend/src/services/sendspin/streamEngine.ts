@@ -1200,6 +1200,18 @@ export class GroupPump {
           `sendspin 泵背压启动 headroomMs=${Math.round(headroom / 1000)} 上限Ms=${Math.round(PUMP_LOOKAHEAD_DEFAULT_US / 1000)} song=${this.songId}` +
             `（前沿超前最落后消费游标,暂停产出等待消费追上 —— 对齐 MA sleep_to_limit_buffer）`,
         );
+      } else if (
+        Math.floor(waitedMs / 60_000) !== Math.floor((waitedMs - this.headroomPollMs) / 60_000)
+      ) {
+        // [S7 复核加固] 持续 >60s ⇒ error：正常背压几分钟内必解除（消费以实时速率
+        // 追 30s 差距）；超 60s 说明消费侧异常（典型 = 摘桥残留冻结游标污染 min），
+        // 真机排障第一落点：grep bridge-cursor-jump / 检查 pumpHeadroomUs 的 min 来源。
+        logSafe(
+          this.server,
+          "error",
+          `sendspin 泵背压持续超 60s headroomMs=${Math.round(headroom / 1000)} 已等=${waitedMs}ms song=${this.songId}` +
+            `（消费侧疑似异常:检查设备游标是否冻结/摘桥清理是否生效）`,
+        );
       } else if (Math.floor(waitedMs / 2000) !== Math.floor((waitedMs - this.headroomPollMs) / 2000)) {
         logSafe(this.server, "info", `sendspin 泵背压中 headroomMs=${Math.round(headroom / 1000)} 已等=${waitedMs}ms song=${this.songId}`);
       }

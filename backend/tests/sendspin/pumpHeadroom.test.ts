@@ -18,8 +18,12 @@ import { nowUs } from "../../src/services/sendspin/clock.js";
 import { PUMP_LOOKAHEAD_DEFAULT_US } from "../../src/services/sendspin/contentDemand.js";
 
 // 两模式游标源在**调用期**读 env（isolationFlag.ts），hoisted 置位保证隔离开启。
+// ⚠️ BROADCAST 也必须在 hoisted 设 "1"：否则 shuffle 把首个用例排在 legacy 覆盖
+// 之前时，broadcastDeliveryEnabled() 落到标志文件检查（不存在）⇒ 走 legacy 分支
+// ⇒ 依赖 bcCursor 的用例拿到 null（全量 shuffle 实锤过，孤立跑侥幸靠前序 afterEach）。
 vi.hoisted(() => {
   process.env.MF_PLAYER_ISOLATION = "1";
+  process.env.MF_PLAYER_BROADCAST = "1";
 });
 
 const liveGroups: SendspinGroup[] = [];
@@ -114,6 +118,42 @@ describe("pumpHeadroomUs — 口径与边界", () => {
     (g as any).bridgeWatermarks.set("dev-a", now + 28_000_000n);
     // 35s − 28s = 7s（bridgeWatermarks 最小值口径）
     expect(g.pumpHeadroomUs()).toBe(7_000_000);
+  });
+
+  it("摘桥残留游标：onBridgeHandleRemoved 后不再计入 min（S7 复核 FAIL 修复回归用例）", () => {
+    const g = groupWith(["dev-a", "dev-b"]);
+    const now = nowUs();
+    addRingFrame(g, now + 35_000_000n);
+    const key = (g as any).encoderKey("pcm", 100);
+    (g as any).bcEpoch.set(key, (g as any).bridgeContentEpoch);
+    // dev-a 即将摘除（掉线/离组,游标将冻结在 −40s）；dev-b 健康（+1s）
+    (g as any).bcCursor.set("dev-a", now - 40_000_000n);
+    (g as any).bcCursor.set("dev-b", now + 1_000_000n);
+    // 摘除前：min 取到 dev-a 冻结游标 ⇒ headroom = 35s − (−40s) = 75s —— 复核定位
+    // 的饿死链形状（随墙钟无限涨,泵永久 await）
+    expect(g.pumpHeadroomUs()).toBe(75_000_000);
+    // 摘桥（真实顺序:bridgeAttach 先从 g.bridges 删,再回调 onBridgeHandleRemoved）
+    g.bridges.delete("dev-a");
+    g.onBridgeHandleRemoved("dev-a");
+    // 修复①生效：dev-a 游标已删 ⇒ min 取 dev-b ⇒ 35s − 1s = 34s
+    expect(g.pumpHeadroomUs()).toBe(34_000_000);
+    // 修复②（第二道防御）：即使游标漏清残留,bridges.has 过滤也兜住
+    (g as any).bcCursor.set("dev-a", now - 40_000_000n);
+    expect(g.pumpHeadroomUs()).toBe(34_000_000);
+  });
+
+  it("resetDeviceDelivery 清该设备游标（原 no-op 修复：按 deviceId 删而非组键）", () => {
+    const g = groupWith(["dev-a"]);
+    const now = nowUs();
+    addRingFrame(g, now + 35_000_000n);
+    const key = (g as any).encoderKey("pcm", 100);
+    (g as any).bcEpoch.set(key, (g as any).bridgeContentEpoch);
+    (g as any).bcCursor.set("dev-a", now + 1_000_000n);
+    // 重连重置：冻结游标必须清（原来 delete(encoderKey) 是 no-op,清不掉）
+    g.resetDeviceDelivery("dev-a");
+    expect((g as any).bcCursor.has("dev-a")).toBe(false);
+    // 游标已清 ⇒ 无历史 ⇒ 豁免（null）
+    expect(g.pumpHeadroomUs()).toBe(null);
   });
 });
 

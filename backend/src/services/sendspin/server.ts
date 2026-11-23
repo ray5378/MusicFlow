@@ -1657,11 +1657,13 @@ export class SendspinGroup {
     }
   }
 
-  /** 各设备游标的最小值（全无/全 0 ⇒ 返回 now，即「无历史，需求按 0 计」）。 */
+  /** 各设备游标的最小值（全无/全 0 ⇒ 返回 now，即「无历史，需求按 0 计」）。
+   *  [S7 复核加固] 按 `bridges.has(id)` 过滤：摘桥残留游标（若有）不计入 min，
+   *  作为 onBridgeHandleRemoved 清理之外的第二道防御。 */
   private minCursorOf(): bigint {
     let min: bigint | null = null;
-    for (const c of this.bcCursor.values()) {
-      if (c === 0n) continue;
+    for (const [id, c] of this.bcCursor.entries()) {
+      if (c === 0n || !this.bridges.has(id)) continue;
       if (min === null || c < min) min = c;
     }
     return min ?? nowUs();
@@ -1703,15 +1705,17 @@ export class SendspinGroup {
     if (this.bridges.size === 0) return null;
     let min: bigint | null = null;
     let anyEntry = false;
+    // [S7 复核加固] 按 `bridges.has(id)` 过滤：摘桥残留游标/水位不计入 min
+    // （第二道防御，根因清理在 onBridgeHandleRemoved）。
     if (broadcastDeliveryEnabled()) {
-      for (const c of this.bcCursor.values()) {
+      for (const [id, c] of this.bcCursor.entries()) {
         anyEntry = true;
-        if (c !== 0n && (min === null || c < min)) min = c;
+        if (c !== 0n && this.bridges.has(id) && (min === null || c < min)) min = c;
       }
     } else {
-      for (const w of this.bridgeWatermarks.values()) {
+      for (const [id, w] of this.bridgeWatermarks.entries()) {
         anyEntry = true;
-        if (w > 0n && (min === null || w < min)) min = w;
+        if (w > 0n && this.bridges.has(id) && (min === null || w < min)) min = w;
       }
     }
     if (min === null) {
@@ -2068,12 +2072,21 @@ export class SendspinGroup {
     this.bridgeShiftAtDelivery.delete(deviceId);
     this.bridgeBulkInFlight.delete(deviceId);
     this.bridgeBulkPending.add(deviceId);
-    this.bcCursor.delete(this.encoderKey("pcm", 100));
+    // [S7 复核修复] 原为 `delete(this.encoderKey("pcm", 100))` —— bcCursor 按
+    // deviceId 键控,删组键是永久 no-op;重连重置语义本就要求清**该设备**游标
+    // （冻结游标残留会污染 minCursorOf/pumpHeadroomUs 的 min）。
+    this.bcCursor.delete(deviceId);
     this.server.log("info", `bridge-reset-delivery device=${deviceId} ⇒ 清水位 + 登记 bulk 预灌`);
     this.ensureBridgePushTimer();
   }
 
-  /** 单座桥从组里摘除后的投递状态清理(bridgeAttach 同步/摘除路径调用)。 */
+  /** 单座桥从组里摘除后的投递状态清理(bridgeAttach 同步/摘除路径调用)。
+   *
+   *  ⚠️ 必须清 `bcCursor`（S7 复核 FAIL 修复,7ba87e0d 引入的回归）:bcCursor 按
+   *  deviceId 键控,摘桥不删 ⇒ 冻结游标残留 ⇒ `pumpHeadroomUs()` 的 min 永远取到
+   *  它 ⇒ headroom 随墙钟涨过 30s ⇒ 泵永久 await ⇒ 全组饿死。任何路径都清不掉:
+   *  双向护栏只遍历在组设备、换代清理只遍历 `this.bridges.keys()`。
+   *  （配套防御:pumpHeadroomUs/minCursorOf 迭代时按 `bridges.has(id)` 再滤一层。） */
   onBridgeHandleRemoved(deviceId: string): void {
     this.bridgeWatermarks.delete(deviceId);
     this.bridgeShiftAtDelivery.delete(deviceId); // [Fix D.1]
@@ -2081,6 +2094,7 @@ export class SendspinGroup {
     this.bridgeBulkInFlight.delete(deviceId);
     this.bridgeDiagLogAt.delete(deviceId);
     this.bridgePushDiagAt.delete(deviceId);
+    this.bcCursor.delete(deviceId); // 摘桥必须同步摘游标（见上方注释,饿死链根因）
     if (this.bridges.size === 0) this.stopBridgePushTimer();
   }
 
