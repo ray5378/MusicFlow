@@ -22,6 +22,7 @@ import type {
   AirplaySessionEndInfo,
 } from "./ipcProtocol.js";
 import { bridgeHealth } from "./bridgeHealth.js";
+import { playerIsolationEnabled } from "../playerHost/isolationFlag.js";
 
 const CHILD_ENTRY = resolveChildEntry(import.meta.url);
 
@@ -142,7 +143,7 @@ export class AirplaySupervisorRouter {
   private mergedMirror: AirplayMirror = { sessions: new Map() };
 
   private isolated(): boolean {
-    return process.env.MF_PLAYER_ISOLATION === "1";
+    return playerIsolationEnabled();
   }
 
   private keyOf(params: unknown): string {

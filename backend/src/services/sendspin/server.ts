@@ -24,6 +24,7 @@ import { randomBytes } from "node:crypto";
 import { loadOrCreateIdentity, type Identity } from "./identity.js";
 import { clearGroupBridges } from "./bridgeAttach.js";
 import { GroupBroadcaster } from "../playerHost/broadcaster.js";
+import { playerIsolationEnabled } from "../playerHost/isolationFlag.js";
 import { getDeviceVolumeState, DEFAULT_SENDSPIN_VOLUME } from "./deviceState.js";
 import { asInitiator, handshakePayload1, type NoiseSession, type NoiseSuite } from "./handshake.js";
 import { packJsonBody, unpackJsonBody, packAudioChunk, type JsonMessage } from "./framing.js";
@@ -821,7 +822,7 @@ export class SendspinGroup {
   private readonly bcCursor = new Map<string, bigint>();
   private readonly bcEpoch = new Map<string, number>();
   private isolationOn(): boolean {
-    return process.env.MF_PLAYER_ISOLATION === "1";
+    return playerIsolationEnabled();
   }
   /** 「控制端全断、仅剩桥在播」的终态回收定时器(见 armBridgeLonelyCleanup)。 */
   private bridgeLonelyTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1542,7 +1543,9 @@ export class SendspinGroup {
     const epoch = this.bridgeContentEpoch;
 
     // 换代：内容时间线整体重锚 ⇒ 游标清零 + 清空所有设备队列
+    let needPrefill = false;
     if (this.bcEpoch.get(key) !== epoch) {
+      needPrefill = true;
       this.bcEpoch.set(key, epoch);
       this.bcCursor.set(key, 0n);
       for (const bc of this.broadcasters.values()) bc.resetAll();
@@ -1553,6 +1556,7 @@ export class SendspinGroup {
     // 设备进出：以 bridges 为准同步 sink 集合
     for (const deviceId of this.bridges.keys()) {
       if (!bc.has(deviceId)) {
+        needPrefill = true;
         bc.addSink(deviceId, {
           maxQueue: 400,
           push: (f) => {
@@ -1562,7 +1566,11 @@ export class SendspinGroup {
             const queued = handle.queuedMs ?? 0;
             if (queued > 4000) return false; // 设备侧排队 >4s：先背压，帧留在本设备队列
             try {
-              handle.pushAudio(f.data, BigInt(f.tsUs));
+              // 与旧路径同口径：投递戳 = 内容 ts − 公共 sendAhead + 该成员补偿。
+              // 少了这一步，设备会晚 ahead 那么多播放（实测 4.8s ⇒ 全判 late）。
+              const ahead = BigInt(this.commonSendAheadUs());
+              const shift = this.bridgeDeliveryShiftUs(deviceId);
+              handle.pushAudio(f.data, BigInt(f.tsUs) - ahead + shift);
               return true;
             } catch {
               return false;
@@ -1587,7 +1595,9 @@ export class SendspinGroup {
       }
       this.bcCursor.set(key, cursor);
     }
-    bc.flush();
+    // 预灌：新设备/换代后一次投够（设备侧缓冲否则从 0 起播，必然饥荒）。
+    // 稳态每拍仍只投一小段，避免把设备队列顶穿。
+    bc.flush(needPrefill ? 1_600 : 80);
 
     // 逐设备诊断（2s 节流）：积压/丢弃/最后投出时刻
     const st = bc.stats();

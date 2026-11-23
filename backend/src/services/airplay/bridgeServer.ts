@@ -18,6 +18,7 @@ import net from "node:net";
 import path from "node:path";
 
 import { isStaleFrame } from "./lateFrameGuard.js";
+import { playerIsolationEnabled } from "../playerHost/isolationFlag.js";
 import { nowUs } from "../../utils/hostClock.js";
 import {
   FrameDecoder,
@@ -316,7 +317,7 @@ export class BridgeServer {
     // 「喂过去的内容 ⇒ 设备全判 late ⇒ 队列 0 ⇒ 静音垫片」的连锁（真机实测 19 分钟无声）。
     const nowT = nowUs();
     // 只在隔离模式启用（开关关闭时与改造前完全一致；旧路径/单测不受影响）
-    if (process.env.MF_PLAYER_ISOLATION === "1" && isStaleFrame(frame.tsUs, nowT)) {
+    if (playerIsolationEnabled() && isStaleFrame(frame.tsUs, nowT)) {
       this.lateDropped += 1;
       if (nowT - this.lateLogAtUs > 2_000_000n) {
         this.lateLogAtUs = nowT;
