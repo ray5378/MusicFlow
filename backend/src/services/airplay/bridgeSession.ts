@@ -1412,6 +1412,8 @@ export class BridgeSession {
       const inQueueTargetUs = 2_000_000;
       const inQueueNowUs = BigInt(Math.round(this.backlogMs() * 1000));
       const servoUs = inQueueNowUs >= BigInt(inQueueTargetUs) ? 0n : BigInt(inQueueTargetUs) - inQueueNowUs;
+      // （backlogMs 现为总缓冲 = inBytes + ringBuf：ringBuf 有货时 inQueue 补齐不触发，
+      //   总量稳定在 2s；ringBuf 排空且 inQueue < 2s 时按差量补 —— 平滑无锯齿）
       const realtimeUs = 105_000; // 1.05x 实时速率：防父侧短暂欠供时缓冲缓降
       const budgetUs = this.ringPrefilled
         ? servoUs > realtimeUs ? servoUs : realtimeUs
@@ -1471,7 +1473,10 @@ export class BridgeSession {
   }
 
   private backlogMs(): number {
-    return Math.round((this.inBytes / BRIDGE_PCM_BYTES_PER_SEC) * 1000);
+    // 总缓冲 = RAOP 发送队列(inBytes) + 到达环(ringBuf)。只报 inQueue 会让父侧
+    // 伺服看不到 arrival ring 的锯齿（ringBuf 0↔4s 振荡、40s 周期）⇒ 补量失真。
+    const ringMs = Math.round((this.ringBufUs / 1000));
+    return Math.round((this.inBytes / BRIDGE_PCM_BYTES_PER_SEC) * 1000) + ringMs;
   }
 
   // ---- Phase 5:生命周期(§5.2/§5.4) ------------------------------------
