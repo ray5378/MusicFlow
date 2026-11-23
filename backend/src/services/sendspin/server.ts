@@ -1667,6 +1667,63 @@ export class SendspinGroup {
     return min ?? nowUs();
   }
 
+  /** 当前代次内容环最后帧 ts（0 = 环空/无当前代次帧）。
+   *  ring 不变量「追加顺序 = ts 递增」⇒ 从尾部回扫第一个当前代次帧即内容前沿。
+   *  抽成方法供 minCursorOf 同族（广播 tick / 泵 headroom）共用同一口径。 */
+  private contentTailUs(): bigint {
+    const ring = this.recentByGroup.get(this.encoderKey("pcm", 100));
+    if (!ring) return 0n;
+    for (let idx = ring.length - 1; idx >= 0; idx--) {
+      if (ring[idx].ep === this.bridgeContentEpoch) return ring[idx].tsUs;
+    }
+    return 0n;
+  }
+
+  /**
+   * 泵的「前沿 − 最落后消费游标」headroom（µs，负值钳 0）；**null = 不设限**。
+   *
+   * 供 streamEngine 推流循环做消费驱动产出（S7）——对标 MA
+   * `playback.py:922 await push_stream.sleep_to_limit_buffer(_PRODUCER_BUFFER_LIMIT_US)`
+   * （值 30s，playback.py:82）：生产者提交后若缓冲超上限就睡眠等待，按**时间量**
+   * 控制、与块数无关（今晚 23:17 真机：环容量按**条数** 1400 兜不住，前沿跑到
+   * +178s、两台设备饿死 —— 缺的就是这个时间量反压）。
+   *
+   * 消费游标来源（两条路径各自同进程直查，零延迟单代码路径）：
+   *   · 广播模式：`bcCursor`（每设备投递游标，S6 终版）；
+   *   · legacy 模式：`bridgeWatermarks`（每设备已投水位）。
+   * 边界（2026-11-25 任务书钉死）：
+   *   · 无桥 ⇒ null（广播侧无消费者，直连成员组不受影响 —— 它们的消费不经本口径）；
+   *   · 游标全 0 / 无任何投递历史 ⇒ null（起播/换代豁免，否则起播被卡死；
+   *     换代清游标 = 新时间线无历史，豁免语义正确）；
+   *   · 防御性边缘：map 有登记但游标全 0（正常不会发生 —— S6 换代是 delete 而非
+   *     置 0，watermarks 只在 lastTsUs>0 时写）⇒ 取**最保守**：以 now 为消费点，
+   *     限制生效（前沿 − now > 30s 即拦）。
+   */
+  pumpHeadroomUs(): number | null {
+    if (this.bridges.size === 0) return null;
+    let min: bigint | null = null;
+    let anyEntry = false;
+    if (broadcastDeliveryEnabled()) {
+      for (const c of this.bcCursor.values()) {
+        anyEntry = true;
+        if (c !== 0n && (min === null || c < min)) min = c;
+      }
+    } else {
+      for (const w of this.bridgeWatermarks.values()) {
+        anyEntry = true;
+        if (w > 0n && (min === null || w < min)) min = w;
+      }
+    }
+    if (min === null) {
+      // 有登记但游标全 0（防御性边缘）⇒ 最保守：视为消费点 = now（限制生效）。
+      return anyEntry ? Math.max(0, Number(this.contentTailUs() - nowUs())) : null;
+    }
+    const tail = this.contentTailUs();
+    if (tail === 0n) return null; // 环空：无前沿可言，不设限
+    const headroom = Number(tail - min);
+    return headroom > 0 ? headroom : 0;
+  }
+
   bridgePushTick(): void {
     if (this.bridges.size === 0) {
       this.endBridgeAutoTrackGap("no-bridge");

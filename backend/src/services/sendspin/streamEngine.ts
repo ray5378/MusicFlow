@@ -31,6 +31,9 @@ import {
   PREFILL_BUFFER_MIN_MS,
 } from "./constants.js";
 import { paceBumpBus } from "./paceBumpBus.js";
+// S7 消费驱动产出：上限常量复用 contentDemand 的 30s（对齐 MA
+// _PRODUCER_BUFFER_LIMIT_US），不新增第二个 30s。contentDemand 零依赖 ⇒ 无环。
+import { PUMP_LOOKAHEAD_DEFAULT_US } from "./contentDemand.js";
 
 import { SAMPLE_RATE, CHANNELS } from "./encoding.js";
 import { nowUs } from "./clock.js";
@@ -1155,6 +1158,56 @@ export class GroupPump {
     return audible < floorMs ? floorMs : audible;
   }
 
+  /** S7 背压重查间隔(ms)；测试注入 0 —— setTimeout(0) 仍让出事件循环，
+   *  用例借此验证等待**不会同步自旋**（饿死事件循环 = 看门狗误杀，2026-09-22 教训）。 */
+  headroomPollMs = 100;
+
+  /**
+   * 消费驱动产出（S7，广播改造最后一环）：内容前沿超前最落后消费游标超过上限
+   * （30s，复用 `PUMP_LOOKAHEAD_DEFAULT_US`）⇒ **await 睡眠等待** —— 不是丢、
+   * 不是拒（丢/拒只影响投递面，治不了前沿本身；paceBumpBus 闸门只拦「加速
+   * 请求」，拦不住基础产出节奏）。
+   *
+   * 对标 MA（2026-11-25 核原文）：`playback.py:922
+   * await push_stream.sleep_to_limit_buffer(_PRODUCER_BUFFER_LIMIT_US)`
+   * （值 30s，playback.py:82）—— 生产者提交后缓冲超限即睡眠到低于上限再继续。
+   * 差异：MA 的缓冲面是每成员 PushStream（水位由 aiosendspin 库内调度）；
+   * 我们是共享环 + 广播投递，水位由 `group.pumpHeadroomUs()` 直查
+   * （前沿 − 最落后消费游标，同进程零延迟）。
+   *
+   * 信号面取舍（任务书两案选 a）：a) 同进程直查 minCursor/watermarks —— 零延迟、
+   * 单代码路径；b) bridgeHealth 跨进程转发 —— 粒度粗且多一跳。
+   *
+   * 世代守卫：等待期间 seek/切歌已 ++epoch 或 stop ⇒ 立即返回，由 pushLoop 的
+   * 世代检查退出 —— 绝不能在旧代次上多睡一拍。
+   */
+  private async waitUntilContentHeadroom(myEpoch: number): Promise<void> {
+    let waitedMs = 0;
+    for (;;) {
+      if (!this.running || this.epoch !== myEpoch) return;
+      // 可选调用：最小测试桩没有该方法 ⇒ undefined ⇒ 视为不设限（桩组零影响）。
+      const headroom = this.group.pumpHeadroomUs?.();
+      if (headroom === null || headroom === undefined || headroom <= PUMP_LOOKAHEAD_DEFAULT_US) {
+        if (waitedMs > 0) {
+          logSafe(this.server, "info", `sendspin 泵背压解除 headroomMs=${headroom ?? "null"} 共等待=${waitedMs}ms song=${this.songId}`);
+        }
+        return;
+      }
+      if (waitedMs === 0) {
+        logSafe(
+          this.server,
+          "warn",
+          `sendspin 泵背压启动 headroomMs=${Math.round(headroom / 1000)} 上限Ms=${Math.round(PUMP_LOOKAHEAD_DEFAULT_US / 1000)} song=${this.songId}` +
+            `（前沿超前最落后消费游标,暂停产出等待消费追上 —— 对齐 MA sleep_to_limit_buffer）`,
+        );
+      } else if (Math.floor(waitedMs / 2000) !== Math.floor((waitedMs - this.headroomPollMs) / 2000)) {
+        logSafe(this.server, "info", `sendspin 泵背压中 headroomMs=${Math.round(headroom / 1000)} 已等=${waitedMs}ms song=${this.songId}`);
+      }
+      await new Promise<void>((r) => setTimeout(r, this.headroomPollMs));
+      waitedMs += this.headroomPollMs;
+    }
+  }
+
   /** 推流主循环:按真实墙钟节奏取 PCM 段 → 编码 → 下发,时间戳按**实测样本数**推进。 */
   private async pushLoop(myEpoch: number): Promise<void> {
     const win = this.window;
@@ -1464,6 +1517,14 @@ export class GroupPump {
           tsUs = cursorUs;
         }
 
+        // ★ S7(2026-11-25)消费驱动产出：每次向编码器/环提交**前**，若内容前沿超前
+        //   最落后消费游标 > 30s（MA _PRODUCER_BUFFER_LIMIT_US 口径）就 await 睡眠。
+        //   真机 23:17 教训：本循环此前只受环容量（**按条数** 1400）约束，广播开关
+        //   开启后前沿 3 分钟涨到 +178s、窗口内一帧没有 ⇒ 设备饿死。paceBumpBus
+        //   闸门只拦加速请求，拦不住基础节奏 —— 时间量反压必须落在提交点本身。
+        //   放在锚点块之后：等待不影响首帧锚点语义（锚点用的墙钟在等待前取好，
+        //   ts 按绝对时间线排程，晚推不晚播）；等待期间 pause/seek/stop 均有守卫。
+        await this.waitUntilContentHeadroom(myEpoch);
         let produced = 0;
         try {
           // pushFrame 返回本批产出包所覆盖的**总样本数**(编码器实测,见 EncodedChunk)。
