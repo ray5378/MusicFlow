@@ -24,6 +24,8 @@ import { randomBytes } from "node:crypto";
 import { loadOrCreateIdentity, type Identity } from "./identity.js";
 import { clearGroupBridges } from "./bridgeAttach.js";
 import { GroupBroadcaster } from "../playerHost/broadcaster.js";
+// 广播投递闭环（纯函数）：投递窗口与泵加速闸门都由「各设备已消费水位」反推。
+import { deliverWindow, shouldApproveBump } from "./contentDemand.js";
 import { broadcastDeliveryEnabled, playerIsolationEnabled } from "../playerHost/isolationFlag.js";
 import { getDeviceVolumeState, DEFAULT_SENDSPIN_VOLUME } from "./deviceState.js";
 import { asInitiator, handshakePayload1, type NoiseSession, type NoiseSuite } from "./handshake.js";
@@ -1550,8 +1552,6 @@ export class SendspinGroup {
     this.bridgePushTimer = undefined;
   }
 
-  /** 补投 tick:把每座桥水位之后、落在可听域窗口内的当前代次帧推给桥。
-   *  public 仅供单测确定性驱动(绕开真实定时器);生产由 ensureBridgePushTimer 调。 */
   /**
    * 新模型投递：组内容只解码一次 → 广播给每台设备的独立 sink。
    *
@@ -1559,13 +1559,16 @@ export class SendspinGroup {
    *  · 游标**全组一个**（内容时间线只有一个），不再出现「两台设备游标各漂各的」；
    *  · 每台设备的积压、丢弃、背压各自独立（慢的设备只让自己丢帧）；
    *  · 设备侧缓冲过深返回背压，帧留在自己队列里，超上限才丢最旧。
+   *
+   * **闭环**（2026-11-24 起）：本拍的投递窗口与「泵要不要加速」都由
+   * `contentDemand` 的纯函数算出，输入是**各设备已消费水位**（不是泵产了多少）：
+   *  · 窗口上沿只前瞻 2s —— 写死 horizon（now + 4s + sendAhead）会把未来内容
+   *    提前塞进设备队列，环里堆着永不被投递的内容，设备可听域永远落空；
+   *  · 游标落后 >1s 直接跳到 now（追不上了，别让设备持续吃旧帧）；
+   *  · 泵加速请求只在「内容不够 **且** 设备落后」时放行，否则挂着不动 ——
+   *    避免越补越远（240 2026-11-19 18:42：前沿超前 34.96s、连补 287 次、queueMs=0）。
    */
   private bridgeBroadcastTick(now: bigint): void {
-    // 广播模式下没有 per-device 的「投不出/缺料」判定，泵的加压请求一律放行：
-    // 内容只有一份，慢设备由各自 sink 的背压 + 丢最旧处理，不需要拦泵。
-    // （漏了这一步：设备侧空缓冲 → 请求被挂着 → 泵不再产出 → 环里只有开局两帧，
-    //   真机实测 pushed=2、inQueueMs=0、late 7695。）
-    for (let i = 0; i < 8 && paceBumpBus.peek() > 0; i++) paceBumpBus.approve();
     const key = this.encoderKey("pcm", 100);
     const ring = this.recentByGroup.get(key);
     const epoch = this.bridgeContentEpoch;
@@ -1612,12 +1615,52 @@ export class SendspinGroup {
     }
 
     if (ring && ring.length > 0) {
+      // ---- 需求快照：窗口/闸门的**唯一**输入来源（纯函数，便于单测钉死边界） ----
+      // minDeviceTsUs = 所有 sink「最近一次成功投递的 ts」的最小**非零**值：
+      //   慢的那台才是瓶颈，取最小才反映真实可听域；0 = 还没有任何设备成功投递过。
+      const stBefore = bc.stats();
+      let minDeviceTsUs = 0;
+      for (const s1 of Object.values(stBefore)) {
+        if (s1.lastTsUs <= 0) continue; // 0 = 该设备尚未投出过任何帧，不参与取最小
+        if (minDeviceTsUs === 0 || s1.lastTsUs < minDeviceTsUs) minDeviceTsUs = s1.lastTsUs;
+      }
+      // 内容前沿：ring 的不变量是「追加顺序 = ts 递增」⇒ 当前代次最后一帧即最新帧。
+      let tailUs = 0;
+      for (let idx = ring.length - 1; idx >= 0; idx--) {
+        if (ring[idx].ep !== epoch) continue;
+        tailUs = Number(ring[idx].tsUs);
+        break;
+      }
+
       let cursor = this.bcCursor.get(key) ?? 0n;
-      const horizon = now + BigInt(BRIDGE_PUSH_HORIZON_US) + BigInt(this.commonSendAheadUs());
+      const demand = { nowUs: Number(now), cursorUs: Number(cursor), tailUs, minDeviceTsUs };
+
+      // 泵加速闸门：只有「内容不够且设备落后」才放行；否则请求**保持挂起**
+      // （不 reject —— 下一拍可能就真的缺料了，reject 会丢掉缺口信息）。
+      if (shouldApproveBump(demand)) {
+        for (let i = 0; i < 8 && paceBumpBus.peek() > 0; i++) paceBumpBus.approve();
+      }
+
+      const win = deliverWindow(demand);
+      // 落后太多 ⇒ 直接跳到 now：逐帧追历史只会让设备持续吃旧帧（越播越晚）。
+      if (win.jumpToUs !== null) {
+        this.server.log(
+          "warn",
+          `bridge-broadcast-cursor-jump group=${this.name}` +
+            ` fromMs=${Math.round(Number(cursor) / 1000)} toMs=${Math.round(win.jumpToUs / 1000)}` +
+            ` behindMs=${Math.round((Number(now) - Number(cursor)) / 1000)}`,
+        );
+        cursor = BigInt(win.jumpToUs);
+        this.bcCursor.set(key, cursor);
+      }
+
+      const hiUs = BigInt(win.hiUs);
+      const loUs = BigInt(win.loUs);
       for (const e of ring) {
         if (e.ep !== epoch) continue;
-        if (e.tsUs <= cursor) continue;
-        if (e.tsUs > horizon) break;
+        if (e.tsUs > hiUs) break; // 上沿：更远的留到下一拍，别提前塞进设备队列
+        if (e.tsUs < loUs) continue; // 下沿：太老的帧不补（宁可缺口，不追历史）
+        if (e.tsUs <= cursor) continue; // 已广播过
         bc.broadcast({ tsUs: Number(e.tsUs), nFrames: Math.round((e.durUs / 1e6) * 48_000), data: e.data });
         cursor = e.tsUs;
       }
