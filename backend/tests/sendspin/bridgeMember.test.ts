@@ -1,3 +1,5 @@
+// [2026-11-25] 帧层/链路层测试：钉直连 ingest 语义（ringBuf 非本文件覆盖对象）
+process.env.MF_PLAYER_ISOLATION = "0";
 import { createHash, randomBytes } from "node:crypto";
 import net from "node:net";
 

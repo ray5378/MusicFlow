@@ -1,3 +1,5 @@
+// [2026-11-25] 帧层/链路层测试：钉直连 ingest 语义（ringBuf 非本文件覆盖对象）
+vi.hoisted(() => { process.env.MF_PLAYER_ISOLATION = "0"; });
 // ==================== 【QA 对抗性用例】Phase 5 生命周期/背压/热复用 ====================
 //
 // ① 播中 join→leave→join 循环 3 次:airplay 侧 session 计数与设备数一致、
