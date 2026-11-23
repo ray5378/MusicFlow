@@ -1641,7 +1641,18 @@ export class SendspinGroup {
       // 最小测试桩的 server 可能没有该字段(S8 前建的桩)⇒ 可选读取,缺省 0 = 缺省窗口
       // (与 pumpHeadroomUs 的可选调用同一兼容纪律:桩组零影响)。
       const holdMs = (this.server as { bridgeBacklogMs?: Map<string, number> }).bridgeBacklogMs?.get(deviceId) ?? 0;
+      // 视界必须跟随「游标 + 目标水位」：墙钟锚定的视界（now+2.5s）在游标贴上它之后
+      // 每拍只放行一个 tick 的新料（供给=消费，零余量）⇒ 设备 backlog 卡 75ms、
+      // 伺服想补 1925ms 却被墙钟窗口封死（2026-11-25 02:2x 真机 bridge-servo 实锤：
+      // dueMs=1925 deliveredMs=250）。取两者较大者：墙钟形态用于游标归零/新时间线，
+      // 游标形态用于伺服补量。ceil 与投递 break 同值（S8 不变式）。
       const horizon = now + BigInt(Math.round(Math.max(DELIVER_LOOKAHEAD_US, holdMs * 1000 + 500_000))) + ahead;
+      const targetMs = Math.max(2000, holdMs + 500);
+      const horizonCur = cursor + BigInt(targetMs * 1000);
+      const horizonFinal = horizon > horizonCur ? horizon : horizonCur;
+      // 超前跳转阈值保持墙钟锚定：内容超前墙钟超过 lookahead+ahead 才算真超前
+      //（跟随游标的 horizonCur 只用于伺服补量，若用它做跳转阈值，
+      //  超前 10s 的遗留游标永不触发跳回）
       const ceil = horizon;
       // 分级恢复（对齐 MA join-catchup：playback.py:293 落后成员从已提交历史重放、
       // 追上实时尾才晋升管线；历史被挤出才放弃重放）：
@@ -1672,7 +1683,6 @@ export class SendspinGroup {
       // （bridgeBacklogMs），低于目标多补、到目标即停 —— 经典水位伺服。
       const shift = this.bridgeDeliveryShiftUs(deviceId);
       const backlogMs = (this.server as { bridgeBacklogMs?: Map<string, number> }).bridgeBacklogMs?.get(deviceId) ?? 0;
-      const targetMs = Math.max(2000, backlogMs + 500);
       const dueUs = BigInt(Math.max(0, Math.round((targetMs - backlogMs) * 1000)));
       let deliveredUs = 0n;
       let firstCand = 0n;
@@ -1682,7 +1692,7 @@ export class SendspinGroup {
         if (e.ep !== epoch) { staleSkip += 1; continue; }
         if (e.tsUs <= cursor) continue;
         if (firstCand === 0n) firstCand = e.tsUs;
-        if (e.tsUs > horizon) break; // 绝对上沿：内容再超前也不预灌
+        if (e.tsUs > horizonFinal) break; // 视界：max(墙钟窗口, 游标+目标水位)
         if (deliveredUs >= dueUs) break; // 水位到目标：停（等设备消费）
         candCount += 1;
         try {
