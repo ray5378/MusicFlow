@@ -1542,10 +1542,20 @@ export class SendspinGroup {
       // 本拍补量 = 目标 − 实测积压，钳在 [0, Q_TARGET_MS]。
       // 上界钳制是防自激的关键：积压已超目标 ⇒ due=0 不补（子进程 drain 自然消化）。
       const dueUs = BigInt(Math.max(0, Math.min(Q_TARGET_MS, Q_TARGET_MS - backlogMs)) * 1000);
+      // [2026-11-25 07:52 对齐 MA PushStream 单一连续时间线]
+      // MA（playback.py _commit_pending_chunks）：timeline_start = commit_start −
+      // produced_audio_us —— 每拍只重算**起点**，已提交帧的偏移是连续的；
+      // send-ahead（min_send_ahead）只约束「首帧不得早于 now + lead」，**从不每拍
+      // 重锚时间线**。若不连续：tick 250ms 抬一次 floor 而本拍实际投递量未必
+      // 250ms ⇒ 两者错位就出现空洞（设备等待 ⇒ 微卡顿）或重叠（设备丢包）。
+      // 故：时间线严格接续；**只有排到过去（设备已饿死）才抢救抬升**。
       const floorSched = now + BigInt(REQUIRED_LEAD_US);
       let sched = this.bcSchedUs.get(deviceId) ?? 0n;
-      if (sched < floorSched) {
-        // 落后（新会话/换代/设备刚追上）⇒ 抬到 now+lead（首帧提前 1s 到达）
+      if (sched === 0n) {
+        sched = floorSched; // 首拍：初始化到 now+lead
+      } else if (sched < now) {
+        // 已排到过去 ⇒ 设备必已饿死，抢救式抬到 now+lead（非常规路径）
+        this.server.log("warn", `bridge-sched-starved dev=${deviceId} lagMs=${Math.round(Number(now - sched) / 1000)}`);
         sched = floorSched;
       } else if (sched > floorSched + 12_000_000n) {
         // 超前超过 3s ⇒ 时间线棘轮，拉回（对应 MA 显著性 rebase；内容跳跃由
