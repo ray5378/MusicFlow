@@ -448,7 +448,8 @@ const bridgeCalibCumulativeUs = new Map<string, number>();
  *  @param deltaUs 本次增量(正 = 出声晚 ⇒ 负向平移,见 anchorAdjustDecision)。 */
 export async function bridgeNudgeDelayDevice(deviceId: string, deltaUs: number): Promise<boolean> {
   if (!Number.isFinite(deltaUs) || deltaUs === 0) return false;
-  const cum = (bridgeCalibCumulativeUs.get(deviceId) ?? 0) + Math.round(deltaUs);
+  const prevCum = bridgeCalibCumulativeUs.get(deviceId) ?? 0;
+  const cum = prevCum + Math.round(deltaUs);
   bridgeCalibCumulativeUs.set(deviceId, cum);
   let baseUs = 0;
   try {
@@ -457,8 +458,16 @@ export async function bridgeNudgeDelayDevice(deviceId: string, deltaUs: number):
     if (gid) baseUs = Math.round(getMemberDelayMs(gid, `airplay:${deviceId}`) * 1000);
   } catch { /* 基准读不到 ⇒ 只下发校准累计量 */ }
   const target = baseUs + cum;
-  log.info(`[bridge-calib] device=${deviceId} driftNudgeUs=${Math.round(deltaUs)} cumulativeUs=${cum} targetShiftUs=${target}`);
-  return bridgeSetDelayDevice(deviceId, target);
+  const ok = await bridgeSetDelayDevice(deviceId, target);
+  if (!ok) {
+    // [S8 复核②]下发失败 ⇒ 回滚累计量(否则下次判定叠加在脏值上)且不重试 ——
+    // supervisor 侧测量实例绑定已保证同值不再判;这里留 warn 痕。
+    bridgeCalibCumulativeUs.set(deviceId, prevCum);
+    log.warn(`[bridge-calib] device=${deviceId} 微调下发失败,回滚累计量 prevCumUs=${prevCum} driftNudgeUs=${Math.round(deltaUs)}`);
+  } else {
+    log.info(`[bridge-calib] device=${deviceId} driftNudgeUs=${Math.round(deltaUs)} cumulativeUs=${cum} targetShiftUs=${target}`);
+  }
+  return ok;
 }
 
 /** 主进程编排:改某台 AirPlay 的成员补偿的**必生效**路径(D9,2026-11-01)。
@@ -469,6 +478,9 @@ export async function bridgeNudgeDelayDevice(deviceId: string, deltaUs: number):
 export async function bridgeRebuildDelayDevice(deviceId: string, shiftUs: number): Promise<boolean> {
   const running = airplaySupervisor.isRunning();
   log.info(`[bridge-rebuild-delay] enter dev=${deviceId} shiftUs=${shiftUs} running=${running}`);
+  // [S8 复核③]用户重新标定 ⇒ 校准累计量清零:shift 已重置为用户新值,
+  // 旧 cum 若残留,下次 nudge 会双重补偿。
+  bridgeCalibCumulativeUs.delete(deviceId);
   if (!running) return false;
   const v = Number(shiftUs);
   if (!Number.isFinite(v)) return false;

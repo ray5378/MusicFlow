@@ -29,8 +29,8 @@ function makeServerStub() {
   const map = new Map<string, number>();
   return {
     log() {},
-    bridgeHoldDepthMs: map,
-    setBridgeHoldDepth(m: Record<string, number>) {
+    bridgeBacklogMs: map,
+    setBridgeBacklog(m: Record<string, number>) {
       map.clear();
       for (const [k, v] of Object.entries(m)) {
         if (Number.isFinite(v) && v >= 0) map.set(k, v);
@@ -80,7 +80,7 @@ describe("逐设备投递窗口 — broadcast tick(修复点)", () => {
     const now = nowUs();
     seedEpoch(g);
     addRingFrame(g, now + 9_000_000n);
-    srv.setBridgeHoldDepth({}); // 无数据
+    srv.setBridgeBacklog({}); // 无数据
     const b = g.bridges.get("dev-a") as any;
     (g as any).bridgeBroadcastTick(now);
     // 9s 远超缺省 2s(+ahead)窗口 ⇒ 不投
@@ -92,7 +92,7 @@ describe("逐设备投递窗口 — broadcast tick(修复点)", () => {
     const now = nowUs();
     seedEpoch(g);
     addRingFrame(g, now + 4_000_000n);
-    srv.setBridgeHoldDepth({ "dev-a": 4000 });
+    srv.setBridgeBacklog({ "dev-a": 4000 });
     const b = g.bridges.get("dev-a") as any;
     (g as any).bridgeBroadcastTick(now);
     // max(2s, 4s+500ms) = 4.5s ⇒ +4s 帧落窗内 ⇒ 投出(缺省 2s 窗口下会被 break)
@@ -106,7 +106,7 @@ describe("逐设备投递窗口 — broadcast tick(修复点)", () => {
     const now = nowUs();
     seedEpoch(g);
     addRingFrame(g, now + 30_000_000n);
-    srv.setBridgeHoldDepth({ "dev-a": 60_000 });
+    srv.setBridgeBacklog({ "dev-a": 60_000 });
     const b = g.bridges.get("dev-a") as any;
     (g as any).bridgeBroadcastTick(now);
     // 上沿 = now+60.5s ⇒ +30s 帧投出;若护栏仍用 2s 旧值,+30s 游标早被跳回 = 白放宽
@@ -118,7 +118,7 @@ describe("逐设备投递窗口 — broadcast tick(修复点)", () => {
     const now = nowUs();
     seedEpoch(g);
     addRingFrame(g, now + 9_000_000n);
-    srv.setBridgeHoldDepth({ "dev-a": 100 });
+    srv.setBridgeBacklog({ "dev-a": 100 });
     const b = g.bridges.get("dev-a") as any;
     (g as any).bridgeBroadcastTick(now);
     expect(b.pushed.length).toBe(0);

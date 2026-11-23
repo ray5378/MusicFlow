@@ -227,19 +227,20 @@ export interface NoRedialEntry {
 const NO_REDIAL_TTL_MS = 5 * 60 * 1000;
 
 export class SendspinServer {
-  /** [S8 任务 2]逐设备持有深度(ms)—— 主进程经 bridgeHealth rpc 转发的 airplay
-   *  bridgeStats 数据(bridgeSession backlogMs 口径:设备稳态持有 ~1s、被追发抽干
-   *  时 0~175)。广播 tick 的逐设备投递窗口上沿用它;无数据 = 缺省 2s 窗口不变。
-   *  放在 server 级(非组级):数据源是服务器全域的桥水位,childMain 的
-   *  "bridgeHealth" rpc 只拿得到 server 引用,由 tick 经 this.server 读取。 */
-  readonly bridgeHoldDepthMs = new Map<string, number>();
+  /** [S8 复核④]逐设备入向 ring 积压(ms)—— 主进程经 bridgeHealth rpc 转发的
+   *  airplay bridgeStats 数据(backlogMs 口径,如实命名:这不是设备侧持有深度,
+   *  是子进程入向未消费量;设备稳态健康值 ~1s、被追发抽干时 0~175)。广播 tick
+   *  的逐设备投递窗口上沿用它;无数据 = 缺省 2s 窗口不变。放在 server 级(非组级):
+   *  数据源是服务器全域的桥水位,childMain 的 "bridgeHealth" rpc 只拿得到
+   *  server 引用,由 tick 经 this.server 读取。 */
+  readonly bridgeBacklogMs = new Map<string, number>();
 
-  /** 主进程(supervisor bridgeStats 转发链)写入逐设备持有深度。整体替换语义:
+  /** 主进程(supervisor bridgeStats 转发链)写入逐设备积压。整体替换语义:
    *  上行是每 2s 的全量快照,陈旧设备(已摘桥)自然从新快照里消失。 */
-  setBridgeHoldDepth(holdDepthMs: Record<string, number>): void {
-    this.bridgeHoldDepthMs.clear();
-    for (const [id, ms] of Object.entries(holdDepthMs)) {
-      if (Number.isFinite(ms) && ms >= 0) this.bridgeHoldDepthMs.set(id, ms);
+  setBridgeBacklog(backlogMs: Record<string, number>): void {
+    this.bridgeBacklogMs.clear();
+    for (const [id, ms] of Object.entries(backlogMs)) {
+      if (Number.isFinite(ms) && ms >= 0) this.bridgeBacklogMs.set(id, ms);
     }
   }
 
@@ -1639,7 +1640,7 @@ export class SendspinGroup {
       // 无数据(legacy 直读等)⇒ 0 ⇒ 缺省 2s,行为不变。
       // 最小测试桩的 server 可能没有该字段(S8 前建的桩)⇒ 可选读取,缺省 0 = 缺省窗口
       // (与 pumpHeadroomUs 的可选调用同一兼容纪律:桩组零影响)。
-      const holdMs = (this.server as { bridgeHoldDepthMs?: Map<string, number> }).bridgeHoldDepthMs?.get(deviceId) ?? 0;
+      const holdMs = (this.server as { bridgeBacklogMs?: Map<string, number> }).bridgeBacklogMs?.get(deviceId) ?? 0;
       const horizon = now + BigInt(Math.round(Math.max(DELIVER_LOOKAHEAD_US, holdMs * 1000 + 500_000))) + ahead;
       const ceil = horizon;
       // 分级恢复（对齐 MA join-catchup：playback.py:293 落后成员从已提交历史重放、
@@ -2190,11 +2191,13 @@ export class SendspinGroup {
    * pending channel + 启动 join-catchup(历史回放追上实时尾才晋升进实时管线),
    * **存量成员时间线一字不动**。
    *
-   * 2026-11-25 00:52 真机:SENDSPIN 设备(WS 直连,自报 required_lead=150ms/
-   * min_buffer=500ms)入组瞬间,legacy 路径下存量桥设备 HiVi skip 14.5s / delta
-   * −11.8s。调查结论(commit message 有完整版):子进程内入组路径已逐一排除
-   * (本函数只动新成员;playCore/playGroupCore 仅由主进程 play 指令触发;
-   * rebuildBridgeRoutes 仅由 PUT /delays 触发;setMemberDelay 无自动重算调用方)。
+   * 2026-11-25 复核事实纠正:00:52 的 HiVi skip 14.5s / delta −11.8s **不是
+   * 入组造成的** —— 日志钉死 16:02:12(UTC)SENDSPIN 回组时存量桥设备什么都没收
+   * 到(无 BOUNDARY/anchor 重发/generation bump);真根因是泵背压 30s 顶格 +
+   * 慢设备积压的慢性失同步(16:00:55 起两台就在 13~28s 跳段,先于入组)。
+   * 子进程内入组路径已逐一排除,与本结论一致(本函数只动新成员;playCore/
+   * playGroupCore 仅由主进程 play 指令触发;rebuildBridgeRoutes 仅由 PUT /delays
+   * 触发;setMemberDelay 无自动重算调用方)。
    * 本注释是**行为契约**:任何让「入组触碰存量成员时间线」的改动都违背 MA 语义,
    * 必须先在 commit message 论证。
    */

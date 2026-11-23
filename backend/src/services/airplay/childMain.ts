@@ -57,10 +57,11 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
           t: "bridgeStats",
           deviceId: row.deviceId,
           inQueueMs: row.inQueueMs,
+          backlogMs: row.backlogMs,
           actualSendAtUs: row.actualSendAtUs,
           commandedAnchorUs: row.commandedAnchorUs,
-          commandedLeadUs: row.commandedLeadUs,
-          holdDepthMs: row.holdDepthMs,
+          firstPacketLeadUs: row.firstPacketLeadUs,
+          isAp2: row.isAp2,
         });
       } catch {
         /* 上报失败不影响推流 */

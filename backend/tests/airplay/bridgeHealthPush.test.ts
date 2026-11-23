@@ -42,7 +42,9 @@ describe("推送链路（子进程侧）", () => {
     expect(s).toContain("inQueueMs: bridgeInQ,");
     expect(s).toContain("actualSendAtUs: this.actualSendAtUs");
     expect(s).toContain("commandedAnchorUs:");
-    expect(s).toContain("holdDepthMs: bridgeInQ");
+    expect(s).toContain("backlogMs: bridgeInQ");
+    expect(s).toContain("firstPacketLeadUs: this.firstPacketLeadUs");
+    expect(s).toContain("isAp2: this.ap2Session !== null");
   });
 
   it("childMain 在构造函数内接线（send 在作用域内）", () => {
@@ -51,16 +53,18 @@ describe("推送链路（子进程侧）", () => {
     // [S8]上报改多行对象,文本锁改为锁事件类型 + 扩展字段透传
     expect(s).toContain('t: "bridgeStats"');
     expect(s).toContain("actualSendAtUs: row.actualSendAtUs");
-    expect(s).toContain("holdDepthMs: row.holdDepthMs");
+    expect(s).toContain("backlogMs: row.backlogMs");
+    expect(s).toContain("isAp2: row.isAp2");
   });
 
   it("事件类型与 supervisor 分支就位", () => {
     const ipc = read("ipcProtocol.ts");
     // [S8]事件扩展字段文本锁(实测 actualSendAtUs/commandedLeadUs/holdDepthMs)
-    expect(ipc).toContain('{ t: "bridgeStats"; deviceId: string; inQueueMs: number; actualSendAtUs: number | null');
+    expect(ipc).toContain('{ t: "bridgeStats"; deviceId: string; inQueueMs: number; backlogMs: number; actualSendAtUs: number | null');
     const sup = read("supervisor.ts");
     expect(sup).toContain('ev.t === "bridgeStats"');
-    expect(sup).toContain("bridgeHealth.record(ev.deviceId, ev.inQueueMs, ev.holdDepthMs)");
+    expect(sup).toContain("bridgeHealth.record(ev.deviceId, ev.inQueueMs, ev.backlogMs)");
+    expect(sup).toContain("!ev.isAp2");
     // [S8]校准闭环接线:判定 + 微调下发
     expect(sup).toContain("anchorDriftUs");
     expect(sup).toContain("anchorAdjustDecision");

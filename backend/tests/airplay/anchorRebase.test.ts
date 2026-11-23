@@ -4,7 +4,8 @@
 // rebase ⇒ 整首歌每包「迟到追发」(latePackets≈100%,bridgeSession.ts:410 事故注释)。
 // 新判据:对齐 MA playback.py:90 ANCHOR_REBASE_SIGNIFICANT_US(500ms,复用
 // contentDemand.CURSOR_JUMP_BEHIND_US)—— ≥500ms 持续滞后立即前移发送参考,
-// <500ms 噪声不 rebase、累积观察(下一拍再判)。
+// <500ms 噪声不 rebase —— 注意:该区间没有累积机制,实际是逐块 late-skip
+// 丢帧追赶(每块丢一拍追一拍)。
 //
 // 本文件用纯依赖桩驱动 runAp2OutputLoop(零 IO),钉死两个边界:700ms 跳 / 300ms 不跳。
 import { describe, it, expect } from "vitest";
@@ -41,7 +42,7 @@ describe("runAp2OutputLoop — rebase 500ms 显著性(S8 任务 3)", () => {
     expect(result.chunks).toBe(1);
   });
 
-  it("滞后 300ms(<500ms 显著阈值)⇒ 不 rebase、照发(累积观察,下一拍再判)", async () => {
+  it("滞后 300ms(<500ms 显著阈值)⇒ 不 rebase、照发(逐块 late-skip 追赶,无累积)", async () => {
     let rebaseCalls = 0;
     let pullCalls = 0;
     const result = await runAp2OutputLoop({

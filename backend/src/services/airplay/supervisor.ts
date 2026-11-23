@@ -101,22 +101,30 @@ class AirplaySupervisor extends RendererHostSupervisor<
           return;
         }
         if (ev.t === "bridgeStats") {
-          bridgeHealth.record(ev.deviceId, ev.inQueueMs, ev.holdDepthMs);
+          bridgeHealth.record(ev.deviceId, ev.inQueueMs, ev.backlogMs);
           // [S8 校准闭环]测量 → 判定 → 微调:有首包测量且已锚定才判。
-          // anchorCalib 纯函数(>500ms 显著 + 10s 迟滞),执行走 control 的
+          // anchorCalib 纯函数(>500ms 显著 + 测量实例绑定 + 10s 迟滞),执行走 control 的
           // bridgeNudgeDelayDevice(动态 import,避免 airplay 内部循环依赖)。
+          // [S8 复核②]AP2 会话排除出判定面(执行端 applyAnchorShift 对 AP2 是 no-op,
+          // 判定→下发→false 每 10s 纯空转);判定面只保留 RAOP。
           // 外层回调非 async ⇒ 异步 IIFE 包裹(失败不连累水位转发)。
-          if (ev.actualSendAtUs !== null && ev.commandedAnchorUs > 0) {
-              void (async () => {
+          const actualSend = ev.actualSendAtUs;
+          const cmdAnchor = ev.commandedAnchorUs;
+          const lead = ev.firstPacketLeadUs ?? 0;
+          if (!ev.isAp2 && actualSend !== null && cmdAnchor > 0) {
+            void (async () => {
               try {
                 const calib = await import("./anchorCalib.js");
-                if (ev.actualSendAtUs === null) return;
-                const drift = calib.anchorDriftUs(ev.actualSendAtUs, ev.commandedAnchorUs, ev.commandedLeadUs);
-                const adjust = calib.anchorAdjustDecision(ev.deviceId, drift, Date.now());
+                const drift = calib.anchorDriftUs(actualSend, cmdAnchor, lead);
+                const adjust = calib.anchorAdjustDecision(ev.deviceId, actualSend, drift, Date.now(), ev.isAp2);
                 if (adjust !== null) {
-                  await import("./control.js")
+                  const ok = await import("./control.js")
                     .then((m) => m.bridgeNudgeDelayDevice(ev.deviceId, adjust))
-                    .catch(() => { /* 下发失败不连累 tick;下一次 tick 重判 */ });
+                    .catch(() => false);
+                  // [S8 复核②]下发失败 ⇒ 不重试(测量实例已绑定,同值不会再判),留痕
+                  if (ok === false) {
+                    log.warn(`[bridge-calib] device=${ev.deviceId} 微调下发失败(无会话/子进程未跑),本测量实例不再重试 driftNudgeUs=${adjust}`);
+                  }
                 }
               } catch { /* 判定异常不连累水位转发 */ }
             })();
@@ -127,10 +135,10 @@ class AirplaySupervisor extends RendererHostSupervisor<
           // ceil = max(now+2s+ahead, now+holdDepth+500ms)。sendspin 侧 childMain
           // "bridgeHealth" rpc 落地(7ba87e0d 之前 minInQueueMs 版本无接收端,转发被丢)。
           const min = bridgeHealth.min();
-          const holdDepths = bridgeHealth.holdDepths();
-          if (Number.isFinite(min) || Object.keys(holdDepths).length > 0) {
+          const backlogs = bridgeHealth.backlogs();
+          if (Number.isFinite(min) || Object.keys(backlogs).length > 0) {
             void import("../sendspin/supervisor.js")
-              .then((m) => m.sendspinSupervisor.rpc("bridgeHealth", { minInQueueMs: min, holdDepthMs: holdDepths }))
+              .then((m) => m.sendspinSupervisor.rpc("bridgeHealth", { minInQueueMs: min, backlogMs: backlogs }))
               .catch(() => {
                 /* sendspin 子进程未起（无播放）：丢弃即可，下一次 tick 再来 */
               });

@@ -890,7 +890,7 @@ export async function runAp2OutputLoop(deps: Ap2OutputDeps): Promise<Ap2OutputRe
   // 行为变更(审计采纳项,裁决允许):旧阈值 2s 下,恒定 0.5~2s 的欠账永远够不着
   // rebase ⇒ 整首歌每包「迟到追发」(latePackets≈100%,见 :410 事故注释);
   // 新阈值下 ≥500ms 的持续滞后立即前移发送参考,<500ms 的噪声不 rebase、
-  // 累积观察(下一拍再判)。只动判据这一处,冷却/互斥(front-rebase)不碰。
+  // 注意:lag ∈ (lateSkip, rebase) 区间**没有累积机制** —— 实际行为是逐块 late-skip 丢帧追赶(每块丢一拍追一拍),不是攒着到下一拍。只动判据这一处,冷却/互斥(front-rebase)不碰。
   const rebaseUs = deps.rebaseUs ?? CURSOR_JUMP_BEHIND_US;
   const errorLimit = deps.sendErrorLimit ?? AP2_SEND_ERROR_LIMIT;
   // L_eff(帧) → µs 用同一份换算函数(audibleAtUs(0 锚点) = 纯帧→µs)。
@@ -898,8 +898,8 @@ export async function runAp2OutputLoop(deps: Ap2OutputDeps): Promise<Ap2OutputRe
   let idx = 0;
   let chunks = 0;
   let lateSkipped = 0;
-    let firstSent = false;
-    let pacingShiftUs = 0n;
+  let firstSent = false;
+  let pacingShiftUs = 0n;
   let prevErrors = 0;
   let consecutiveErrors = 0;
   let stopReason: Ap2OutputResult["stopReason"] = "eof";
@@ -1082,9 +1082,15 @@ export class BridgeSession {
   /** [S8 校准闭环]锚定后**首块实际发出**的墙钟(µs,host 单调钟);null = 尚未发出。
    *  RAOP 路径在 pullChunk 首个成功块处记录(发送面 proxy,≤1 个节拍 before socket 写);
    *  AP2 路径由 runAp2OutputLoop 的 onFirstSend 精确记录。随 bridgeStats 每 2s 上报
-   *  主进程,drift 判定 = actualSendAtUs + commandedLeadUs − anchorUs(设备按声明
-   *  latency 确定性渲染 ⇒ 出声 = 发出 + L;RAOP 的 L_true 需解析设备 TIMING,后续项)。 */
+   *  主进程,drift 判定 = actualSendAtUs − (anchorUs − firstPacketLeadUs)(S8 复核②修正:
+   *  旧公式用 commandedLeadUs = anchorUs − now_plan,锚点对消后 drift ≡ 实际 − now_plan,
+   *  测的是「计划→首包」墙钟差;改用**会话有效延迟**才与设备真实出声对齐)。
+   *  RAOP 的 L_true 精确值需解析设备 TIMING,后续项 —— 当前 L_true ≈ 声明 latency。 */
   actualSendAtUs: number | null = null;
+  /** [S8 复核②]锚点建立时确定的首包**预期提前量**(µs):AP2 = latencyFrames→µs;
+   *  RAOP forceNow = 0(预期首包 = now_plan);RAOP 非 forceNow = L + SAFETY。
+   *  drift = actualSendAtUs − (anchorUs − 本值)。null = 未锚定。 */
+  firstPacketLeadUs: number | null = null;
   /** E3:锚点落定时刻的 chunksOut 快照(tick deltaUs 用增量)。 */
   private chunksOutAtPlan = 0;
   private generation = 0;
@@ -1531,6 +1537,7 @@ export class BridgeSession {
       this.anchors = null;
       this.anchorUs = null;
       this.commandedLeadUs = null;
+      this.firstPacketLeadUs = null;
       this.streamAborted = true;
       this.player?.flush();
       // 手动标记**传递**给紧随的 track:回拨必须在重启型边界落地(MA 口径:
@@ -1556,6 +1563,7 @@ export class BridgeSession {
     this.anchors = null;
     this.anchorUs = null;
     this.commandedLeadUs = null;
+    this.firstPacketLeadUs = null;
     // 热复用 RAOP 会话,推流循环立刻退出,新代次首帧重新起流
     // (player.flush 置 started=false ⇒ 新流首包带 0xE0 marker,接收端重锚)。
     this.streamAborted = true;
@@ -1650,6 +1658,7 @@ export class BridgeSession {
     this.anchors = null;
     this.anchorUs = null;
     this.commandedLeadUs = null;
+    this.firstPacketLeadUs = null;
     this.firstFrameTsUs = null;
   }
 
@@ -1739,6 +1748,11 @@ export class BridgeSession {
     this.anchorUs = plan.anchorUs;
     this.commandedLeadUs = plan.commandedLeadUs;
     this.actualSendAtUs = null; // 新锚点 ⇒ 首包测量重置
+    // [S8 复核②]首包预期提前量(L_eff):AP2 = 声明 latencyFrames→µs;
+    // RAOP forceNow = 0(首包即发);RAOP 非 forceNow = L + SAFETY(节拍公式 A−i·帧−L−SAFETY)。
+    this.firstPacketLeadUs = this.ap2Session !== null
+      ? Math.round((latencyFrames / rate) * 1e6)
+      : (plan.forceNow ? 0 : Math.round((latencyFrames / rate) * 1e6) + RAOP_SAFETY_MS * 1000);
     this.anchors = plan.anchors;
     // E3:锚点落定时刻的 chunksOut 快照 —— tick deltaUs 用本次 plan 起的增量,
     // 修 warm-reuse 会话跨 gen 累积导致的恒偏谬值(240 实证 35.68s)。
@@ -2294,10 +2308,11 @@ export class BridgeSession {
       bridgeStatsSink?.({
         deviceId: this.deviceId,
         inQueueMs: bridgeInQ,
+        backlogMs: bridgeInQ,
         actualSendAtUs: this.actualSendAtUs,
         commandedAnchorUs: this.anchorUs !== null ? Number(this.anchorUs) : 0,
-        commandedLeadUs: this.commandedLeadUs !== null ? Number(this.commandedLeadUs) : 0,
-        holdDepthMs: bridgeInQ, // 入向 ring 持有时长 = 设备持有深度估计(同口径)
+        firstPacketLeadUs: this.firstPacketLeadUs,
+        isAp2: this.ap2Session !== null,
       });
       const nowMs = Date.now();
 
@@ -2828,10 +2843,14 @@ export class BridgeSession {
 type BridgeStatsSink = (row: {
   deviceId: string;
   inQueueMs: number;
+  /** [S8 复核④]如实命名:值 = 子进程入向 ring 积压(backlogMs),非设备侧持有深度。 */
+  backlogMs: number;
   actualSendAtUs: number | null;
   commandedAnchorUs: number;
-  commandedLeadUs: number;
-  holdDepthMs: number;
+  firstPacketLeadUs: number | null;
+  /** AP2 会话标记:S8 复核② —— AP2 执行端(applyAnchorShift)是 no-op,
+   *  排除出校准判定面,避免「每 10s 判定→下发→false→空转」。 */
+  isAp2: boolean;
 }) => void;
 let bridgeStatsSink: BridgeStatsSink | null = null;
 

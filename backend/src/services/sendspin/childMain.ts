@@ -429,12 +429,12 @@ export class SendspinChildController extends ChildRpcHost<SendspinChildToParent,
         return srv?.sinkHealthOf(String(p?.clientId ?? "")) ?? "ok";
       }
       case "bridgeHealth": {
-        // [S8 任务 2]主进程转发的逐设备持有深度(airplay bridgeStats → supervisor
-        // → 本 rpc)。整体替换进组对象,广播 tick 的逐设备投递窗口上沿用它
-        // (ceil = max(now+2s+ahead, now+holdDepth+500ms))。
+        // [S8 任务 2]主进程转发的逐设备入向积压(airplay bridgeStats → supervisor
+        // → 本 rpc;[S8 复核④]如实命名 backlogMs)。整体替换进 server,广播 tick 的
+        // 逐设备投递窗口上沿用它(ceil = max(now+2s+ahead, now+backlog+500ms))。
         // 7ba87e0d 之前 minInQueueMs 版本没有本接收端 ⇒ 转发被 catch 丢弃。
-        const m = (p as { holdDepthMs?: Record<string, number> }).holdDepthMs;
-        if (m && typeof m === "object") srv?.setBridgeHoldDepth(m);
+        const m = (p as { backlogMs?: Record<string, number> }).backlogMs;
+        if (m && typeof m === "object") srv?.setBridgeBacklog(m);
         return null;
       }
       case "applyCfg": {
