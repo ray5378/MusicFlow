@@ -1663,6 +1663,25 @@ export class BridgeSession {
   /** D6/P1:`bridgeManual` RPC 落点 —— 只置 sticky 标记,不立即 FLUSH。
    *  真正的「1 次 FLUSH + ts 回拨」在下一个 track boundary 到达时执行,
    *  避免与正在跑的推流节拍/重传路径抢 socket。 */
+  /** [验收10/debug-only] 复采注入口:模拟一次传输死亡,走与真实 send-error 完全相同的
+   *  scheduleRaopReconnect 路径(守卫/上限/退避全部生效)。debug-only:仅复采/测试用,
+   *  触发动作均为自愈链路已有动作,无额外破坏面(已批准不加 env 开关)。 */
+  debugReconnect(reason: string): void {
+    this.scheduleRaopReconnect(`debug/${reason}`);
+  }
+
+  /** [验收10/debug-only] 复采注入口:模拟一次**恢复成功** —— 同时喂两个基准:
+   *  player.lastTimingAt(liveness 静默基线,防看门狗立刻二次判定)与
+   *  lastRecoveryAtMs(30s 恢复守卫窗起点)。debug-only,语义同上。 */
+  debugMarkRecovery(): void {
+    const now = Date.now();
+    if (this.player !== null) {
+      (this.player as unknown as { lastTimingAt: number }).lastTimingAt = now;
+    }
+    this.lastRecoveryAtMs = now;
+    log.info(`[airplay-bridge] debug mark-recovery: device=${this.deviceId} lastRecoveryAtMs=${now}`);
+  }
+
   markManual(): void {
     this.manualPendingAt = Date.now();
     log.info(`[airplay-bridge] ${JSON.stringify({ ev: "manual-mark", dev: this.deviceId, gen: this.generation })}`);
@@ -3353,6 +3372,30 @@ export class BridgeSessionManager {
   /** D6/P1:按 sessionToken 标记「用户手动 next/prev」;未知 token 幂等忽略。 */
   markManual(token: string): void {
     this.sessions.get(token)?.markManual();
+  }
+
+  /** [验收10/debug-only] 按 deviceId 注入一次传输死亡(复采用;见 BridgeSession.debugReconnect)。 */
+  debugReconnect(deviceId: string, reason: string): boolean {
+    this.pruneClosed();
+    for (const s of this.sessions.values()) {
+      if (s.deviceId === deviceId) {
+        s.debugReconnect(reason);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** [验收10/debug-only] 按 deviceId 注入一次恢复成功(复采用;见 BridgeSession.debugMarkRecovery)。 */
+  debugMarkRecovery(deviceId: string): boolean {
+    this.pruneClosed();
+    for (const s of this.sessions.values()) {
+      if (s.deviceId === deviceId) {
+        s.debugMarkRecovery();
+        return true;
+      }
+    }
+    return false;
   }
 
   /** D6(2026-11-01):按 deviceId **运行中改成员补偿**(命中即更新并平移设备侧映射)。

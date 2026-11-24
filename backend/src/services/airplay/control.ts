@@ -540,6 +540,34 @@ export async function bridgeStopDevice(token: string, deviceId?: string): Promis
  *  只置**sticky 标记**,不在此刻 FLUSH —— boundary 到达时由 BridgeSession 统一
  *  执行「恰 1 次 RTSP FLUSH + ts 回拨」。失败只记 debug:桥不在(冷建/已拆)时
  *  没有旧轨道可换,标记本身无意义。 */
+/** [验收10/debug-only] 复采注入口:按 deviceId 注入一次传输死亡(走真实自愈链路)。
+ *  debug-only:仅复采/测试用,触发动作均为自愈已有动作(已批准不加 env 开关)。
+ *  @returns false = 该设备当前没有桥会话。 */
+export async function bridgeDebugReconnect(deviceId: string, reason: string): Promise<boolean> {
+  if (!deviceId) return false;
+  if (!airplaySupervisor.isRunning()) return false;
+  try {
+    const r = await airplaySupervisor.rpc("debug/bridgeReconnect", { deviceId, reason });
+    return Boolean((r as { hit?: boolean } | null)?.hit);
+  } catch (e: any) {
+    log.debug(`[bridge-debug] ${deviceId} reconnect 注入失败(忽略): ${e?.message || e}`);
+    return false;
+  }
+}
+
+/** [验收10/debug-only] 复采注入口:按 deviceId 注入一次恢复成功(喂两个恢复基准)。 */
+export async function bridgeDebugMarkRecovery(deviceId: string): Promise<boolean> {
+  if (!deviceId) return false;
+  if (!airplaySupervisor.isRunning()) return false;
+  try {
+    const r = await airplaySupervisor.rpc("debug/bridgeMarkRecovery", { deviceId });
+    return Boolean((r as { hit?: boolean } | null)?.hit);
+  } catch (e: any) {
+    log.debug(`[bridge-debug] ${deviceId} mark-recovery 注入失败(忽略): ${e?.message || e}`);
+    return false;
+  }
+}
+
 export async function bridgeManualDevice(token: string): Promise<void> {
   if (!token) return;
   if (!airplaySupervisor.isRunning()) return;

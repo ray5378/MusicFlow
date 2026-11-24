@@ -192,6 +192,20 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
         this.bridgeSessions.markManual(String(p?.token ?? ""));
         return null;
       }
+      case "debug/bridgeReconnect": {
+        // [验收10/debug-only:仅复采/测试用] 注入一次传输死亡 —— 走与真实 send-error
+        // 完全相同的 scheduleRaopReconnect 路径(守卫/上限/退避全部生效),无额外破坏面。
+        const hit1 = this.bridgeSessions.debugReconnect(
+          String(p?.deviceId ?? ""),
+          String(p?.reason ?? "inject"),
+        );
+        return { hit: hit1 };
+      }
+      case "debug/bridgeMarkRecovery": {
+        // [验收10/debug-only:仅复采/测试用] 注入一次恢复成功(喂 liveness 基线 + 30s 守卫窗起点)。
+        const hit2 = this.bridgeSessions.debugMarkRecovery(String(p?.deviceId ?? ""));
+        return { hit: hit2 };
+      }
       case "bridgeSetDelay": {
         // D6(2026-11-01):运行中改成员补偿 —— 只平移该设备会话的 RTP↔NTP 映射。
         // 返回 false = 该设备当前没有桥会话(主进程按重建/加入兜底)。

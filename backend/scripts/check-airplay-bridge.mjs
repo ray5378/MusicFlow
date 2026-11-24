@@ -829,6 +829,60 @@ console.log("===== ⑲ 进程退出(SIGTERM/SIGINT)必须先 TEARDOWN AirPlay �
 //   D8 边界处置按本地 reason 判 ⇒ 一台清队列一台保留(跨换歌粘住 2.95s);
 //   D9 只靠 SYNC 平移 ⇒ 接收端只在 RECORD 吃映射,出声时刻其实没变;但 2026-11-03 实测
 //      「为必生效去重建会话」会把整条桥队列清空(6.28~7.60s 静音)⇒ 方案1 改回原地 retime。
+// ---------------------------------------------------------------------------
+// ㉑ 验收10:传输恢复守卫 + rejoin 上限 + debug 注入口(2026-11-25)
+// ---------------------------------------------------------------------------
+console.log("===== ㉑ 验收10:传输恢复守卫(30s) + rejoin 上限(2) + debug 注入口 =====");
+{
+  const bs = code(BRIDGE_SESSION);
+  const ctl = code(CONTROL);
+  const child = code(CHILD_MAIN);
+  const rates = code("backend/src/services/airplay/rates.ts");
+  check(
+    "验收10: BRIDGE_REJOIN_ATTEMPT_MAX = 2 钉死(MA :1196-1219 (5,30);间距由 computeBridgeBackoffMs 承担)",
+    count(rates, "export const BRIDGE_REJOIN_ATTEMPT_MAX = 2;") === 1,
+    `命中 ${count(rates, "export const BRIDGE_REJOIN_ATTEMPT_MAX = 2;")} 次(应恰 1)`,
+  );
+  check(
+    "验收10: transportGiveUp 统一闸挂在两个入口(退避排程 + 看门狗直调),且两触发面齐全",
+    bs.includes("if (this.transportGiveUp(reason)) return;")
+      && bs.includes("if (this.transportGivenUp) return;")
+      && bs.includes("raopReconnectAttempt >= BRIDGE_REJOIN_ATTEMPT_MAX")
+      && bs.includes("this.lastRecoveryAtMs > 0"),
+    "缺 scheduleRaopReconnect/reconnectRaop 任一入口或触发面",
+  );
+  check(
+    "验收10: lastRecoveryAtMs 在 reconnectRaop 成功路径赋值(看门狗 TEARDOWN+重锚汇于此,单写点)",
+    /raop reconnected[\s\S]{0,400}?this\.lastRecoveryAtMs = Date\.now\(\);/.test(bs),
+    "未找到 reconnected 日志后紧跟 lastRecoveryAtMs 赋值",
+  );
+  check(
+    "验收10: 放弃态留痕可 grep(raop transport give-up,区分两种触发原因)",
+    bs.includes("raop transport give-up")
+      && bs.includes("rejoin attempts exhausted")
+      && bs.includes("died again within"),
+    "放弃态缺 error 留痕",
+  );
+  check(
+    "debug 注入口: debug/ 命名空间(childMain case + 会话侧 reason 前缀),防误挪出 debug 面",
+    child.includes('case "debug/bridgeReconnect"')
+      && child.includes('case "debug/bridgeMarkRecovery"')
+      && bs.includes("debug/${reason}")
+      && ctl.includes("export async function bridgeDebugReconnect")
+      && ctl.includes("export async function bridgeDebugMarkRecovery"),
+    "debug 注入口缺 childMain case / control 入口 / debug 前缀",
+  );
+  // ---- 既有新增机制查漏(第一轮复采已验证的信号,钉住防回退) ----
+  check(
+    "复采信号钉: track-reanchor / boundary-reanchor / anchor-splice / group-anchor-floormiss 四类诊断在场",
+    bs.includes('ev: "track-reanchor"')
+      && bs.includes('ev: "boundary-reanchor"')
+      && bs.includes('ev: "anchor-splice"')
+      && bs.includes('ev: "group-anchor-floormiss"'),
+    "四类复采信号缺一(复采脚本依赖这些 ev 名)",
+  );
+}
+
 console.log("===== ⑳ D4~D9:组时间线唯一(D4/D5/D7/D8)+ 成员补偿必生效(D6/D9) =====");
 {
   const bs = code(BRIDGE_SESSION);

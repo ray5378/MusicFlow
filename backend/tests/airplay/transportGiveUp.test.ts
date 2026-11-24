@@ -11,7 +11,7 @@ import "../plugins/_env.js";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bridgeSocketPath } from "../../src/services/airplay/bridgeChannel.js";
-import { BridgeSession } from "../../src/services/airplay/bridgeSession.js";
+import { BridgeSession, BridgeSessionManager } from "../../src/services/airplay/bridgeSession.js";
 import { BRIDGE_REJOIN_ATTEMPT_MAX } from "../../src/services/airplay/rates.js";
 import { BRIDGE_TRANSPORT_RECOVERY_GUARD_MS } from "../../src/services/sendspin/constants.js";
 
@@ -88,5 +88,32 @@ describe("传输恢复守卫 + rejoin 上限(验收10/MA (5,30))", () => {
     expect(any.raopReconnectTimer).not.toBeNull();
     expect(any.raopReconnectAttempt).toBe(1);
     clearTimeout(any.raopReconnectTimer);
+  });
+
+  it("⑤ debug 注入口:debugReconnect 走同一排程路径,debugMarkRecovery 喂两个恢复基准", () => {
+    const s = mk();
+    const any = s as any;
+    any.debugReconnect("inject");
+    expect(any.raopReconnectTimer).not.toBeNull();
+    expect(any.raopReconnectAttempt).toBe(1);
+    clearTimeout(any.raopReconnectTimer);
+    // dry 会话无 player ⇒ 注入最小桩,让 debugMarkRecovery 的 liveness 基线分支也被覆盖
+    any.player = { lastTimingAt: 0 };
+    const before = Date.now();
+    any.debugMarkRecovery();
+    expect(any.lastRecoveryAtMs).toBeGreaterThanOrEqual(before);
+    expect((any.player as { lastTimingAt: number } | null)?.lastTimingAt).toBeGreaterThanOrEqual(before);
+  });
+
+  it("⑥ manager 级 debug 口:按 deviceId 命中,未命中返回 false", () => {
+    const s = mk();
+    const any = s as any;
+    const m = new BridgeSessionManager();
+    (m as unknown as { sessions: Map<string, unknown> }).sessions.set("tok", s);
+    expect(m.debugReconnect(any.opts.deviceId, "inject")).toBe(true);
+    clearTimeout((any as { raopReconnectTimer: NodeJS.Timeout }).raopReconnectTimer);
+    expect(m.debugMarkRecovery(any.opts.deviceId)).toBe(true);
+    expect(m.debugReconnect("no-such-dev", "inject")).toBe(false);
+    expect(m.debugMarkRecovery("no-such-dev")).toBe(false);
   });
 });
