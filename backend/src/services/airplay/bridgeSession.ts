@@ -185,7 +185,16 @@ const BRIDGE_FRONT_REBASE_MAX_BACKLOG_MS = 3_000;
 
 /** 接收侧 overflow 保留上限(ms):裁旧保新时把 inQueue 压回该深度(与接收端 L 同量级),
  *  余下的时间线缺口交给 aligner 的 skip 路径自然吸收。 */
+// [验收9/MA 差异] 对齐 sendspin_bridge.py:1511-1516 `_held_chunks`
+// (MAX_HELD_AUDIO_US=45s / MAX_HELD_CHUNKS=4000)防「锚点永不落定 ⇒ hold 无限涨」
+// 的同一故障面;本仓取 2s 裁旧保新(更激进更早丢旧),hold 恒 ≤2s,
+// **结构性排除**该故障面 —— 不叠 MA 同款层(2026-11-25 裁决:双重丢帧策略会打架)。
 const BRIDGE_OVERFLOW_KEEP_MS = 2_000;
+
+// [N4/MA sendspin_bridge.py:118-124 SILENCE_BLOCK 同款] 1 秒 48k/s16le/2ch 静音共享块:
+// 对齐器补静音/欠料补静音的**只读母版**(immutable 全零),消费侧一律切片后 copy,
+// 绝不把共享块本体交给会改写的持有者 —— 防 timeline rebase 大洞的 MB 级一次性分配。
+const SILENCE_BLOCK = Buffer.alloc(BRIDGE_PCM_BYTES_PER_SEC);
 
 /** Fix-1: 桥会话建立(RECORD 完成)后主动推一次初始音量。此前桥会话只在音量
  *  **变更**事件时才有 SET_PARAMETER(cast 路径 control.applyVolumeDb 不覆盖桥),
@@ -1835,6 +1844,10 @@ export class BridgeSession {
    *  积压本质只是「生产者比发送侧快」,丢最旧的一段即可追上;保留当前内容与 outBuf,
    *  余下的时间线缺口由 aligner 的 skip 路径自然吸收(不物化静音)。
    */
+  // [验收9/MA 对齐说明] sendspin_bridge.py:1511-1516 `_held_chunks`(45s/4000 双上限)
+  // 防「锚点永不落定 ⇒ hold 无限涨」。本仓不叠同款层:onReceiveOverflow 以
+  // BRIDGE_OVERFLOW_KEEP_MS=2s 裁旧保新,hold 上限恒 ≤2s,结构性排除该故障面;
+  // 两层丢帧策略会打架(谁先丢/丢谁不一致)。验收9=断言 hold 不超 2s 口径。
   private onReceiveOverflow(ms: number): void {
     const keepBytes = Math.round((BRIDGE_OVERFLOW_KEEP_MS / 1000) * BRIDGE_PCM_BYTES_PER_SEC);
     let dropped = 0;
@@ -1912,6 +1925,19 @@ export class BridgeSession {
     // AP2 realtime 没有 RAOP 会话对象(player/raopSession 恒 null)⇒ 判空必须放行 AP2;
     // ap2 === null 时本式与原 `if (!player || !session) return;` 逐字节等价(RAOP 不变)。
     if (this.ap2Session === null && (!player || !session)) return;
+    // [验收11/MA ClockReadiness.STALLED :903-911 姿态对齐] 设备时钟始终未就绪
+    // (timing 心跳一次都没来)⇒ MA = warning "never answered the server's PTP
+    // clock, so this stream will be silent until it does; anchoring anyway":
+    // 仍然锚定 —— 停下会掐死音箱,stall 不足以证明该弃;且**每个锚定周期重臂**
+    // 该报告(本仓落点在 maybeBeginStream,天然逐周期重臂,不会读到上轮旧状态)。
+    // 本仓差异:MA 等 PTP 时钟,我们等 RAOP timing 心跳(player.timingCount);
+    // 无阻断逻辑,报告即动作(锚定照常)。
+    if (player !== null && (player as unknown as { timingCount?: number }).timingCount === 0) {
+      log.warn(
+        `[airplay-bridge] clock-stalled dev=${this.deviceId} gen=${this.generation} ` +
+        `timingCount=0 ⇒ 设备时钟未就绪,anchoring anyway(MA STALLED 姿态);流将静音直到 timing 心跳到达`,
+      );
+    }
     const rate = this.outRate;
     // L = RECORD 协商的接收端缓冲深度(不得归零,§3.3);锚点公式与 SYNC 用同一值。
     const raopLatency = player ? Math.max(1, player.negotiatedLatencyFrames) : 1;
@@ -2586,7 +2612,15 @@ export class BridgeSession {
           backlogMs: this.backlogMs(),
         })}`);
       }
-      this.deltaSamples.push(deltaUs);
+      // [N1/MA _absorb_playout_shift :1411-1446 差异说明] MA 的 cliairplay 断粮时会
+    // 自行推迟 playout re-anchor 并上报 cumulative_shift_seconds,桥据此折回映射
+    // (drop_until_us += delta;负 delta 取新基线不追旧账)。本仓 RAOP/AP2 侧**没有**
+    // 该上报源(全仓 grep cumulative/shift 仅剩已移除的 S8 校准链残留),设备自行
+    // 重排不可观测 ⇒ 只能把「late 暴涨 + 残留积压 0」这一可观测指纹诊断化:
+    // late 涨幅超阈值时打一行联动日志(与 bridge-late-selfheal 守卫互为印证 ——
+    // 该行出现即说明存在 MA 所述的设备端 shift,等价于 `_absorb_playout_shift` 的
+    // 折回量,可由 selfheal 的 BOUNDARY{seek} 重建映射来吸收)。
+    this.deltaSamples.push(deltaUs);
       if (this.deltaSamples.length > 25) this.deltaSamples.shift();
     }
     const sorted = [...this.deltaSamples].sort((a, b) => a - b);
@@ -2848,7 +2882,20 @@ export class BridgeSession {
         // 内容落后(有洞)⇒ 补静音(占据真实时间线)。D8:稳态对齐不设上限(长缺口也补,
         // 绝不跳段 —— 跳段会把本成员 RTP 内容轴前移,永久错位)。
         // 唯一例外 = 新代次首帧的大缺口:按 ① 先走 skip(见上),不会落到这里。
-        this.appendOut(Buffer.alloc(act.insertFrames * 4));
+        // [N4/MA SILENCE_BLOCK] sendspin_bridge.py:118-124(1s immutable 共享静音块)
+        // + :1567(_queue_silence):timeline rebase 可开出几十秒的洞,MA 用共享块重复
+        // 引用、只分配子块余量 —— 防 MB 级一次性分配压 event loop。本仓同形:
+        // 按 ≤1s 切片追加(避免 outBuf 直接别名共享块被上层改写)。
+        {
+          let left = act.insertFrames * 4;
+          while (left > 0) {
+            const piece = left <= SILENCE_BLOCK.length
+              ? SILENCE_BLOCK.subarray(0, left)
+              : SILENCE_BLOCK;
+            this.appendOut(Buffer.from(piece));
+            left -= piece.length;
+          }
+        }
         this.stats.insertedFrames += act.insertFrames;
         if (act.insertFrames > rate * 2) {
           log.warn(`[airplay-bridge] ${JSON.stringify({ ev: "pad-insert", dev: this.deviceId, gen: this.generation, frames: act.insertFrames, ms: Math.round((act.insertFrames / rate) * 1000) })}`);
