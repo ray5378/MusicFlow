@@ -901,6 +901,15 @@ export class SendspinGroup {
   /** [P0]环时间线重基准冷却(ms):一次死锁只前移一次 —— 两台设备共享同一条环,
    *  后判到的那台不能对已对齐的环再前移一次。 */
   private bridgeRebaseAtMs = 0;
+  /** [P0-补]泵时间线**显式偏移**(µs,重基准后为负;新代次清零)。
+   *  为什么必须动这里而不是 deliveredByGroup/deliveredPeak:打戳公式是
+   *    `ts = 组累计交付 + (tsUs − 批前峰值) + pendingTrackLeadUs`
+   *  两者**同减会互相抵消**(ts 不变)—— 只有独立偏移项才能让「泵后续新帧」
+   *  与「平移后的环」连续。加在 pendingTrackLeadUs 同一处,对成员下发 / ring 入环 /
+   *  桥投递的 ts 全链一致生效(整组时间线同源,组内同步不破)。
+   *  风险边界:该偏移是**整组**平移;若组内还有直连成员,它们同样按新时间线排程
+   *  (与桥一致,组内同步优先)。新内容代次(切歌/seek)清零 —— 泵会重新锚到 now+lead。 */
+  private bridgeTimelineOffsetUs = 0n;
   /** [C 方案 2026-11-03] 自动换歌空窗续静音的当前静音尾(内容域 ts);null = 不在空窗期。
    *
    *  语义:自动换歌(`track && !manual`)不中断推流,但上游取下一首/解码期间不产帧 ⇒
@@ -1473,6 +1482,8 @@ export class SendspinGroup {
       // [P0]原来是 delete ⇒ 下一拍 `?? 0n` 把游标当「内容绝对 0」，与 uptime 相减
       // 得 -296907s：**游标缺失绝不能等价于内容 0**。复位到 now 才是有效种子。
       for (const id of this.bridges.keys()) this.bcCursor.set(id, now);
+      // [P0-补]新代次:泵重新锚到 now+lead,重基准偏移必须清零(否则新时间线被叠加旧偏移)。
+      this.bridgeTimelineOffsetUs = 0n;
     }
     // 内容尾（当前代次；环空 ⇒ 0，视为内容不足）
     let tailUs = 0n;
@@ -1785,15 +1796,26 @@ export class SendspinGroup {
     const shiftUs = headUs > now ? headUs - now : 0n;
     if (shiftUs <= 0n) return;
     this.bridgeRebaseAtMs = Date.now();
-    for (const e of ring) {
-      if (e.ep === epoch) e.tsUs -= shiftUs;
+    // [P0-补]**所有**组环的当前代次帧整体前移 —— 不能只移 pcm:100:泵时间线是
+    // 全局记账(deliveredByGroup/deliveredPeak 跨 codec 组共享),flac 等组环与
+    // pcm 环同源打戳,只移一条会让各环与泵记账错位。
+    for (const r of this.recentByGroup.values()) {
+      for (const e of r) {
+        if (e.ep === epoch) e.tsUs -= shiftUs;
+      }
     }
+    // [P0-补]**泵时间线同步重基准**:偏移量与环平移同源,新产帧 ts 才会接在
+    // 平移后的环尾之后(否则泵按旧累计 +50s 打戳 ⇒ 环尾出现 +35s→+50s 的 15s
+    // 空洞 ⇒ 播到 35s 再次 dead 2 拍 ⇒ 周期性 0.5s 死窗 + BOUNDARY 重锚)。
+    // 不动 deliveredByGroup/deliveredPeak:它们在打戳公式里同减会互相抵消(见字段注释)。
+    this.bridgeTimelineOffsetUs -= shiftUs;
     this.server.log(
       "warn",
       `bridge-start-seek-deadlock dev=${deviceId} shiftMs=${Math.round(Number(shiftUs) / 1000)} ` +
         `headVsNowMs=${Math.round(Number(headUs - now) / 1000)} tailVsNowMs=${Math.round(Number(tailUs - now) / 1000)} ` +
         `horizonMs=${Math.round(Number(horizonFinal - now) / 1000)} ringFrames=${ring.length} ` +
-        `⇒ 环时间线整体前移回可投范围 + 全体 BOUNDARY{seek} 重锚(cursor=now)`,
+        `timelineOffsetUs=${this.bridgeTimelineOffsetUs} ` +
+        `⇒ 环时间线前移 + 泵打戳偏移同步 + 全体 BOUNDARY{seek} 重锚(cursor=now)`,
     );
     for (const [id, h] of this.bridges) {
       try {
@@ -2521,6 +2543,10 @@ export class SendspinGroup {
       //    递增。投递侧会把这段去重成 1 帧(= 每首开头丢 Δ)。真因与修法见上面
       //    「否决记录」——必须让窗口感知垫片(D1),不能靠常数垫片。
       if (this.pendingTrackLeadUs > 0n) ts += this.pendingTrackLeadUs;
+      // [P0-补]泵时间线重基准偏移(见 bridgeTimelineOffsetUs 注释):重基准后为负,
+      // 让后续新帧与平移后的环连续,消除「每约 15s 一次 0.5s 死窗」的周期性空洞。
+      // 与 pendingTrackLeadUs 同点叠加 ⇒ 成员下发 / ring / 桥投递 ts 全链一致。
+      if (this.bridgeTimelineOffsetUs !== 0n) ts += this.bridgeTimelineOffsetUs;
       // late-join 回填缓存:逐帧记下**本组真正发出去的 chunk** 及其真实起点时间戳。
       // 只有这里(唯一的下发点)能拿到「未来还没播的音频」,新成员加入时靠它补齐。
       const ring = this.ringFor(key);
