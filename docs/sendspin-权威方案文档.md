@@ -1951,7 +1951,7 @@ this.continuityDenied   = continuityDrainSkip && !this.continuityCommitted;
 | `sendspin timeline anchored: base=… contig=… continuity=… lastEnd=…` | `streamEngine.ts:1638-1642` | `contig` 有值 = 接续落地 |
 | `bridge-generation … continuity=1 keep=queue,epoch,watermarks` | `server.ts:1011` | 桥侧按接续换代（不发任何边界消息） |
 | `bridge-window-dead dev=… reason=content-beyond-horizon\|no-frame-in-window …` | `server.ts:1620-1626` | **桥断粮在父侧的唯一直接证据** |
-| `[anchor-content] dev=cold\|warm contentVsNowMs=… minSafeMs=… finalLeadMs=… picked=…` | `bridgeSession.ts:743-749` | 起播锚点实际取值 |
+| `[anchor-content] dev=cold\|warm contentVsNowMs=… minSafeMs=… finalLeadMs=… picked=…` | `bridgeSession.ts:746-752` | 起播锚点实际取值 |
 
 **同链四级一致判据（旧称「三级」，实际四处落点，缺一不成立）**：
 `曲末排空跳过 continuity=1` → `[Sendspin][continuity] continuity=true` →
@@ -1965,7 +1965,7 @@ this.continuityDenied   = continuityDrainSkip && !this.continuityCommitted;
    **`deltaUs`**：历史 2.06s / 当前 1.56s；`driftUs=0` 表示时间线对齐。
 2. **forceNow 语义下设备「到包即播」**：lead 拉长**不转化为缓冲**（cold lead 3s 时 `deltaUs` 仍 1.56s）。
 3. **父侧投递实测 1.0x**：15s 窗口 `pushed` 增量 = 600 块 × 25ms = 15s，供需平衡 ⇒ drain
-   无货可追（`[ring-diag] bufferedMs=0` 而 `budgetMs≈1950`，`bridgeSession.ts:1561`）。
+   无货可追（`[ring-diag] bufferedMs=0` 而 `budgetMs≈1950`，`bridgeSession.ts:1564`）。
 4. `inQueueMs` 是**设备侧 RAOP 发送队列**、`maxQueueMs` 是**桥内待发队列**，两者都不是
    「设备真实可播时长」；设备队列容量实测 4163ms（`server.ts:1486` 注释）。
 
@@ -1978,7 +1978,7 @@ this.continuityDenied   = continuityDrainSkip && !this.continuityCommitted;
 3. **`bridgeDeliveryShiftUs` 在 sync 组时间线开启时恒 0**（`server.ts:1798-1802`），成员补偿只落在
    桥会话锚点（`airplay/control.ts:406` 的 `bridgePrepare.anchorShiftUs`）。
 4. **父侧不做水位伺服**（`server.ts:1551-1556`）：只把 ring 填到投递上沿；水位由子进程
-   `startRingDrain`（`bridgeSession.ts:1492`）按设备 inQ 伺服。旧「父侧按 backlog 伺服」与子进程
+   `startRingDrain`（`bridgeSession.ts:1495`）按设备 inQ 伺服。旧「父侧按 backlog 伺服」与子进程
    打架（真机 inQ 875↔5650 振荡 ⇒ 可闻卡顿）。
 5. **任何 per-member 的时序分叉都要先回答「同一时刻各成员包里的内容是否仍然相同」**（§4.4 条 2 的延伸）。
 
