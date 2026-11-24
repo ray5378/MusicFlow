@@ -889,7 +889,18 @@ export class SendspinGroup {
   // 4889 → 197692，+19.3 万帧 = 用户听到的切歌后秒级卡顿）。
   // 起播对齐由 cold 预热（bridgeSession coldPreheat 4.5s）+ 锚点补偿解决，不靠它。
   /** 会话级一次性标记：本次会话已补过 seek（避免每拍重复发 ⇒ 反复清缓冲）。 */
-  private bridgeStartSeekDone = new Set<string>();
+  /** [P0 2026-11-25 死锁修复] start-seek 记账**按代次**(值 = 上次补发时
+   *  bridgeContentEpoch),不是会话级 Set 只发一次 —— 同一 session 内重播同一首
+   *  (warm session 复用 / 新代次)必须重新对齐,而旧「只发一次」的语义叠加
+   *  「补发时 delete 游标」会在重播路径上复发死锁。 */
+  private bridgeStartSeekDone = new Map<string, number>();
+  /** [P0]死锁兜底:连续「candCount===0 && tail>horizon」的拍数(逐设备)。
+   *  连续 2 拍仍无从投递 ⇒ 环时间线整体前移回可投范围 + 全体 BOUNDARY{seek}
+   *  重锚(bridge-start-seek-deadlock),禁止无限空转。 */
+  private bridgeDeadTicks = new Map<string, number>();
+  /** [P0]环时间线重基准冷却(ms):一次死锁只前移一次 —— 两台设备共享同一条环,
+   *  后判到的那台不能对已对齐的环再前移一次。 */
+  private bridgeRebaseAtMs = 0;
   /** [C 方案 2026-11-03] 自动换歌空窗续静音的当前静音尾(内容域 ts);null = 不在空窗期。
    *
    *  语义:自动换歌(`track && !manual`)不中断推流,但上游取下一首/解码期间不产帧 ⇒
@@ -1458,8 +1469,10 @@ export class SendspinGroup {
     const epoch = this.bridgeContentEpoch;
     if (this.bcEpoch.get(key) !== epoch) {
       this.bcEpoch.set(key, epoch);
-      // 换代：内容时间线重锚 ⇒ 各设备游标清零（重灌按新时间线走）
-      for (const id of this.bridges.keys()) this.bcCursor.delete(id);
+      // 换代：内容时间线重锚 ⇒ 各设备游标复位到 now（重灌按新时间线走）。
+      // [P0]原来是 delete ⇒ 下一拍 `?? 0n` 把游标当「内容绝对 0」，与 uptime 相减
+      // 得 -296907s：**游标缺失绝不能等价于内容 0**。复位到 now 才是有效种子。
+      for (const id of this.bridges.keys()) this.bcCursor.set(id, now);
     }
     // 内容尾（当前代次；环空 ⇒ 0，视为内容不足）
     let tailUs = 0n;
@@ -1492,7 +1505,11 @@ export class SendspinGroup {
     // 设备持有 3.5s 仍 < 其容量 4.16s；切歌 lead 自适应到 3.9s。
     const BRIDGE_FEED_CAP_US = 5_000_000;
     for (const [deviceId, handle] of this.bridges) {
-      let cursor = this.bcCursor.get(deviceId) ?? 0n;
+      const horizonInit = now + BigInt(BRIDGE_FEED_CAP_US) + ahead;
+      // [P0 2026-11-25 死锁根因] 游标缺失 ≠ 内容绝对 0。旧 `?? 0n` 在 start-seek
+      // delete 游标后把游标当 0 与 uptime(≈296907s)相减 ⇒ 视界 now+5.5s 永远够不着
+      // 环内 now+15s 的帧 ⇒ 每拍 cand=0、游标不推进 = 永久静音。缺失时给有效种子。
+      let cursor = this.bcCursor.get(deviceId) ?? this.seedDeliveryCursor(ring, epoch, now, horizonInit);
       // [2026-11-25 08:44 三阈值同源修复] v4.15.0 的 horizon/ceil 随 backlog 伸缩：
       // backlog 涨到 5s ⇒ 阈值涨到 7.5s ⇒ 投递把游标推到 7.5s；drain 消化后 backlog
       // 回落 ⇒ 阈值缩回 2.5s < 游标 ⇒ ahead 跳回 now ⇒ 相对 floor(now+2.3s) 又「落后」
@@ -1575,25 +1592,38 @@ export class SendspinGroup {
         cursor = e.tsUs;
         deliveredUs += BigInt(Math.round((e.durUs)));
       }
+      // [P0]死锁兜底:连续 2 拍「本代内容整体越过视界」⇒ 显式把环时间线推回
+      // 可投递范围并重锚(见 recoverStartSeekDeadlock),不再无限 content-beyond-horizon。
+      if (candCount === 0 && tailUs > horizonFinal) {
+        const deadN = (this.bridgeDeadTicks.get(deviceId) ?? 0) + 1;
+        this.bridgeDeadTicks.set(deviceId, deadN);
+        if (deadN >= 2) this.recoverStartSeekDeadlock(deviceId, ring, epoch, now, horizonFinal, tailUs);
+      } else {
+        this.bridgeDeadTicks.delete(deviceId);
+      }
       this.bcCursor.set(deviceId, cursor);
       // [2026-11-25 11:00] 新会话首投后补一次 seek 重锚（见 bridgeStartSeekPending 注释）
-      if (deliveredUs > 0n && !this.bridgeStartSeekPending.has(deviceId) && !this.bridgeStartSeekDone.has(deviceId)) {
+      if (deliveredUs > 0n && !this.bridgeStartSeekPending.has(deviceId) && this.bridgeStartSeekDone.get(deviceId) !== epoch) {
         this.bridgeStartSeekPending.set(deviceId, Date.now());
       }
       {
         const pend = this.bridgeStartSeekPending.get(deviceId);
         if (pend !== undefined && Date.now() - pend > 800) {
           this.bridgeStartSeekPending.delete(deviceId);
-    this.bridgeStartSeekDone.delete(deviceId);
-          this.bridgeStartSeekDone.add(deviceId); // 会话级只发一次
+          // [P0]按**代次**记账(值=epoch):会话级只发一次的旧语义在「同一 session
+          // 内重播同一首」时会让重播跳过对齐;按代次后每个新代次重新对齐一次。
+          this.bridgeStartSeekDone.set(deviceId, epoch);
           try {
             handle.sendBoundary("seek");
             // [2026-11-25 11:10 起播内容起点对齐] 只发 seek 不够：seek 重锚的是
             // **时间戳**，不改**内容位置**。起播时两台会话就绪有先后，后就绪者只能从
             // 环里剩余位置开投 ⇒ 内容层面领先几秒（听感"快"，且持续到下次换代）。
-            // 故清游标 ⇒ 两台都从环内最早可用帧重投 ⇒ 内容起点一致（等价切歌重投）。
-            this.bcCursor.delete(deviceId);
-            this.server.log("info", `bridge-start-seek dev=${deviceId} reason=new-session-first-delivery cursorReset=1`);
+            // 故游标回退到「环内最早可投帧」⇒ 两台都从同一内容点重投。
+            // [P0 2026-11-25] 但**绝不 delete**:缺失游标会被下一拍当成内容 0 ⇒
+            // 死锁。种子 = 环内最早当前代次帧(过期则 now,越过视界则 now)。
+            const seed = this.seedDeliveryCursor(ring, epoch, now, horizonFinal);
+            this.bcCursor.set(deviceId, seed);
+            this.server.log("info", `bridge-start-seek dev=${deviceId} reason=new-session-first-delivery cursorSeedVsNowMs=${Math.round(Number(seed - now) / 1000)} epoch=${epoch}`);
           } catch { /* 单设备失败不影响其他成员 */ }
         }
       }
@@ -1707,6 +1737,71 @@ export class SendspinGroup {
     if (tail === 0n) return null; // 环空：无前沿可言，不设限
     const headroom = Number(tail - min);
     return headroom > 0 ? headroom : 0;
+  }
+
+  /** [P0]投递游标的**有效种子**(游标缺失/回退时用;缺失绝不等价于内容 0)。
+   *  取环内当前代次最早帧:
+   *    · 已过期(≤ now) ⇒ now(过期内容投出去也来不及播);
+   *    · 未来但在视界内 ⇒ 该帧(两台设备从同一内容点起投 = start-seek 原意);
+   *    · 越过视界 ⇒ now(交给 bridge-start-seek-deadlock 兜底重基准,不在这里硬掰)。 */
+  private seedDeliveryCursor(
+    ring: Array<{ tsUs: bigint; ep?: number }>,
+    epoch: number,
+    now: bigint,
+    horizon: bigint,
+  ): bigint {
+    for (const e of ring) {
+      if (e.ep !== epoch) continue;
+      if (e.tsUs <= now) return now;
+      // 视界内的最早未来帧 ⇒ 从**该帧前一格**起投(游标语义 = 已投到哪;
+      // 若直接取该帧自身,扫描的 `e.tsUs <= cursor` 会把它自己跳掉)。
+      return e.tsUs <= horizon ? e.tsUs - 1n : now;
+    }
+    return now; // 环空/无当前代次帧:从 now 起投
+  }
+
+  /** [P0]start-seek 死锁兜底:本代内容整体越过视界(tail > now+5s+ahead)且连续
+   *  2 拍无可投帧 ⇒ 显式把**环时间线整体前移**回可投范围(头帧落到 now),并对
+   *  全体桥会话 BOUNDARY{seek} 重锚 + 游标复位 now。打独立日志
+   *  `bridge-start-seek-deadlock`,禁止无限 content-beyond-horizon 空转。
+   *  (本次事故:环内只剩 now+15s~now+50s 的帧,视界 5.5s 永远够不着。)
+   *  冷却 1s:两台设备共享同一条环,后判到的那台不得对已对齐的环再前移一次。 */
+  private recoverStartSeekDeadlock(
+    deviceId: string,
+    ring: Array<{ tsUs: bigint; ep?: number }>,
+    epoch: number,
+    now: bigint,
+    horizonFinal: bigint,
+    tailUs: bigint,
+  ): void {
+    this.bridgeDeadTicks.delete(deviceId);
+    if (Date.now() - this.bridgeRebaseAtMs < 1000) return;
+    let headUs = 0n;
+    for (const e of ring) {
+      if (e.ep !== epoch) continue;
+      headUs = e.tsUs;
+      break;
+    }
+    const shiftUs = headUs > now ? headUs - now : 0n;
+    if (shiftUs <= 0n) return;
+    this.bridgeRebaseAtMs = Date.now();
+    for (const e of ring) {
+      if (e.ep === epoch) e.tsUs -= shiftUs;
+    }
+    this.server.log(
+      "warn",
+      `bridge-start-seek-deadlock dev=${deviceId} shiftMs=${Math.round(Number(shiftUs) / 1000)} ` +
+        `headVsNowMs=${Math.round(Number(headUs - now) / 1000)} tailVsNowMs=${Math.round(Number(tailUs - now) / 1000)} ` +
+        `horizonMs=${Math.round(Number(horizonFinal - now) / 1000)} ringFrames=${ring.length} ` +
+        `⇒ 环时间线整体前移回可投范围 + 全体 BOUNDARY{seek} 重锚(cursor=now)`,
+    );
+    for (const [id, h] of this.bridges) {
+      try {
+        h.sendBoundary("seek");
+      } catch { /* 单设备重锚失败不连累组 */ }
+      this.bcCursor.set(id, now);
+      this.bridgeDeadTicks.delete(id);
+    }
   }
 
   bridgePushTick(): void {
