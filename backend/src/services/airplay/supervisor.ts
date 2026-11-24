@@ -111,24 +111,30 @@ class AirplaySupervisor extends RendererHostSupervisor<
           const actualSend = ev.actualSendAtUs;
           const cmdAnchor = ev.commandedAnchorUs;
           const lead = ev.firstPacketLeadUs ?? 0;
-          if (!ev.isAp2 && actualSend !== null && cmdAnchor > 0) {
-            void (async () => {
-              try {
-                const calib = await import("./anchorCalib.js");
-                const drift = calib.anchorDriftUs(actualSend, cmdAnchor, lead);
-                const adjust = calib.anchorAdjustDecision(ev.deviceId, actualSend, drift, Date.now(), ev.isAp2);
-                if (adjust !== null) {
-                  const ok = await import("./control.js")
-                    .then((m) => m.bridgeNudgeDelayDevice(ev.deviceId, adjust))
-                    .catch(() => false);
-                  // [S8 复核②]下发失败 ⇒ 不重试(测量实例已绑定,同值不会再判),留痕
-                  if (ok === false) {
-                    log.warn(`[bridge-calib] device=${ev.deviceId} 微调下发失败(无会话/子进程未跑),本测量实例不再重试 driftNudgeUs=${adjust}`);
-                  }
-                }
-              } catch { /* 判定异常不连累水位转发 */ }
-            })();
+          // [2026-11-25 11:33 对齐 MA _anchor_stream 的 ack] 桥侧实际提前量
+          // = 首包名义播放时刻 − 首包实际发出墙钟；与命令提前量之差即偏差。
+          // dev < 0 ⇒ 发得比计划晚（首包离目标时刻更近）⇒ 设备更晚出声；
+          // dev > 0 ⇒ 发得比计划早 ⇒ 设备更早出声。
+          // MA 用 ack 的 skipped_us 把内容重映射到实际时刻；我们先**测量并留痕**，
+          // 确认两台差异后再决定是否落到内容起点校正（避免又一次凭猜改行为）。
+          const firstTs = ev.firstFrameTsUs;
+          if (!ev.isAp2 && actualSend !== null && firstTs != null && firstTs > 0) {
+            const actualLeadMs = Math.round((firstTs - actualSend) / 1000);
+            const cmdLeadMs = Math.round(lead / 1000);
+            log.info(
+              `[bridge-ack] dev=${ev.deviceId} gen_firstTs=${firstTs} actualSend=${actualSend} ` +
+              `actualLeadMs=${actualLeadMs} cmdLeadMs=${cmdLeadMs} devMs=${actualLeadMs - cmdLeadMs}`,
+            );
           }
+          // [2026-11-25 13:50 校准闭环已停用] 原 S8 nudge 链路（anchorCalib 判定 →
+          // bridgeNudgeDelayDevice 微调）在此**整体移除**，原因是测量口径错误：
+          // bridge-ack 恒报 actualLeadMs=4430 / cmdLeadMs=0（firstPacketLeadUs 在
+          // forceNow 形态被置 0，实际命令提前量是 cold 预热 ~4500ms）⇒ drift 恒
+          // 4430ms > 500ms 阈值 ⇒ 每 10s nudge 一次 2~3.2s ⇒ cumulativeUs 累积
+          // 10.8s→12.9s（[bridge-calib] 日志实证）。后果与用户听感完全吻合：
+          // 首歌 cumulative≈0 正常；之后每首播放中累积 2~10s 偏差 ⇒ 全部卡顿
+          // （换歌 retime 重置回用户值，故每首都「先正常后卡」）。
+          // 重新启用前必须先把 firstPacketLeadUs 改成真实命令提前量。
           // 转发给 sendspin 子进程（泵在那里，判据要用）：桥水位与泵分属两个子进程，
           // 必须经主进程中转。动态 import 避免 airplay ↔ sendspin 的静态循环依赖。
           // [S8 任务 2]载荷扩展:逐设备 holdDepth(设备持有深度)—— 逐设备投递窗口

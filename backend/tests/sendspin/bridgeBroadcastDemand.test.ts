@@ -108,19 +108,24 @@ describe("bridgeBroadcastTick — 游标对称跳转接线（按设备键）", (
     return BigInt(Math.round((g as any).commonSendAheadUs()));
   }
 
-  it("② 游标落后 1.5s（调度锚定后）⇒ 无跳转，积压帧按 now 调度补发（快进追赶）", () => {
+  it("② 游标落后墙钟 2s ⇒ dir=stale 跳到 now + BOUNDARY 重锚，窗口内帧照常投出", () => {
     const b = bridgeStub("ap-1");
     const g = groupWith([b]);
     const now = nowUs();
-    const A = aheadOf(g);
     seedEpoch(g);
-    const seeded = now + A - 1_500_000n; // 名义游标落后墙钟 1.5s
-    const frameTs = seeded + 250_000n;
+    // [2026-11-25 08:44] 落后判据改为「游标真的落后墙钟 >1.3s」。旧判据是落后一个
+    // 虚构 floor(= now+lookahead+ahead−grace)，把"投递提前量"混进了"消费位置"判断，
+    // 于是 ahead 跳回 now 后必然又"落后"2.3s ⇒ 两护栏无限对撞（真机丢帧 1331 万）。
+    const seeded = now - 2_000_000n; // 落后墙钟 2s ⇒ 内容已过期
+    const frameTs = now + 500_000n;
     addRingFrame(g, frameTs);
     (g as any).bcCursor.set("ap-1", seeded);
     (g as any).bridgeBroadcastTick(now);
-    // 调度锚定后无 behind 跳转：积压帧按 now 起排补发（无迟到）
-    expect((g as any).logs.some((l: string) => l.includes("bridge-cursor-jump") && l.includes("dir=behind"))).toBe(false);
+    const jump = (g as any).logs.find((l: string) => l.includes("bridge-cursor-jump")) as string;
+    expect(jump).toBeDefined();
+    // [2026-11-24] 新语义：sourceReady(内容尾 > now+500ms) 为假时打 dir=starved
+    // （无料可投，非游标落后）；为真才打 dir=stale 并允许重锚。
+    expect(jump).toMatch(/dir=(stale|starved)/);
     expect(b.pushed.length).toBeGreaterThan(0);
     expect((g as any).bcCursor.get("ap-1")).toBe(frameTs);
   });

@@ -27,10 +27,8 @@ const liveGroups: SendspinGroup[] = [];
  *  组 tick 经 this.server 读取。 */
 function makeServerStub() {
   const map = new Map<string, number>();
-  const logs: string[] = [];
   return {
-    log(_level: string, m: string) { logs.push(String(m)); },
-    logs,
+    log() {},
     bridgeBacklogMs: map,
     setBridgeBacklog(m: Record<string, number>) {
       map.clear();
@@ -50,7 +48,7 @@ function groupWith(bridges: string[]): { g: SendspinGroup; srv: ReturnType<typeo
       deviceId: id,
       pushed,
       pushAudio(data: Uint8Array, ts: bigint) { pushed.push({ data: Uint8Array.from(data), ts }); },
-      sendBoundary() { (this as any).boundaryCalls = ((this as any).boundaryCalls ?? 0) + 1; },
+      sendBoundary() {},
     } as any);
   }
   liveGroups.push(g);
@@ -89,7 +87,7 @@ describe("逐设备投递窗口 — broadcast tick(修复点)", () => {
     expect(b.pushed.length).toBe(0);
   });
 
-  it("积压已超目标(4s > 2s) ⇒ due=0 不补(防自激:积压不得放大目标)", () => {
+  it("积压 4s ⇒ 父侧仍填满视界(水位改由子进程按设备 inQueue 伺服)", () => {
     const { g, srv } = groupWith(["dev-a"]);
     const now = nowUs();
     seedEpoch(g);
@@ -97,12 +95,12 @@ describe("逐设备投递窗口 — broadcast tick(修复点)", () => {
     srv.setBridgeBacklog({ "dev-a": 4000 });
     const b = g.bridges.get("dev-a") as any;
     (g as any).bridgeBroadcastTick(now);
-    // 旧实现 max(2s, 积压+500ms) ⇒ 积压越大窗口越宽 ⇒ 灌更多 ⇒ 积压更大(正反馈,
-    // 真机 iEAST 22s 事故)。新语义:目标固定 2s,积压 4s 已超 ⇒ 本拍不补。
-    expect(b.pushed.length).toBe(0);
+    // [2026-11-25 09:22 两级伺服解耦] 父侧不做水位伺服,只把 ring 填到投递上沿(常量 8s,
+    // MA 生产者跑满上限语义);水位由子进程按设备侧 inQueue 伺服。故 +1s 帧照投。
+    expect(b.pushed.length).toBeGreaterThan(0);
   });
 
-  it("积压严重超目标(60s > 3×2s) ⇒ 一次性自愈:BOUNDARY 重锚 + 时间线/游标重置", () => {
+  it("积压超大(60s)⇒ 上沿仍是常量 8s:+30s 帧不投(不随积压放宽)", () => {
     const { g, srv } = groupWith(["dev-a"]);
     const now = nowUs();
     seedEpoch(g);
@@ -110,10 +108,9 @@ describe("逐设备投递窗口 — broadcast tick(修复点)", () => {
     srv.setBridgeBacklog({ "dev-a": 60_000 });
     const b = g.bridges.get("dev-a") as any;
     (g as any).bridgeBroadcastTick(now);
-    expect((b as any).boundaryCalls ?? 0).toBeGreaterThan(0);
-    expect((srv as any).logs.some((l: string) => l.includes("bridge-backlog-reset"))).toBe(true);
+    // [2026-11-25 08:44] 视界 = 常量 8s(MA MAX_DEVICE_BUFFER_SECONDS),不随积压伸缩 ——
+    // 随积压伸缩会让阈值回缩导致 ahead↔behind 护栏对撞(真机 droppedFrames 1331 万)。
     expect(b.pushed.length).toBe(0);
-    expect((g as any).bcCursor.get("dev-a")).toBe(now);
   });
 
   it("holdDepth 小(100ms)⇒ max(2s, 600ms) = 2s:行为与缺省一致", () => {

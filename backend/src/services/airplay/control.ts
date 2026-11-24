@@ -390,6 +390,19 @@ export async function bridgePrepareDevice(
     // 设备的 sync_adjust,组时间线不带」):桥投递戳/窗口已全组一致(同一时刻同内容),
     // 该值只把本设备的 START 可听锚点平移 shift ⇒ 只有它自己晚/早出声。
     // 改完需重建该成员桥才生效(锚点在建会话时算死)—— groups.ts 的 PUT 已自动重建。
+    // **补偿的唯一落点 = 桥会话锚点**(2026-11-01,MA `_anchor_stream` 语义:「命令带
+    // 设备的 sync_adjust,组时间线不带」):桥投递戳/窗口已全组一致(同一时刻同内容),
+    // 该值只把本设备的 START 可听锚点平移 shift ⇒ 只有它自己晚/早出声。
+    // [2026-11-25 10:26 回滚 10:12 的错误改动] 曾把补偿移到投递 ts，真机证明不行：
+    // 设备**起播以锚点为基准**，START 时把当前 ts 对齐到锚点 ⇒ 投递 ts 上的偏移被
+    // 锚点重置**吸收掉**（实测两台 anchor 只差 7ms 而 shift 差 500ms ⇒ 起播错位）。
+    // 运行中改值走 bridgeRebuildDelayDevice 的原地 retime（平移 RTP↔NTP 映射，
+    // 2026-11-25 09:39 实测 delta 变化 719ms 有效），不重建会话。
+    // [2026-11-25 12:02 恢复] 补偿的唯一落点 = 桥会话锚点（MA _anchor_stream 语义：
+    // 命令带 sync_adjust、组时间线不带）。10:36 曾把它置 0 并改由投递 ts 承载，
+    // 但设备起播以锚点为基准、START 时把当前 ts 对齐锚点 ⇒ 投递 ts 的偏移被吸收，
+    // 结果补偿完全失效（真机 12:00：iEAST 慢 500ms、HiVi 显快）。
+    // 起播偏快的问题由 cold 预热（bridgeSession coldPreheat 4.5s）解决，不靠关闭补偿。
     anchorShiftUs:
       bridgeSyncGroupTimelineEnabled() && groupId
         ? getMemberDelayMs(groupId, `airplay:${deviceId}`) * 1000

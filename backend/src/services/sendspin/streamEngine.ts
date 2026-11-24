@@ -35,6 +35,15 @@ import { paceBumpBus } from "./paceBumpBus.js";
 // _PRODUCER_BUFFER_LIMIT_US），不新增第二个 30s。contentDemand 零依赖 ⇒ 无环。
 import { PUMP_LOOKAHEAD_DEFAULT_US } from "./contentDemand.js";
 
+/** [2026-11-25 11:57 恢复 MA 的 cold 预热档] 进程内**第一次**泵起播按 cold（4.5s），
+ *  之后（切歌/reseed/换歌）按 warm（2.5s）。
+ *  背景：原实现 `bridgeStartLeadUs([{ warm: BRIDGE_LEAD_TIERED }])` 恒传 true
+ *  ⇒ cold 4.5s 从未生效（注释自述「停用冷档，统一暖档」，为把 rehost 首帧
+ *  从 4.5s 提前到 2.75s）。代价正是用户实测的问题：设备冷态渲染延迟尚未进入
+ *  稳态就开播 ⇒ 成员延迟补偿建立在错误相位上 ⇒ 起播偏、切歌后（设备已热）才正常。
+ *  MA sendspin_bridge.py:98-99 保留 warm 2.5 / cold 4.5 两档，cold 就是预热。 */
+let bridgeColdLeadPending = true;
+
 import { SAMPLE_RATE, CHANNELS } from "./encoding.js";
 import { nowUs } from "./clock.js";
 import { PcmWindow, WindowEvictedError, WINDOW_HIGH_SEC, type WindowSource } from "./streamSource.js";
@@ -1472,10 +1481,14 @@ export class GroupPump {
           //   (那一段已由切歌垫片按暖档 800ms 覆盖)。故停用冷档,统一暖档;
           //   下限仍是 floor + tick(2.75s),首帧必落投递窗口内,不会吞歌开头。
           //   实测收益:client→group 流转的 rehost 首帧从 ~4.5s 提前到 ~2.75s。
+          // [2026-11-25 11:57] cold/warm 真实分档：进程内首次起播 = cold（4.5s 预热，
+          // 让设备进入稳态后成员补偿才成立）；之后 = warm（2.5s，切歌/换歌保速度）。
+          const bridgeWarm = !bridgeColdLeadPending;
+          if (hasBridges) bridgeColdLeadPending = false;
           const anchorLead = hasBridges
             ? Math.max(
                 aheadUs,
-                bridgeStartLeadUs([{ warm: BRIDGE_LEAD_TIERED }]),
+                bridgeStartLeadUs([{ warm: bridgeWarm }]),
                 BRIDGE_PUSH_FLOOR_US + BRIDGE_PUSH_TICK_MS * 1000,
               )
             : prefillEnabled()

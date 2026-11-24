@@ -97,6 +97,29 @@ export function getMemberDelayMs(groupId: string | null | undefined, memberId: s
   return getMemberDelays(groupId)[memberId] ?? 0;
 }
 
+/** 绕 cache **直查 DB** 读单成员补偿。
+ *  [2026-11-25 10:20 跨进程陈旧修复] 主进程处理 PUT /delays 时更新的是**本进程** cache，
+ *  而 sendspin 组跑在 playerHost 子进程里，其 cache 永不过期 ⇒ 子进程读到的永远是
+ *  启动时的旧值（真机实测：PUT HiVi 0→400ms 返回 rebuilt=1，但子进程 shiftMs 恒 0）。
+ *  凡「前端可改 + 子进程实时读」的值必须绕 cache 直查（同 AC-3 延迟标定纪律）。 */
+export function getMemberDelayMsFresh(
+  groupId: string | null | undefined,
+  memberId: string,
+): number {
+  if (!groupId || !memberId) return 0;
+  try {
+    const row = db
+      .select({ md: playerGroups.memberDelaysJson })
+      .from(playerGroups)
+      .where(eq(playerGroups.id, groupId))
+      .get();
+    if (!row) return 0;
+    return parseMemberDelays(row.md)[memberId] ?? 0;
+  } catch {
+    return getMemberDelayMs(groupId, memberId);
+  }
+}
+
 /** 写单个成员的补偿:**内存先更新(立即生效),再落库**(member_delays_json 整表回写)。
  *  @returns 实际生效值(已钳制)。 */
 export function setMemberDelay(groupId: string, memberId: string, ms: unknown): number {
@@ -127,7 +150,8 @@ export function invalidateGroupDelays(groupId: string): void {
 export function bridgeAnchorShiftUsOf(groupName: string, airplayDeviceId: string): bigint {
   const id = parseUserGroupId(groupName);
   if (!id || !airplayDeviceId) return 0n;
-  return BigInt(getMemberDelayMs(id, `airplay:${airplayDeviceId}`) * 1000);
+  // 绕 cache 直查（子进程读不到主进程 cache 更新，见 getMemberDelayMsFresh 注释）
+  return BigInt(getMemberDelayMsFresh(id, `airplay:${airplayDeviceId}`) * 1000);
 }
 
 /** 从 sendspin 组名取用户组 id:`ug:<gid>` → gid;设备组(裸 clientId)→ null。 */

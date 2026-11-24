@@ -61,6 +61,7 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
           actualSendAtUs: row.actualSendAtUs,
           commandedAnchorUs: row.commandedAnchorUs,
           firstPacketLeadUs: row.firstPacketLeadUs,
+          firstFrameTsUs: row.firstFrameTsUs,
           isAp2: row.isAp2,
         });
       } catch {

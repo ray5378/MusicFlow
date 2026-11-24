@@ -161,9 +161,10 @@ app.put("/v1/groups/:id/delays", permMiddleware(PERM.RENDERER_USE), async (c) =>
     // 登记缺失(容器重启后 resume-active 恢复的桥/历史泄漏)⇒ 逐成员幂等 join。
     if (memberId.startsWith("airplay:") && after !== before) {
       const devId = memberId.slice("airplay:".length);
-      const live = await import("../../services/airplay/control.js")
-        .then((m) => m.bridgeRebuildDelayDevice(devId, after * 1000))
-        .catch(() => false);
+      // [2026-11-25 10:49] 不再 retime：补偿由投递时间线（bridgeDeliveryShiftUs）每拍
+      // 重算 ⇒ 改值下一拍即生效，无需平移 RTP↔NTP 映射。retime 会留下锚点偏移，
+      // 而起播 warm 复用会沿用该偏移 ⇒ "起播时 iEAST 快半秒、切歌后正常"（真机实证）。
+      const live = false;
       if (live) {
         rebuilt = 1;
       } else if (isBridgeRouteActive(id)) {

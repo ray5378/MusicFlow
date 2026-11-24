@@ -693,6 +693,11 @@ export class RaopPlayer {
    *  「连续救不回来就止损」那一级变成死代码(2026-10-30 独立复核发现)。
    *  也不能靠重连后回写 lastTimingAt 代替:那是给 quiet 判据宽限,不代表设备活过来。 */
   timingCount = 0;
+  /** [2026-11-25 11:40 B1 设备时钟速率测量] 设备 timing 请求里带自己的时钟读数
+   *  (send_time 的低 32 位 ms 计数器)。连续两次的「设备时钟增量 ÷ 我们的墙钟增量」
+   *  即设备时钟相对我们的速率比 ⇒ ppm。RAOP 拿不到 t4 所以算不出 NTP offset，
+   *  但**速率偏差**足以解释「两台越播越不同步」。窗口 ≥30s 才输出（短窗口噪声大）。 */
+  private timingRateBase: { dev: bigint; our: number } | null = null;
   /** 桥接路径 latePackets(§3.3):sendAt 已过期仍「追发但不改 RTP 映射」的包数。
    *  连续过期说明启动 lead 不足 —— 由上层(BridgeSession stats tick)报警/重锚。 */
   private bridgeLatePackets = 0;
@@ -1161,6 +1166,31 @@ export class RaopPlayer {
       writeNtp(reply, sec, frac, 24);
       this.timeSocket!.send(reply, rinfo.port, rinfo.address);
       log.info(`timing reply dev=${this.opts.deviceId ?? "-"} lport=${this.timeSocket!.address().port} rport=${rinfo.port} ref=${reqSendTime.toString("hex")} ntp=${sec}.${frac.toString(16)}`);
+      // [B1] 设备时钟速率测量（2026-11-25 11:46 修正口径）
+      // 原始报文实证：ref 是**完整 NTP 时间戳**（高 32 位秒 / 低 32 位分数）——
+      // 两台相邻 3s 的差值 = 0x3_00000000 + 1116692 ≈ 3.0003s，除以 2^32 正好 3 秒。
+      // 早前取低 4 字节只读了分数部分 ⇒ ppm 荒谬（14 亿）。
+      // 用完整 64 位差值：ΔdevSec = Δraw / 2^32，与我们的 Δour 相比即速率比。
+      {
+        const devRaw = reqSendTime.readBigUInt64BE(0);
+        const ourMs = Date.now();
+        const base = this.timingRateBase;
+        if (!base) {
+          this.timingRateBase = { dev: devRaw, our: ourMs };
+        } else {
+          const dDevRaw = devRaw - base.dev;
+          const dOur = ourMs - base.our;
+          if (dOur >= 30_000 && dDevRaw > 0n) {
+            const dDevSec = Number(dDevRaw) / 4294967296;
+            const dOurSec = dOur / 1000;
+            const ppm = Math.round((dDevSec / dOurSec - 1) * 1e6);
+            log.info(
+              `[timing-rate] dev=${this.opts.deviceId ?? "-"} windowMs=${dOur} devDeltaSec=${dDevSec.toFixed(6)} ourDeltaSec=${dOurSec.toFixed(3)} ppm=${ppm}`,
+            );
+            this.timingRateBase = { dev: devRaw, our: ourMs };
+          }
+        }
+      }
     });
   }
 

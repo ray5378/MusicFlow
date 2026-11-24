@@ -646,6 +646,15 @@ export function planBridgeAnchor(opts: {
   /** D7(2026-11-01):同组已发布的共享锚点(见 BridgeGroupAnchorRegistry)。
    *  仅 forceNow 分支消费;缺省 = 本会话自行取 now 锚(旧行为)。 */
   groupAnchorUs?: bigint;
+  /** [2026-11-25 12:52] 设备**当前已排到的位置**（inBytes 换算，µs）。
+   *  锚点 lead 必须覆盖它，否则新内容播点落在设备当前位置之前 ⇒ 被 D5 整块丢弃
+   *  （真机：设备持 5.4s 而 lead 3.5s ⇒ 切歌一次丢 20 万帧 ≈ 4.2s）。 */
+  queuedUs?: bigint;
+  /** [2026-11-25 11:58] 本会话**首次**锚定 ⇒ cold 预热(MA sendspin_bridge.py:98-99
+   *  的 cold 4.5s)。设备冷态渲染延迟远小于稳态值，若不预热就开播，成员延迟补偿会
+   *  建立在错误相位上（用户实测：起播偏、切歌后设备已热才正常）。切歌(reseed)不预热，
+   *  否则每次换歌都要多等 2 秒（真机 lead 3595ms ⇒ 换歌静音过长）。 */
+  coldPreheat?: boolean;
 }): BridgeAnchorPlan {
   const sync = bridgeSyncGroupTimelineEnabled();
   const shiftUs = BigInt(opts.anchorShiftUs ?? 0);
@@ -668,9 +677,76 @@ export function planBridgeAnchor(opts: {
     // env 仍可上调(想要更深缓冲时);下调被拒绝,逃生门是关掉 forceNow 本身。
     const wantLeadUs = raopNowAnchorOffsetUs();
     const floorLeadUs = lUs + safetyUs;
-    const leadUs = wantLeadUs > floorLeadUs ? wantLeadUs : floorLeadUs;
-    // D7:同组同 gen 复用已发布锚点 ⇒ 各成员的内容零点/送包节拍完全同源。
-    anchorUs = opts.groupAnchorUs ?? opts.nowUs + leadUs;
+    let leadUs = wantLeadUs > floorLeadUs ? wantLeadUs : floorLeadUs;
+    // [2026-11-25 12:04 实验：cold 预热] forceNow 分支的 lead 只由 offset(400ms)+L+safety
+    // 决定（实测 2.05s），设备冷态渲染延迟尚未进入稳态就开播 ⇒ 成员延迟补偿建立在
+    // 错误相位上 ⇒ 起播偏快、切歌后（设备已热）才对齐。
+    // MA sendspin_bridge.py:98-99 用 cold 4.5s 预热解决同一问题。此处先做**全局**实验
+    // （每次起播都给 4.5s），验证「预热是否解决起播偏移」；成立后再按 warm/cold 分档
+    // 收紧到 2.5s 以免牺牲切歌速度。
+    // [2026-11-25 14:22 修「首曲吞开头几秒」] cold 预热 4.5s → 3.0s。
+    // 真机证据：起播 ack 报首帧提前量 actualLeadMs=4198，而锚点 lead=4500 ⇒
+    // 锚点比**首帧内容**晚 302ms 以上，凡 ts 早于锚点的内容被 D5「早于 contentAnchorUs
+    // 整块丢弃/裁头」判掉 ⇒ 用户听到开头几秒被吞（HiVi 补偿 0、锚点更晚，故比 iEAST 明显）。
+    // 收紧到 3.0s：锚点不晚于首帧（3.0s < 4.2s），内容完整；设备仍有 3 秒预热。
+    // [2026-11-25 14:45] cold 预热降级：仅作为「尚未收到首帧」时的回退值。
+    // 收到首帧后锚点改由首帧内容时刻决定（见下方 anchor-content 段），
+    // 否则 cold 会叠加在投递提前量之上、把锚点推到内容之后 ⇒ 吞开头。
+    const COLD_PREHEAT_US = 3_000_000n;
+    if (opts.coldPreheat === true && leadUs < COLD_PREHEAT_US) leadUs = COLD_PREHEAT_US;
+    // [2026-11-25 12:52 结构性防护] 锚点 lead 必须覆盖设备**当前已排到的位置**，
+    // 否则新内容播点落在设备当前位置之前 ⇒ 被 D5「早于锚点整块丢弃」判掉
+    // （真机：设备持 5.4s 而 lead 3.5s ⇒ 切歌一次丢 20 万帧）。此处按实测
+    // inQueue + 400ms 余量抬高 lead，使「缓冲深度」与「切歌提前量」永远配套 ——
+    // 与 MA 的 AIRPLAY_LATE_JOIN_MIN_HEADROOM_MS(2.5s) 配 2.5s 缓冲同一思路。
+    if ((opts.queuedUs ?? 0n) + 400_000n > leadUs) leadUs = (opts.queuedUs ?? 0n) + 400_000n;
+    // [2026-11-25 14:22] lead **上限 3.8s**：父侧投递上沿 5s、实测首帧提前量 ~4.2s；
+    // lead 一旦越过首帧时刻，锚点就会落在内容之后 ⇒ D5 丢弃开头内容（吞开头）。
+    const LEAD_CAP_US = 3_800_000n;
+    if (leadUs > LEAD_CAP_US) leadUs = LEAD_CAP_US;
+    // ===== [2026-11-25 14:45 对齐 MA _anchor_stream：锚点 = 内容起点] =====
+    // MA 语义（sendspin_bridge.py:886-1030）：
+    //   anchor_ms = max(now + 最小安全, first_chunk_unix_ms)  —— 锚点绝不晚于首帧内容；
+    //   随后 _drop_until_us = anchor_us，内容一律从该零点起算，故不会「吞开头」。
+    // 我们此前的错误：forceNow 分支把锚点写成 now + 预热(cold 4.5s/3.0s)，而父侧投递的
+    // 内容时间戳本身已在 now + ~4.2s（投递上沿 5s）—— 预热其实已由投递提前量提供；
+    // 再叠加一次 cold 预热 ⇒ 锚点晚于首帧 ⇒ ts 早于 contentAnchorUs 的内容被 D5
+    // 裁头/整块丢弃 ⇒ 用户听到「开头几秒被吞」（HiVi 补偿 0、锚点更晚，故比 iEAST 明显）。
+    // 正解：锚点直接取首帧内容时刻（设备从第 0 秒出声，首包已提前 ~4.2s 到达 = 天然预热）；
+    // 仅当首帧早于设备最小安全(L+safety)时才抬到该下限（那时丢一点不可避免）。
+    {
+      // [2026-11-25 14:48 修正] 锚点 = now + lead，且 **lead 绝不越过首帧内容时刻**。
+      // 上一版直接取「首帧内容时刻」当锚点 ⇒ 父侧首帧已提前 ~4.9s 到位 ⇒ 设备要等
+      // 4.9 秒才出声、期间 inQ=0、late 暴涨（真机 14:45 实证）。MA 的 first_chunk 是
+      // 「当前待播内容」而非「未来内容」，直接照抄语义会把投递提前量误当成起播延迟。
+      // 正确：锚点取期望预热(cold/warm/自适应)，但夹在 [minSafe, 首帧-200ms] 之间 ——
+      //   · 上限保证不越过首帧 ⇒ D5 不会裁头/丢弃开头（不吞）；
+      //   · 下限保证设备来得及（L+safety）。
+      const minSafeUs = opts.nowUs + lUs + safetyUs;
+      const contentUs = opts.firstFrameTsUs;
+      if (contentUs && contentUs > 0n) {
+        let useLead = leadUs;
+        const contentOffsetUs = contentUs - opts.nowUs;
+        const ceiling = contentOffsetUs - 200_000n; // 留 200ms 余量，确保锚点在首帧之前
+        if (ceiling > 0n && useLead > ceiling) useLead = ceiling;
+        const floorUs = minSafeUs - opts.nowUs;
+        if (useLead < floorUs) useLead = floorUs;
+        anchorUs = opts.groupAnchorUs ?? (opts.nowUs + useLead);
+        log.info(
+          "[anchor-content] dev=" + (opts.coldPreheat === true ? "cold" : "warm")
+          + " contentVsNowMs=" + String(Math.round(Number(contentOffsetUs) / 1000))
+          + " minSafeMs=" + String(Math.round(Number(floorUs) / 1000))
+          + " finalLeadMs=" + String(Math.round(Number(useLead) / 1000))
+          + " picked=" + (opts.groupAnchorUs ? "shared" : "now+lead"),
+        );
+      } else {
+        anchorUs = opts.groupAnchorUs ?? opts.nowUs + leadUs;
+        log.warn(
+          "[anchor-content] dev=" + (opts.coldPreheat === true ? "cold" : "warm")
+          + " no-first-frame -> fallback now+preheatMs=" + String(Math.round(Number(leadUs) / 1000)),
+        );
+      }
+    }
   } else if (anchorUs - lUs - safetyUs < opts.nowUs) {
     const floorUs = opts.nowUs + warmUs;
     if (floorUs > anchorUs) {
@@ -678,9 +754,15 @@ export function planBridgeAnchor(opts: {
       reAnchored = true;
     }
   }
-  // 旧模式:补偿进锚点(改造前逐字节行为;对齐器零点/节拍基准都含 shift)
-  if (!sync) anchorUs += shiftUs;
-  // 映射锚点输入 = 组锚点 + 成员补偿(A′ = 该值 + 重采样群延迟,computeBridgeAnchors 内)
+  // [2026-11-25 12:02] 恢复：映射锚点吃成员补偿（见下）。原 10:49 的移出改动
+  // 导致补偿彻底失效（真机 12:00 实证），已回退。
+  //   · 补偿由投递时间线承载（server.bridgeDeliveryShiftUs，带换代后 3s 稳态窗口）；
+  //   · 若这里再加 shift，起播时映射锚点 A′ 会被平移 -500ms（真机 anchor 日志：
+  //     iEAST shifted=sched−499637µs 而 HiVi 只 +363µs）⇒ iEAST 抢先出声、快半秒；
+  //   · 切歌后重新 plan（shift=0）就不偏 ⇒ 这正是"起播错、切歌对"的根因。
+  // 旧注释保留供追溯：曾认为「补偿唯一落点=桥会话锚点」（MA sync_adjust 语义），
+  // 但设备起播以锚点为基准、且 warm 复用会沿用带 retime 偏移的旧映射，无法保证一致。
+  // [2026-11-25 12:02 恢复] 映射锚点吃成员补偿（A′ = 该值 + 重采样群延迟）。
   const mapAnchorUs = sync ? anchorUs + shiftUs : anchorUs;
   const anchors = computeBridgeAnchors({
     anchorUs: mapAnchorUs,
@@ -1073,6 +1155,8 @@ export class BridgeSession {
   /** 会话对象创建时刻(ms)：空壳判据/暖复用判据的时间基准。 */
   private readonly createdAtMs = Date.now();
   /** 首帧有效 AUDIO 的 tsUs(A 候选;§7.2:锚点只在此刻确定)。 */
+  /** [2026-11-25 11:58] 本会话是否已锚定过（首次锚定才 cold 预热，切歌不预热）。 */
+  private anchoredOnce = false;
   private firstFrameTsUs: bigint | null = null;
   /** 锚点已落定(aligner 非 null ⇒ 已进入四锚点驱动)。 */
   private aligner: BridgeTimelineAligner | null = null;
@@ -1409,21 +1493,43 @@ export class BridgeSession {
       // 与父侧 250ms 伺服突发叠加成「锯齿振荡」（inQ 0~125ms、late 缓涨）。
       // 6s 首灌（prefilled=false 阶段）保留 —— 冷启动快速建立缓冲。
       // 对标 MA PushStream 按成员水位供给（playback.py:947-963）。
-      // [2026-11-25 07:57 对齐 MA 桥喂 CLI 语义] 反馈量必须是**设备侧水位**
-      // （RAOP 发送队列 inBytes），绝不能是总缓冲 —— ringBuf 是子进程手里的存量，
-      // 设备拿不到。用总缓冲判断会出现：ringBuf 1.5s + inQueue 175ms ⇒ 总缓冲 1.7s
-      // ≈ 目标 ⇒ 判定「水位够」⇒ 只按 1.05x 喂 ⇒ 设备永远只有 200ms ⇒ 秒级卡顿
-      // （真机 ring-diag pull n=4 / inQueueMs=175 实锤）。
-      // MA sendspin_bridge.py 喂 CLI：只要设备缓冲 < MAX_DEVICE_BUFFER_SECONDS(8s)
-      // 就持续喂，存量尽快送进设备。
-      const inQueueTargetUs = 2_000_000;
+      // [2026-11-25 12:44 修「秒级卡顿」] 目标水位 2s → 6s。
+      // 真机证据：inQMs=1925、budgetMs=105（1.05x）⇒ 每 100ms 只喂 100ms 内容，
+      // 供给恒等于消费、零余量；任何抖动直接吃掉设备可播放时长，累积到 0 即 underrun
+      // （用户听到的秒级卡顿）。且包在 ring 里等到接近 ts 才发出 ⇒ late 持续缓涨。
+      // MA sendspin_bridge.py:83-89 喂 CLI 是「设备缓冲 < MAX_DEVICE_BUFFER_SECONDS(8s)
+      // 就持续喂」，从不贴着目标水位跑。
+      // [2026-11-25 12:52 关键约束] 目标必须 **< 切歌 lead（3.5s）**：
+      //   取 6s 时设备持 5.4s，切歌新锚点只提前 3.5s ⇒ 新内容播放点落在设备
+      //   **已排到的位置之前** ⇒ 被 D5「早于 contentAnchorUs 整块丢弃」判掉
+      //   （真机 gen=6000018 一次丢 20 万帧 ≈ 4.2s = 用户听到的秒级跳跃）。
+      // 取 3s：稳态有 3s 抗抖余量（vs 1.9s 时的秒级卡顿），且 < lead 3.5s 不撞车。
+      const inQueueTargetUs = 3_000_000;
+      // [2026-11-25 09:02 对齐 MA 桥喂 CLI] 反馈量必须是**设备侧水位**（RAOP 发送队列
+      // inBytes），不能是总缓冲 —— ringBuf 是子进程手里的存量，设备拿不到。用总缓冲会
+      // 出现：ringBuf 2s + 设备 0 ⇒ 总缓冲 2s ≈ 目标 ⇒ 判定"够了"⇒ 只 1.05x 喂 ⇒
+      // 设备永远拿不到那 2s ⇒ queueMs 205ms、late 涨（真机 08:58 cand=0/dueMs=0 实锤）。
+      // MA sendspin_bridge.py 喂 CLI：只要设备缓冲 < MAX_DEVICE_BUFFER_SECONDS(8s) 就持续喂。
       const inQueueNowMs = Math.round((this.inBytes / BRIDGE_PCM_BYTES_PER_SEC) * 1000);
       const inQueueNowUs = BigInt(inQueueNowMs * 1000);
       const servoUs = inQueueNowUs >= BigInt(inQueueTargetUs) ? 0n : BigInt(inQueueTargetUs) - inQueueNowUs;
-      const realtimeUs = 105_000; // 1.05x 实时速率：防父侧短暂欠供时缓冲缓降
-      const budgetUs = this.ringPrefilled
-        ? servoUs > realtimeUs ? servoUs : realtimeUs
-        : 6_000_000;
+      // （backlogMs 现为总缓冲 = inBytes + ringBuf：ringBuf 有货时 inQueue 补齐不触发，
+      //   总量稳定在 2s；ringBuf 排空且 inQueue < 2s 时按差量补 —— 平滑无锯齿）
+      // [2026-11-25 12:56 闭环伺服] 三档：
+      //   · 低于目标 ⇒ max(servoUs, 1.5x)：快速补足，给足追赶能力（旧 1.05x 毫无余量）；
+      //   · 达到目标 ⇒ 1.0x 维持：**不能**再超前喂，否则缓冲单调增长（真机 12:55
+      //     inQMs 5450 且不回落 ⇒ 切歌 lead 被自适应抬到 5.8s，换歌要等 6 秒）；
+      //   · 冷启动首灌 ⇒ 3.5s（略高于目标，避免一开始就贴薄水位）。
+      // 抖动丢失的缓冲会在下一拍被「低于目标」分支自动补回 —— 标准水位伺服。
+      const catchupUs = 150_000;
+      // [2026-11-25 13:06] 维持档 1.05x：1.0x 时任何一拍被拖慢就净损失缓冲且无法补回
+      // （低于目标才补，但补的量又被 ring 存量限制）。1.05x 给微量正余量，缓慢自愈。
+      const maintainUs = 105_000;
+      const budgetUs = !this.ringPrefilled
+        ? 3_500_000
+        : servoUs > 0n
+          ? (servoUs > catchupUs ? servoUs : catchupUs)
+          : maintainUs;
       let taken = 0;
       let n = 0;
       while (this.ringBuf.length > 0) {
@@ -1445,7 +1551,7 @@ export class BridgeSession {
       if (!this.ringPrefilled && n > 0) this.ringPrefilled = true;
       if (this.ringPullCount <= 3 || this.ringPullCount % 50 === 0) {
         log.warn(
-          `[ring-diag] dev=${this.deviceId} pull#${this.ringPullCount} n=${n} buffered=${this.ringBuf.length} bufferedMs=${Math.round(this.ringBufUs / 1000)} inQueueMs=${inQueueNowMs} budgetMs=${Math.round(Number(budgetUs) / 1000)} prefilled=${this.ringPrefilled} pushed=${this.ringPushCount} dropOld=${this.ringDropOld}`,
+          `[ring-diag] dev=${this.deviceId} pull#${this.ringPullCount} n=${n} buffered=${this.ringBuf.length} bufferedMs=${Math.round(this.ringBufUs / 1000)} inQMs=${inQueueNowMs} budgetMs=${Math.round(Number(budgetUs) / 1000)} prefilled=${this.ringPrefilled} pushed=${this.ringPushCount} dropOld=${this.ringDropOld}`,
         );
       }
     }, 100);
@@ -1756,7 +1862,10 @@ export class BridgeSession {
       anchorShiftUs: this.opts.anchorShiftUs ?? 0,
       forceNow: this.ap2Session === null && raopNowAnchorEnabled(),
       groupAnchorUs: sharedAnchorUs ?? undefined,
+      coldPreheat: !this.anchoredOnce,
+      queuedUs: BigInt(Math.round((this.inBytes / BRIDGE_PCM_BYTES_PER_SEC) * 1e6)),
     });
+    this.anchoredOnce = true; // 后续 reseed/切歌按 warm 档，避免换歌多等 2 秒
     if (useSharedAnchor) {
       if (sharedAnchorUs !== null) {
         log.info(`[airplay-bridge] group-anchor reuse: device=${this.deviceId} gen=${this.generation} anchorUs=${sharedAnchorUs}(leadUs=${sharedAnchorUs - nowHostUs})`);
@@ -2335,6 +2444,7 @@ export class BridgeSession {
         actualSendAtUs: this.actualSendAtUs,
         commandedAnchorUs: this.anchorUs !== null ? Number(this.anchorUs) : 0,
         firstPacketLeadUs: this.firstPacketLeadUs,
+        firstFrameTsUs: this.firstFrameTsUs === null ? null : Number(this.firstFrameTsUs),
         isAp2: this.ap2Session !== null,
       });
       const nowMs = Date.now();
@@ -2871,6 +2981,10 @@ type BridgeStatsSink = (row: {
   actualSendAtUs: number | null;
   commandedAnchorUs: number;
   firstPacketLeadUs: number | null;
+  /** [2026-11-25 11:33 对齐 MA ack] 首包的名义播放时刻(µs)。
+   *  与 actualSendAtUs 一起才能算出「桥实际提前量」= firstFrameTsUs − actualSendAtUs，
+   *  与命令提前量 firstPacketLeadUs 相比即得偏差（MA _anchor_stream 的 skipped_us 口径）。 */
+  firstFrameTsUs: number | null;
   /** AP2 会话标记:S8 复核② —— AP2 执行端(applyAnchorShift)是 no-op,
    *  排除出校准判定面,避免「每 10s 判定→下发→false→空转」。 */
   isAp2: boolean;

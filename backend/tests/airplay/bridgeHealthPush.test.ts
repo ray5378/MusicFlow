@@ -65,9 +65,11 @@ describe("推送链路（子进程侧）", () => {
     expect(sup).toContain('ev.t === "bridgeStats"');
     expect(sup).toContain("bridgeHealth.record(ev.deviceId, ev.inQueueMs, ev.backlogMs)");
     expect(sup).toContain("!ev.isAp2");
-    // [S8]校准闭环接线:判定 + 微调下发
-    expect(sup).toContain("anchorDriftUs");
-    expect(sup).toContain("anchorAdjustDecision");
-    expect(sup).toContain("bridgeNudgeDelayDevice");
+    // [2026-11-24] S8 校准闭环已**停用并整块移除**：其测量口径错误
+    // （firstPacketLeadUs 在 forceNow 形态置 0，而实际命令提前量为 cold 预热值）
+    // 导致 drift 恒 >500ms、每 10s nudge 累积补偿到 12.9s ⇒ 切歌后卡顿。
+    // 现断言「已停用」并保留原因注释，防止误恢复。
+    expect(sup).toContain("校准闭环已停用");
+    expect(sup).not.toContain("bridgeNudgeDelayDevice(ev.deviceId");
   });
 });
