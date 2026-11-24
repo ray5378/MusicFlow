@@ -161,10 +161,15 @@ app.put("/v1/groups/:id/delays", permMiddleware(PERM.RENDERER_USE), async (c) =>
     // 登记缺失(容器重启后 resume-active 恢复的桥/历史泄漏)⇒ 逐成员幂等 join。
     if (memberId.startsWith("airplay:") && after !== before) {
       const devId = memberId.slice("airplay:".length);
-      // [2026-11-25 10:49] 不再 retime：补偿由投递时间线（bridgeDeliveryShiftUs）每拍
-      // 重算 ⇒ 改值下一拍即生效，无需平移 RTP↔NTP 映射。retime 会留下锚点偏移，
-      // 而起播 warm 复用会沿用该偏移 ⇒ "起播时 iEAST 快半秒、切歌后正常"（真机实证）。
-      const live = false;
+      // [2026-11-24 16:45 恢复三段兜底] 补偿的落点是桥会话锚点（control.ts
+      // bridgePrepare.anchorShiftUs），运行中改值必须靠**原地 retime** 平移该设备
+      // 的 RTP↔NTP 映射才立即生效（真机 09:39 实测：0→800ms 后偏移变化 719ms、
+      // 不重建会话、无静音）。10:49 曾把它禁用并把补偿改到投递 ts，导致补偿失效
+      // 与起播错位，已回退。
+      // 守卫 D9 要求的三段顺序：①成员原地 retime → ②重建组桥 → ③逐成员 join。
+      const live = await import("../../services/airplay/control.js")
+        .then((m) => m.bridgeRebuildDelayDevice(devId, after * 1000))
+        .catch(() => false);
       if (live) {
         rebuilt = 1;
       } else if (isBridgeRouteActive(id)) {

@@ -450,7 +450,10 @@ describe("③b 深锚仅纯桥组(E3 判决,2026-10-26)", () => {
 
     expect(leadMixed - leadPlain).toBeGreaterThan(900_000);
 
-    expect(leadMixed - leadPlain).toBeLessThan(3_000_000);
+    // [2026-11-24] 首次起播走 cold 预热 3.0s（MA 的 cold 档，让设备进入稳态后
+    // 成员补偿才成立），实测起播 lead≈3.0~3.7s、切歌 lead≈2.75s。原上限 3.0s
+    // 钉的是「cold 恒被跳过」的旧行为（代码恒传 warm=true，冷档从未生效）。
+    expect(leadMixed - leadPlain).toBeLessThan(4_000_000);
 
   }, 30_000);
 });
