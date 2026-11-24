@@ -1777,6 +1777,18 @@ export class BridgeSession {
       return;
     }
     // 以下为「换代重启」:seek / rehost / 用户手动 next-prev(track+manual)。
+    // [N-附 2026-11-25 第一轮复采] 该分支与 track 边界的 track-reanchor 是**两条重锚
+    // 路径**(后者只覆盖 gen 变化的 track 边界),效果等价(清锚点状态+flush+重新
+    // planBridgeAnchor)但此前无统一 ev 名 ⇒ 复采 grep 漏一半。这里补 boundary-reanchor
+    // 留痕,与 track-reanchor 同字段口径,复采两条都要查。
+    log.info(`[airplay-bridge] ${JSON.stringify({
+      ev: "boundary-reanchor",
+      dev: this.deviceId,
+      prevGen: this.generation,
+      gen: generation >>> 0,
+      reason,
+      note: "换代重启路径重锚(seek/rehost/手动),与 track-reanchor 等价",
+    })}`);
     this.firstFrameTsUs = null;
     this.aligner = null;
     this.anchors = null;
@@ -2025,7 +2037,9 @@ export class BridgeSession {
         gen: this.generation,
         residualUsMs: Math.round(Number(residualUs) / 1000),
         spliceFloorMs,
-        finalLeadMs: Number(plan.commandedLeadUs),
+        // [N-D 修 2026-11-25 第一轮复采] commandedLeadUs 是 µs,字段名是 Ms ⇒ 必须换算,
+        // 否则显示 3800ms/2500ms 实为 3.8s/2.5s 的 µs 值,误导排障。
+        finalLeadMs: Math.round(Number(plan.commandedLeadUs) / 1000),
         shared: sharedAnchorUs !== null,
       })}`);
     }
