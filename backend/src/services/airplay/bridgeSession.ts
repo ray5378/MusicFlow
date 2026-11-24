@@ -55,6 +55,7 @@ import {
   BRIDGE_PCM_BYTES_PER_SEC,
   BRIDGE_REBASE_MIN_AHEAD_US,
   BRIDGE_RESUME_REBASE_US,
+  BRIDGE_REJOIN_ATTEMPT_MAX,
   BRIDGE_SPLICE_LEAD_MARGIN_US,
   BRIDGE_WARM_START_LEAD_US,
   PROTOCOL_CAPS,
@@ -68,6 +69,7 @@ import { computeBridgeBackoffMs } from "./bridgeSource.js";
 // 对标 MA playback.py:90 ANCHOR_REBASE_SIGNIFICANT_US(值 500_000,语义=锚点移动
 // 超 500ms 才算显著偏移)—— 广播游标跳转与 pacing rebase 共用同一「显著」阈值。
 import { CURSOR_JUMP_BEHIND_US } from "../sendspin/contentDemand.js";
+import { BRIDGE_TRANSPORT_RECOVERY_GUARD_MS } from "../sendspin/constants.js";
 import { PolyphaseResampler, floatToPcmS16, pcmS16ToFloat } from "./resampler.js";
 import { audibleAtUs, computeBridgeAnchors, driftCorrection, groupDelayUs, type BridgeAnchors } from "./bridgeMath.js";
 import { nowUs } from "../../utils/hostClock.js";
@@ -2280,8 +2282,36 @@ export class BridgeSession {
    *  重连成功后重新 RECORD(新 baseTs/startNtp)并对齐器复位 —— 下一帧 AUDIO 用
    *  新会话重新锚定(新 scheduledAnchorUs)。仅推流异常断开时触发(boundary/stall
    *  不触发:那些场景会话仍健康)。 */
+  /** [验收10/MA :1481-1490] 上一次传输**恢复成功**的时刻(ms;0 = 从未恢复过)。
+   *  消费点 = transportGiveUp 的 30s 守卫:恢复后 30s 内再死 ⇒ 放弃(防 churn,
+   *  MA "died again within 30s of the previous recovery, giving up")。
+   *  写入点 = reconnectRaop 成功路径(看门狗与 send-error 两条路都汇于此)。 */
+  private lastRecoveryAtMs = 0;
+  /** [验收10/MA :1196-1219] rejoin 尝试用尽 ⇒ 保持移出(不再调度/执行重连)。
+   *  复位 = 新 BridgeSession(syncGroupBridges 重建句柄);显式重试走编排侧重建。 */
+  private transportGivenUp = false;
+  /** [验收10] 守卫/上限统一闸(§见 rates.ts BRIDGE_REJOIN_ATTEMPT_MAX 注释)。
+   *  @returns true = 已放弃,调用方不得再调度/执行重连。 */
+  private transportGiveUp(reason: string): boolean {
+    if (this.transportGivenUp) return true;
+    const withinGuard = this.lastRecoveryAtMs > 0
+      && Date.now() - this.lastRecoveryAtMs < BRIDGE_TRANSPORT_RECOVERY_GUARD_MS;
+    const exhausted = this.raopReconnectAttempt >= BRIDGE_REJOIN_ATTEMPT_MAX;
+    if (!withinGuard && !exhausted) return false;
+    this.transportGivenUp = true;
+    log.error(
+      `[airplay-bridge] raop transport give-up: device=${this.deviceId} ` +
+      (exhausted
+        ? `rejoin attempts exhausted(${BRIDGE_REJOIN_ATTEMPT_MAX}, MA (5,30))`
+        : `died again within ${BRIDGE_TRANSPORT_RECOVERY_GUARD_MS / 1000}s of previous recovery`) +
+      ` ⇒ 保持移出,等编排侧对账/用户显式重试 reason=${reason}`,
+    );
+    return true;
+  }
   private scheduleRaopReconnect(reason: string): void {
     if (this.closed || this.raopReconnectTimer) return;
+    // [验收10] 守卫窗内再死 / 尝试用尽 ⇒ 放弃,不再排程(MA :1481-1490/:1196-1219)。
+    if (this.transportGiveUp(reason)) return;
     this.raopReconnectAttempt++;
     const delay = computeBridgeBackoffMs(this.raopReconnectAttempt, Math.random());
     log.warn(`[airplay-bridge] raop reconnect in ${delay}ms (attempt ${this.raopReconnectAttempt}, ${reason}) device=${this.deviceId}`);
@@ -2300,6 +2330,9 @@ export class BridgeSession {
     // sendChunk false destroying=true),进而 .then() 再判「非正常结束」继续调度重连,
     // 形成 36s 无声死循环。重入也一并挡掉。
     if (this.raopReconnectInFlight) return;
+    // [验收10] 看门狗(arbitrateLiveness)直调路径同样受守卫/上限闸 —— 30s 恢复窗内
+    // 再死或尝试用尽 ⇒ 放弃(F6b 场景的判定点)。已放弃时不再执行,现场保留供排查。
+    if (this.transportGivenUp) return;
     this.raopReconnectInFlight = true;
     try {
       // 标记 degraded:推流停,对齐器复位,等新会话 + 新帧重锚(重连窗口内旧队列清空)。
@@ -2340,6 +2373,9 @@ export class BridgeSession {
         this.timingCountAtFire = 0;
         this.raopReconnectAttempt = 0;
         log.info(`[airplay-bridge] raop reconnected: device=${this.deviceId}(新 RECORD,等待新代次首帧重锚)`);
+        // [验收10] 恢复成功 = 30s 守卫窗起点(看门狗与 send-error 两路都汇于此,
+        // 故只需这一处写入)。MA :1481-1490 的 recovery 语义。
+        this.lastRecoveryAtMs = Date.now();
         pushInitialVolume(player, this.deviceId, this.opts.initialVolume, this.opts.sameHostDlnaPeer, {
           volume: this.opts.deviceVolume,
           muted: this.opts.deviceMuted,

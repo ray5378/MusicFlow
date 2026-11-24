@@ -195,6 +195,13 @@ export const AP2_WAIT_SLICE_MS = 10;
  */
 export const BRIDGE_WARM_GRACE_SECONDS = 4;
 
+/** [验收10/MA sendspin_bridge.py:1196-1219 BRIDGE_REJOIN_ATTEMPT_DELAYS=(5,30)]
+ *  传输死亡后的 rejoin 尝试上限:两次用完**保持移出**,不再无限重试(第二次覆盖音箱
+ *  重启的 mDNS 消失窗口)。本仓 `computeBridgeBackoffMs` 的退避间距(5s/30s ±20%)与
+ *  MA 一致,故只补「上限 + 放弃」两个增量,不改间距。
+ *  消费点:bridgeSession.scheduleRaopReconnect / reconnectRaop(transportGiveUp)。 */
+export const BRIDGE_REJOIN_ATTEMPT_MAX = 2;
+
 export const BRIDGE_MAX_HELD_AUDIO_US = 45_000_000;
 /** [P0-C 2026-11-25 对齐 MA AIRPLAY_SPLICE_LEAD_MARGIN_MS] splice 型接收端(MUZO 2017
  *  固件一族)只在「重排指令时刻落在残留排队音频之后」才执行换锚;落在之前 ⇒ 指令被
