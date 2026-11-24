@@ -517,6 +517,12 @@ HiVi H5MKII 同时以 `airplay:00226C••••••`（HiVi）与 `dlna:FF31
 12. **“重启后音量变 20 是项目里谁在回放”** —— 最终定位为 **HA 自动化**调用 `media_player.volume_set` 设 20，与本项目无关；`[peer-volume]` 日志的 UA 可直接确认来源。项目侧的职责只有「重启保留用户上次设置」（落库 + 持久值播种），**不得**用吞请求的方式兜第三方行为。
 13. **“DLNA Stop 只影响 DLNA 通道”** —— 错。同一台 Linkplay/HiVi 上的 DLNA `Stop` 会停掉整机播放器，连带静音 AirPlay。客户端流转后 `reset` 源端 DLNA 时若照发 Stop，就会得到「进度在走、完全没有声」；必须在 `stopDevice` 里挡掉（§2.11）。
 14. **“热补丁部署过的容器可以随便 force-recreate”** —— 错。`docker compose up --force-recreate` 会用镜像重建容器，热补丁写进 `dist` 的文件全部丢失，现场表现为「同一个操作有时能出声、有时不行」。热补丁验证通过后必须走正式发版。
+15. **“接续由起播侧与泵侧各判一次，只要判据写成一样的就不会冲突”** —— 错。两次**求值时刻**不同，`waitUs`（`from − now`）在临界点必然翻转：240 实测曲末 `差=35317ms`（同一现场事件，早期记录写 35316，以 35317 为准）被旧阈值 35000ms 否决，1.5s 后起播侧再算却通过 ⇒ 起播侧 `continuity=true`、泵侧 `false`，两套时间轴并存（2026-11-24 10:16）。正解：曲末那一拍用 `cursorUs` **一次定死** granted/denied，两侧只读（文末增补 §A-2）。
+16. **“`interrupted = pump.active` 足以区分手动打断与自然播完”** —— 错。240 现场 17:26:07：`pushLoop` 收尾（`running` 仍 true）与 QueueController auto-advance 之间隔了 **~350ms**，这段窗口被误判成「手动打断」⇒ `continuity=false` ⇒ `clearPlayback()` 清空 ring ⇒ 泵仍按 `contig` 把新曲首帧锚在**已清空的内容尾**之后（now+33.3s）⇒ 两台桥同时断粮 3 分钟。正解：`pump.active && !pump.naturalEnded`（§A-3）。
+17. **“`inQueueMs` 就是缓冲深度，可以拿它当调参目标”** —— 错。里面含**对齐器补入的静音**在设备队列里排队：历史「缓冲 2.6s」中 `insertedFrames=117866`（≈2.67s）就是这部分；forceNow 语义下设备「到包即播」，lead 拉长不转化为缓冲（cold lead 3s 时 `deltaUs` 仍 1.56s）。真实提前量只看 `deltaUs`（§A-8）。
+18. **“按成员补偿扩投递视界，能治负补偿设备的持续追发”** —— **已证伪**。`c4190985` 按 `|shift|` 给 iEAST 加视界（当时局部指标确实好转：inQ 75ms→3175ms、late 39410→3），但随即被 `53f7c8c2` revert：现场 `newgenSkip` 7~9 万帧、`cursor-jump` 31 次。正解：同组不同成员的投递视界**必须完全一致**，补偿只落桥会话锚点（§A-9 铁律 1/3）。
+19. **“父侧也按 backlog 做水位伺服更稳”** —— 错，且会与子进程打架：父侧灌 2s 到 ring → 子进程只喂 105ms → 父侧 `due=0` → 子进程排空 → 父侧又灌 2s，真机 `inQueue` **875↔5650** 剧烈跳动 ⇒ 可闻卡顿。正解：父侧只填到投递上沿，水位由子进程 `startRingDrain` 按设备 inQ 伺服（`sendspin/server.ts:1551-1556`、`bridgeSession.ts:1492`，§A-9 铁律 4）。
+20. **“8s 投递视界能把设备缓冲堆起来”** —— **两次证伪**。视界 8s 时游标贴到 8.5s，推给设备的内容超出其队列容量（实测 `maxQueueMs=4163ms`）⇒ 设备直接丢弃 ⇒ `inQMs=0`、`late=17006`（真机 iEAST `cursorVsNow=8494 / horizonMs=8500`）。当前 **5s**，且必须 > 设备目标缓冲 3.5s + ring 存货 1.5s（§A-5）。
 
 ---
 
@@ -1155,7 +1161,7 @@ npx vitest run tests/airplay tests/dlna/controlTransportGuards.test.ts tests/ser
 |---|---|
 | 职责 | 桥接环**发送端**(跑在 sendspin 侧):unix socket 会合连接、发送队列、背压/硬上限、退避重连 |
 | 对外导出 | `computeBridgeBackoffMs(attempt: number, rand: () => number): number`(:35)/`class BridgeSource`(:100):`start`(:134)/`stop`(:142)/`enqueue(frame)`(:156)/`sendNow(bytes)`(:187)/`clearQueue()`(:198)/`stats()`(:204);私有 `drain`(:332)/`handleClosed`(:292)/`scheduleReconnect(forcedDelayMs?)`(:308)/`attach`(:265)<br>类型:`BridgeLinkState = "idle" \| "connecting" \| "live" \| "stalled"`(:23)/`BridgeSourceStats`(:61)/`BridgeSourceOpts`(:76)/`BridgeSocketLike`(:26) |
-| 关键常量 | `BRIDGE_ENOENT_PERMANENT_AFTER = 12`(:48,连续 12 次 ENOENT 判永久失败,路径不可能再出现)<br>来自 `rates.ts`:`BRIDGE_QUEUE_HIGH_WATER_BYTES=384KB`/`BRIDGE_QUEUE_HARD_CAP_BYTES=1536KB`/`BRIDGE_BACKOFF_BASE_MS=5_000`/`BRIDGE_BACKOFF_MAX_MS=30_000`/`BRIDGE_PCM_BYTES_PER_SEC=192_000`/`BRIDGE_QUEUE_HIGH_WATER_MS=2_000`/`BRIDGE_QUEUE_HARD_CAP_MS=16_000`<br>为什么 16s（2026-11-02 由 8s 抬高）:240 真机 2h 实测,组泵按设备 `buffer_capacity × 0.6` 预填充后投递领先量 `bridge-window.tailVsHiUs` p50=7.57s / p99=max 11.96s,接收侧积压 `inQueueMs` p50=7.63s / p90=7.75 / max=7.98s —— 稳态就贴着旧 8s 红线,于是 `recv-overflow`(83 次,backlog 全在 8001–8025ms)→ 清 8s 积压 → `pad-insert` 8s 静音 → 会话换代,形成 overflow→换代→再 overflow 循环。抬到 16s 覆盖实测 p99 且留 4s 余量(代价内存 3MB/会话)。**曲末排空上限独立固定 8s**(`BRIDGE_END_DRAIN_SAFE_MAX_MS`),换歌等待不受影响 |
+| 关键常量 | `BRIDGE_ENOENT_PERMANENT_AFTER = 12`(:48,连续 12 次 ENOENT 判永久失败,路径不可能再出现)<br>来自 `rates.ts`:`BRIDGE_QUEUE_HIGH_WATER_BYTES=384KB`/`BRIDGE_QUEUE_HARD_CAP_BYTES=1536KB`/`BRIDGE_BACKOFF_BASE_MS=5_000`/`BRIDGE_BACKOFF_MAX_MS=30_000`/`BRIDGE_PCM_BYTES_PER_SEC=192_000`/`BRIDGE_QUEUE_HIGH_WATER_MS=2_000`/`BRIDGE_QUEUE_HARD_CAP_MS=16_000`<br>为什么 16s（2026-11-02 由 8s 抬高）:240 真机 2h 实测,组泵按设备 `buffer_capacity × 0.6` 预填充后投递领先量 `bridge-window.tailVsHiUs` p50=7.57s / p99=max 11.96s,接收侧积压 `inQueueMs` p50=7.63s / p90=7.75 / max=7.98s —— 稳态就贴着旧 8s 红线,于是 `recv-overflow`(83 次,backlog 全在 8001–8025ms)→ 清 8s 积压 → `pad-insert` 8s 静音 → 会话换代,形成 overflow→换代→再 overflow 循环。抬到 16s 覆盖实测 p99 且留 4s 余量(代价内存 3MB/会话)。**曲末排空上限独立固定 8s**(`BRIDGE_END_DRAIN_SAFE_MAX_MS`),换歌等待不受影响。**历史语境豁免**:本段的 `inQueueMs p50=7.63s` 是 2026-11-02 抬高硬顶时的取证值,只作历史依据,不可当调参目标 —— 新口径「`inQueueMs` 不是缓冲深度、不得用它调 lead」见 §A-4 与 §10.6 |
 | 状态归属 | 发送端内存:`queue/queuedBytes/maxQueueMs/backpressureActive/reconnects/state` |
 | 上下游 | 上游:`sendspin/bridgeMember.ts::pushAudio`(经 `enqueue`)、`sendBoundary`/`notifyGeneration`;下游:`bridgeServer.ts` listener |
 | 失败模式 | ①硬上限触发 → 断连重连(:163-171),日志 `bridge hardCap <ms>ms > <cap>ms,断连重连`;**排查要点:出现即说明对端 16s 没读**,常见于对端推流被 boundary/stall 中止或泵侧一次灌太多;②ENOENT 无限重连 = socket 路径已废而 stop 未走(:48) |
@@ -1428,6 +1434,11 @@ seek 后为 `sendspin timeline RE-anchored after seek: pos=<ms>ms base=…`。
 已经被推过(`ts < lo` 的帧会被水位吃掉,永不补投);③`commonSendAheadUs()` 是否被桥污染
 (守卫 ⑦ 组⑧ 钉死「体内不得出现 bridge/lead」)。
 
+> **[2026-11-24 增补]** 本节 `BRIDGE_PUSH_HORIZON_US` 是**桥侧投递窗口**上沿(决定「投哪一段」);
+> 父侧 `bridgeServoTick` 还有一层**投递视界** `BRIDGE_FEED_CAP_US`(当前 5s + `ahead`,决定「游标最多推到多远」,
+> 源:`sendspin/server.ts:1493`、`:1504`)。两层别混。8s 视界已两次证伪,详见文末增补 §A-5;
+> 窗口下沿 `lo` 不可放宽,见 §A-9 铁律 2。
+
 **窗口迁移(2026-11-02,全局,无按设备分支)**:`1.5s/2.5s ⇒ 2.5s/4.0s`(宽度保持 1.5s)。
 老 LinkPlay(HiVi H5MKII)实测有效设备缓冲只剩 ~200ms,原窗口下桥侧可听余量不足 ⇒ 每秒欠一块。
 同批强耦合落点:`BRIDGE_END_DRAIN_MARGIN_MS 1_500 ⇒ 2_500`、桥组锚点 lead 取
@@ -1609,6 +1620,11 @@ routes/api/groups.ts:129  PUT /v1/groups/:id/delays  {memberId, ms}
 | 桥锚点 | `[airplay-bridge] {"ev":"anchor",…}` | 看 `scheduledAnchorUs` / `commandedLeadUs` / `latencyFrames` / `reAnchored` |
 | 锚点不可达 | `anchor unreachable: … → re-anchor <µs>(丢弃更早内容)` | 桥自己等太久才立锚(首帧过旧) |
 | 桥稳态 | `[airplay-bridge] {"ev":"tick",…}` | 判据见 §10.6;A/V 权威字段 `deltaUs` |
+| **桥投递断粮** | `bridge-window-dead dev=… reason=content-beyond-horizon\|no-frame-in-window …` | 环里有本代内容、这一拍**零帧**投出 = 桥断粮在父侧的唯一直接证据(增补 §A-7,`sendspin/server.ts:1620-1626`) |
+| 桥投递伺服 | `bridge-servo dev=… cursorVsNow=… horizonMs=… firstCandVsNow=… cand=… deliveredMs=… oldEp=…` | `cand=0` + `deliveredMs=0` 是断粮指纹;`horizonMs` = 当前投递视界(5s + ahead) |
+| 桥锚点取值 | `[anchor-content] dev=cold\|warm contentVsNowMs=… minSafeMs=… finalLeadMs=… picked=…` | 起播锚点实际值;`dev=warm` 走 warm 保底 2.5s 路径(增补 §A-4) |
+| 桥环下泄 | `[ring-diag] dev=… pull#N n=… buffered=…（帧） bufferedMs=… inQMs=… budgetMs=… pushed=… dropOld=…` | 子进程水位伺服;`bufferedMs=0` 而 `budgetMs≈1950` = 供需 1.0x、无货可追(`bridgeSession.ts:1561`) |
+| 接续承诺 | `sendspin 曲末排空跳过:接续下一首 continuity=1 …` / `sendspin 接续承诺被时间窗否决: …` / `sendspin 接续承诺撤回(ring 将被清空,放弃 contig 锚点) …` | 曲末接续 granted / denied / 撤回三态(增补 §A-7) |
 | 桥背压/硬上限 | `bridge backpressure <ms>ms > 2000ms` / `bridge hardCap <ms>ms > 16000ms,断连重连` | 后者 = 对端 16s 没读,必然重连 |
 | 桥投递 | `bridge-backfill group=… frames=… durUs=…` / `bridge-sync group=… before=… after=…` | 播中加入 / 路由变化 |
 | 桥对齐降噪 | `[airplay-bridge] realigned …` | 无动作恒漂移已降 `debug`(WARN 只剩真动作) |
@@ -1652,6 +1668,7 @@ routes/api/groups.ts:129  PUT /v1/groups/:id/delays  {memberId, ms}
 | **4.9.0** | **混合组切歌等待按组可配**:`player_groups.mixed_anchor_lead_ms`(可空;NULL/0 = 自动 5000ms,>0 = 用户值,0~30000 步进 100)取代混合组锚点 lead 的全局常量;消费点 `streamEngine` 混合组分支组值优先回退 `BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US`,读值**绕 delayCalib cache 直查 db**(cache 懒加载+写时更新、无失效广播 ⇒ 子进程结构性陈旧);`GET/PUT /v1/groups/:id/delays` 收发 `mixedAnchorLeadMs`,前端群组卡片「切歌等待」弹窗;PUT 后下一首切歌生效、无需重建;纯桥组深锚与非桥分支不变;守卫 G19(+7 条,76→83) |
 | **4.9.1** | **删除切歌垫片组值手动口**:`player_groups.track_switch_lead_ms`(幂等 DROP 迁移)+ `getTrackLeadMs`/`setTrackLeadMs`/`trackSwitchLeadUsOf` + API 收发 `trackLeadMs` 全部移除;垫片机制本身(pendingTrackLeadUs 冷/暖动态 + 逐帧消耗)一行不动,动态自动挡不变(默认 0=自动从未生效,前端零引用);守卫相关断言反转为不存在性防复活;与混合组锚点 lead(4.9.0)是两道独立防线,分工注释已补 |
 | 未发布(本文同批) | 桥会话音量回落修复(缺陷 **D-1**):`BridgeSession.setVolumeDb`(`bridgeSession.ts:773`)+`BridgeSessionManager.setVolumeDb`(`:833`)+`childMain.ts:119` 的「native 未命中回落桥」——桥占用设备的volume RPC 不再恒落空;回归用例 `tests/airplay/bridgeVolumeRouting.test.ts`(7 个 `it`);缺陷 **D-2**(每首歌无条件 teardown+prepare 桥路由)明确**留待下一轮**,见附录 D |
+| 未发布(`caed89ad`,2026-11-24) | **曲末接续「一次定死 + 双侧只读」**:`continuityCommitted/Denied`(曲末一拍用 `cursorUs` 定死)+ `continuityNext/NextDenied`(`play()` 快照,消费即清);`continuityAgeOk()` 二次复核只判「太旧」不判「太远」;`interrupted = pump.active && !pump.naturalEnded`(修 pushLoop 收尾~auto-advance 的 ~350ms 误判);新增 `dropContinuityHandover()`(非接续分支清 ring 时同步撤回 contig 锚点);接续上限 35s→45s(与泵背压 30s + 投递视界 ≈5.5s 同源);warm 锚点 lead 保底 2.5s(已实证：240 18:51 后 `dev=warm finalLeadMs=2500` ×2);新增 `bridge-window-dead` / `接续承诺撤回/否决` 诊断日志。**桥侧协议与窗口不变**,口径见文末「未发布增补」§A-1~A-10 |
 
 # 附录 D：已知缺陷 / 待排期（2026-10-26 盘点）
 
@@ -2153,6 +2170,12 @@ late 累积    ≈ 22/秒（约占发包 18%）    ← producer 阻塞（欠料�
 | 重传请求 future% | ≈100%（656/657） | 真实小丢包 4~8 条、future≈0（**请求仍会存在，判据不是"消失"**） |
 | 听感 | 曲中失声 2~10 秒 | **不失声**（最终判据以听感为准） |
 
+> **[2026-11-24 口径纠正]** 本表 `inQueueMs` 的用法**只在本节的历史语境里成立**（当时用它区分
+> 「bulk 未生效（≈6000）」与「resample 没转（≈0）」）。`inQueueMs` **不是**缓冲深度：
+> 其中含对齐器补入的静音（同一段 `insertedFrames=117866` ≈2.67s），且 forceNow 语义下设备
+> 「到包即播」、lead 拉长不转化为缓冲。**任何以 `inQueueMs` 为调参目标的表述一律作废**，
+> 真实出音提前量看 `deltaUs`（详见文末增补 §A-8）。
+
 ### 7. 若仍有问题
 
 按《AirPlay排障总手册-监控与取证-2026-10-31.md》§1 六步流程走：先分层定位（服务端投递 /
@@ -2344,3 +2367,169 @@ late 累积    ≈ 22/秒（约占发包 18%）    ← producer 阻塞（欠料�
 
 **判据边界（仍是旧结论）**：桥的 `[airplay-bridge] tick` 依旧是内容同步的权威判据；
 本节新增的只是「什么时候把封面/进度切过去」，不参与任何同步决策。
+
+---
+
+## 未发布增补（桥侧：曲末接续「一次定死」后的口径 + 投递视界/缓冲深度纠正，2026-11-24）
+
+> 上游事故：240 自动换歌后**两台桥同时断粮约 3 分钟**（2026-11-24 17:26）。修复提交 `caed89ad`
+> 只改「谁来判接续、判几次」，**桥侧协议、锚点数学、投递窗口**
+> （§10.4 / §10.5 / §10.6 / §11 与 v4.9.x 系列增补）**全部不变**，冲突时以本节为准。
+
+### A-1 结论先行
+
+1. 接续判定**只有一个产地**：泵在曲末那一拍用 `cursorUs` 一次定死（granted / denied），
+   起播侧与泵侧都只读；桥侧收到的 `bridge-generation … continuity=1` 就是这一结论的下游投影。
+2. `interrupted` 判据改为 `pump.active && !pump.naturalEnded` —— 自然播完与 auto-advance 之间有 ~350ms 窗口。
+3. 非接续分支会清 ring，必须**同时撤回**泵侧的接续承诺；否则泵仍锚 `contig`（一条已不存在的时间线）
+   ⇒ 投递窗口内零帧 ⇒ **桥断粮**（新增 `bridge-window-dead` 日志专治「认不出来」）。
+4. 接续上限 35s → **45s**，与「泵背压 30s + 投递视界 ≈5.5s」同源。
+5. warm 起播锚点 lead 保底 2.5s（**已实证**：18:51 部署后 `dev=warm finalLeadMs=2500` 命中 2 次，见 §A-4）。
+6. `inQueueMs` **不是**缓冲深度；真实出音提前量是 `deltaUs`。
+
+### A-2 桥侧要读的接续三态（源码坐标）
+
+| 字段 | 语义 | 写入 | 读点 |
+|---|---|---|---|
+| `continuityCommitted` | 曲末已按接续跳过排空的**承诺**（不可撤回） | `sendspin/streamEngine.ts:2025` | `continuityReady()` `:1135` |
+| `continuityDenied` | 曲末判过但**被时间窗否决** | `streamEngine.ts:2028` | `:1138` |
+| `continuityNext` / `continuityNextDenied` | `play()` 起手快照（消费即清） | `streamEngine.ts:760-764` | 泵锚点 `:1487`、`:1494` |
+
+泵侧锚点表达式（`streamEngine.ts:1483-1495`）：
+
+```text
+!continuityNextDenied
+&& (continuityNext || continuityGates(hasBridges, isPureBridge))
+&& continuityAgeOk(continuityFromUs)
+```
+
+- granted ⇒ **不再过结构门**（桥集合在 prepare/reconnect 瞬间会短暂翻 false，不能让它否决已落地的承诺）；
+- 未承诺（无槽位/预取路径）⇒ 回落结构门（这条路上 ring 未必被清，接续依然成立）；
+- denied ⇒ 短路 false；
+- `continuityAgeOk()`（`streamEngine.ts:1108-1111`）只判「接续点是否**已过旧**」
+  （age ≤ `BRIDGE_CONTINUITY_STALE_US` 15s，`constants.ts:151`），**不判「太远」** ——
+  太远是曲末那一刻的事实，换时刻再算会临界翻转（实测 35317ms vs 旧阈值 35000ms）。
+
+**桥侧为什么关心**：`continuity=1` 时桥**一个字都不发**（不换代 / 不清队列 / 不发 BOUNDARY，
+`sendspin/server.ts:1008-1012`）；上游一旦判 false，桥就按常规换代 → `BOUNDARY{track}` → 重锚，
+旧曲尾与新曲首帧不再连续。因此「上游同链日志对不上」在桥侧的可见形态就是**断粮 + 换代**。
+
+### A-3 `interrupted` 与承诺撤回（桥侧血案的两根导火索）
+
+- `services/sendspin/playerCore.ts:482`：`interrupted = pump.active && !pump.naturalEnded`（旧：`pump.active`）。
+  `naturalEnded` getter 见 `streamEngine.ts:720-722`，读 `endedNaturally`（`:2186` 置位 `= contentEnded && !truncated`）。
+- 非接续分支（`playerCore.ts:500-512`）会 `close({keepBridgeDelivery:false})` + `clearPlayback()` 把 ring 清空
+  ⇒ 必须调 `pump.dropContinuityHandover()`（`streamEngine.ts:1153-1168`）：撤回四个承诺字段
+  **并清 `continuityFromUs` / `lastContentEndUs`**（否则泵仍锚 contig），幂等。
+- **现场（240，17:26:07）**：泵记 `曲末排空跳过 continuity=1` → 390ms 后起播侧记 `continuity=false`
+  → 清 ring → `sendspin timeline anchored base=254545581990 contig=254545581990`（now+33.3s）
+  → `bridge-servo cand=0 firstCandVsNow=33740 deliveredMs=0` → 两台桥断粮、泵被 30s 背压钉死。
+
+### A-4 warm 锚点 lead 保底 2.5s（**已实证**，2026-11-24 18:51 起在 240 命中）
+
+`planBridgeAnchor` 的 forceNow 分支（`bridgeSession.ts:667` 起）新增一行（`:713`）：
+
+```ts
+// warmUs = BRIDGE_WARM_START_LEAD_US = 2.5s（airplay/rates.ts:42）
+if (opts.coldPreheat !== true && leadUs < warmUs) leadUs = warmUs;
+```
+
+- 旧行为：forceNow 分支只取 `max(offset 400ms, L + safety ≈ 2.05s)` ⇒ tick 实测真实出音提前量
+  `deltaUs` 恒 2.06s、设备 `inQueueMs` 仅 1.1s（用户诉求是 2.5s 量级）。
+- cold 已由 `COLD_PREHEAT_US`（3.0s，`bridgeSession.ts:695`）覆盖，故**只抬 warm**；
+  代价是切歌首帧多约 450ms 静默。
+- ⚠️ **命中条件（代码事实）**：`coldPreheat: !this.anchoredOnce`（`bridgeSession.ts:1872`），
+  锚点算完后 `anchoredOnce = true`（`:1875`，注释「后续 reseed/切歌按 warm 档」）。
+  也就是说 warm 保底**只在「同一会话内的切歌 / reseed」**上生效；该次起播若新建了会话
+  （`anchoredOnce=false`）就走 cold 3s，这一行不参与。
+- ✅ **已实证（2026-11-24 18:51:49 部署后，240 现场）**：`anchor-content` 全量分布
+  `cold lead=3000 ×13 / cold lead=2199 ×1 / warm lead=2050 ×8（补丁前）/ warm lead=2500 ×2（补丁后）`；
+  原始日志两条：`[AirPlay] INFO [anchor-content] dev=warm contentVsNowMs=4742 minSafeMs=2050 finalLeadMs=2500 picked=shared`
+  （另一条 `contentVsNowMs=4741` 同类）。补丁前同形态为 `finalLeadMs=2050` ⇒ 保底确实抬高 450ms。
+- ⚠️ 口径精确化：**不是「每次起播必 cold」** —— **新建桥会话**的起播走 cold 3s；**同一会话的
+  reseed/切歌**走 warm 并已吃到 2.5s 保底。实测 cold:warm = 14:10。
+- ⚠️ **生效条件（三重门，`bridgeSession.ts:716`）**：warm 保底仅在 ①`coldPreheat === false`
+  （**显式** warm；未传参 `undefined` 不保底 —— 保底是「同会话 reseed」语义，不是「任何未声明调用」的
+  缺省）②用户**未上调** `MF_BRIDGE_RAOP_NOW_ANCHOR_OFFSET_MS`（`wantLeadUs <= floorLeadUs`，即 offset
+  没越过 `L+SAFETY` 下限）③`leadUs < 2.5s` 三条同时成立时才生效。
+  **env 上调优先，不会被保底覆盖**（offset=3000 ⇒ lead 仍 3.0s）；env 显式 800/1500/0 仍被
+  `L+SAFETY`(≈1.05s) 下限钳住，与旧契约一致。
+- 单测：`tests/airplay/bridgeSessionForceNow.test.ts` 新增 2 例钉住 ——「显式 warm ⇒ 2.5s(±50ms)」与
+  「env=3000 ⇒ 3.0s 不被覆盖」；既有 6 例（不传 `coldPreheat`）保持旧契约不变。
+- ⚠️ 该保底只抬 lead（首帧多等约 450ms），**不改变** `deltaUs` 的真实缓冲语义 ——
+  forceNow 下设备到包即播，别把它当作「缓冲已到 2.5s」的依据。
+- 同批还有 `LEAD_CAP_US = 3.8s` 上限（`bridgeSession.ts:705-706`）：lead 一旦越过首帧时刻，
+  锚点落到内容之后 ⇒ D5 丢开头内容（吞开头）。
+
+### A-5 投递视界：8s 已两次证伪，当前 **5s**
+
+父侧 `bridgeServoTick` 的投递视界 = `BRIDGE_FEED_CAP_US`（`sendspin/server.ts:1493`，**5s**）
++ `ahead`（`commonSendAheadUs()`，`:1504`）⇒ 实测 `horizonMs ≈ 5.5s`。
+
+- **8s 视界不可行（已两次证伪）**：视界 8s 时游标贴到 8.5s，推给设备的内容超出其队列容量
+  （两台设备实测 `maxQueueMs=4163ms`）⇒ 设备直接丢弃 ⇒ `inQMs=0`、`late` 暴涨
+  （真机 iEAST `cursorVsNow=8494 / horizonMs=8500 / inQMs=0 / late=17006`，`server.ts:1484-1493`）。
+- **也不能无限收**：取 5s 的依据是「视界必须 > 设备目标缓冲 3.5s + ring 存货 1.5s」，
+  否则游标一贴视界，投递速率恒等于消费速率（1.0x），设备缓冲永远停在首灌水平
+  （真机 `inQMs` 卡 1575 不涨、`ring` 空、`budgetMs` 想补但无货，`server.ts:1492-1493`）。
+- 视界与「泵背压上限」共同决定接续上限，见 A-6。
+
+### A-6 接续上限 35s → 45s（与结构深度同源）
+
+`BRIDGE_CONTINUITY_MAX_WAIT_US` 缺省 **45000**（`sendspin/constants.ts:148`）。
+依据 = 泵背压上限 `PUMP_LOOKAHEAD_DEFAULT_US` 30s（`sendspin/contentDemand.ts:95`）
++ 投递视界 ≈5.5s ≈ 35.5s：曲末游标**天然**领先墙钟这么多，阈值取 35s 就等于「每次换歌都被否」。
+240 实测曲末 `差=35317ms` vs 旧值 35000ms ⇒ 每首重建时间线、水位做薄到 1.1s
+（接续正常时段实测 2.6s）。取 45s 留约 10s 余量。
+**纪律：改 `PUMP_LOOKAHEAD_DEFAULT_US` 或投递视界，必须同步复核此值。**
+
+### A-7 新增诊断日志（桥侧）
+
+| 日志 | 出处 | 读法 |
+|---|---|---|
+| `bridge-window-dead dev=… reason=content-beyond-horizon\|no-frame-in-window cursorVsNowMs=… tailVsNowMs=… horizonMs=… firstCandVsNowMs=… oldEp=… ringFrames=… group=…` | `sendspin/server.ts:1620-1626` | 环里有本代内容、这一拍**零帧**投出 = **桥断粮在父侧的唯一直接证据**。`content-beyond-horizon` = 内容尾跑到视界之外（时间线被锚到墙钟之后）；`no-frame-in-window` = 内容在窗口下沿之前（游标/水位推过了内容）。只读诊断，不改投递行为，节流与 `bridge-servo` 共用（≤1 行/2s/设备） |
+| `[anchor-content] dev=cold\|warm contentVsNowMs=… minSafeMs=… finalLeadMs=… picked=shared\|now+lead` | `bridgeSession.ts:743-749` | 起播锚点实际取值；`picked=shared` = 吃了组锚点登记册 |
+| `[anchor-content] dev=… no-first-frame -> fallback now+preheatMs=…` | `bridgeSession.ts:752-755` | 未收到首帧时的预热回退 |
+| `[ring-diag] dev=… pull#N n=… buffered=…（帧） bufferedMs=… inQMs=… budgetMs=… prefilled=… pushed=… dropOld=…` | `bridgeSession.ts:1561` | 子进程水位伺服；`bufferedMs=0` 且 `budgetMs≈1950` = 供需 1.0x、无货可追 |
+| `sendspin 接续承诺撤回(ring 将被清空,放弃 contig 锚点) committed=… next=…` | `streamEngine.ts:1155-1160` | 本曲 ring 即将被清，泵放弃 contig |
+| `sendspin 接续承诺被时间窗否决: 尾=… now=… 差=…ms song=…` | `streamEngine.ts:2033-2038` | 曲末跳过排空但窗口不过（`差` = waitUs） |
+| `sendspin 曲末排空跳过:接续下一首 continuity=1 next=… endUs=…` | `streamEngine.ts:2044` | 承诺 granted 的第一手证据 |
+| `[Sendspin][continuity] group=… song=… interrupted=… continuity=… keepPrefetch=…` | `playerCore.ts:514-517` | 起播侧最终结论（`interrupted` 已含 `!naturalEnded`） |
+| `sendspin timeline anchored: base=… contig=… continuity=… lastEnd=…` | `streamEngine.ts:1638-1642` | `contig` 有值 = 接续落地 |
+| `bridge-generation group=… gen=… reason=track continuity=1 keep=queue,epoch,watermarks` | `server.ts:1011` | 桥侧按接续换代（不发任何边界消息） |
+
+**同链四级一致判据（旧称「三级」，实际四处落点，缺一不成立）**：
+`曲末排空跳过 continuity=1` → `[Sendspin][continuity] continuity=true` →
+`bridge-generation … continuity=1 keep=queue,epoch,watermarks` → `timeline anchored contig=<end> continuity=true`。
+任何一级出现 `continuity=false` / `contig=null` ⇒ 这次换歌没接续，按 A-3 的断粮链排查。
+
+### A-8 口径纠正：`inQueueMs` **不是**缓冲深度
+
+| 曾经的用法 | 错在哪 | 正确口径 |
+|---|---|---|
+| 把 tick `inQueueMs` 当缓冲深度目标调参 | 里面含**对齐器补入的静音**在设备队列里排队：历史「缓冲 2.6s」中 `insertedFrames=117866`（≈2.67s）就是这部分 | 真实出音提前量看 **`deltaUs`**（历史 2.06s / 当前 1.56s）；`driftUs=0` 表示时间线对齐 |
+| 「forceNow 下抬 lead 能换缓冲」 | 设备「到包即播」，lead 拉长**不转化为缓冲**（cold lead 3s 时 `deltaUs` 仍 1.56s） | lead 只买「内容完整、不吞开头」，不买深度 |
+| 「`bufferedMs=0` 说明父侧投得不公平」 | 父侧投递实测就是 **1.0x**：15s 窗口 `pushed` 增量 600 块 × 25ms = 15s，供需平衡 ⇒ drain 无货可追（`budgetMs≈1950`） | 先看 `pushed` 增量与 `inQMs`，再谈补偿 |
+| 把 `queueMs` / `maxQueueMs` 当设备队列 | 那是**桥内待发队列**；设备侧 RAOP 发送队列是 `inQueueMs`（`inBytes`） | §10.6 表的口径不变，两把尺子别混 |
+
+### A-9 铁律（不可协商，违反即复发）
+
+1. **同组不同成员的投递视界必须完全一致**，禁止按成员补偿分叉。`c4190985` 曾给负补偿设备
+   （iEAST −500ms）按 `|shift|` 加视界，随即被 `53f7c8c2` revert：现场 `newgenSkip` 7~9 万帧、
+   `cursor-jump` 31 次。
+2. **投递窗口 `lo` 不可放宽**（`server.ts:1179` 计算、`:1189` 跳过）：允许更旧内容继续投
+   ⇒ 设备判 late 更多，方向相反。
+3. **`bridgeDeliveryShiftUs` 在 sync 组时间线开启时恒 0**（`server.ts:1798-1802`），
+   成员补偿只落在桥会话锚点（`airplay/control.ts:406` 的 `bridgePrepare.anchorShiftUs`）。
+   旧行为「把 shift 同时塞进窗口与戳」会让同内容帧到不同成员的墙钟整体平移 ⇒ 抓包判据不成立。
+4. **父侧不做水位伺服**（`server.ts:1551-1556`）：父侧只把 ring 填到投递上沿；水位由子进程
+   `startRingDrain`（`bridgeSession.ts:1492`）按**设备侧 inQ** 伺服。旧「父侧按 backlog 伺服」
+   会与子进程打架：父侧灌 2s → 子进程只喂 105ms → 父侧 `due=0` → 子进程排空 → 父侧又灌 2s，
+   真机 `inQueue` **875↔5650** 振荡 ⇒ 可闻卡顿。
+
+### A-10 数据基线（判「是否需要优化」用）
+
+- 有效基线时段：**15:41~17:18**（未改动版本），iEAST `late` **0.33/min**、HiVi **0.71/min**。
+- **17:18~18:10 是已知断粮故障期**（`late` ≈20/min、`silenceChunks=2140`），
+  **不可作为基线**，也不可拿来和基线时段做「优化前后」对比。
+- 对账前先对齐时段与代次（`gen`），否则比出来的是两套不同故障的差值。

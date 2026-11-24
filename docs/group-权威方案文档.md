@@ -960,6 +960,45 @@ PUT 语义：`memberId` 必须是本组成员（命名空间 id **原样整条**
 | 延迟范围注释写 ±2000，常量是 ±30000 | ✅ 已修复（注释已改成 ±30000）；口径始终以常量为准 | `delayCalib.ts:3`、`:41` vs `:20-21` |
 | 旧文档里的 `resync` / `clamped` 字段名 | 现行 `stats` 用 `realigned` / `late`，没有 `clamped` | `bridgeSession.ts:642-658` |
 
+### 11.6 「接续是泵内部的事，组起播侧不用管」
+
+- **旧结论**：接续只在 `pushLoop` 里判，`playGroupCore` 只要照着 `continuityReady()` 的结果走就行。
+- **现实**：起播侧的 `interrupted` 判据本身就是接续的**否决权**。旧写法 `interrupted = pump.active`
+  在「自然播完但 `pushLoop` 还没退出」的 **~350ms** 窗口内为真 ⇒ 组起播判不接续 ⇒ `clearPlayback()`
+  清空 ring，而泵仍按 `contig` 锚点把新曲首帧放进一条已不存在的时间线（now+33.3s）⇒ 全组断粮
+  3 分钟，两台桥一起静音（240，2026-11-24 17:26）。
+- **现行口径**：`interrupted = pump.active && !pump.naturalEnded`（`sendspin/playerCore.ts:482`）；
+  非接续分支还必须 `pump.dropContinuityHandover()`（`:512`）撤回接续承诺。详见文末增补 §G-2。
+- **教训**：组级「起播一次」的动作里，任何一句状态判据都可能是否决上游不可逆决定的一票。
+
+### 11.7 「自动换歌与手动切歌在泵看来是一回事」
+
+- **旧结论**：只要泵还在跑（`active`）就说明这次起播是手动打断，天然不该接续。
+- **现实**：自然播完时 `endedNaturally = contentEnded && !truncated` 已经置位（`streamEngine.ts:2186`），
+  但 `pushLoop` 收尾后 `running` 仍为 true；`QueueController` 的 auto-advance 这时还在路上。
+  区分二者靠 `GroupPump.naturalEnded` getter（`streamEngine.ts:720-722`）。
+- **教训**：「谁在读状态」必须先问「这个状态在生命周期哪一段为真」，不能只看布尔值名字。
+
+### 11.8 「按成员补偿扩投递视界，可以治负补偿设备的持续追发」
+
+- **旧结论**：iEAST（补偿 −500ms）要提前出声 ⇒ 需要更早拿到料 ⇒ 把它的投递视界按 `|shift|` 放大。
+- **局部证据（真实）**：`c4190985` 上线后 iEAST `inQ` 75ms→3175ms、`late` 39410→3。
+- **为何仍被推翻**：同一组不同成员从此拿到**不同的投递视界** ⇒ 「同一时刻各成员包里的内容相同」
+  这条组级不变量被打掉；现场 `newgenSkip` 7~9 万帧、`cursor-jump` 31 次，比原症状更糟，
+  因而 `53f7c8c2` 整条 revert。
+- **现行口径**：投递视界**全组一致**；成员补偿只落桥会话锚点（`airplay/control.ts:406`
+  `bridgePrepare.anchorShiftUs`），`bridgeDeliveryShiftUs` 在 sync 组时间线开启时**恒 0**
+  （`sendspin/server.ts:1798-1802`）。
+
+### 11.9 「`inQueueMs` 当缓冲深度 / 父侧也按 backlog 做水位伺服」
+
+- **旧结论**：`inQueueMs` 2.6s = 设备缓冲 2.6s；父侧按 backlog 伺服能让水位更稳。
+- **现实**：`inQueueMs` 里含对齐器补入的静音（同一段 `insertedFrames=117866` ≈2.67s），
+  forceNow 语义下设备「到包即播」，lead 拉长不转化为缓冲；父侧伺服与子进程 `startRingDrain`
+  打架（**inQ 875↔5650** 振荡 ⇒ 可闻卡顿）。
+- **现行口径**：真实提前量看 `deltaUs`；父侧只把 ring 填到投递上沿，水位由子进程按设备 inQ 伺服
+  （`sendspin/server.ts:1551-1556`）。
+
 ---
 
 ## 12 代码地图
@@ -1026,6 +1065,10 @@ PUT 语义：`memberId` 必须是本组成员（命名空间 id **原样整条**
 | `BRIDGE_PUSH_TICK_MS` | 250 | `sendspin/constants.ts:79` |
 | `BRIDGE_PUSH_HORIZON_US` | 4_000_000 | `sendspin/constants.ts:86` |
 | `BRIDGE_PUSH_FLOOR_US` | 2_500 * 1000 | `sendspin/constants.ts:100` |
+| `BRIDGE_CONTINUITY_MAX_WAIT_US` | **45_000**（2026-11-24 由 35000 抬高，与泵背压 30s + 投递视界 ≈5.5s 同源） | `sendspin/constants.ts:148` |
+| `BRIDGE_CONTINUITY_STALE_US` | 15_000（接续点「太旧」阈值，二次复核唯一判据） | `sendspin/constants.ts:151` |
+| `PUMP_LOOKAHEAD_DEFAULT_US` | 30_000_000（泵背压 = 内容前沿超前最落后消费游标的上限） | `sendspin/contentDemand.ts:95` |
+| `BRIDGE_FEED_CAP_US` | 5_000_000（父侧投递视界，另 + `ahead`；8s 已两次证伪） | `sendspin/server.ts:1493` |
 | `mixed_anchor_lead_ms` 默认 | 5_000（NULL/0 = 自动） | `group/delayCalib.ts`（`BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US` 已随 4.9.0 组级配置移除） |
 | `BRIDGE_BACKFILL_MAX_US` | 6_000_000 | `sendspin/constants.ts:157` |
 | `DEFAULT_MIN_BUFFER_MS` | 800 | `sendspin/group.ts:47` |
@@ -1297,3 +1340,76 @@ v4.10.1 在 MAJ-07 之前插入自动救回梯(细节以 airplay 权威文档 v4
   由 `retry#1` 自愈,不拖累另一台(`bridge-prepare` 负缓存未误伤在线设备)。
 - **回归**:退避梯钉值测试同步更新;`tests/airplay/raopProbe.test.ts` + `tests/group`
   15 文件 247 例全过。
+
+---
+
+## 未发布增补（曲末接续「一次定死」对组链路的影响，2026-11-24）
+
+> 事故：240 自动换歌后**整组静音约 3 分钟**（两台桥同时断粮，2026-11-24 17:26）。
+> 修复提交 `caed89ad`。本节只讲**组链路**（起播、边界、成员一致性）要跟着改的部分；
+> 泵内细节见 `sendspin-权威方案文档.md` 文末增补 §E-1~§E-10，桥侧口径见
+> `airplay-权威方案文档.md` 文末增补 §A-1~§A-10。
+
+### G-1 结论先行
+
+1. 组起播（`playGroupCore`）里那句 `interrupted` 判据**是否决接续的一票**，不是无害的状态读取；
+   现改为 `pump.active && !pump.naturalEnded`（`sendspin/playerCore.ts:482`）。
+2. 接续结论只有**一个产地**（泵的曲末那一拍）；组起播与泵侧都只读，不许重算。
+3. 非接续分支清 ring 时必须同步撤回接续承诺（`dropContinuityHandover`，`:512`），
+   否则组内所有桥成员一起断粮。
+4. 组级不变量再补一条：**同组不同成员的投递视界必须完全一致**（见 §11.8 的证伪记录）。
+5. 数据基线：15:41~17:18 有效（iEAST `late` 0.33/min、HiVi 0.71/min），17:18~18:10 是故障期，不可当基线。
+
+### G-2 `playGroupCore` 里发生的事（组视角）
+
+| 步骤 | 代码 | 组级后果 |
+|---|---|---|
+| ① 判定打断 | `playerCore.ts:482` `interrupted = pump.active && !pump.naturalEnded` | 旧写法在「自然播完 / `pushLoop` 未退出」的 ~350ms 窗口内为真 ⇒ 否决接续 |
+| ② 读接续结论 | `:483` `continuity = !interrupted && pump.continuityReady(songId, seekPositionMs)` | `continuityReady()` 先读曲末承诺（`continuityCommitted` → true，`continuityDenied` → false），未承诺才回落结构门 + `continuityAgeOk` |
+| ③ 停旧泵 / 可选 seek | `:484-485` `pump.stop()` / `pump.armSeek()` | 与改前一致 |
+| ④a 接续分支 | `:493` `g.close({keepBridgeDelivery: true})` | **不发任何边界消息**；ring 与水位跨曲保留，桥侧不换代、不清队列 |
+| ④b 非接续分支 | `:500` `g.close({keepBridgeDelivery: keepQueueForPrefetch})` + `clearPlayback()`/`finishPlayback()` + `:512` `dropContinuityHandover()` | ring 被清 ⇒ 泵必须放弃 `contig` 锚点，回落「墙钟 + lead」 |
+| ⑤ 留痕 | `:514-517` `[Sendspin][continuity] … interrupted=… continuity=… keepPrefetch=…` | 组级唯一权威结论行 |
+
+**为什么组侧必须关心 ④b**：组内桥成员消费的是同一份 ring。ring 被清而锚点仍指向旧内容尾
+⇒ 投递窗口（上沿 now+8.5s）内一帧都没有 ⇒ **全组所有桥同时断粮**，泵被 30s 背压钉死，
+只能等墙钟追上来（现场 `base=now+33.3s`、`bridge-servo cand=0 firstCandVsNow=33740`）。
+
+### G-3 接续三态（组侧只需记这三句）
+
+| 态 | 含义 | 组侧可见形态 |
+|---|---|---|
+| granted | 曲末跳过排空 + 窗口过 ⇒ 承诺不可撤回 | `曲末排空跳过 continuity=1` + `timeline anchored contig=<end> continuity=true`，桥侧 `bridge-generation … continuity=1 keep=queue,epoch,watermarks` |
+| 未承诺 | 曲末没走到跳过排空（无槽位 / 走预取） | 泵侧回落结构门；预取路径走 `handoff`，不是接续 |
+| denied | 曲末判过但窗口不过 | `sendspin 接续承诺被时间窗否决: 尾=… 差=…ms`，下一条边界会清队列（这是「宁可整段换时间线也不吞」的取舍） |
+
+**同链四级一致判据（缺一不成立）**：`曲末排空跳过 continuity=1` →
+`[Sendspin][continuity] continuity=true` → `bridge-generation … continuity=1 keep=…` →
+`timeline anchored contig=<end> continuity=true`。
+
+### G-4 接续上限 45s 与组的关系
+
+`BRIDGE_CONTINUITY_MAX_WAIT_US` **45s**（`sendspin/constants.ts:148`）= 泵背压 30s
+（`contentDemand.ts:95`）+ 投递视界 ≈5.5s（`server.ts:1493/1504`）+ 余量。
+组里只要有桥成员，曲末游标就会**天然**领先墙钟这么多（预填 + 背压），阈值 35s 等于
+「每次换歌都被否」：240 实测 `差=35317ms` vs 旧值 35000ms ⇒ 每首重建时间线、水位做薄到 1.1s
+（接续正常时段实测 2.6s）。**改泵背压或投递视界，必须同步复核此值。**
+
+### G-5 组级铁律（补充 §4.4 的四条）
+
+1. **投递视界全组一致**：禁止 per-member 分叉（§11.8，`c4190985` → `53f7c8c2`）。
+2. **投递窗口 `lo` 不可放宽**（`server.ts:1179`/`:1189`）：让更旧内容继续投 ⇒ 设备判 late 更多。
+3. **成员补偿只落桥会话锚点**：`bridgeDeliveryShiftUs` 在 sync 组时间线开启时恒 0
+   （`server.ts:1798-1802`），补偿走 `airplay/control.ts:406` 的 `bridgePrepare.anchorShiftUs`。
+4. **父侧不做水位伺服**（`server.ts:1551-1556`）：父侧只填到投递上沿，水位由子进程
+   `startRingDrain` 按设备 inQ 伺服；两边同时伺服 ⇒ `inQ` 875↔5650 振荡 ⇒ 可闻卡顿。
+5. **组起播的状态判据要问「它在生命周期哪一段为真」**（§11.7 的教训）。
+
+### G-6 数据基线与判据
+
+| 时段 | 性质 | iEAST `late` | HiVi `late` | 备注 |
+|---|---|---|---|---|
+| 15:41~17:18 | **有效基线**（未改动版本） | 0.33/min | 0.71/min | 判「是否需要优化」用这一行 |
+| 17:18~18:10 | **已知断粮故障期** | ≈20/min | ≈20/min | `silenceChunks=2140`；**不可作基线** |
+
+对账前先对齐时段与代次（`gen`）：不同 `gen` 的两段日志比的不是同一件事。

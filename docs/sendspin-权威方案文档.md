@@ -482,6 +482,13 @@ if (delayMs > 0) await sleep(delayMs);   // ❌ 落后时完全没有让出点
 
 另：`stream/end` 之后应丢弃已过期音频（对应 MA `_stream_started` 守卫）——**当前未做**，见第十部分。
 
+> **[2026-11-24 增补] 排空还有一个反面：「该跳过」**。队列里确有下一首、且下一轮起播会走接续时，
+> 曲末排空让位于接续 —— `continuityDrainSkip = contentEnded && !prefetch && continuitySlotAvailable()`
+> （`streamEngine.ts:2020`）。跳过排空后旧曲尾仍留在 ring 里按 250ms 补投窗口继续投给桥，
+> 新曲首帧接在同一条时间线上；**这个决定不可逆**（旧曲尾没被排空成静音、新曲时间线已押在
+> 「接上这条连续轴」上），所以曲末那一拍就用 `cursorUs` 一次性定死 granted / denied，
+> 起播侧与泵侧**只读**结论，不再各判一次（见文末增补 §E-1~§E-6）。
+
 ## 2.11 `client/state` 解析：**根层优先**
 
 真机实发 payload：
@@ -1044,6 +1051,46 @@ MA 的回填**不是为了对齐**（MA 同样用绝对时间戳），而是为�
 | **拍脑袋定常量** | B1、B5 | 一切阈值都要有来源（设备宣告 / 实测 / 规范条款），并留安全余量 |
 | **用一个正确结论否掉另一个问题** | B14 | 「X 不需要 A」≠「Y 不需要 A」：先锁定症状，再证明该机制与**这个**症状无关 |
 | **拿「各成员应当相同」当不变量** | B15 | 有状态编解码器（块编码器）下成员间**相位可以任意错开**；聚合口径必须在结构上不可能被相位影响 |
+| **同一个事实在两侧各算一次** | C1、C3 | 只能有一个「产地」；其余人读结论，不重算 |
+| **把辅助指标当权威指标** | C4 | 先问「这个数里还含什么」（`inQueueMs` 含对齐静音），权威量通常只有一个（`deltaUs`） |
+| **按成员分叉共享节奏** | C2 | 共享时间线上任何 per-member 分叉都会把「同一时刻同一内容」这条不变量打掉 |
+
+---
+
+## 6.4 C 组：曲末接续判定（2026-11-24，4 条）
+
+### 坑 C1 —— 「两侧判据写成一样就不会冲突」
+
+- **当时判断**：起播侧（`playerCore`）与泵侧（`pushLoop`）都用 `continuityGates + continuityWindowOk`，判据同源，重复判一次无妨。
+- **真相**：判据同源 ≠ **求值时刻**同源。`waitUs = from − now` 是随墙钟变化的量：240 实测曲末
+  `差=35317ms`（同一现场事件，早期记录写 35316，以 35317 为准）被旧阈值 35000ms 否决，1.5s 后起播侧再算却通过 ⇒ 起播侧 `continuity=true`、
+  泵侧 `false`，两套时间轴并存（轻则多一条 BOUNDARY，重则 ring 顺序被未来帧打断）。
+- **正解**：曲末那一拍用 `cursorUs` **一次定死** granted/denied（`continuityCommitted` /
+  `continuityDenied`，`streamEngine.ts:2025/2028`），两侧只读（§E-2）。
+
+### 坑 C2 —— 「自然播完 = 没打断，所以 `interrupted = pump.active` 够用」
+
+- **当时判断**：`pump.active` 为真就说明这次起播打断了上一曲。
+- **真相**：`pushLoop` 收尾后 `running` 仍是 true，而 QueueController 的 auto-advance 要等
+  poll（5s 一轮）之后，两者之间有 **~350ms** 窗口。旧判据把这段窗口判成「手动打断」
+  ⇒ 清 ring ⇒ 泵把新曲首帧锚在已清空的时间线之后（`base=now+33.3s`）⇒ 两台桥同时断粮。
+- **正解**：`interrupted = pump.active && !pump.naturalEnded`（`playerCore.ts:482`；
+  `naturalEnded` 见 `streamEngine.ts:720-722`，置位 `endedNaturally = contentEnded && !truncated` `:2186`）。
+
+### 坑 C3 —— 「清 ring 只是清音频，不影响锚点」
+
+- **当时判断**：非接续分支 `clearPlayback()` 清空 ring 后，泵的锚点自然会回落到「墙钟 + lead」。
+- **真相**：泵仍持有 `continuityFromUs` 指向旧曲内容尾 ⇒ 锚点继续取 `contig`，而那段时间线已经不存在。
+- **正解**：非接续分支必须调 `dropContinuityHandover()`（`streamEngine.ts:1153-1168`，调用点
+  `playerCore.ts:512`），撤回承诺并清 `continuityFromUs`/`lastContentEndUs`（§E-5）。
+
+### 坑 C4 —— 「设备 `inQueueMs` 就是缓冲深度」
+
+- **当时判断**：`inQueueMs` 2.6s 说明设备有 2.6s 缓冲，可以拿它当目标调参。
+- **真相**：里面含**对齐器补入的静音**在设备队列里排队（同一段 `insertedFrames=117866` ≈2.67s）；
+  forceNow 语义下设备「到包即播」，lead 拉长不转化为缓冲（cold lead 3s 时 `deltaUs` 仍 1.56s）。
+- **正解**：真实出音提前量看 `deltaUs`（历史 2.06s / 当前 1.56s），`driftUs=0` 表示时间线对齐；
+  父侧投递实测是 1.0x（15s/600 块×25ms），`bufferedMs=0` 不等于「投得不公平」（§E-7）。
 
 ---
 
@@ -1103,6 +1150,13 @@ Created ring buffer with size 96000 [speaker_task]   ← 输出环形区（关�
 | `SYNC LOST (state=error)` / `synchronized` | 设备失步/恢复的时间线（服务端可自证，不必看设备串口） |
 | `Processed new codec header: flac, 48000 Hz, 2 ch, 16-bit` + `State changed to PLAYING` | FLAC 链路真正出声的铁证 |
 | `[Esphome] 6053 已连接 …` | 只读监控通道就绪 |
+| `sendspin 曲末排空跳过:接续下一首 continuity=1 next=… endUs=… song=…` | 曲末接续**承诺 granted**（`streamEngine.ts:2044`） |
+| `sendspin 曲末排空跳过:下一首预取已就绪 song=… next=… startTsUs=…` | 走 S1 预取路径（不是接续承诺，`streamEngine.ts:2012`） |
+| `sendspin 接续承诺被时间窗否决: 尾=… now=… 差=…ms song=…` | 跳过排空但窗口不过 ⇒ 本曲**不接续**（`streamEngine.ts:2033-2038`） |
+| `sendspin 接续承诺撤回(ring 将被清空,放弃 contig 锚点) committed=… next=…` | 起播侧判不接续、ring 即将被清（`streamEngine.ts:1155-1160`） |
+| `[Sendspin][continuity] group=… song=… interrupted=… continuity=… keepPrefetch=…` | 起播侧最终结论（`playerCore.ts:514-517`） |
+| `sendspin timeline anchored: base=… contig=… continuity=… lastEnd=…` | 泵侧锚点落地；`contig` 有值 = 接续（`streamEngine.ts:1638-1642`） |
+| `bridge-window-dead dev=… reason=…` | 环里有本代内容、这一拍零帧投出 = **桥断粮**（父侧唯一直接证据，`server.ts:1620-1626`） |
 
 **设备侧关键错误字样**（`logger: level: DEBUG` 时可见）：`Failed to send audio chunk`（缓冲满逐帧拒收）、`Lost sync (Xus off)`、`Time message N/8 timed out`、`underrun`。
 > 注意：稳定播放时设备**零日志**，看计数不看有无。
@@ -1779,3 +1833,157 @@ socket 按需追加)后,原「单行 `grep -F` 整串」断言恒不命中 ⇒ �
   守卫 `sendspin/streamPumpRowReuse.test.ts`(跨曲复用 / 失效回退)。
 - 位置:`player/QueueController.ts:214,1161,1198,1479-1488`、`player/types.ts:96-106`、
   `sendspin/protocolPlayer.ts:93-109,343`、`sendspin/streamEngine.ts:631-698`。
+
+---
+
+## 未发布增补（曲末接续「一次定死 + 双侧只读」，2026-11-24）
+
+> 触发事故：240 自动换歌后**两台桥同时断粮约 3 分钟**（2026-11-24 17:26）。
+> 修复提交 `caed89ad`，涉及 `sendspin/streamEngine.ts` / `playerCore.ts` / `server.ts` /
+> `airplay/bridgeSession.ts` / `sendspin/constants.ts`。本节**只改**「谁来判接续、判几次、
+> 按哪个时刻求值」；预取（§5.6）、排空（§2.10）、锚点 lead、投递窗口等既有结论全部不变。
+
+### E-1 一句话结论
+
+曲末那一拍**一次性**把「能不能接续」定死（granted / denied 二选一，判据用 `cursorUs`），
+起播侧（`continuityReady`）与泵侧（contig 锚点）**都只读这一个结论**；
+二次复核只保留「接续点是否**已过旧**（age）」，不再重算「是否**太远**（wait）」。
+
+为什么：旧实现两侧各判一次，两次求值时刻不同 ⇒ 临界点翻转。17:26:07 现场：泵记
+`曲末排空跳过 continuity=1`，390ms 后起播侧记 `continuity=false` ⇒
+`g.close({keepBridgeDelivery:false})` + `clearPlayback()` 把 ring 整段清掉，而泵仍按 contig
+把新曲首帧锚在**已被清掉的内容尾**之后（`sendspin timeline anchored base=254545581990
+contig=254545581990`，即 now+33.3s）⇒ 投递窗口（上沿 now+8.5s）内一帧都没有
+（`bridge-servo cand=0 firstCandVsNow=33740 deliveredMs=0`），泵又被 30s 背压钉死，
+只能等墙钟追上来。
+
+### E-2 四个字段与唯一产地
+
+| 字段 | 语义 | 写入点 | 读点 |
+|---|---|---|---|
+| `continuityCommitted` | 曲末已按接续跳过排空的**承诺**（不可撤回） | `streamEngine.ts:2025` | `continuityReady()` `:1135` |
+| `continuityDenied` | 曲末**判过但被时间窗否决** | `streamEngine.ts:2028` | `continuityReady()` `:1138` |
+| `continuityNext` | `play()` 起手把 committed 快照过来（消费即清） | `streamEngine.ts:760-761` | 泵侧锚点 `:1494` |
+| `continuityNextDenied` | 同上，denied 的快照 | `streamEngine.ts:763-764` | 泵侧锚点 `:1487` |
+
+产地（`pushLoop` 曲末排空分支）：
+
+```ts
+// streamEngine.ts:2020
+const continuityDrainSkip = contentEnded && !this.prefetch && this.continuitySlotAvailable();
+// streamEngine.ts:2025 / :2028  —— granted / denied 同拍定死
+this.continuityCommitted = continuityDrainSkip && this.continuityWindowOk(cursorUs);
+this.continuityDenied   = continuityDrainSkip && !this.continuityCommitted;
+```
+
+用 `cursorUs` 求值的原因：跳过排空后 `cursorUs` 就是 `contentTailUs`（= 下一轮
+`lastContentEndUs` 的取值，`streamEngine.ts:2195`），与泵侧锚点判定**同源同值**。
+`continuitySlotAvailable()`（`:1116-1120`）= 结构门 + 队列确有下一首。
+
+### E-3 两侧读法（严格同源）
+
+**起播侧** `continuityReady(songId, seekMs)`（`streamEngine.ts:1128-1143`）：
+
+1. seek 非 0 ⇒ `false`（`:1129`，判据与 `armSeek` 同源；`0` 是「从头起播」，不是 seek）；
+2. `continuityCommitted` ⇒ **`true`，先于结构门**（`:1135`）—— 桥集合在 prepare/reconnect 瞬间会
+   短暂翻 false，不能让它否决一个已经落地的承诺；
+3. `continuityDenied` ⇒ **`false`**（`:1138`）—— 不许在这里再算一次窗口把它翻回 true；
+4. 只有「未承诺」路径（手动切歌 / 无下一首槽位）才回落：`continuityGates()` +
+   `hasPendingPrefetch()` + `continuityAgeOk(lastContentEndUs)`（`:1139-1143`）。
+
+**泵侧锚点三态**（`streamEngine.ts:1483-1495`）：
+
+```text
+!continuityNextDenied
+&& (continuityNext || continuityGates(hasBridges, isPureBridge))
+&& continuityAgeOk(continuityFromUs)
+```
+
+| 态 | 条件 | 过结构门 | 说明 |
+|---|---|---|---|
+| granted | `continuityNext` | **不过** | 曲末已用 cursor 定死窗口 |
+| 未承诺 | 两个快照皆 false | **过** | 曲末没走到跳过排空（无槽位 / 预取路径）；这条路上 ring 未必被清，接续依然成立 |
+| denied | `continuityNextDenied` | — | 上面第一项短路为 false |
+
+`contig` 取值（`streamEngine.ts:1605-1613`）：接续点不得落进桥投递下沿以内，故取
+`max(continuityFromUs, now + BRIDGE_PUSH_FLOOR_US + BRIDGE_PUSH_TICK_MS*1000)`，
+再与「空窗续静音尾」（`currentBridgeGapFillTailUs`）取大者。
+
+### E-4 `continuityAgeOk()`：二次复核只判「太旧」
+
+`streamEngine.ts:1108-1111`：`Number(nowUs() - from) <= BRIDGE_CONTINUITY_STALE_US`
+（15s，`constants.ts:151`），**不判 waitUs**。
+
+- 太远（`waitUs = from − now`）是**曲末那一刻**的事实（旧曲尾还没播完，接续点落在未来），
+  必须在那时用 cursor 一次定死；换时刻再算必然临界翻转（实测 35317ms vs 旧阈值 35000ms）。
+- 太旧（`ageUs`）才是二次复核真正要防的：曲末判完到真正起播之间若隔很久（pause / 队列阻塞），
+  接续点已成为过去 ⇒ 必须放弃，否则新曲首帧锚到过去 ⇒ 全量追发 / 断粮。
+- `continuityWindowOk()`（`:1093-1099`，age + wait 双判）保留，但**只在曲末那一拍**用。
+
+### E-5 `interrupted` 修正与 `dropContinuityHandover()`
+
+- `playerCore.ts:482`：`interrupted = pump.active && !pump.naturalEnded`（旧：`pump.active`）。
+  `naturalEnded` getter 见 `streamEngine.ts:720-722`，读 `endedNaturally`（`:2186` 置位
+  `= contentEnded && !truncated`）。两种情形下 `active` 都是 true，但只有真正的 stop/seek
+  该否定接续：`pushLoop` 收尾（`running` 仍 true）与 auto-advance 之间隔 ~350ms。
+- `dropContinuityHandover()`（`streamEngine.ts:1153-1168`，调用点 `playerCore.ts:512`）：
+  非接续分支会 `close({keepBridgeDelivery:false})` + `clearPlayback()` 清 ring ⇒ 旧曲尾不复存在
+  ⇒ 泵必须同时放弃 contig 锚点（回落「墙钟 + lead」）。它撤回四个字段**并清
+  `continuityFromUs` / `lastContentEndUs`**。幂等；`committed || next` 为真时留 WARN。
+
+### E-6 接续上限与结构深度同源：35s → 45s
+
+`BRIDGE_CONTINUITY_MAX_WAIT_US` 缺省 35000 → **45000**（`constants.ts:148`）。
+依据 = 泵背压上限 `PUMP_LOOKAHEAD_DEFAULT_US` = 30s（`contentDemand.ts:95`）
++ 投递视界（`BRIDGE_FEED_CAP_US` 5s + `ahead`，`server.ts:1493/1504`，实测 ≈5.5s）≈ 35.5s。
+曲末游标天然领先墙钟这么多 ⇒ 阈值 35s 等于「每次换歌都被否」（240 实测 `差=35317ms` vs 35000ms
+⇒ 每首重建时间线、水位做薄到 1.1s，而接续正常时段实测 2.6s）。取 45s 留约 10s 余量。
+**纪律：改 `PUMP_LOOKAHEAD_DEFAULT_US` 或投递视界，必须同步复核此值。**
+
+### E-7 新增诊断日志与同链判据
+
+| 日志 | 出处 | 判读 |
+|---|---|---|
+| `sendspin 曲末排空跳过:接续下一首 continuity=1 next=… endUs=…` | `streamEngine.ts:2044` | 承诺 granted |
+| `sendspin 接续承诺被时间窗否决: 尾=… now=… 差=…ms song=…` | `streamEngine.ts:2033-2038` | 跳过排空但窗口不过（`差` = waitUs） |
+| `sendspin 接续承诺撤回(ring 将被清空,放弃 contig 锚点) committed=… next=…` | `streamEngine.ts:1155-1160` | 起播侧判不接续，泵放弃 contig |
+| `[Sendspin][continuity] group=… song=… interrupted=… continuity=… keepPrefetch=…` | `playerCore.ts:514-517` | 起播侧最终结论 |
+| `sendspin timeline anchored: base=… contig=… continuity=… lastEnd=…` | `streamEngine.ts:1638-1642` | `contig` 有值 = 接续落地 |
+| `bridge-generation … continuity=1 keep=queue,epoch,watermarks` | `server.ts:1011` | 桥侧按接续换代（不发任何边界消息） |
+| `bridge-window-dead dev=… reason=content-beyond-horizon\|no-frame-in-window …` | `server.ts:1620-1626` | **桥断粮在父侧的唯一直接证据** |
+| `[anchor-content] dev=cold\|warm contentVsNowMs=… minSafeMs=… finalLeadMs=… picked=…` | `bridgeSession.ts:743-749` | 起播锚点实际取值 |
+
+**同链四级一致判据（旧称「三级」，实际四处落点，缺一不成立）**：
+`曲末排空跳过 continuity=1` → `[Sendspin][continuity] continuity=true` →
+`bridge-generation … continuity=1 keep=queue,epoch,watermarks` → `timeline anchored contig=<end> continuity=true`。
+任何一级出现 `continuity=false` / `contig=null` ⇒ 这次换歌没接续，按 E-1 的断粮链排查。
+
+### E-8 口径纠正：`inQueueMs` **不是**缓冲深度
+
+1. **历史「缓冲 2.6s」的构成**：其中绝大部分是对齐器补入的**静音**在设备队列里排队
+   （同一段 `insertedFrames=117866` ≈2.67s）。真实出音提前量看 `[airplay-bridge] tick` 的
+   **`deltaUs`**：历史 2.06s / 当前 1.56s；`driftUs=0` 表示时间线对齐。
+2. **forceNow 语义下设备「到包即播」**：lead 拉长**不转化为缓冲**（cold lead 3s 时 `deltaUs` 仍 1.56s）。
+3. **父侧投递实测 1.0x**：15s 窗口 `pushed` 增量 = 600 块 × 25ms = 15s，供需平衡 ⇒ drain
+   无货可追（`[ring-diag] bufferedMs=0` 而 `budgetMs≈1950`，`bridgeSession.ts:1561`）。
+4. `inQueueMs` 是**设备侧 RAOP 发送队列**、`maxQueueMs` 是**桥内待发队列**，两者都不是
+   「设备真实可播时长」；设备队列容量实测 4163ms（`server.ts:1486` 注释）。
+
+### E-9 铁律（不可协商）
+
+1. **同组不同成员的投递视界必须完全一致**，禁止按成员补偿分叉。`c4190985` 曾按 `|shift|`
+   给负补偿设备加视界，随即 `53f7c8c2` revert：现场 `newgenSkip` 7~9 万帧、`cursor-jump` 31 次。
+2. **投递窗口 `lo` 不可放宽**（`server.ts:1179` 计算、`:1189` 跳过）：允许更旧内容继续投
+   ⇒ 设备判 late 更多，方向相反。
+3. **`bridgeDeliveryShiftUs` 在 sync 组时间线开启时恒 0**（`server.ts:1798-1802`），成员补偿只落在
+   桥会话锚点（`airplay/control.ts:406` 的 `bridgePrepare.anchorShiftUs`）。
+4. **父侧不做水位伺服**（`server.ts:1551-1556`）：只把 ring 填到投递上沿；水位由子进程
+   `startRingDrain`（`bridgeSession.ts:1492`）按设备 inQ 伺服。旧「父侧按 backlog 伺服」与子进程
+   打架（真机 inQ 875↔5650 振荡 ⇒ 可闻卡顿）。
+5. **任何 per-member 的时序分叉都要先回答「同一时刻各成员包里的内容是否仍然相同」**（§4.4 条 2 的延伸）。
+
+### E-10 数据基线
+
+- 有效基线时段：**15:41~17:18**（未改动版本），iEAST `late` **0.33/min**、HiVi **0.71/min**。
+- **17:18~18:10 是已知断粮故障期**（`late` ≈20/min、`silenceChunks=2140`），**不可作为基线**。
+- 判「是否需要优化」时先对齐时段与代次（`gen`），否则比的是两套故障的差值。
