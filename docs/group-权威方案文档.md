@@ -1413,3 +1413,44 @@ v4.10.1 在 MAJ-07 之前插入自动救回梯(细节以 airplay 权威文档 v4
 | 17:18~18:10 | **已知断粮故障期** | ≈20/min | ≈20/min | `silenceChunks=2140`；**不可作基线** |
 
 对账前先对齐时段与代次（`gen`）：不同 `gen` 的两段日志比的不是同一件事。
+
+
+## 2026-11-25 未发布增补(组级锚点同源 + 非接续换代重锚语义)
+
+### G-7 非接续换代 track 边界强制重锚(1e9f6c08,用户裁决语义反转)
+
+- 同代 track 边界 = 纯内容替换(旧行为,不变);
+- **gen 变化**的 track 边界 = `track-reanchor`(stopGapFiller + 清 aligner/anchors/
+  anchorUs/firstFrameTsUs + streamAborted + player.flush;socket 仍 warm 复用,
+  **绝不 reconnectRaop**)。依据:上游 `notifyBridgeGeneration(continuity=true)` 在
+  server.ts:1008 早退不发 BOUNDARY ⇒ 桥收到「gen 变了」的 track 必是非接续 ——
+  MA 语义「换曲即重新 anchor,`_drop_until_us = anchor_us`,零点唯一」
+  (sendspin_bridge.py:886-1030 `_anchor_stream`)。
+- 手动 next/seek 走 bridgeSession「换代重启」分支(同语义清锚+flush),诊断
+  `ev:"boundary-reanchor"` 与 `ev:"track-reanchor"` 同字段口径 —— 两条等价重锚
+  路径一条 grep 覆盖。
+- 静态守卫 D6 已按此语义改判(check-airplay-bridge ㉑/㉒)。
+
+### G-8 组级锚点同源(BridgeGroupAnchorRegistry,MA "timeline is the group's")
+
+- registry 携带组级 lead:`publish(gen, anchorUs, commandedLeadUs)` /
+  `peek → {anchorUs, leadUs}`,**首规划者获胜**;
+- 后到者消费侧单一约束点夹紧:`max(shared, now + max(minSafe, keepQueueTail))`,
+  再钳 ≤ 首帧−200ms —— 组锚不得击穿本设备 splice 下限(MA :934-945 splice 链本就
+  per-device),也绝不吞新头;
+- 档位诊断 `ev:"group-anchor-floormiss"`(sharedAnchorUs/finalAnchorUs/raisedUs/
+  sharedLeadUs):一眼看出哪台被抬高、多少、为什么;
+- 真机(2026-11-25 F1/F7):换代后两台 publish 锚点差 <1ms(修复前 250ms 分裂);
+  `bridge-start-seek` 种子两台 `cursorSeedVsNowMs` 恒等(4000/4000、2284/2284 多次)。
+- 双桥扩例(startSeekDeadlock.test.ts ⑤)断言口径 = **内容时间线一致**(两台游标
+  同拍对齐同一份重基准后的环时间线),非 gen_firstTs 逐字节相等 —— 后者含正常
+  首帧时序差,钉它会误报。
+
+### G-9 起播空窗(N-A)与三级自愈的关系
+
+- 形态:起播后 8~16s 设备 inQ=0、late 以 ≈123 帧/s 暴涨(sendspin 守卫侧观测)。
+- 根因锚点:`clock-stalled`(timingCount=0)每轮起播命中 ⇒ **设备时钟域未同步即锚定**
+  (MA `_anchor_stream` 有 `AIRPLAY_CLOCK_READY_LEAD_MS` 与 clock-ready 等待,本仓
+  尚无 —— 深层修复待办);在修复前,三级自愈分级(见 sendspin 权威文档附录 F)是
+  兜底:armed(10s)→ retime(桥自估,超 10s 门 skip)→ light-restart 清管线拉回,
+  真机闭环 inQ 0/late 4030 ⇒ 4950/late=2。

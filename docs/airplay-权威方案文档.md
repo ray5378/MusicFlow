@@ -2539,3 +2539,100 @@ if (opts.coldPreheat === false && wantLeadUs <= floorLeadUs && leadUs < warmUs) 
 - **17:18~18:10 是已知断粮故障期**（`late` ≈20/min、`silenceChunks=2140`），
   **不可作为基线**，也不可拿来和基线时段做「优化前后」对比。
 - 对账前先对齐时段与代次（`gen`），否则比出来的是两套不同故障的差值。
+
+
+## 2026-11-25 未发布增补(自愈三级分级 + 防御自愈对齐 MA + 传输守卫)
+
+> 修复链 13 commit(fix/start-seek-cursor-seed 分支,fe07ad43…0cefbbeb,未 push)。
+> 背景:死锁兜底重锚(6e47da5c)真机暴露三处次生缺陷 —— 非接续换代裁头(缺陷 B)、
+> splice 残留口径低估致 MUZO 族时戳域整体错位、起播空窗 late 暴涨无自愈。
+> 全部对齐 MA music-assistant airplay provider(sendspin_bridge.py)实现,**凡对齐处
+> 代码必带出处注释**(铁律)。
+
+### B-1 三级自愈分级(本守卫,MA 无对应机制 —— 补充层)
+
+守卫:设备「积压 0 + 父侧仍在投 + 内容充足(组在播)」连续 40 tick(≈10s) ⇒ 按档位动作:
+
+| 级 | 动作 | 执行体 | 触发条件 |
+|---|---|---|---|
+| 一级 | retime:平移 RTP↔NTP 映射(`rebuildForShift`,reason=`late-selfheal-retime`) | 桥子进程 | shift ≤ 10s 门;shift=0 = 桥自估裁决 |
+| 二级 | lightRestart:清锚点/对齐器/首帧时戳 + `player.flush()` 重锚,**绝不 reconnectRaop**(MA `:640-693` _restart_transport 形态,socket 仍 warm) | 桥子进程 | 一级未奏效 / shift 超 10s 门 |
+| 三级 | `bridge-late-selfheal-exhausted` error 留痕,交上层摘桥 | 无(只留痕) | 二级后仍 starving |
+
+- shift 估计:sendspin 侧 armed 时刻记 `bridgeLateAtArmed` 基线,触发时
+  `lateDelta × BRIDGE_RAOP_FRAME_US(7980µs)`;**桥侧自估二次核对**
+  (`lastRetimeLateTotal` 基线防重放),两侧任一侧无证据即 skip(禁止猜测当实测)。
+- 量级门 `BRIDGE_SELFHEAL_RETIME_SHIFT_MAX_US = 10_000_000`(与桥侧自估钳同值):
+  retime 只救轻错位;超门直接二级(240 真机 01:05 实证 29s 错位 retime 救不动)。
+- 冷却 `BRIDGE_TRANSPORT_RECOVERY_GUARD_MS = 30s`(对齐 MA :1481-1490 防抖语义);
+  设备恢复健康且距上次动作 >30s ⇒ 档位复位(下次事故从头一级试起)。
+- 真机闭环(02:17 R2 轮):armed → 一级(桥自估 10.2s 超门 skip)→ armed 再到 →
+  二级 light-restart → **inQ 0/late 4030 ⇒ 4950/late=2**,全链秒级拉回。
+
+### B-2 死锁兜底量级门(`BRIDGE_REBASE_SHIFT_MAX_US = 16_000_000`)
+
+`recoverStartSeekDeadlock` 按量级分派:
+- shift ≤ 16s ⇒ 整环前移(原方案;《燃》15s 场景真机+测试已验证有效,14:45 shift=6.5s 同路径成功);
+- shift > 16s ⇒ `mode=light-restart`:旧代内容作废 + 泵打戳偏移接回投递下沿 +
+  `stream/clear`→重宣告 + BOUNDARY{seek}(01:05 事故实证 shift=29s 整环前移会环空
+  `no-frame-in-window` + offset 累计 -31.8s;02:16 真机 shift=34.9s 走本路径**无 offset 失控**)。
+- 注意:01:05 崩坏另有游标覆盖 bug(2624cc30 已修)叠加,门值真机复采后可再校准。
+
+### B-3 传输守卫(验收10,MA :1481-1490 + :1196-1219)
+
+- `BRIDGE_REJOIN_ATTEMPT_MAX = 2`:尝试用尽 ⇒ 放弃(`raop rejoin attempts exhausted`)。
+- 30s 恢复守卫:上次恢复后 30s 内再死 ⇒ 放弃(`died again within 30s`)。
+- 统一闸 `transportGiveUp` 挂 `scheduleRaopReconnect` 与 `reconnectRaop`(看门狗直调
+  同闸);放弃态 = 停止调度 + error 留痕 + 现场保留;复位 = 新 BridgeSession 或编排侧重建。
+- `lastRecoveryAtMs` 单写点:`reconnectRaop` 成功路径(看门狗 TEARDOWN+重锚最终也走
+  它,两路天然汇于一点 —— 实现关键边界,漏掉则真实断网场景守卫永不触发)。
+- 退避间距 5s/30s ±20%(`computeBridgeBackoffMs`)与 MA `BRIDGE_REJOIN_ATTEMPT_DELAYS=(5,30)` 一致。
+
+### B-4 splice 口径修正(2026-11-24 22:45 iEAST 错位 2.7s 的直接根因)
+
+`planBridgeAnchor` 抬 lead 的残留口径从「RAOP 发送队列 inBytes」扩为
+**inBytes + 已编码待发 outBuf**(MA 的 flushed_head/`audio_pending_ms` 同义):
+残留被低估 ⇒ 指令落点落在设备尚未排完的音频之前 ⇒ splice 型固件(2017 MUZO 族)
+忽略换锚 ⇒ 时戳域整体错位(真机首拍即偏 +264ms,非慢漂移)。余量常量化
+`BRIDGE_SPLICE_LEAD_MARGIN_US`(对齐 MA `AIRPLAY_SPLICE_LEAD_MARGIN_MS`),并入
+单一 floor/ceiling 夹紧;诊断 `ev:"anchor-splice"`(residualUsMs/spliceFloorMs/finalLeadMs/shared)。
+
+### B-5 组级锚点同源(MA "the Sendspin timeline is the group's, never the bridge's to set")
+
+`BridgeGroupAnchorRegistry` 携带组级 lead(`publish(gen, anchorUs, commandedLeadUs)` /
+`peek → {anchorUs, leadUs}`,首规划者获胜);后到者做
+`max(shared, now + max(minSafe, keepQueueTail))` 夹紧 —— 组锚不击穿本设备 splice 下限,
+也绝不吞新头。档位诊断 `ev:"group-anchor-floormiss"`(sharedAnchorUs/finalAnchorUs/
+raisedUs/sharedLeadUs)。真机:换代后两台 publish 锚点差 <1ms(修复前 250ms 分裂);
+`bridge-start-seek` 种子两台 `cursorSeedVsNowMs` 恒等。
+
+### B-6 其它防御对齐(全部带 MA 出处注释)
+
+- **STALLED 姿态**(MA :903-911):设备 timing 未就绪 ⇒ warning `clock-stalled` +
+  anchoring anyway,不阻断锚定;逐锚定周期重臂。**N-A 根因锚点**:真机每轮起播
+  命中(双台 timingCount=0)= 起播空窗根因=设备时钟域未同步;深层修复方向 =
+  锚定前等 timing 就绪或抬高锚点(对齐 MA `AIRPLAY_CLOCK_READY_LEAD_MS`,待办)。
+- **hold 上限不叠 MA 层**:MA `_held_chunks` 45s/4000(锚点永不落定防积压)被本仓
+  `onReceiveOverflow` 2s 裁旧保新结构性排除,双层丢帧策略会打架 —— 只注释出处+断言。
+- **静音垫共享块**(MA SILENCE_BLOCK :118-124):大洞补静音按 1s immutable 块切片,
+  峰值分配从「洞大小」降为 1s。
+- **warm grace**(`BRIDGE_WARM_GRACE_SECONDS=4` 仅作语义锚点):本仓生命周期
+  「保活直到显式 stop」严格长于 MA 4s,不引入 4s 定时拆除(会拆掉可复用会话)。
+- **传输死亡判定纪律**(MA `_transport_lost` :1448-1472):clean end(自然曲末/
+  手动停止)不判死 —— 自愈守卫加「组在播」判据同源,守卫绝不误伤正常收尾。
+- **诊断**:换代重启分支补 `ev:"boundary-reanchor"`(与 track-reanchor 同字段) ——
+  两条等价重锚路径一条 grep 覆盖;`anchor-splice.finalLeadMs` 单位修正(此前 µs 值进 Ms 名)。
+
+### B-7 诊断日志速查(自愈/分级相关,复采 grep 用)
+
+| ev/日志 | 含义 |
+|---|---|
+| `bridge-late-selfheal-armed` | 守卫到阈值,一级即将触发(带 ticks/backlogMs/deliveredMs/tailVsNowMs) |
+| `bridge-late-selfheal-retime` | 一级 retime 请求(shiftUs/lateDelta;shiftUs=0=桥自估) |
+| `late-selfheal-retime-skip` | 桥自估无证据/超 10s 门,不平移(让位二级) |
+| `bridge-late-selfheal-light-restart` | 二级 lightRestart 请求 |
+| `late-selfheal-light-restart` | 桥执行清管线+flush 重锚 |
+| `bridge-late-selfheal-exhausted` | 三级放弃留痕(交上层) |
+| `clock-stalled` | 设备 timing 未就绪仍锚定(STALLED 姿态) |
+| `mode=light-restart`(deadlock) | 死锁兜底超大 shift 走轻重启 |
+| `group-anchor-floormiss` | 组级 lead 被本设备 splice 下限抬高 |

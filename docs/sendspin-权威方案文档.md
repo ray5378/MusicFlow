@@ -1987,3 +1987,43 @@ this.continuityDenied   = continuityDrainSkip && !this.continuityCommitted;
 - 有效基线时段：**15:41~17:18**（未改动版本），iEAST `late` **0.33/min**、HiVi **0.71/min**。
 - **17:18~18:10 是已知断粮故障期**（`late` ≈20/min、`silenceChunks=2140`），**不可作为基线**。
 - 判「是否需要优化」时先对齐时段与代次（`gen`），否则比的是两套故障的差值。
+
+
+## 附录 F 自愈三级分级与死锁兜底量级门(2026-11-25,组A)
+
+> 守卫在 `bridgeBroadcastTick`(SendspinGroup);动作经 selfhealBus → childMain emit →
+> 主进程 dispatch → airplay/selfhealExec → control RPC 落到桥子进程执行。
+
+### F-1 三级分级(late-selfheal,MA 无对应 —— 本仓补充层)
+
+| 级 | 判定 | 动作 | 日志 |
+|---|---|---|---|
+| armed | 「backlog=0 + deliveredUs>0 + tail>now + 组在播」连续 `BRIDGE_LATE_SELFHEAL_TICKS=40` 拍(≈10s) | 记 late 基线 `bridgeLateAtArmed` | `bridge-late-selfheal-armed` |
+| 一级 | armed 后触发,shift ≤ 10s 门(含 shift=0=桥自估) | `selfhealBus.request(level=1)`:桥平移 RTP↔NTP 映射(retimeByUs,MA :1411-1446 折回语义) | `bridge-late-selfheal-retime` |
+| 二级 | 一级未奏效(armed 再到)或 shift 超 `BRIDGE_SELFHEAL_RETIME_SHIFT_MAX_US=10s` | `request(level=2)`:桥 lightRestart(清管线+flush 重锚,**绝不 reconnectRaop**,MA :640-693)+ BOUNDARY{seek}+游标复位 | `bridge-late-selfheal-light-restart` |
+| 三级 | 二级后仍 starving | error 留痕,停止分级动作交上层摘桥 | `bridge-late-selfheal-exhausted` |
+
+- shift 估计:`lateDelta × BRIDGE_RAOP_FRAME_US(7980µs)`;lateDelta = 触发时刻
+  `server.bridgeLateTotal[dev]` − armed 基线(只对新增 late 负责)。桥侧以
+  `lastRetimeLateTotal` 二次核对,任一侧无证据即 skip(禁止猜测当实测)。
+- 冷却:`BRIDGE_TRANSPORT_RECOVERY_GUARD_MS=30s`(MA :1481-1490 防抖);档位复位 =
+  非 starving 且距上次动作 >30s。
+- N2 判定纪律(MA `_transport_lost` :1448-1472 同源):「组在播」是硬前提 ——
+  自然曲末/手动停止的积压归 0 是正常形态,守卫绝不触发。
+- 真机闭环(02:17):一级(桥自估 10.2s 超门 skip)→ 二级 light-restart →
+  设备 inQ 0/late 4030 ⇒ 4950/late=2,秒级拉回。
+
+### F-2 死锁兜底 shift 量级门(`BRIDGE_REBASE_SHIFT_MAX_US = 16_000_000`)
+
+- shift ≤ 16s ⇒ 整环前移(原方案,《燃》15s 场景真机+测试已验证有效);
+- shift > 16s ⇒ `mode=light-restart`:旧代作废 + 泵打戳偏移接回投递下沿 +
+  stream/clear→重宣告(01:05 事故 shift=29s 整环前移实证环空+offset 累计 -31.8s;
+  02:16 真机 34.9s 走本路径无失控)。
+
+### F-3 lateTotal 上行链(自愈分级的实测输入)
+
+桥 tick(bridgeStatsSink,2s 全量快照)`lateTotal = player.bridgeLateCount`
+→ airplay childMain `bridgeStats` 事件 → 主进程 supervisor → `bridgeHealth` rpc →
+sendspin childMain → `server.setBridgeLateTotal`(Map,整体替换语义同 bridgeBacklogMs)。
+守卫读 `server.bridgeLateTotal` 与 `bridgeBacklogMs` 同源同拍 —— **两处缺一不可**,
+测试 stub 只给其中之一时守卫按「无数据」退化(shiftUs=0,一级走桥自估裁决)。
