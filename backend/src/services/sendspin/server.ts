@@ -1622,6 +1622,12 @@ export class SendspinGroup {
         this.bridgeDeadTicks.delete(deviceId);
       }
       // [P0-C 自愈守卫] 设备判 late 全丢的形态 = 「设备积压 0 + 父侧仍在投 + 内容充足」。
+      // MA 出处:无对应机制(MA 靠 splice 约束从源头预防,见 rates.ts
+      // BRIDGE_SPLICE_LEAD_MARGIN_US 注释) —— 本守卫是本仓**补充层**;
+      // 冷却常量对齐 MA BRIDGE_TRANSPORT_RECOVERY_GUARD_SECONDS=30
+      // (sendspin_bridge.py:1481-1490 的防抖语义:一次事故只救一次,防 churn)。
+      // 差异取舍:动作选 BOUNDARY{seek}+游标复位(轻),不走 reconnectRaop(重) ——
+      // 真机 2026-11-24 17:31 手动 next 即 BOUNDARY 重锚拉回,证明轻动作足够。
       // 与上面 content-beyond-horizon 死锁互补:那条是「投不出去」,这条是「投得出去但
       // 设备全丢」。连续 BRIDGE_LATE_SELFHEAL_TICKS 拍(≈10s)⇒ 对该设备做一次受限重锚
       // (BOUNDARY{seek} + 游标复位到 now):不重建会话(防 churn),由接收端按新指令重排。

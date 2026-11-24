@@ -1715,6 +1715,10 @@ export class BridgeSession {
       // 实现:清锚点状态 + abort 推流(下一帧经 maybeBeginStream 重新 planBridgeAnchor,
       // 由 keepQueueTail 夹紧决定旧队列去留,见 planBridgeAnchor 的 keepQueueTailUs)。
       // gen 未变(同代重复边界 / clearPlayback 不换代)保持旧行为,逐字节不变。
+      // MA 出处:sendspin_bridge.py:886-1030 `_anchor_stream` —— "换曲即重新 anchor",
+      // 新时间线零点唯一(`_drop_until_us = anchor_us`);差异取舍:MA 每曲都重锚,
+      // 我们只在**非接续**(gen 变)时重锚,接续(continuity=true)上游根本不发
+      // BOUNDARY,旧曲尾与新曲首帧按连续 ts 无缝衔接,等价 MA 的 splice 语义且更省。
       const genChanged = (generation >>> 0) !== this.generation;
       if (!genChanged) {
         void this.stopGapFiller();
@@ -1903,6 +1907,11 @@ export class BridgeSession {
     // 内容时刻,否则旧曲尾被排进「未来」;也不得晚于新曲首帧 −200ms,否则新曲开头被
     // D5 裁头(真机 -1607ms/-1.02s/-1.73s 三次实证)。区间为空 ⇒ 宁可丢旧曲尾巴
     // (出清队列),绝不丢新曲开头。
+    // MA 出处:sendspin_bridge.py:934-945 —— `anchor_ms = max(anchor_ms,
+    // now_ms + stream.warm_lead_ms - min(0, adjust_ms) + AIRPLAY_SPLICE_LEAD_MARGIN_MS)`
+    // 与 `max(anchor_ms, stream.flushed_head_unix_ms - adjust_ms + ...)` 的 max 链;
+    // 差异:MA 用 flushed_head(已冲刷头),我们用保留队列尾(尚未投出的旧代帧尾),
+    // 两者同为「新指令不得早于残留音频」的 splice 下界。
     // 只统计**旧代次**帧(非接续换代后 inQueue 里同时有旧尾与新曲帧,新曲帧不能抬 floor)。
     let keepQueueTailUs = 0n;
     for (const q of this.inQueue) {
@@ -1944,6 +1953,8 @@ export class BridgeSession {
       keepQueueTailUs: keepQueueTailUs > 0n ? keepQueueTailUs : undefined,
     });
     // [P0-C 诊断] splice 下限是否生效、生效多少,一眼可查:residualUsMs = 设备残留,
+    // MA 出处:sendspin_bridge.py:958-963 —— 锚点下发时若残留 pending 音频,warning
+    // "its content will play that late"(报告不吞掉);我们把同一事实折成可 grep 字段。
     // spliceFloorMs = residual+margin,finalLeadMs = 实际 lead。若 finalLeadMs 明显小于
     // spliceFloorMs,说明 lead 被 ceiling(首帧−200ms)压回 —— 那就是「宁吞新头」的取舍点。
     {
