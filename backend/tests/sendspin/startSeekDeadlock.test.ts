@@ -268,4 +268,51 @@ describe("start-seek 死锁修复(P0)", () => {
     expect(newTail - rebasedTail).toBeLessThanOrEqual(30_000n);
     expect(newTail - rebasedTail).toBeGreaterThan(0n);
   });
+
+  // [组A-4/原验收3 2026-11-25] 双桥场景:1 台触发死锁 + 1 台正常种子。
+  // 断言口径 = **内容时间线一致**(两台游标在同一拍被同一次组级重基准对齐到同一
+  // now 种子、环时间线只有一份),**不是** gen_firstTs 逐字节相等 —— gen_firstTs 含
+  // 各设备首帧到达时序差(240 真机 14:45 两台差 250ms 即为正常时序差),拿它当
+  // 「同源」断言会把正常现象钉成回归。
+  it("⑤ 双桥:一台触发死锁兜底 ⇒ 组级单次重基准覆盖两台,游标同种子、环时间线一份,稳态不再触发", () => {
+    const { g, srv, handles } = groupWith(["dev-a", "dev-b"]);
+    const now = nowUs();
+    const epoch = (g as any).bridgeContentEpoch;
+    const key = (g as any).encoderKey("pcm", 100);
+    (g as any).bcEpoch.set(key, epoch);
+    // 环内容整体在视界外(now+15s 起,视界 now+8.5s ⇒ cand=0 对两台都成立)
+    for (let i = 0; i < 40; i++) addRingFrame(g, now + 15_000_000n + BigInt(i) * 25_000n, epoch);
+    // dev-a:模拟先起流的那台(游标已过期落在很远的历史位置);dev-b:新会话(游标缺失,走种子路径)
+    (g as any).bcCursor.set("dev-a", now - 30_000_000n);
+
+    // 第 1 拍:两台都记 dead(内容在视界外);种子路径生效(dev-b 游标=now,非 0)
+    (g as any).bridgeBroadcastTick(now);
+    expect((g as any).bcCursor.get("dev-b")).toBe(now);
+    // 第 2 拍:dev-a 触发组级兜底重基准(冷却 1s:只前移一次)
+    (g as any).bridgeBroadcastTick(now + 250_000n);
+    expect(srv.logs.filter((l: string) => l.includes("bridge-start-seek-deadlock")).length).toBe(1);
+    expect(handles["dev-a"].boundaries).toContain("seek");
+    expect(handles["dev-b"].boundaries).toContain("seek");
+    // 内容时间线一致:两台游标同拍被对齐进同一份(已重基准的)环时间线 ——
+    // dev-a(先处理,触发兜底)= 种子 now;dev-b(后处理)同拍即从重基准后的环窗口
+    // 继续投递,游标已前进。同源的判定 = 两台都落在同一条环时间线的窗口内
+    // (≥ 重基准种子 now、≤ 环尾 now+1s),而不是逐字节相等(见本用例头注释)。
+    const ca = (g as any).bcCursor.get("dev-a") as bigint;
+    const cb = (g as any).bcCursor.get("dev-b") as bigint;
+    expect(ca).toBeGreaterThanOrEqual(now + 250_000n);
+    expect(ca).toBeLessThanOrEqual(ringTail(g) + 30_000n);
+    expect(cb).toBeGreaterThanOrEqual(ca);
+    expect(cb).toBeLessThanOrEqual(ringTail(g) + 30_000n);
+    // 第 3 拍:两台都恢复投递(同一份环,同一时间线)
+    (g as any).bridgeBroadcastTick(now + 500_000n);
+    expect(handles["dev-a"].pushed.length).toBeGreaterThan(0);
+    expect(handles["dev-b"].pushed.length).toBeGreaterThan(0);
+    // 两台投递的是同一时间线的帧(各自游标独立推进,但内容源唯一)
+    expect((g as any).bridgeDeadTicks.size).toBe(0);
+    // 稳态 20 拍:冷却+重基准后不得再次触发(环时间线一份,不存在第二轮死锁)
+    for (let i = 1; i <= 20; i++) {
+      (g as any).bridgeBroadcastTick(now + BigInt(500_000 + i * 250_000));
+    }
+    expect(srv.logs.filter((l: string) => l.includes("bridge-start-seek-deadlock")).length).toBe(1);
+  });
 });

@@ -1617,7 +1617,14 @@ export class SendspinGroup {
       if (candCount === 0 && tailUs > horizonFinal) {
         const deadN = (this.bridgeDeadTicks.get(deviceId) ?? 0) + 1;
         this.bridgeDeadTicks.set(deviceId, deadN);
-        if (deadN >= 2) this.recoverStartSeekDeadlock(deviceId, ring, epoch, now, horizonFinal, tailUs);
+        if (deadN >= 2) {
+          // [组A-4/双桥扩例抓到的真 bug] 兜底重基准是**组级**动作(所有桥游标复位
+          // 到 now),但本地 `cursor` 是本拍投递循环的旧值 —— 块尾
+          // `bcCursor.set(deviceId, cursor)` 会用旧值把复位覆盖掉(与自愈守卫同类
+          // 覆盖 bug,240 真机 14:45 两台 250ms 分裂的同族成因)。种子必须同步到本地。
+          const rebaseSeed = this.recoverStartSeekDeadlock(deviceId, ring, epoch, now, horizonFinal, tailUs);
+          if (rebaseSeed !== null) cursor = rebaseSeed;
+        }
       } else {
         this.bridgeDeadTicks.delete(deviceId);
       }
@@ -1834,6 +1841,8 @@ export class SendspinGroup {
    *  `bridge-start-seek-deadlock`,禁止无限 content-beyond-horizon 空转。
    *  (本次事故:环内只剩 now+15s~now+50s 的帧,视界 5.5s 永远够不着。)
    *  冷却 1s:两台设备共享同一条环,后判到的那台不得对已对齐的环再前移一次。 */
+  /** @returns 本次重基准应用的游标种子(now);未触发(冷却/无偏移)返回 null。
+   *  [组A-4] 调用方必须把它同步进本地 cursor —— 否则会被块尾覆盖(见调用点注释)。 */
   private recoverStartSeekDeadlock(
     deviceId: string,
     ring: Array<{ tsUs: bigint; ep?: number }>,
@@ -1841,9 +1850,9 @@ export class SendspinGroup {
     now: bigint,
     horizonFinal: bigint,
     tailUs: bigint,
-  ): void {
+  ): bigint | null {
     this.bridgeDeadTicks.delete(deviceId);
-    if (Date.now() - this.bridgeRebaseAtMs < 1000) return;
+    if (Date.now() - this.bridgeRebaseAtMs < 1000) return null;
     let headUs = 0n;
     for (const e of ring) {
       if (e.ep !== epoch) continue;
@@ -1851,7 +1860,7 @@ export class SendspinGroup {
       break;
     }
     const shiftUs = headUs > now ? headUs - now : 0n;
-    if (shiftUs <= 0n) return;
+    if (shiftUs <= 0n) return null;
     this.bridgeRebaseAtMs = Date.now();
     // [P0-补]**所有**组环的当前代次帧整体前移 —— 不能只移 pcm:100:泵时间线是
     // 全局记账(deliveredByGroup/deliveredPeak 跨 codec 组共享),flac 等组环与
@@ -1892,6 +1901,7 @@ export class SendspinGroup {
       this.bcCursor.set(id, now);
       this.bridgeDeadTicks.delete(id);
     }
+    return now;
   }
 
   bridgePushTick(): void {
