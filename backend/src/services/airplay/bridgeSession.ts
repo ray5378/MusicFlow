@@ -655,6 +655,10 @@ export function planBridgeAnchor(opts: {
    *  建立在错误相位上（用户实测：起播偏、切歌后设备已热才正常）。切歌(reseed)不预热，
    *  否则每次换歌都要多等 2 秒（真机 lead 3595ms ⇒ 换歌静音过长）。 */
   coldPreheat?: boolean;
+  /** [P0-B 2026-11-25] 保留队列(S2 track-keep-queue)尾的内容时刻(µs,内容域)。
+   *  非接续换代时锚点必须 ≥ 它,否则旧曲尾被排进「未来」。缺省 0 = 没有保留队列,
+   *  该下限不参与(纯 seek/rehost/清队列路径行为不变)。 */
+  keepQueueTailUs?: bigint;
 }): BridgeAnchorPlan {
   const sync = bridgeSyncGroupTimelineEnabled();
   const shiftUs = BigInt(opts.anchorShiftUs ?? 0);
@@ -734,12 +738,18 @@ export function planBridgeAnchor(opts: {
       //   · 下限保证设备来得及（L+safety）。
       const minSafeUs = opts.nowUs + lUs + safetyUs;
       const contentUs = opts.firstFrameTsUs;
+      // [P0-B 2026-11-25 单一约束点] 锚点必须同时满足:minSafe(设备来得及)/
+      // ≥ 保留队列尾(旧尾不被排进未来)/ ≤ 首帧 −200ms(新曲开头不被 D5 裁头)。
+      // 三者合并进同一个 floor/ceiling 夹紧,不另起第二套判据。
+      const keepFloorUs = (opts.keepQueueTailUs ?? 0n) > 0n
+        ? (opts.keepQueueTailUs as bigint) - opts.nowUs
+        : 0n;
       if (contentUs && contentUs > 0n) {
         let useLead = leadUs;
         const contentOffsetUs = contentUs - opts.nowUs;
         const ceiling = contentOffsetUs - 200_000n; // 留 200ms 余量，确保锚点在首帧之前
         if (ceiling > 0n && useLead > ceiling) useLead = ceiling;
-        const floorUs = minSafeUs - opts.nowUs;
+        const floorUs = minSafeUs - opts.nowUs > keepFloorUs ? minSafeUs - opts.nowUs : keepFloorUs;
         if (useLead < floorUs) useLead = floorUs;
         anchorUs = opts.groupAnchorUs ?? (opts.nowUs + useLead);
         log.info(
@@ -1688,12 +1698,32 @@ export class BridgeSession {
     }
     if (!manual) this.manualFlushDone = false;
     if (reason === "track" && !manual) {
-      // 自动换歌(D6/P1)= 同一时间线「纯内容替换」:不 FLUSH、不 RECORD、不重锚。
-      // 关键:保留 aligner / anchors / firstFrameTsUs,且**不 abort 推流循环** ——
-      // 旧 streamBridge 继续消费新代次帧,seq/ts 自然连续(+352/包)。
-      // S2:旧曲余料**保留**(上面 keepQueue 分支),新代次帧按 ts 接在其后;
-      // 只有关掉 MF_BRIDGE_TRACK_KEEP_QUEUE 时才在此前出清队列。
+      // [P0-B 2026-11-25 对齐 MA sendspin_bridge] **换代 track 边界必须重锚**。
+      // 上游 `notifyBridgeGeneration(continuity=true)` 的分支根本不会给桥发 BOUNDARY
+      // (server.ts 1008 早退),所以凡是在这里收到「gen 变了」的 track ⇒ 泵侧一定是
+      // 非接续(continuity=false / contig=-):泵已按「墙钟 + lead」重立时间线。此时
+      // 本会话若继续沿用旧锚点 + 保留队列,就是 MA 明确禁止的「两套时间轴并存」——
+      // 真机三次实证(2026-11-24):realigned drift=-70879 帧(-1607.2ms) / -45202 帧
+      // (1.02s) / -76456 帧(1.73s),全部是同形态、全部是新曲开头被 D5 裁头。
+      // MA 语义:换曲即重新 anchor,`_drop_until_us = anchor_us`,新时间线零点唯一。
+      // 实现:清锚点状态 + abort 推流(下一帧经 maybeBeginStream 重新 planBridgeAnchor,
+      // 由 keepQueueTail 夹紧决定旧队列去留,见 planBridgeAnchor 的 keepQueueTailUs)。
+      // gen 未变(同代重复边界 / clearPlayback 不换代)保持旧行为,逐字节不变。
+      const genChanged = (generation >>> 0) !== this.generation;
+      if (!genChanged) {
+        void this.stopGapFiller();
+        return;
+      }
+      log.info(`[airplay-bridge] ${JSON.stringify({ ev: "track-reanchor", dev: this.deviceId, prevGen: this.generation, gen: generation >>> 0, keptFrames: queueFrames, note: "非接续换代 ⇒ 重新 planBridgeAnchor(MA 换曲重锚)" })}`);
       void this.stopGapFiller();
+      this.firstFrameTsUs = null;
+      this.aligner = null;
+      this.anchors = null;
+      this.anchorUs = null;
+      this.commandedLeadUs = null;
+      this.firstPacketLeadUs = null;
+      this.streamAborted = true;
+      this.player?.flush();
       return;
     }
     // 以下为「换代重启」:seek / rehost / 用户手动 next-prev(track+manual)。
@@ -1863,6 +1893,33 @@ export class BridgeSession {
     const sharedAnchorUs = useSharedAnchor
       ? this.groupAnchors!.peek(this.opts.groupKey!, this.generation, nowHostUs, floorLeadUs)
       : null;
+    // [P0-B 2026-11-25] 保留队列(S2)与新锚点必须同源:锚点不得早于**保留队列尾**的
+    // 内容时刻,否则旧曲尾被排进「未来」;也不得晚于新曲首帧 −200ms,否则新曲开头被
+    // D5 裁头(真机 -1607ms/-1.02s/-1.73s 三次实证)。区间为空 ⇒ 宁可丢旧曲尾巴
+    // (出清队列),绝不丢新曲开头。
+    // 只统计**旧代次**帧(非接续换代后 inQueue 里同时有旧尾与新曲帧,新曲帧不能抬 floor)。
+    let keepQueueTailUs = 0n;
+    for (const q of this.inQueue) {
+      if (q.generation !== 0 && q.generation !== this.generation && q.tsUs > keepQueueTailUs) {
+        keepQueueTailUs = q.tsUs;
+      }
+    }
+    const plannedFirstFrame = this.firstFrameTsUs;
+    if (plannedFirstFrame !== null && keepQueueTailUs > 0n && keepQueueTailUs > plannedFirstFrame - 200_000n) {
+      log.info(`[airplay-bridge] ${JSON.stringify({
+        ev: "anchor-clamp-conflict",
+        dev: this.deviceId,
+        gen: this.generation,
+        keepQueueTailUs: Number(keepQueueTailUs),
+        firstFrameTsUs: Number(plannedFirstFrame),
+        gapUs: Number(plannedFirstFrame - keepQueueTailUs),
+        action: "drop-keep-queue(宁丢旧尾不吞新头)",
+      })}`);
+      this.inQueue = [];
+      this.inBytes = 0;
+      this.outBuf = Buffer.alloc(0);
+      keepQueueTailUs = 0n;
+    }
     const plan = planBridgeAnchor({
       firstFrameTsUs: this.firstFrameTsUs,
       latencyFrames,
@@ -1874,7 +1931,24 @@ export class BridgeSession {
       groupAnchorUs: sharedAnchorUs ?? undefined,
       coldPreheat: !this.anchoredOnce,
       queuedUs: BigInt(Math.round((this.inBytes / BRIDGE_PCM_BYTES_PER_SEC) * 1e6)),
+      keepQueueTailUs: keepQueueTailUs > 0n ? keepQueueTailUs : undefined,
     });
+    // [P0-B 诊断] 三个时基一眼可比:泵新时间线基(pumpBase = 新曲首帧 ts)、保留队列尾、
+    // 最终落锚。锚点被夹紧(= minSafe/keepQueueTail 上抬 或 首帧-200ms 下压)时,
+    // anchorMinusTailUs / firstMinusAnchorUs 的符号就是裁头方向的直接证据。
+    log.info(`[airplay-bridge] ${JSON.stringify({
+      ev: "anchor-clamp",
+      dev: this.deviceId,
+      gen: this.generation,
+      pumpBaseUs: plannedFirstFrame === null ? null : Number(plannedFirstFrame),
+      keepQueueTailUs: Number(keepQueueTailUs),
+      bridgeAnchorUs: Number(plan.anchorUs),
+      anchorMinusTailUs: Number(plan.anchorUs - keepQueueTailUs),
+      firstMinusAnchorUs: plannedFirstFrame === null ? null : Number(plannedFirstFrame - plan.anchorUs),
+      commandedLeadUs: Number(plan.commandedLeadUs),
+      reAnchored: plan.reAnchored,
+      shared: sharedAnchorUs !== null,
+    })}`);
     this.anchoredOnce = true; // 后续 reseed/切歌按 warm 档，避免换歌多等 2 秒
     if (useSharedAnchor) {
       if (sharedAnchorUs !== null) {

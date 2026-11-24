@@ -886,12 +886,27 @@ console.log("===== ⑳ D4~D9:组时间线唯一(D4/D5/D7/D8)+ 成员补偿必生
     "手动分支未登记 pendingRewindFrames / 未排除 AP2 / 未清零",
   );
   const trackBody = bodyOf(bs, /if\s*\(\s*reason === "track" && !manual\s*\)\s*\{/);
+  // [P0-B 2026-11-25 改判(用户裁决)] track 边界按「gen 是否变化」二分:
+  //   · gen 未变(同代重复边界 / clearPlayback 不换代)= 仍是纯内容替换,不 FLUSH、不中断;
+  //   · gen 变了 = 泵侧一定是**非接续**(continuity=true 的分支在上游根本不发 BOUNDARY,
+  //     server.ts notifyBridgeGeneration 1008 早退)⇒ 必须重新 planBridgeAnchor(MA
+  //     sendspin_bridge 的换曲重锚语义)。旧的无差别「沿用旧锚点+保留队列」= 两套时间轴
+  //     并存 ⇒ 新曲开头被 D5 裁头(真机三次实证 -1607ms / 1.02s / 1.73s)。
+  //   落地要求:stopGapFiller + track-reanchor 留痕 + FLUSH(0xE0 重锚) + streamAborted,
+  //   但**绝不 reconnectRaop**(warm 复用 socket,只换锚点 —— 为省一次重连沿用旧时基
+  //   正是本次事故的直接成因)。
   check(
-    "D6: 自动换歌(track 且非手动)是纯内容替换:不 FLUSH、不重锚、不中断推流",
-    trackBody !== null && /void\s+this\.stopGapFiller\(\)\s*;/.test(trackBody) &&
-      !/player\?\.flush\(\)/.test(trackBody) && !/reconnectRaop/.test(trackBody) &&
-      !/streamAborted\s*=\s*true/.test(trackBody),
-    trackBody === null ? "未定位 `if (reason === \"track\" && !manual)` 分支" : "自动换歌分支出现 FLUSH / reconnectRaop / streamAborted",
+    "D6: 同代 track 边界仍是纯内容替换;换代(gen 变)track 边界必须重锚(track-reanchor: FLUSH+streamAborted,且绝不 reconnectRaop)",
+    trackBody !== null
+      && /void\s+this\.stopGapFiller\(\)\s*;/.test(trackBody)
+      && /genChanged/.test(trackBody)
+      && /track-reanchor/.test(trackBody)
+      && /player\?\.flush\(\)/.test(trackBody)
+      && /streamAborted\s*=\s*true/.test(trackBody)
+      && !/reconnectRaop/.test(trackBody),
+    trackBody === null
+      ? "未定位 `if (reason === \"track\" && !manual)` 分支"
+      : "track 分支缺 genChanged 二分 / track-reanchor 留痕 / 重锚三件套,或出现了 reconnectRaop",
   );
   check(
     "D6: 暖复用时把可变标定刷进现有会话(否则 PUT delays 的新值被静默丢弃)",
