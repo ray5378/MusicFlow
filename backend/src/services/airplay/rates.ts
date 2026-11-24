@@ -185,6 +185,16 @@ export const AP2_WAIT_SLICE_MS = 10;
 
 /** 暂停保持上限(§5.4):暂停 ≤45s ⇒ 恢复按「继续」(原 A/B 不动,pacing 对齐);
  *  >45s ⇒ 恢复按「锚点不可达」重新锚定(A = now + warmLead,跳到该时刻内容)。 */
+/** [裁决2/MA BRIDGE_WARM_GRACE_SECONDS=4s, sendspin_bridge.py:81-85] 流结束后保活
+ *  等待下一次复用的宽限窗。本仓**生命周期已严格更长**:桥会话/RAOP socket 在 track
+ *  边界与 stop 边界都不拆(onBoundary stop 仅停推流,拆会话只在显式路径:
+ *  bridgeStopDevice ← 组停/成员摘除/孤儿回收),即「保活直到显式停止」≥ MA 的 4s。
+ *  故本常量只作**语义锚点**记录对齐关系与 F7 复采口径(3s 内再播=warm 复用无冷连;
+ *  真停后冷连走 cold lead 含连接预算),不引入 4s 后拆除的定时器 —— 那反而比现状差
+ *  (会把本来能复用的会话拆掉)。
+ */
+export const BRIDGE_WARM_GRACE_SECONDS = 4;
+
 export const BRIDGE_MAX_HELD_AUDIO_US = 45_000_000;
 /** [P0-C 2026-11-25 对齐 MA AIRPLAY_SPLICE_LEAD_MARGIN_MS] splice 型接收端(MUZO 2017
  *  固件一族)只在「重排指令时刻落在残留排队音频之后」才执行换锚;落在之前 ⇒ 指令被

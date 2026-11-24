@@ -1722,6 +1722,11 @@ export class BridgeSession {
     this.generation = generation >>> 0;
     if (reason === "stop") {
       // 终态:停推流(保留 listener 与 RAOP 会话;编排侧 bridgeStop 负责拆会话)。
+      // [裁决2/warm grace, MA BRIDGE_WARM_GRACE_SECONDS=4s :81-85] MA 在流结束后
+      // 保活 4s 等复用、真停(用户显式)立即拆。本仓语义**严格更长**:stop 边界只停
+      // 推流,会话/socket 保留到显式 bridgeStop(组停/摘成员/孤儿回收),期间任何
+      // 再播都走 prepare warm-reuse(F7 3s 例);显式停止路径立即拆(F7 真停例)。
+      // 故不引入 4s 定时拆除 —— 见 rates.ts BRIDGE_WARM_GRACE_SECONDS 注释。
       this.firstFrameTsUs = null;
       this.aligner = null;
       this.anchors = null;
