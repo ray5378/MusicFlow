@@ -704,6 +704,16 @@ export function planBridgeAnchor(opts: {
     // lead 一旦越过首帧时刻，锚点就会落在内容之后 ⇒ D5 丢弃开头内容（吞开头）。
     const LEAD_CAP_US = 3_800_000n;
     if (leadUs > LEAD_CAP_US) leadUs = LEAD_CAP_US;
+    // [2026-11-24 缓冲深度] warm 起播也保底 bridgeStartLeadUs(2.5s)。
+    //   forceNow 分支此前只取 max(offset 400ms, L+safety≈2.05s) ⇒ tick 实测真实出音
+    //   提前量 `deltaUs` 恒 2.06s、设备 inQueueMs 仅 1.1s（用户要求 2.5s 量级）。
+    //   cold 已由 COLD_PREHEAT_US(3.0s) 覆盖，此处只抬 warm；代价是切歌首帧多 ~450ms
+    //   静默。注意 deltaUs 才是「设备提前拿到多久的音频」，inQueueMs 里含对齐器垫的
+    //   静音，两者不是同一口径，不要拿 inQueueMs 当缓冲深度来调这个值。
+    // 三重门：①显式 warm(`coldPreheat === false`,未传参 `undefined` 一律不动 —— 保底是"同会话 reseed"语义,不是"任何未声明调用"的缺省);
+    // ②用户没显式上调 env offset(`wantLeadUs <= floorLeadUs`,即 offset 未越过 L+SAFETY 下限);
+    // ③确实低于 warm 保底值。env 上调(offset > L+SAFETY)优先,不被保底覆盖。
+    if (opts.coldPreheat === false && wantLeadUs <= floorLeadUs && leadUs < warmUs) leadUs = warmUs;
     // ===== [2026-11-25 14:45 对齐 MA _anchor_stream：锚点 = 内容起点] =====
     // MA 语义（sendspin_bridge.py:886-1030）：
     //   anchor_ms = max(now + 最小安全, first_chunk_unix_ms)  —— 锚点绝不晚于首帧内容；

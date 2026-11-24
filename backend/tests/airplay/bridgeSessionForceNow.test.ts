@@ -241,3 +241,50 @@ describe("exp6 守卫:forceNow 的 sendAt(0) 绝不能落到过去", () => {
     });
   }
 });
+
+describe("warm 保底(三重门:显式 warm 且 env 未上调)", () => {
+  const KEY = "MF_BRIDGE_RAOP_NOW_ANCHOR_OFFSET_MS";
+  let saved: string | undefined;
+  beforeEach(() => {
+    saved = process.env[KEY];
+    delete process.env[KEY];
+  });
+  afterEach(() => {
+    if (saved === undefined) delete process.env[KEY];
+    else process.env[KEY] = saved;
+  });
+
+  it("warm 保底:显式 coldPreheat=false 且首帧足够远 ⇒ lead = 2.5s(±50ms)", () => {
+    const plan = planBridgeAnchor({
+      // 首帧 3s ⇒ ceiling = 首帧−200ms = 2.8s,不会把 2.5s 保底夹掉
+      firstFrameTsUs: NOW + 3_000_000n,
+      latencyFrames: 44100,
+      rate: RATE,
+      resampled: true,
+      nowUs: NOW,
+      forceNow: true,
+      coldPreheat: false,
+    });
+    const leadUs = Number(plan.anchorUs - NOW);
+    expect(leadUs).toBeGreaterThanOrEqual(2_450_000);
+    expect(leadUs).toBeLessThanOrEqual(2_550_000);
+    // 与 anchorUs 同源(tick 的 deltaUs 口径):也不该停在旧的 L+SAFETY(1050ms)
+    expect(Number(plan.commandedLeadUs)).toBeGreaterThanOrEqual(2_450_000);
+  });
+
+  it("warm 保底不覆盖 env 上调:MF_BRIDGE_RAOP_NOW_ANCHOR_OFFSET_MS=3000 ⇒ lead 仍 3.0s", () => {
+    process.env[KEY] = "3000";
+    const plan = planBridgeAnchor({
+      // 首帧 5s ⇒ ceiling 4.8s,3.0s 不会被夹
+      firstFrameTsUs: NOW + 5_000_000n,
+      latencyFrames: 44100,
+      rate: RATE,
+      resampled: true,
+      nowUs: NOW,
+      forceNow: true,
+      coldPreheat: false,
+    });
+    // wantLeadUs(3000ms) > floorLeadUs(1050ms) ⇒ 三重门第②条不成立 ⇒ 不保底,env 生效
+    expect(Number(plan.anchorUs - NOW)).toBe(3_000_000);
+  });
+});

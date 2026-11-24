@@ -474,7 +474,12 @@ export function playGroupCore(
   //    可采纳的 S1 预取(预取有自己的精确交接点)。
   //  ⚠️ seek 判据必须与泵的 `armSeek` 完全同源:`0` 是「从头起播」(QueueController
   //    每次 playMedia 都带 0),不是 seek —— 否则自动换歌会被误判成 seek 而不接续。
-  const interrupted = pump.active;
+  // [P0 2026-11-24] 「自然播完但 pushLoop 还没退出」不算打断:两种情形下 pump.active
+  // 都是 true,但只有真正的 stop/seek 该否定接续。240 现场 17:26:07:曲末
+  // `pushLoop 退出 running=true` 与 QueueController auto-advance 之间隔了 ~350ms,
+  // 旧判据把这段窗口判成「手动打断」⇒ continuity=false ⇒ 清 ring ⇒ 泵锚 contig
+  // 到已清空的时间线 ⇒ 两台桥同时断粮 3 分钟(证据链见 streamEngine.continuityCommitted)。
+  const interrupted = pump.active && !pump.naturalEnded;
   const continuity = !interrupted && pump.continuityReady(item.songId, seekPositionMs);
   pump.stop(); // 打断上一首,避免重叠推流
   if (seekPositionMs != null) pump.armSeek(seekPositionMs);
@@ -501,6 +506,10 @@ export function playGroupCore(
       // MA legacy 档:只发 `stream/end` 收尾旧流,**不报 stopped**(同 playCore)。
       g.finishPlayback({ silentState: true });
     }
+    // [P0 2026-11-24] 走非接续分支 ⇒ ring 即将被清空、旧曲尾不复存在 ⇒ 必须同步撤回
+    // 泵侧的接续承诺,否则泵仍把新曲首帧锚在 contig(已被清掉的内容尾)之后 ⇒ 投递
+    // 窗口内一帧都没有(`bridge-servo cand=0 firstCandVsNow=33740`)⇒ 全组断粮。
+    pump.dropContinuityHandover?.();
   }
   log.info(
     `[Sendspin][continuity] group=${groupName} song=${item.songId} interrupted=${interrupted} ` +

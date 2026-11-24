@@ -624,6 +624,34 @@ export class GroupPump {
   private lastContentEndUs: bigint | null = null;
   /** 本轮起播可接续的上一曲尾(play() 起手从 lastContentEndUs 快照,随后清空)。 */
   private continuityFromUs: bigint | null = null;
+  /** [P0 2026-11-24 桥断粮] 曲末**已按接续跳过排空**的承诺(曲末那一拍一次性定死)。
+   *
+   *  为什么必须是「承诺」而不是「再判一次」:`continuityDrainSkip` 一旦为真,旧曲尾
+   *  (可能几十秒)就留在 ring 里没被排空成静音,新曲的时间线也已经押在「接上这条连续
+   *  时间轴」上 —— 这个决定**不可逆**。旧实现让起播侧(playerCore)再用自己的一套判据
+   *  (pump.active / gates / window / prefetch)重判一次,两侧一旦不一致(240 现场
+   *  2026-11-24 17:26:07:泵记 `曲末排空跳过 continuity=1`、390ms 后起播侧记
+   *  `continuity=false`),就会 `g.close({keepBridgeDelivery:false})` + `clearPlayback()`
+   *  把这条 ring 整段清掉,而泵仍按 contig 把新曲首帧锚在**已被清掉的内容尾**之后
+   *  (现场 `timeline anchored base=254545581990 contig=254545581990`,即 now+33.3s)
+   *  ⇒ 投递窗口(上沿 now+8.5s)内一帧都没有(`bridge-servo cand=0 firstCandVsNow=33740`
+   *  、`deliveredMs=0`)⇒ 两台桥同时断粮,泵又被 30s 背压钉死,只能等墙钟自己追上来。
+   *  纪律:接续判定只有一个产地 = 曲末这一拍,后面所有人读这个字段。 */
+  private continuityCommitted = false;
+  /** `play()` 起手把 continuityCommitted 快照到这里(与 lastContentEndUs→continuityFromUs
+   *  同款「记完即用一次」语义),随后清零 —— 一次起播只消费一次承诺。 */
+  private continuityNext = false;
+  /** [P0 2026-11-24 二次求值分叉] 曲末**判过但被时间窗否决** ⇒ 明确「不接续」。
+   *
+   *  为什么单独记 denied 而不靠 `!committed` 推断:起播侧不知道「曲末到底判没判」,
+   *  若退回旧逻辑再算一次窗口,两次求值时刻不同(曲末用 cursor,起播用 lastContentEndUs)
+   *  就会在临界点上翻转 —— 240 现场 10:16 实测:曲末 `差=35316ms` 否决(阈值 35000ms),
+   *  1.5s 后起播侧再算却通过 ⇒ 起播侧 continuity=true、泵侧 continuity=false,两套
+   *  时间轴并存(与 17:26 断粮同型,方向相反)。
+   *  纪律:曲末一锤定音(granted / denied 二选一),后续只复核「是否已经太旧」。 */
+  private continuityDenied = false;
+  /** 起播起手把 denied 一起快照(与 continuityNext 同款「记完即用一次」)。 */
+  private continuityNextDenied = false;
 
   /** 判死后回传(子进程 → 主进程负缓存同步):由 `pumpFor(_, _, sink)` 装填。
    *  未装填 = 静默丢弃(单测 / 主进程内起播都不受影响)。
@@ -683,6 +711,16 @@ export class GroupPump {
     return this.running;
   }
 
+  /** [P0 2026-11-24] 本曲是否**自然播完**(而非被 stop/seek 打断)。
+   *
+   *  起播侧用它区分「打断」与「播完但 pushLoop 还没退出」:两者下 `active` 都是 true,
+   *  但只有前者该否定接续。240 现场:pushLoop 收尾(`running` 仍 true)与
+   *  QueueController auto-advance 之间有 ~350ms 窗口,旧判据 `interrupted = pump.active`
+   *  把这段窗口当成「手动打断」⇒ 接续承诺被否 ⇒ 清 ring ⇒ 断粮。 */
+  get naturalEnded(): boolean {
+    return this.endedNaturally;
+  }
+
   /** 本组共享流的 ③ 段音色片段(见 `dspPeerIdForGroup` / `WindowSource.dspFilters`)。
    *
    *  三处刻意取舍:
@@ -718,6 +756,12 @@ export class GroupPump {
     //   手动切歌/seek 重建走 stop() 中断,不会写 lastContentEndUs ⇒ 快照恒为 null。
     this.continuityFromUs = this.lastContentEndUs;
     this.lastContentEndUs = null;
+    // [P0 2026-11-24] 接续承诺与内容尾一起搬交:曲末定死,起播消费一次。
+    this.continuityNext = this.continuityCommitted;
+    this.continuityCommitted = false;
+    // [P0 2026-11-24] 否决也一起搬交:起播侧/泵侧都按同一个结论走,不再二次求值。
+    this.continuityNextDenied = this.continuityDenied;
+    this.continuityDenied = false;
     // debug 日志开关起播这一拍刷新(fire-and-forget,**不 await** —— play 的起播时序
     // 有用例钉死(busy/取源次数),多一个宏任务都会破坏;刷新在取音源的数秒窗口内
     // 必然完成,首个事件(play.start 除外)记录时开关已就绪)。
@@ -1054,6 +1098,18 @@ export class GroupPump {
     return ageUs <= BRIDGE_CONTINUITY_STALE_US && waitUs <= BRIDGE_CONTINUITY_MAX_WAIT_US;
   }
 
+  /** [P0 2026-11-24] 二次复核专用:只判「接续点是否已经太旧」,不判「太远」。
+   *
+   *  太远(waitUs)是**曲末那一刻**的事实(旧曲尾还没播完,接续点落在未来),必须在那
+   *  一刻用 cursor 一次定死;换到起播/泵侧再算就换了求值时刻,临界点会翻转(240 实测
+   *  35316ms vs 阈值 35000ms)。太旧(ageUs)才是二次复核真正要防的:曲末判完到真正
+   *  起播之间若隔了很久(pause/队列阻塞),接续点已成为过去 ⇒ 必须放弃,否则新曲首帧
+   *  锚到过去 ⇒ 全量追发/断粮。 */
+  private continuityAgeOk(from: bigint | null): boolean {
+    if (from === null) return false;
+    return Number(nowUs() - from) <= BRIDGE_CONTINUITY_STALE_US;
+  }
+
   /** 本曲是否值得**跳过曲末排空**:队列里有下一首,且下一轮起播会走接续。
    *  排空会把数秒静音写进 ring,随后 playerCore 的 `g.close()` 又清掉 ring ——
    *  接续点与新曲首帧都在这份 ring 里,排空/清理一旦发生,接续就无从谈起。 */
@@ -1071,9 +1127,44 @@ export class GroupPump {
    *  消息与时间线锚点各走各的(轻则多一条 BOUNDARY,重则 ring 顺序被未来帧打断)。 */
   continuityReady(songId?: string, seekMs?: number | null): boolean {
     if (seekMs != null && alignFrameMs(Math.max(0, Math.round(seekMs))) > 0) return false;
+    // [P0 2026-11-24] 曲末已经**按接续跳过排空**⇒ 这个承诺不可撤回:旧曲尾还在 ring
+    // 里没排空,起播侧若在这里改判 false 就会 clearPlayback 把它清掉,而泵仍锚 contig
+    // ⇒ 新曲首帧落到投递窗口之外(现场 now+33.3s vs 上沿 now+8.5s)⇒ 全组断粮。
+    // 故先于 gates 返回(桥集合在 prepare/reconnect 瞬间会短暂翻 false,不能让它否决
+    // 一个已经落地的承诺)。窗口复核仍保留在泵侧锚点判定里(那一侧才真正用它)。
+    if (this.continuityCommitted) return true;
+    // [P0 2026-11-24] 曲末已明确否决 ⇒ 不许在这里再算一次窗口把它翻回 true
+    // (临界点翻转 ⇒ 与泵侧分叉,证据见 continuityDenied 字段注释)。
+    if (this.continuityDenied) return false;
     if (!this.continuityGates()) return false;
     if (songId && this.hasPendingPrefetch(songId)) return false;
-    return this.continuityWindowOk(this.lastContentEndUs);
+    // 未经过曲末承诺(手动切歌/无槽位)才走到这里;二次复核只判「太旧」不判「太远」
+    // —— 太远由曲末那一拍用 cursor 一次定死。
+    return this.continuityAgeOk(this.lastContentEndUs);
+  }
+
+  /** [P0 2026-11-24] 撤回「曲末跳过了排空」的接续承诺。
+   *
+   *  调用点 = 起播侧判定**不接续**(手动切歌 / seek / 窗口失效 / 主动换代)时:该路径
+   *  会 `g.close({keepBridgeDelivery:false})` + `clearPlayback()` 把 ring 清空,旧曲尾
+   *  不复存在 ⇒ 泵必须同时放弃 contig 锚点(回落到「墙钟 + lead」),否则新曲首帧被锚在
+   *  一段已经不存在的时间线之后,投递窗口内一帧都没有,泵被 30s 背压钉死直到墙钟追上。
+   *  幂等。 */
+  dropContinuityHandover(): void {
+    if (this.continuityCommitted || this.continuityNext) {
+      logSafe(
+        this.server,
+        "warn",
+        `sendspin 接续承诺撤回(ring 将被清空,放弃 contig 锚点) song=${this.songId}` +
+          ` committed=${this.continuityCommitted} next=${this.continuityNext}`,
+      );
+    }
+    this.continuityCommitted = false;
+    this.continuityNext = false;
+    this.continuityDenied = false;
+    this.continuityNextDenied = false;
+    this.continuityFromUs = null;
+    this.lastContentEndUs = null;
   }
 
   /** 曲末预解码下一首:墙钟剩余 ≤ 5s 且满足「纯桥组 / 开关开 / 未预取」时启动。
@@ -1382,6 +1473,7 @@ export class GroupPump {
           // ★ 桥组判定(锚点 / 接续 / 边界语义共用;桩缺失 hasDirectMembers 按纯桥组,
           //   与既有 ③ 用例口径一致)。
           const hasBridges = this.group.hasBridges?.() === true;
+          // 未承诺分支要回落旧结构门,故纯桥判定仍需保留(见下方 continuity 表达式)。
           const isPureBridge = hasBridges && this.group.hasDirectMembers?.() !== true;
           // ★ P2 接续判定:这一拍**同时决定桥边界语义** —— 满足接续时新曲接在上一曲
           //   自然播完的时间线尾上,桥侧不换代、不清队列、不发 BOUNDARY(见 server.ts
@@ -1389,8 +1481,18 @@ export class GroupPump {
           const continuity =
             !reseed &&
             handoffUs === null &&
-            this.continuityGates(hasBridges, isPureBridge) &&
-            this.continuityWindowOk(this.continuityFromUs);
+            // [P0 2026-11-24] 只有曲末**真的跳过了排空**并留下了旧曲尾,才允许接续锚点。
+            // ring 已由起播侧清掉却仍锚 contig ⇒ 新曲首帧落在投递窗口之外 ⇒ 全组断粮
+            // (见 continuityCommitted 字段注释的现场证据链)。两个决定必须同源。
+            !this.continuityNextDenied &&
+            // 三态(与起播侧 continuityReady 严格同源):
+            //   granted  ⇒ 曲末已用 cursor 一次定死窗口,这里**不再过结构门**(桥集合在
+            //              prepare/reconnect 瞬间会短暂翻 false,不能让它否决已落地的承诺);
+            //   未承诺   ⇒ 曲末没走到跳过排空(无下一首槽位/预取路径),回落旧结构门 ——
+            //              这条路上 ring 未必被清,接续依然成立(bridgePumpGeneration ③b);
+            //   denied   ⇒ 上面 !continuityNextDenied 已短路为 false。
+            (this.continuityNext || this.continuityGates(hasBridges, isPureBridge)) &&
+            this.continuityAgeOk(this.continuityFromUs);
           // ★ 桥代次钩子(§4.3,唯一落点,BLK-02 不新增 bridgeTimelineReset):
           //   这里同时持有 myEpoch 与 this.group,一次覆盖 seek/track(epoch 变)与
           //   rehost(timelineReseed 变)。seek 时 epoch 跳 2、投递路径只见最终值,
@@ -1916,6 +2018,25 @@ export class GroupPump {
         //   首帧都在这份 ring 里,清掉就没有「连续时间轴」可言。接续时旧曲尾仍按 250ms
         //   补投窗口继续投给桥(旧曲自然播完),不需要再让服务端干等。
         const continuityDrainSkip = contentEnded && !this.prefetch && this.continuitySlotAvailable();
+        // [P0 2026-11-24 单一产地] 接续承诺在这里一次性定死,后续两处(起播侧
+        // `continuityReady` / 泵侧 contig 锚点)都只读它,不再各判一套。
+        // 窗口判据在此刻用 `cursorUs` 求值 —— 跳过排空后它就是 `contentTailUs`
+        // (= 下一轮 `lastContentEndUs` 的取值),与泵侧锚点判定同源同值。
+        this.continuityCommitted = continuityDrainSkip && this.continuityWindowOk(cursorUs);
+        // [P0 2026-11-24] granted / denied 同时定死:跳过排空但窗口不过 ⇒ 明确否决,
+        // 后续任何人都不许再算一次窗口(见 continuityDenied 字段注释)。
+        this.continuityDenied = continuityDrainSkip && !this.continuityCommitted;
+        if (continuityDrainSkip && !this.continuityCommitted) {
+          // 承诺落不下去(上一曲尾离得太远)⇒ 必须留痕:此时照旧跳过排空,但下一曲
+          // 不会接续锚点,边界会清队列 —— 这是「宁可整段换时间线也不吞」的取舍,
+          // 不允许静默发生(与 drain-fill 的三选一留痕同纪律)。
+          logSafe(
+            this.server,
+            "warn",
+            `sendspin 接续承诺被时间窗否决:尾=${cursorUs} now=${nowUs()} ` +
+              `差=${Math.round(Number(cursorUs - nowUs()) / 1000)}ms song=${this.songId}`,
+          );
+        }
         if (continuityDrainSkip) {
           logSafe(
             this.server,

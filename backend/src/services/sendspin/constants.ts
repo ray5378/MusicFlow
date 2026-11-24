@@ -140,8 +140,13 @@ export const BRIDGE_CONTINUITY_MIXED_ENABLED =
  *  ⚠️ 这个值要覆盖**预填充深度**(纯桥组实测曲末游标领先墙钟 ~15s):
  *  接续点本身就落在未来,而未来那段正是上一曲尚未播完的尾巴 —— 等待不是静默,
  *  是「旧曲继续播」。旧默认 3s 正是 P2 首轮灰度不触发的直接原因(实测 6.14s 被拒)。 */
+/** ⚠️ 必须 **大于**「泵背压上限 + 投递视界」的结构深度，否则曲末游标天然领先墙钟
+ *  那么多、接续永远卡在边界被否：`PUMP_LOOKAHEAD_DEFAULT_US`=30s + 视界 5.5s ≈ 35.5s。
+ *  240 实测 2026-11-24：曲末 `差=35317ms` vs 旧值 35000ms ⇒ 每次换歌都被否决 ⇒
+ *  每首重建时间线、水位做薄到 1.1s（接续正常时段实测 2.6s）。取 45s 留 10s 余量；
+ *  改 `PUMP_LOOKAHEAD_DEFAULT_US` 时必须同步复核此值。 */
 export const BRIDGE_CONTINUITY_MAX_WAIT_US =
-  Number(process.env.MF_BRIDGE_CONTINUITY_MAX_WAIT_MS ?? 35000) * 1000;
+  Number(process.env.MF_BRIDGE_CONTINUITY_MAX_WAIT_MS ?? 45000) * 1000;
 /** 接续陈旧阈值(µs):结束距现在超过它(含自动切歌的 poll 5s + 解码)⇒ 视作中断。 */
 export const BRIDGE_CONTINUITY_STALE_US =
   Number(process.env.MF_BRIDGE_CONTINUITY_STALE_MS ?? 15000) * 1000;

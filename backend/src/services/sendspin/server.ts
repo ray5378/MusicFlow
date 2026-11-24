@@ -1607,6 +1607,24 @@ export class SendspinGroup {
             "info",
             `bridge-servo dev=${deviceId} cursorVsNow=${Math.round(Number(cursor - now) / 1000)}ms backlogMs=${backlogMs} shiftMs=${Math.round(Number(shift) / 1000)} targetMs=${targetMs} dueMs=${Math.round(Number(dueUs) / 1000)} deliveredMs=${Math.round(Number(deliveredUs) / 1000)} aheadMs=${Math.round(Number(ahead) / 1000)} horizonMs=${Math.round(Number(horizonFinal - now) / 1000)} firstCandVsNow=${firstCand === 0n ? "null" : String(Math.round(Number(firstCand - now) / 1000))} cand=${candCount} oldEp=${staleSkip}`,
           );
+          // [P0 2026-11-24 断粮指纹] 环里有本代次内容、这一拍却**一帧都投不出去** ——
+          // 这就是「桥断粮」在父侧的唯一直接证据,旧实现只把它混在 bridge-servo 的
+          // cand=0 字段里(240 现场 2026-11-24 17:26 全靠人工对比才认出来)。
+          // 两个成因必须能一眼分开:
+          //   · content-beyond-horizon = 内容尾跑到投递上沿之外(时间线被锚到墙钟之后,
+          //     典型 = 清 ring 后仍按 contig 锚点 ⇒ 现场 firstCandVsNow=33740ms vs
+          //     horizonMs=8500,泵同时被 30s 背压钉死,只能等墙钟追上来);
+          //   · no-frame-in-window     = 内容在窗口下沿之前(游标/水位推过了内容)。
+          // 只读诊断,不改任何投递行为;节流与上面 bridge-servo 共用(≤1 行/2s/设备)。
+          if (candCount === 0 && deliveredUs === 0n && tailUs > 0n) {
+            this.server.log(
+              "warn",
+              `bridge-window-dead dev=${deviceId} reason=${tailUs > horizonFinal ? "content-beyond-horizon" : "no-frame-in-window"} ` +
+                `cursorVsNowMs=${Math.round(Number(cursor - now) / 1000)} tailVsNowMs=${Math.round(Number(tailUs - now) / 1000)} ` +
+                `horizonMs=${Math.round(Number(horizonFinal - now) / 1000)} firstCandVsNowMs=${firstCand === 0n ? "null" : String(Math.round(Number(firstCand - now) / 1000))} ` +
+                `oldEp=${staleSkip} ringFrames=${ring.length} group=${this.name}`,
+            );
+          }
         }
       }
     }
