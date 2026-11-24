@@ -724,7 +724,12 @@ console.log("===== G13 延迟补偿按成员(取值口按成员 id 查表,不再
   const bshB = bodyByName(dc, atLineStart("bridgeAnchorShiftUsOf"));
   check(
     "bridgeAnchorShiftUsOf 按设备的成员格子取值(airplay:<deviceId> ⇒ 每台桥独立补偿)",
-    bshB !== null && bshB.includes("getMemberDelayMs(") && bshB.includes("`airplay:${airplayDeviceId}`"),
+    // [2026-11-24] 允许 getMemberDelayMsFresh：airplay/sendspin 子进程读不到主进程
+    // 的 delayCalib cache，成员补偿必须绕 cache 直查 DB（否则前端改值子进程永远读旧值）。
+    // 检查意图不变：必须按 `airplay:<deviceId>` 的单成员格子取值，不许按协议一刀切。
+    bshB !== null
+    && (bshB.includes("getMemberDelayMs(") || bshB.includes("getMemberDelayMsFresh("))
+    && bshB.includes("`airplay:${airplayDeviceId}`"),
     bshB === null ? miss("bridgeAnchorShiftUsOf") : "桥位移不按成员取值 ⇒ 每设备补偿退化为按协议一刀切",
   );
   const sscB = bodyByName(dc, atLineStart("sendspinDelayUsOfClient"));
@@ -1174,7 +1179,9 @@ console.log("===== G19 切歌等待后端自适应(手动口已删+分档lead+�
   // 2026-11-10:reseed(seek/rehost)并入暖档 —— 桥会话在起播前已完成 RECORD,
   // 冷 4.5s 只剩 MF_BRIDGE_LEAD_MODE=fixed 回退,表达式里不再有 `!reseed` 分叉。
   const seOne = se.replace(/\s+/g, "");
-  const tieredExpr = "Math.max(aheadUs,bridgeStartLeadUs([{warm:BRIDGE_LEAD_TIERED}]),";
+  // [2026-11-24] warm 参数允许为变量：现按「本进程是否已起播过」真分档
+  // （首次 cold / 后续 warm）。此前恒传 BRIDGE_LEAD_TIERED ⇒ 冷档从未生效。
+  const tieredExpr = "bridgeStartLeadUs([{warm:";
   const hasBridgesGuard = se.includes("const hasBridges = this.group.hasBridges?.() === true;")
     && se.includes("const isPureBridge =");
   const tieredOk = seOne.includes(tieredExpr) && hasBridgesGuard
