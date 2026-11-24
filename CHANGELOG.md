@@ -2,6 +2,36 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.15.2] - 2026-11-25
+
+### Fix 桥自愈三级分级 + 防御自愈对齐 MA(起播空窗/裁头/锚点分裂/死锁兜底连环失效)
+
+真机多轮注入验证(240,2026-11-24~25)定位并修复桥投递链四类缺陷,防御/自愈机制
+全程对齐 Music Assistant airplay provider(凡对齐处代码带出处注释):
+
+- **起播空窗(自愈三级分级)**:设备时钟域未同步即锚定(clock-stalled 实证) ⇒ 设备
+  把到达帧全判 late(inQ=0、late≈+123/s)。新增守卫三级:armed(10s)→ 一级 retime
+  (桥自估 shift,超 10s 门 skip)→ 二级 lightRestart(清管线+flush 重锚,绝不
+  reconnectRaop)→ 三级 exhausted 留痕交上层。真机闭环:inQ 0/late 4030 ⇒
+  4950/late=2,秒级拉回(修复前只能 restart 清状态)。
+- **非接续换代吞开头**:gen 变化的 track 边界强制重锚(track-reanchor,MA「换曲即
+  重新 anchor」语义)+ 锚点夹紧(keepQueueTail:指令时刻须越过设备残留队列,
+  splice 型固件才执行换锚;残留口径修正为 inBytes+outBuf)。真机三次裁头
+  (-1607ms/-1020ms/-1730ms)消除。
+- **锚点分裂**:组级锚点同源(registry 携带组级 lead,首规划者获胜;后到者 splice
+  下限夹紧)—— 换代后两台 publish 锚点差 <1ms(修复前 250ms 分裂);新增
+  `group-anchor-floormiss` 诊断。
+- **死锁兜底连环失效**:游标复位被投递循环块尾旧值覆盖(240 实测 shift 2800→29030
+  连环、设备落后墙钟 57.5s)——种子同步写本地;兜底加 shift 量级门(>16s 走
+  mode=light-restart,01:05 事故 29s 整环前移会环空)。
+- **传输守卫(验收10)**:30s 恢复窗内再死即放弃 + rejoin 封顶 2 次(MA (5,30));
+  lastRecoveryAtMs 单写点(reconnectRaop 成功路径,看门狗汇于同点)。
+- 其它对齐 MA:clock-stalled 姿态(timing 未就绪 anchoring anyway,逐周期重臂)、
+  warm grace 保活语义钉死、hold 上限注释+断言、静音垫 1s 共享块、传输死亡判定纪律
+  (clean end 不触发)、splice 诊断单位修正、boundary-reanchor 双路径留痕。
+- 测试:新增 41 条(守卫三级 6/死锁兜底 8/桥侧自估与 lightRestart 7/传输守卫 6/
+  splice 3/组级同源 3/warm 2/其余);守卫脚本新增 ㉒ 段 5 钉;真机注入矩阵 F1~F8
+  全量执行(附录 C)。
 ## [4.15.1] - 2026-11-24
 
 ### Fix 长播稳定性（切歌卡顿 / 首曲吞音 / 设备缓冲贴地）
