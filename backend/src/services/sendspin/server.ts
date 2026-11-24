@@ -54,7 +54,9 @@ import {
   BRIDGE_BACKFILL_MAX_US,
   BRIDGE_TRACK_LEAD_COLD_US,
   BRIDGE_TRACK_LEAD_WARM_US,
+  BRIDGE_LATE_SELFHEAL_TICKS,
   BRIDGE_TRACK_KEEP_QUEUE_ENABLED,
+  BRIDGE_TRANSPORT_RECOVERY_GUARD_MS,
 } from "./constants.js";
 import { nowUs } from "./clock.js";
 import { MessageRouter } from "./messages.js";
@@ -898,6 +900,13 @@ export class SendspinGroup {
    *  连续 2 拍仍无从投递 ⇒ 环时间线整体前移回可投范围 + 全体 BOUNDARY{seek}
    *  重锚(bridge-start-seek-deadlock),禁止无限空转。 */
   private bridgeDeadTicks = new Map<string, number>();
+  /** [P0-C 自愈守卫]「设备积压 0 而父侧仍在投」的连续 tick 数(逐设备)。
+   *  达到 BRIDGE_LATE_SELFHEAL_TICKS ⇒ 设备在把到达帧全判 late 丢弃(splice 型固件
+   *  忽略换锚/时戳域错位),做一次受限重锚;此后受 BRIDGE_TRANSPORT_RECOVERY_GUARD_MS
+   *  冷却约束 —— 守卫本身不得变成 churn 源。 */
+  private bridgeLateSelfhealTicks = new Map<string, number>();
+  /** [P0-C 自愈守卫]上次自愈重锚时刻(逐设备,冷却基准)。 */
+  private bridgeSelfhealAtMs = new Map<string, number>();
   /** [P0]环时间线重基准冷却(ms):一次死锁只前移一次 —— 两台设备共享同一条环,
    *  后判到的那台不能对已对齐的环再前移一次。 */
   private bridgeRebaseAtMs = 0;
@@ -1612,6 +1621,39 @@ export class SendspinGroup {
       } else {
         this.bridgeDeadTicks.delete(deviceId);
       }
+      // [P0-C 自愈守卫] 设备判 late 全丢的形态 = 「设备积压 0 + 父侧仍在投 + 内容充足」。
+      // 与上面 content-beyond-horizon 死锁互补:那条是「投不出去」,这条是「投得出去但
+      // 设备全丢」。连续 BRIDGE_LATE_SELFHEAL_TICKS 拍(≈10s)⇒ 对该设备做一次受限重锚
+      // (BOUNDARY{seek} + 游标复位到 now):不重建会话(防 churn),由接收端按新指令重排。
+      // 冷却 BRIDGE_TRANSPORT_RECOVERY_GUARD_MS:一次事故只救一次,救不回交给上层摘桥。
+      {
+        const starving = backlogMs <= 0 && deliveredUs > 0n && tailUs > now;
+        if (starving) {
+          const n = (this.bridgeLateSelfhealTicks.get(deviceId) ?? 0) + 1;
+          this.bridgeLateSelfhealTicks.set(deviceId, n);
+          const cooled = Date.now() - (this.bridgeSelfhealAtMs.get(deviceId) ?? 0) >= BRIDGE_TRANSPORT_RECOVERY_GUARD_MS;
+          if (n === BRIDGE_LATE_SELFHEAL_TICKS) {
+            this.server.log(
+              "warn",
+              `bridge-late-selfheal-armed dev=${deviceId} ticks=${n} backlogMs=${backlogMs} deliveredMs=${Math.round(Number(deliveredUs) / 1000)} tailVsNowMs=${Math.round(Number(tailUs - now) / 1000)} (设备疑似全判 late,到达阈值将受限重锚)`,
+            );
+          }
+          if (n >= BRIDGE_LATE_SELFHEAL_TICKS && cooled) {
+            this.bridgeLateSelfhealTicks.delete(deviceId);
+            this.bridgeSelfhealAtMs.set(deviceId, Date.now());
+            this.server.log(
+              "warn",
+              `bridge-late-selfheal dev=${deviceId} ticks=${n} backlogMs=${backlogMs} ⇒ BOUNDARY{seek} + 游标复位(受限重锚,冷却 ${BRIDGE_TRANSPORT_RECOVERY_GUARD_MS}ms)`,
+            );
+            try {
+              handle.sendBoundary("seek");
+            } catch { /* 单设备重锚失败不连累组 */ }
+            this.bcCursor.set(deviceId, now);
+          }
+        } else {
+          this.bridgeLateSelfhealTicks.delete(deviceId);
+        }
+      }
       this.bcCursor.set(deviceId, cursor);
       // [2026-11-25 11:00] 新会话首投后补一次 seek 重锚（见 bridgeStartSeekPending 注释）
       if (deliveredUs > 0n && !this.bridgeStartSeekPending.has(deviceId) && this.bridgeStartSeekDone.get(deviceId) !== epoch) {
@@ -1893,6 +1935,8 @@ export class SendspinGroup {
     this.bridgeBulkPending.delete(deviceId);
     this.bridgeBulkInFlight.delete(deviceId);
     this.bridgeDiagLogAt.delete(deviceId);
+    this.bridgeLateSelfhealTicks.delete(deviceId);
+    this.bridgeSelfhealAtMs.delete(deviceId);
     this.bridgePushDiagAt.delete(deviceId);
     this.bcCursor.delete(deviceId); // 摘桥必须同步摘游标（见上方注释,饿死链根因）
     if (this.bridges.size === 0) this.stopBridgePushTimer();

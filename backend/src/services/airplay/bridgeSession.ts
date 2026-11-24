@@ -55,6 +55,7 @@ import {
   BRIDGE_PCM_BYTES_PER_SEC,
   BRIDGE_REBASE_MIN_AHEAD_US,
   BRIDGE_RESUME_REBASE_US,
+  BRIDGE_SPLICE_LEAD_MARGIN_US,
   BRIDGE_WARM_START_LEAD_US,
   PROTOCOL_CAPS,
   RAOP_SAFETY_MS,
@@ -703,7 +704,12 @@ export function planBridgeAnchor(opts: {
     // （真机：设备持 5.4s 而 lead 3.5s ⇒ 切歌一次丢 20 万帧）。此处按实测
     // inQueue + 400ms 余量抬高 lead，使「缓冲深度」与「切歌提前量」永远配套 ——
     // 与 MA 的 AIRPLAY_LATE_JOIN_MIN_HEADROOM_MS(2.5s) 配 2.5s 缓冲同一思路。
-    if ((opts.queuedUs ?? 0n) + 400_000n > leadUs) leadUs = (opts.queuedUs ?? 0n) + 400_000n;
+    // [P0-C 2026-11-25] 余量改用命名常量(BRIDGE_SPLICE_LEAD_MARGIN_US,语义见 rates.ts):
+    // splice 型接收端只在指令时刻落在残留音频之后才换锚,余量不够 ⇒ 指令被忽略 ⇒
+    // 时戳域整体错位(240 iEAST 14:45:33 实证)。行为与旧 inline 400ms 逐字节一致。
+    if ((opts.queuedUs ?? 0n) + BigInt(BRIDGE_SPLICE_LEAD_MARGIN_US) > leadUs) {
+      leadUs = (opts.queuedUs ?? 0n) + BigInt(BRIDGE_SPLICE_LEAD_MARGIN_US);
+    }
     // [2026-11-25 14:22] lead **上限 3.8s**：父侧投递上沿 5s、实测首帧提前量 ~4.2s；
     // lead 一旦越过首帧时刻，锚点就会落在内容之后 ⇒ D5 丢弃开头内容（吞开头）。
     const LEAD_CAP_US = 3_800_000n;
@@ -1930,9 +1936,29 @@ export class BridgeSession {
       forceNow: this.ap2Session === null && raopNowAnchorEnabled(),
       groupAnchorUs: sharedAnchorUs ?? undefined,
       coldPreheat: !this.anchoredOnce,
-      queuedUs: BigInt(Math.round((this.inBytes / BRIDGE_PCM_BYTES_PER_SEC) * 1e6)),
+      // [P0-C 2026-11-25 splice 残留口径] 「设备残留音频」= RAOP 发送队列(inBytes)
+      // + 已编码待发(outBuf)。旧口径只算 inBytes,漏掉 outBuf ⇒ 指令落点可能仍落在
+      // 设备还没排完的音频之前 ⇒ splice 被忽略(240 iEAST 14:45:33 实证链)。
+      // MA 同口径:sendspin_bridge 的 flushed_head/.audio_pending_ms。
+      queuedUs: BigInt(Math.round(((this.inBytes + this.outBuf.length) / BRIDGE_PCM_BYTES_PER_SEC) * 1e6)),
       keepQueueTailUs: keepQueueTailUs > 0n ? keepQueueTailUs : undefined,
     });
+    // [P0-C 诊断] splice 下限是否生效、生效多少,一眼可查:residualUsMs = 设备残留,
+    // spliceFloorMs = residual+margin,finalLeadMs = 实际 lead。若 finalLeadMs 明显小于
+    // spliceFloorMs,说明 lead 被 ceiling(首帧−200ms)压回 —— 那就是「宁吞新头」的取舍点。
+    {
+      const residualUs = BigInt(Math.round(((this.inBytes + this.outBuf.length) / BRIDGE_PCM_BYTES_PER_SEC) * 1e6));
+      const spliceFloorMs = Math.round(Number(residualUs + BigInt(BRIDGE_SPLICE_LEAD_MARGIN_US)) / 1000);
+      log.info(`[airplay-bridge] ${JSON.stringify({
+        ev: "anchor-splice",
+        dev: this.deviceId,
+        gen: this.generation,
+        residualUsMs: Math.round(Number(residualUs) / 1000),
+        spliceFloorMs,
+        finalLeadMs: Number(plan.commandedLeadUs),
+        shared: sharedAnchorUs !== null,
+      })}`);
+    }
     // [P0-B 诊断] 三个时基一眼可比:泵新时间线基(pumpBase = 新曲首帧 ts)、保留队列尾、
     // 最终落锚。锚点被夹紧(= minSafe/keepQueueTail 上抬 或 首帧-200ms 下压)时,
     // anchorMinusTailUs / firstMinusAnchorUs 的符号就是裁头方向的直接证据。

@@ -186,6 +186,13 @@ export const AP2_WAIT_SLICE_MS = 10;
 /** 暂停保持上限(§5.4):暂停 ≤45s ⇒ 恢复按「继续」(原 A/B 不动,pacing 对齐);
  *  >45s ⇒ 恢复按「锚点不可达」重新锚定(A = now + warmLead,跳到该时刻内容)。 */
 export const BRIDGE_MAX_HELD_AUDIO_US = 45_000_000;
+/** [P0-C 2026-11-25 对齐 MA AIRPLAY_SPLICE_LEAD_MARGIN_MS] splice 型接收端(MUZO 2017
+ *  固件一族)只在「重排指令时刻落在残留排队音频之后」才执行换锚;落在之前 ⇒ 指令被
+ *  忽略,旧队列继续、新时戳域整体错位(240 真机 14:45:33 iEAST:首拍 delta 偏 +264ms、
+ *  随后 delta 4126~4268 / late +120/s 不收敛;HiVi 同走 warm 却没事 = 残留队列深度不同)。
+ *  修复 = 重锚/种子的指令时刻必须 ≥ 设备残留(发送队列 + 待发 outBuf)+ 本余量。
+ *  MA 原文:sendspin_bridge.py ~934-963 `+ AIRPLAY_SPLICE_LEAD_MARGIN_MS`。 */
+export const BRIDGE_SPLICE_LEAD_MARGIN_US = 400_000;
 /** 发送节拍 rebase 阈值:sendAt 落后墙钟超过该值(暂停恢复/长饥饿)⇒ 对齐 pacing
  *  参考而不计 latePackets(§5.4「暂停期不计 latePackets」;RTP 映射不动)。 */
 export const BRIDGE_RESUME_REBASE_US = 2_000_000;

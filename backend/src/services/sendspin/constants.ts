@@ -161,4 +161,17 @@ export const BRIDGE_TRACK_KEEP_QUEUE_ENABLED = !(
 /** 播中回填单桥总量上限(µs)。常态窗口宽仅 1s,远达不到;纯防御异常大帧。 */
 export const BRIDGE_BACKFILL_MAX_US = 6_000_000;
 
+// ---- P0-C(2026-11-25)设备判 late 全丢的自愈守卫 ----
+// 形态(240 真机 14:45:33 iEAST 实证):warm 会话重锚时指令落点没越过设备残留队列
+// ⇒ splice 型固件忽略换锚 ⇒ 时戳域整体错位 ⇒ 设备把到达帧全判 late 丢弃 ⇒ inQueueMs
+// 恒 0、父侧照常投 ⇒ late 线性无限涨(3 分钟 +31348)且**无任何机制收敛**(对齐器
+// 只吃真实帧,inQueue 空 ⇒ resampleIn 走 padded() 不产生 realign)。
+// 守卫:父侧每拍看「该设备积压 0 而自己仍在投」的连续 tick 数,达到阈值做**一次**
+// 受限重锚(sendBoundary("seek")+游标复位);此后受恢复守卫冷却约束,防止守卫本身
+// 变成 churn 源(对齐 MA BRIDGE_TRANSPORT_RECOVERY_GUARD_SECONDS=30)。
+/** 触发阈值(连续 tick 数)。tick = BRIDGE_PUSH_TICK_MS ⇒ 40 tick ≈ 10s。 */
+export const BRIDGE_LATE_SELFHEAL_TICKS = 40;
+/** 一次自愈重锚后的冷却(ms)。 */
+export const BRIDGE_TRANSPORT_RECOVERY_GUARD_MS = 30_000;
+
 export type PskCategory = "lt" | "pr" | "sn";
