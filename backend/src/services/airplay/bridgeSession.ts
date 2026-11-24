@@ -757,7 +757,21 @@ export function planBridgeAnchor(opts: {
         if (ceiling > 0n && useLead > ceiling) useLead = ceiling;
         const floorUs = minSafeUs - opts.nowUs > keepFloorUs ? minSafeUs - opts.nowUs : keepFloorUs;
         if (useLead < floorUs) useLead = floorUs;
-        anchorUs = opts.groupAnchorUs ?? (opts.nowUs + useLead);
+        // [验收6/MA A] 组共享锚点仍不得击穿本设备的 minSafe/splice 下限,也不得晚于
+        // 首帧−200ms(宁吞新头)。MA 出处:sendspin_bridge.py:934-945(splice 下限链)
+        // 与 :886-1030(组时间线归属);差异=MA 把 adjust 折进命令时刻,我们在此夹紧。
+        if (opts.groupAnchorUs !== undefined) {
+          anchorUs = opts.groupAnchorUs;
+          // floorAllUs 必须包含 useLead(它已吸收 splice 残留下限):组锚不得击穿
+          // 本设备自身的任何下限(MA :934-945 splice 链是 per-device 的)。
+          const floorA = minSafeUs - opts.nowUs > keepFloorUs ? minSafeUs - opts.nowUs : keepFloorUs;
+          const floorAllUs = floorA > useLead ? floorA : useLead;
+          if (anchorUs < opts.nowUs + floorAllUs) anchorUs = opts.nowUs + floorAllUs;
+          const firstCeilUs = contentUs - 200_000n;
+          if (anchorUs > firstCeilUs) anchorUs = firstCeilUs;
+        } else {
+          anchorUs = opts.nowUs + useLead;
+        }
         log.info(
           "[anchor-content] dev=" + (opts.coldPreheat === true ? "cold" : "warm")
           + " contentVsNowMs=" + String(Math.round(Number(contentOffsetUs) / 1000))
@@ -834,15 +848,26 @@ export const GROUP_ANCHOR_LATE_TOLERANCE_US = 500_000;
  *  ②复用前校验该锚点对本设备仍可达(`anchorUs ≥ now + floor − 容差`),否则不共享
  *  (中途重连那种「锚点在几十秒前」的场景属于组级重锚问题,不在本表职责内)。 */
 export class BridgeGroupAnchorRegistry {
-  private readonly byKey = new Map<string, { anchorUs: bigint; atMs: number }>();
+  private readonly byKey = new Map<string, { anchorUs: bigint; leadUs: bigint; atMs: number }>();
 
   constructor(
     private readonly ttlMs = 120_000,
     private readonly maxEntries = 32,
   ) {}
 
-  /** 取同组同 gen 的共享锚点;无 / 过期 / 对本设备已不可达 ⇒ null(调用方自行规划并发布)。 */
-  peek(groupKey: string, gen: number, nowHostUs: bigint, floorLeadUs: bigint): bigint | null {
+  /** 取同组同 gen 的共享锚点;无 / 过期 / 对本设备已不可达 ⇒ null(调用方自行规划并发布)。
+   *  [验收6/MA A] 返回值携带**组级 lead**(首个规划者的 commandedLeadUs):后续成员的
+   *  锚点必须从同一组参考派生,不允许各自独立种子漂移。MA 出处:sendspin_bridge.py
+   *  `_anchor_stream` —— "Always a join: the Sendspin timeline is the group's, never
+   *  the bridge's to set";START 一律 join=True 并把设备 ack 映射回组时间线。
+   *  本仓差异:未做 ack 映射(结构改动),以「共享锚点 + 本设备下限夹紧」近似,
+   *  见 planBridgeAnchor 的 groupAnchorUs 分支与 maybeBeginStream 的 floormiss 诊断。 */
+  peek(
+    groupKey: string,
+    gen: number,
+    nowHostUs: bigint,
+    floorLeadUs: bigint,
+  ): { anchorUs: bigint; leadUs: bigint } | null {
     const k = `${groupKey}#${gen}`;
     const e = this.byKey.get(k);
     if (!e) return null;
@@ -851,14 +876,15 @@ export class BridgeGroupAnchorRegistry {
       return null;
     }
     if (e.anchorUs + BigInt(GROUP_ANCHOR_LATE_TOLERANCE_US) < nowHostUs + floorLeadUs) return null;
-    return e.anchorUs;
+    return { anchorUs: e.anchorUs, leadUs: e.leadUs };
   }
 
-  /** 发布锚点(同 key 已有则保留先发布者 = 首个规划者的组时间线零点)。 */
-  publish(groupKey: string, gen: number, anchorUs: bigint): void {
+  /** 发布锚点(同 key 已有则保留先发布者 = 首个规划者的组时间线零点与组级 lead)。
+   *  [验收6/MA A] lead 与 anchor 一起登记,后到成员以同一组参考派生锚点。 */
+  publish(groupKey: string, gen: number, anchorUs: bigint, leadUs: bigint): void {
     const k = `${groupKey}#${gen}`;
     if (this.byKey.has(k)) return;
-    this.byKey.set(k, { anchorUs, atMs: Date.now() });
+    this.byKey.set(k, { anchorUs, leadUs, atMs: Date.now() });
     if (this.byKey.size > this.maxEntries) {
       const oldest = [...this.byKey.entries()].sort((a, b) => a[1].atMs - b[1].atMs)[0];
       if (oldest) this.byKey.delete(oldest[0]);
@@ -1900,9 +1926,11 @@ export class BridgeSession {
       && bridgeSyncGroupTimelineEnabled() && !!this.opts.groupKey && !!this.groupAnchors;
     const nowHostUs = nowUs();
     const floorLeadUs = BigInt(Math.round((latencyFrames / rate) * 1e6)) + BigInt(RAOP_SAFETY_MS * 1000);
-    const sharedAnchorUs = useSharedAnchor
+    const sharedAnchor = useSharedAnchor
       ? this.groupAnchors!.peek(this.opts.groupKey!, this.generation, nowHostUs, floorLeadUs)
       : null;
+    const sharedAnchorUs = sharedAnchor === null ? null : sharedAnchor.anchorUs;
+    const sharedAnchorLeadUs = sharedAnchor === null ? 0n : sharedAnchor.leadUs;
     // [P0-B 2026-11-25] 保留队列(S2)与新锚点必须同源:锚点不得早于**保留队列尾**的
     // 内容时刻,否则旧曲尾被排进「未来」;也不得晚于新曲首帧 −200ms,否则新曲开头被
     // D5 裁头(真机 -1607ms/-1.02s/-1.73s 三次实证)。区间为空 ⇒ 宁可丢旧曲尾巴
@@ -1990,8 +2018,23 @@ export class BridgeSession {
     if (useSharedAnchor) {
       if (sharedAnchorUs !== null) {
         log.info(`[airplay-bridge] group-anchor reuse: device=${this.deviceId} gen=${this.generation} anchorUs=${sharedAnchorUs}(leadUs=${sharedAnchorUs - nowHostUs})`);
+        if (plan.anchorUs > sharedAnchorUs) {
+          // [验收6/MA A] 组锚早于本设备自身下限(splice/minSafe)⇒ 已在 planBridgeAnchor
+          // 内抬到下限;此差值 = 该设备比组基准多出的残留。MA 出处:sendspin_bridge.py
+          // :934-945 —— 命令时刻必须落在残留音频之后,设备的 sync_adjust 不进组时间线。
+          log.info(`[airplay-bridge] ${JSON.stringify({
+            ev: "group-anchor-floormiss",
+            dev: this.deviceId,
+            gen: this.generation,
+            sharedAnchorUs: Number(sharedAnchorUs),
+            finalAnchorUs: Number(plan.anchorUs),
+            raisedUs: Number(plan.anchorUs - sharedAnchorUs),
+            sharedLeadUs: Number(sharedAnchorLeadUs),
+          })}`);
+        }
       } else {
-        this.groupAnchors!.publish(this.opts.groupKey!, this.generation, plan.anchorUs);
+        // [验收6/MA A] 发布时同时登记**组级 lead**,后到成员以它为同源参考。
+        this.groupAnchors!.publish(this.opts.groupKey!, this.generation, plan.anchorUs, plan.commandedLeadUs);
         log.info(`[airplay-bridge] group-anchor publish: device=${this.deviceId} gen=${this.generation} anchorUs=${plan.anchorUs}(leadUs=${plan.commandedLeadUs})`);
       }
     }

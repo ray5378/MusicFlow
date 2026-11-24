@@ -1633,7 +1633,13 @@ export class SendspinGroup {
       // (BOUNDARY{seek} + 游标复位到 now):不重建会话(防 churn),由接收端按新指令重排。
       // 冷却 BRIDGE_TRANSPORT_RECOVERY_GUARD_MS:一次事故只救一次,救不回交给上层摘桥。
       {
-        const starving = backlogMs <= 0 && deliveredUs > 0n && tailUs > now;
+        // [P0-C/N2 判定纪律,MA _transport_lost :1448-1472 同源] 传输丢失判定必须排除
+      // 「干净收尾」:自然曲末/手动停止时泵已停产,设备把残余播完 ⇒ 积压归 0 是**正常**
+      // 形态,绝不能触发自愈重锚(否则守卫会误伤正常收尾,复刻 MA 特意排除的分支)。
+      // 本仓对应判据 = 组当前有在播内容(this.current 非空);MA 对应 = ended_cleanly
+      // 与 stream.running 组合判定。差异:MA 判「传输对象」,我们判「会话在播」。
+      const starving = backlogMs <= 0 && deliveredUs > 0n && tailUs > now
+        && (this.current !== null && this.current !== undefined);
         if (starving) {
           const n = (this.bridgeLateSelfhealTicks.get(deviceId) ?? 0) + 1;
           this.bridgeLateSelfhealTicks.set(deviceId, n);
@@ -1654,6 +1660,9 @@ export class SendspinGroup {
             try {
               handle.sendBoundary("seek");
             } catch { /* 单设备重锚失败不连累组 */ }
+            // 游标复位必须同时写本地 cursor:块尾的 bcCursor.set(deviceId, cursor)
+            // 会用本拍投递游标覆盖,不写它复位就是空操作(单测 ① 抓到的真 bug)。
+            cursor = now;
             this.bcCursor.set(deviceId, now);
           }
         } else {

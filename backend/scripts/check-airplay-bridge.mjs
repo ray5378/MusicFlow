@@ -922,9 +922,9 @@ console.log("===== ⑳ D4~D9:组时间线唯一(D4/D5/D7/D8)+ 成员补偿必生
     "缺 BridgeGroupAnchorRegistry 或 peek 的可达性校验",
   );
   check(
-    "D7: 先 peek 共享锚点、未命中才 publish 本设备规划值(同组同 gen 只有一个锚点)",
+    "D7: 先 peek 共享锚点、未命中才 publish 本设备规划值(同组同 gen 只有一个锚点;[验收6/MA A] publish 携带组级 lead)",
     /this\.groupAnchors!\.peek\(\s*this\.opts\.groupKey!\s*,\s*this\.generation\s*,\s*nowHostUs\s*,\s*floorLeadUs\s*\)/.test(bs) &&
-      /this\.groupAnchors!\.publish\(\s*this\.opts\.groupKey!\s*,\s*this\.generation\s*,\s*plan\.anchorUs\s*\)/.test(bs),
+      /this\.groupAnchors!\.publish\(\s*this\.opts\.groupKey!\s*,\s*this\.generation\s*,\s*plan\.anchorUs\s*,\s*plan\.commandedLeadUs\s*\)/.test(bs),
     "peek / publish 调用形态不符(共享锚点可能只剩一头)",
   );
   check(
