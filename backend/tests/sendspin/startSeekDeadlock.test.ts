@@ -48,9 +48,35 @@ function makeServerStub() {
   };
 }
 
-function groupWith(bridges: string[]) {
+/** 直连成员桩(最小面:codec 分组 / 清流 / 宣告 / 音频下发)。 */
+function memberStub(clientId: string) {
+  const sent: { type: string; payload: unknown }[] = [];
+  const audio: { ts: bigint }[] = [];
+  const events: string[] = [];
+  return {
+    clientId,
+    codec: "pcm",
+    legacy: false,
+    appliedGain: () => 100,
+    bufferCapacityBytes: 0,
+    clientWantsStream: () => true,
+    sendJson(type: string, payload: unknown) {
+      sent.push({ type, payload });
+      if (type === "stream/clear") events.push("clear");
+    },
+    sendAudio(ts: bigint) { audio.push({ ts }); },
+    announceStream() { events.push("start"); },
+    sendGroupUpdate() {},
+    sent,
+    audio,
+    events,
+  };
+}
+
+function groupWith(bridges: string[], members: ReturnType<typeof memberStub>[] = []) {
   const srv = makeServerStub();
   const g = new SendspinGroup("g-start-seek", srv as any);
+  for (const m of members) g.members.add(m as any);
   const handles: Record<string, { pushed: { ts: bigint }[]; boundaries: string[] }> = {};
   for (const id of bridges) {
     const pushed: { ts: bigint }[] = [];
@@ -207,5 +233,39 @@ describe("start-seek 死锁修复(P0)", () => {
     expect(handles["dev-a"].pushed.length).toBeGreaterThan(0);
     expect(handles["dev-a"].boundaries.filter((b) => b === "seek").length).toBe(0);
     expect((g as any).bridgeDeadTicks.size).toBe(0);
+  });
+
+  it("⑤ 混合组:重基准对直连成员 stream/clear→重宣告,后续 sendAudio ts 与环连续(无 15s 倒跳)", async () => {
+    const mb = memberStub("esp32-player2");
+    const { g, handles } = groupWith(["dev-a"], [mb]);
+    const now = nowUs();
+    const epoch = (g as any).bridgeContentEpoch;
+    const key = (g as any).encoderKey("pcm", 100);
+    (g as any).bcEpoch.set(key, epoch);
+    for (let i = 0; i < 1400; i++) addRingFrame(g, now + 15_000_000n + BigInt(i) * 25_000n, epoch);
+    (g as any).deliveredPeak = 50 * 48_000;
+    (g as any).encoders.set(key, new PhaseEncoder());
+
+    // 两拍触发兜底重基准
+    (g as any).bridgeBroadcastTick(now);
+    (g as any).bridgeBroadcastTick(now + 250_000n);
+    // 直连成员:清流 + 入 pendingAnnounces(下一帧重宣告);桥仍 seek
+    expect(mb.events).toContain("clear");
+    expect((g as any).pendingAnnounces).toContain(mb);
+    expect(handles["dev-a"].boundaries).toContain("seek");
+
+    // 下一帧走真实 pushFrame ⇒ stream/start + sendAudio 的 ts 与平移后环连续
+    const rebasedTail = ringTail(g);
+    await g.pushFrame(now + 50_000_000n, new Float32Array(2400));
+    expect(mb.events).toContain("start");
+    expect((g as any).pendingAnnounces.length).toBe(0);
+    expect(mb.audio.length).toBeGreaterThan(0);
+    const memberTs = mb.audio[0].ts;
+    const newTail = ringTail(g);
+    // 成员与环同源:同一帧 ts(成员 sendAudio 不额外偏移,client 延迟补偿=0)
+    expect(memberTs).toBe(newTail);
+    // 连续性:新帧接在平移后环尾之后(≈一帧时长),不是 15s 倒跳/空洞
+    expect(newTail - rebasedTail).toBeLessThanOrEqual(30_000n);
+    expect(newTail - rebasedTail).toBeGreaterThan(0n);
   });
 });

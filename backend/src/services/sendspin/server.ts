@@ -1809,13 +1809,24 @@ export class SendspinGroup {
     // 空洞 ⇒ 播到 35s 再次 dead 2 拍 ⇒ 周期性 0.5s 死窗 + BOUNDARY 重锚)。
     // 不动 deliveredByGroup/deliveredPeak:它们在打戳公式里同减会互相抵消(见字段注释)。
     this.bridgeTimelineOffsetUs -= shiftUs;
+    // [补]混合组:直连成员的后续 ts 同样被偏移平移(见 bridgeTimelineOffsetUs),
+    // 它们已排队的旧时间线音频必须作废 —— 复刻切歌清流语义(clearPlayback):
+    // `stream/clear` 只清缓冲**不结束流**(spec 保留 stream/end 给队列空),随后
+    // 把成员压入 pendingAnnounces,下一帧 pushFrame 的 flushAnnounceFor 会用**真实
+    // codec header** 重新发 `stream/start`(与切歌/seek 同一路径,legacy 同源)。
+    for (const c of this.members) {
+      try {
+        c.sendJson("stream/clear", {});
+      } catch { /* 单成员失败不连累其余 */ }
+      if (!this.pendingAnnounces.includes(c)) this.pendingAnnounces.push(c);
+    }
     this.server.log(
       "warn",
       `bridge-start-seek-deadlock dev=${deviceId} shiftMs=${Math.round(Number(shiftUs) / 1000)} ` +
         `headVsNowMs=${Math.round(Number(headUs - now) / 1000)} tailVsNowMs=${Math.round(Number(tailUs - now) / 1000)} ` +
         `horizonMs=${Math.round(Number(horizonFinal - now) / 1000)} ringFrames=${ring.length} ` +
-        `timelineOffsetUs=${this.bridgeTimelineOffsetUs} ` +
-        `⇒ 环时间线前移 + 泵打戳偏移同步 + 全体 BOUNDARY{seek} 重锚(cursor=now)`,
+        `timelineOffsetUs=${this.bridgeTimelineOffsetUs} members=${this.members.size}` +
+        ` ⇒ 环时间线前移 + 泵打戳偏移同步 + 桥 BOUNDARY{seek} + 直连成员 stream/clear→重宣告(cursor=now)`,
     );
     for (const [id, h] of this.bridges) {
       try {
