@@ -55,9 +55,13 @@ import {
   BRIDGE_TRACK_LEAD_COLD_US,
   BRIDGE_TRACK_LEAD_WARM_US,
   BRIDGE_LATE_SELFHEAL_TICKS,
+  BRIDGE_REBASE_SHIFT_MAX_US,
+  BRIDGE_SELFHEAL_RETIME_SHIFT_MAX_US,
+  BRIDGE_RAOP_FRAME_US,
   BRIDGE_TRACK_KEEP_QUEUE_ENABLED,
   BRIDGE_TRANSPORT_RECOVERY_GUARD_MS,
 } from "./constants.js";
+import { selfhealBus } from "./selfhealBus.js";
 import { nowUs } from "./clock.js";
 import { MessageRouter } from "./messages.js";
 import "./roles/index.js";
@@ -243,6 +247,18 @@ export class SendspinServer {
     this.bridgeBacklogMs.clear();
     for (const [id, ms] of Object.entries(backlogMs)) {
       if (Number.isFinite(ms) && ms >= 0) this.bridgeBacklogMs.set(id, ms);
+    }
+  }
+
+  /** [组A] 逐设备累计 late 帧(RAOP 352/44100≈7.98ms/帧)—— 自愈分级 retime 的
+   *  shift 估计输入。与 bridgeBacklogMs 同链上行(bridgeStats → supervisor →
+   *  bridgeHealth rpc → 本 map),整体替换语义同上。 */
+  readonly bridgeLateTotal = new Map<string, number>();
+
+  setBridgeLateTotal(lateTotal: Record<string, number>): void {
+    this.bridgeLateTotal.clear();
+    for (const [id, n] of Object.entries(lateTotal)) {
+      if (Number.isFinite(n) && n >= 0) this.bridgeLateTotal.set(id, n);
     }
   }
 
@@ -907,6 +923,12 @@ export class SendspinGroup {
   private bridgeLateSelfhealTicks = new Map<string, number>();
   /** [P0-C 自愈守卫]上次自愈重锚时刻(逐设备,冷却基准)。 */
   private bridgeSelfhealAtMs = new Map<string, number>();
+  /** [组A-分级]自愈档位(逐设备):0/缺=retime 未试 1=retime 已发 2=lightRestart 已发。
+   *  升级判定见守卫块;设备恢复健康且距上次动作超冷却窗 ⇒ 复位。 */
+  private bridgeSelfhealLevel = new Map<string, number>();
+  /** [组A-分级]armed 时刻的设备 late 累计基线(逐设备):retime 的 shift 估计 =
+   *  触发时刻 lateTotal − 此基线,只对新增 late 负责(防旧账重放)。 */
+  private bridgeLateAtArmed = new Map<string, number>();
   /** [P0]环时间线重基准冷却(ms):一次死锁只前移一次 —— 两台设备共享同一条环,
    *  后判到的那台不能对已对齐的环再前移一次。 */
   private bridgeRebaseAtMs = 0;
@@ -1652,6 +1674,13 @@ export class SendspinGroup {
           this.bridgeLateSelfhealTicks.set(deviceId, n);
           const cooled = Date.now() - (this.bridgeSelfhealAtMs.get(deviceId) ?? 0) >= BRIDGE_TRANSPORT_RECOVERY_GUARD_MS;
           if (n === BRIDGE_LATE_SELFHEAL_TICKS) {
+            // [组A] armed 时刻记 late 基线:触发时的 retime shift 估计 = 触发时刻
+            // lateTotal − armed 基线(只对**新增** late 负责,防旧账重放)。
+            // 可选链:测试 stub 的 server 只有 log(无 bridgeLateTotal)。
+            this.bridgeLateAtArmed.set(
+              deviceId,
+              (this.server as { bridgeLateTotal?: Map<string, number> }).bridgeLateTotal?.get(deviceId) ?? 0,
+            );
             this.server.log(
               "warn",
               `bridge-late-selfheal-armed dev=${deviceId} ticks=${n} backlogMs=${backlogMs} deliveredMs=${Math.round(Number(deliveredUs) / 1000)} tailVsNowMs=${Math.round(Number(tailUs - now) / 1000)} (设备疑似全判 late,到达阈值将受限重锚)`,
@@ -1660,20 +1689,60 @@ export class SendspinGroup {
           if (n >= BRIDGE_LATE_SELFHEAL_TICKS && cooled) {
             this.bridgeLateSelfhealTicks.delete(deviceId);
             this.bridgeSelfhealAtMs.set(deviceId, Date.now());
-            this.server.log(
-              "warn",
-              `bridge-late-selfheal dev=${deviceId} ticks=${n} backlogMs=${backlogMs} ⇒ BOUNDARY{seek} + 游标复位(受限重锚,冷却 ${BRIDGE_TRANSPORT_RECOVERY_GUARD_MS}ms)`,
-            );
-            try {
-              handle.sendBoundary("seek");
-            } catch { /* 单设备重锚失败不连累组 */ }
-            // 游标复位必须同时写本地 cursor:块尾的 bcCursor.set(deviceId, cursor)
-            // 会用本拍投递游标覆盖,不写它复位就是空操作(单测 ① 抓到的真 bug)。
-            cursor = now;
-            this.bcCursor.set(deviceId, now);
+            // [组A-三级分级] 一级 retime(MA _absorb_playout_shift :1411-1446 同语义:
+            // 折回可证实的 shift 增量)→ 无效 ⇒ 二级 lightRestart(MA _restart_transport
+            // :640-693 形态,清管线重锚不拆 socket)⇒ 再失败 ⇒ 三级放弃留痕交上层。
+            // MA 差异:MA 有 binary cumulative_shift_seconds 上报,本仓 RAOP 无上报源,
+            // 用 late 帧增量估计(armed→now 的差 × 7980µs/帧);shift 超 10s 门 ⇒ retime
+            // 救不动,直接跳二级(01:05 事故实证:29s 错位只能清管线)。
+            // 二级动作含原受限重锚(BOUNDARY{seek}+游标复位)——真机 17:31 实证轻动作
+            // 可拉回;一级 retime 单独尝试不加 BOUNDARY(纯映射平移,SYNC 一段即生效)。
+            const level = (this.bridgeSelfhealLevel.get(deviceId) ?? 0) as 0 | 1 | 2;
+            const lateNow = (this.server as { bridgeLateTotal?: Map<string, number> }).bridgeLateTotal?.get(deviceId) ?? 0;
+            const lateDelta = Math.max(0, lateNow - (this.bridgeLateAtArmed.get(deviceId) ?? lateNow));
+            const shiftUs = Math.round(lateDelta * BRIDGE_RAOP_FRAME_US);
+            const lateMs = Math.round(shiftUs / 1000);
+            if (level === 0 && shiftUs <= BRIDGE_SELFHEAL_RETIME_SHIFT_MAX_US) {
+              // shiftUs=0(sendspin 侧无 late 数据)也走一级:桥侧自估裁决 —— 桥无新增
+              // late 证据则 skip 并返回 true,守卫 armed 再到即升级二级。
+              this.bridgeSelfhealLevel.set(deviceId, 1);
+              selfhealBus.request({ deviceId, level: 1, shiftUs });
+              this.server.log(
+                "warn",
+                `bridge-late-selfheal-retime dev=${deviceId} shiftUs=${shiftUs} lateDelta=${lateDelta} (一级:平移 RTP↔NTP 映射,桥自估核对;8s 内 late 不降升级 lightRestart)`,
+              );
+            } else if (level <= 1) {
+              this.bridgeSelfhealLevel.set(deviceId, 2);
+              selfhealBus.request({ deviceId, level: 2, shiftUs: 0 });
+              this.server.log(
+                "warn",
+                `bridge-late-selfheal-light-restart dev=${deviceId} level=${level === 0 ? `shiftMs=${lateMs}>10s 门,跳过 retime` : "retime 未奏效"} (二级:桥清管线+flush 重锚,不拆 socket)`,
+              );
+              try {
+                handle.sendBoundary("seek");
+              } catch { /* 单设备重锚失败不连累组 */ }
+              // 游标复位必须同时写本地 cursor:块尾的 bcCursor.set(deviceId, cursor)
+              // 会用本拍投递游标覆盖,不写它复位就是空操作(单测 ① 抓到的真 bug)。
+              cursor = now;
+              this.bcCursor.set(deviceId, now);
+            } else {
+              this.server.log(
+                "error",
+                `bridge-late-selfheal-exhausted dev=${deviceId} backlogMs=${backlogMs} (三级:retime 与 lightRestart 均未奏效,停止分级动作,交上层摘桥/重建;留痕供排障)`,
+              );
+            }
           }
         } else {
           this.bridgeLateSelfhealTicks.delete(deviceId);
+          // [组A] 分级档位复位:设备恢复健康(非 starving)且距上次动作 > 冷却窗 ⇒
+          // 档位清零(下次事故从头一级试起);冷却窗内复位会吞掉「恢复又复发」的
+          // 连续事故分级(30s 冷却本身已防 churn,这里对齐同一节奏)。
+          if (
+            Date.now() - (this.bridgeSelfhealAtMs.get(deviceId) ?? 0) >= BRIDGE_TRANSPORT_RECOVERY_GUARD_MS
+          ) {
+            this.bridgeSelfhealLevel.delete(deviceId);
+            this.bridgeLateAtArmed.delete(deviceId);
+          }
         }
       }
       this.bcCursor.set(deviceId, cursor);
@@ -1862,6 +1931,44 @@ export class SendspinGroup {
     const shiftUs = headUs > now ? headUs - now : 0n;
     if (shiftUs <= 0n) return null;
     this.bridgeRebaseAtMs = Date.now();
+    // [组A-分级/01:05 事故标定] shift 量级门:超大 shift 走**轻重启**,不整环前移
+    // (240 真机 01:05 实证:shift=29s 整环前移 ⇒ 环空 + offset 累计 -31.8s +
+    // 设备落后墙钟 57.5s,只能 restart 清状态兜底)。轻重启 = 旧代内容作废 + 泵
+    // 打戳偏移直接把后续新帧接到投递下沿起 + BOUNDARY{seek} + 游标复位。
+    if (shiftUs > BigInt(BRIDGE_REBASE_SHIFT_MAX_US)) {
+      // ① 旧代内容整体作废(错位时间线的残骸,投出去也来不及播):全组环清当前代次。
+      for (const r of this.recentByGroup.values()) {
+        for (let i = r.length - 1; i >= 0; i--) if (r[i]!.ep === epoch) r.splice(i, 1);
+      }
+      // ② 泵打戳偏移:把「下一帧应有的 ts」从旧时间线尾接回到投递下沿。
+      //    下一帧 ≈ 环尾 + 尾帧时长;目标 = now + 投递下沿(与换代重锚同一落点)。
+      let lastDur = 25_000n;
+      const key0 = this.encoderKey("pcm", 100);
+      const ring0 = this.recentByGroup.get(key0);
+      if (ring0 && ring0.length > 0) lastDur = BigInt(ring0[ring0.length - 1]!.durUs);
+      const tailNext = tailUs + lastDur;
+      const target = now + BigInt(BRIDGE_PUSH_FLOOR_US);
+      const pullBack = tailNext > target ? tailNext - target : 0n;
+      if (pullBack > 0n) this.bridgeTimelineOffsetUs -= pullBack;
+      // ③ 直连成员:清缓冲 + 重宣告(与整环前移路径同语义,见下)。
+      for (const c of this.members) {
+        try { c.sendJson("stream/clear", {}); } catch { /* 单成员失败不连累其余 */ }
+        if (!this.pendingAnnounces.includes(c)) this.pendingAnnounces.push(c);
+      }
+      this.server.log(
+        "warn",
+        `bridge-start-seek-deadlock dev=${deviceId} mode=light-restart shiftMs=${Math.round(Number(shiftUs) / 1000)} ` +
+          `headVsNowMs=${Math.round(Number(headUs - now) / 1000)} tailVsNowMs=${Math.round(Number(tailUs - now) / 1000)} ` +
+          `pullBackMs=${Math.round(Number(pullBack) / 1000)} timelineOffsetUs=${this.bridgeTimelineOffsetUs} ` +
+          `⇒ 旧代内容作废 + 泵新帧接投递下沿 + 桥 BOUNDARY{seek}(01:05 事故分级:超大 shift 不整环前移)`,
+      );
+      for (const [id, h] of this.bridges) {
+        try { h.sendBoundary("seek"); } catch { /* 单设备重锚失败不连累组 */ }
+        this.bcCursor.set(id, now);
+        this.bridgeDeadTicks.delete(id);
+      }
+      return now;
+    }
     // [P0-补]**所有**组环的当前代次帧整体前移 —— 不能只移 pcm:100:泵时间线是
     // 全局记账(deliveredByGroup/deliveredPeak 跨 codec 组共享),flac 等组环与
     // pcm 环同源打戳,只移一条会让各环与泵记账错位。

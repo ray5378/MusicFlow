@@ -488,9 +488,9 @@ export async function bridgeNudgeDelayDevice(deviceId: string, deltaUs: number):
  *  RTP↔NTP 映射 —— SYNC 无回执,实测 GGMM 只在 RECORD 时采纳映射,运行中改值不保证生效。
  *  代价 = 重建窗口 ~1~2s 静音(内容轴不变,仍按 D7/D8 的组锚点规则)。
  *  @returns true = 已重建;false = 无桥会话/子进程未跑(调用方按路由重建/成员 join 兜底)。 */
-export async function bridgeRebuildDelayDevice(deviceId: string, shiftUs: number): Promise<boolean> {
+export async function bridgeRebuildDelayDevice(deviceId: string, shiftUs: number, reason = "delay-change"): Promise<boolean> {
   const running = airplaySupervisor.isRunning();
-  log.info(`[bridge-rebuild-delay] enter dev=${deviceId} shiftUs=${shiftUs} running=${running}`);
+  log.info(`[bridge-rebuild-delay] enter dev=${deviceId} shiftUs=${shiftUs} reason=${reason} running=${running}`);
   // [S8 复核③]用户重新标定 ⇒ 校准累计量清零:shift 已重置为用户新值,
   // 旧 cum 若残留,下次 nudge 会双重补偿。
   bridgeCalibCumulativeUs.delete(deviceId);
@@ -498,7 +498,7 @@ export async function bridgeRebuildDelayDevice(deviceId: string, shiftUs: number
   const v = Number(shiftUs);
   if (!Number.isFinite(v)) return false;
   try {
-    const r = await airplaySupervisor.rpc<boolean>("bridgeRebuildDelay", { deviceId, shiftUs: Math.round(v) });
+    const r = await airplaySupervisor.rpc<boolean>("bridgeRebuildDelay", { deviceId, shiftUs: Math.round(v), reason });
     log.info(`[bridge-rebuild-delay] result dev=${deviceId} r=${String(r)}`);
     return r;
   } catch (e) {
@@ -564,6 +564,21 @@ export async function bridgeDebugMarkRecovery(deviceId: string): Promise<boolean
     return Boolean((r as { hit?: boolean } | null)?.hit);
   } catch (e: any) {
     log.debug(`[bridge-debug] ${deviceId} mark-recovery 注入失败(忽略): ${e?.message || e}`);
+    return false;
+  }
+}
+
+/** [组A/N3,MA sendspin_bridge.py:640-693 _restart_transport 同形态] 按deviceId 轻量
+ *  重启该设备桥的内容管线(清锚点/对齐器 + flush,socket 仍 warm 复用,**绝不
+ *  reconnectRaop**)—— 自愈分级第二级(retime 无效后的最小代价动作)。 */
+export async function bridgeLightRestart(deviceId: string, reason: string): Promise<boolean> {
+  if (!deviceId) return false;
+  if (!airplaySupervisor.isRunning()) return false;
+  try {
+    const r = await airplaySupervisor.rpc<boolean>("bridgeLightRestart", { deviceId, reason });
+    return r !== false;
+  } catch (e: any) {
+    log.warn(`[bridge-selfheal] ${deviceId} lightRestart 下发失败: ${e?.message || e}`);
     return false;
   }
 }

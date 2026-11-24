@@ -61,9 +61,10 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
           actualSendAtUs: row.actualSendAtUs,
           commandedAnchorUs: row.commandedAnchorUs,
           firstPacketLeadUs: row.firstPacketLeadUs,
-          firstFrameTsUs: row.firstFrameTsUs,
-          isAp2: row.isAp2,
-        });
+        firstFrameTsUs: row.firstFrameTsUs,
+        isAp2: row.isAp2,
+        lateTotal: row.lateTotal,
+      });
       } catch {
         /* 上报失败不影响推流 */
       }
@@ -220,6 +221,14 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
           String(p?.deviceId ?? ""),
           Number(p?.shiftUs ?? 0),
           String(p?.reason ?? "delay-change"),
+        );
+      }
+      case "bridgeLightRestart": {
+        // [组A/N3] 自愈分级第二级:清内容管线+flush 重锚,socket 仍 warm(MA
+        // _restart_transport :640-693 形态,绝不 TEARDOWN/重连)。
+        return this.bridgeSessions.lightRestart(
+          String(p?.deviceId ?? ""),
+          String(p?.reason ?? "late-selfheal-light-restart"),
         );
       }
       case "raopProbe": {

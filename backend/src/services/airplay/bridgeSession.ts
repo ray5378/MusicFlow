@@ -1264,6 +1264,10 @@ export class BridgeSession {
   private lastFrontierUs = 0n;
   /** A(垫片窗静音续流):token 递增令在跑 filler 退出;promise 供新流首包前收尾。 */
   private gapFillerToken = 0;
+  /** [组A] 上次 late-selfheal-retime 时刻的 late 累计基线:retime 只对两次之间
+   *  **新增**的 late 帧负责(MA _absorb_playout_shift 的 delta 口径;无新增=无证据
+   *  不平移,防把猜测当实测)。 */
+  private lastRetimeLateTotal = 0;
   private gapFillerPromise: Promise<number> | null = null;
   /** B(消费停滞看门狗):重连进行中防重入。 */
   private livenessReconnectInFlight = false;
@@ -2718,6 +2722,7 @@ export class BridgeSession {
         firstPacketLeadUs: this.firstPacketLeadUs,
         firstFrameTsUs: this.firstFrameTsUs === null ? null : Number(this.firstFrameTsUs),
         isAp2: this.ap2Session !== null,
+        lateTotal: this.player?.bridgeLateCount ?? 0,
       });
       const nowMs = Date.now();
 
@@ -3151,18 +3156,68 @@ export class BridgeSession {
    *  (无 RTP 时间线,主进程按路由重建兜底)。 */
   async rebuildForShift(shiftUs: number, reason = "delay-change"): Promise<boolean> {
     if (this.closed) return false;
+    // [组A] late-selfheal-retime:shift 由**桥内** late 增量自估(数据在设备侧,
+    // 主进程传 shiftUs=0 触发)。MA 出处:sendspin_bridge.py:1411-1446
+    // _absorb_playout_shift —— MA 的 delta 来自 binary cumulative_shift_seconds
+    // 上报;本仓 RAOP 无该上报源,用 late 帧增量估计(352/44100≈7.98ms/帧;
+    // 真机标定 late≈+123/s ≈ 设备 1x 实时落后)。基线 lastRetimeLateTotal
+    // 防重放:两次 retime 之间只对**新增** late 负责;无新增 late = 无证据,
+    // 不做映射平移(禁止把猜测当实测),守卫侧按「未奏效」升级 lightRestart。
+    let effectiveShift = shiftUs;
+    if (reason === "late-selfheal-retime") {
+      const late = this.player?.bridgeLateCount ?? 0;
+      const deltaFrames = Math.max(0, late - this.lastRetimeLateTotal);
+      this.lastRetimeLateTotal = late;
+      effectiveShift = Math.round(deltaFrames * 7980);
+      // 桥侧自估钳制:与守卫侧 BRIDGE_SELFHEAL_RETIME_SHIFT_MAX_US(10s,sendspin/
+      // constants.ts)同值 —— retime 只救「轻错位」,超出即判定过深(01:05 事故实证
+      // 29s 平移会环空),skip 让守卫 armed 再到升级二级 lightRestart。
+      const SELFHEAL_RETIME_SHIFT_MAX_US = 10_000_000;
+      if (effectiveShift <= 0 || effectiveShift > SELFHEAL_RETIME_SHIFT_MAX_US) {
+        log.info(`[airplay-bridge] ${JSON.stringify({
+          ev: "late-selfheal-retime-skip", dev: this.deviceId, late, deltaFrames, shiftUs: effectiveShift,
+          note: effectiveShift <= 0
+            ? "无新增 late 证据,不平移映射(自愈分级一级无证据即让位二级)"
+            : "自估 shift 超 10s 门,过深错位 retime 救不动,让位二级 lightRestart",
+        })}`);
+        return true;
+      }
+    }
     // AP2 无 RTP 时间线:opts 已更新,只能靠主进程重建桥路由(调用方兜底)。
     if (this.ap2Session !== null) {
-      this.applyAnchorShift(shiftUs);
+      this.applyAnchorShift(effectiveShift);
       return false;
     }
-    if (!this.applyAnchorShift(shiftUs)) return false;
+    if (!this.applyAnchorShift(effectiveShift)) return false;
     log.info(`[airplay-bridge] ${JSON.stringify({
       ev: "set-delay-inplace", dev: this.deviceId, gen: this.generation,
-      shiftUs, reason,
+      shiftUs: effectiveShift, reason,
       // 原地 retime 是否真的落到了在跑的流(未起流/已中止 ⇒ false,新值留待下次锚定)
       applied: this.player !== null && this.aligner !== null && !this.streamAborted,
     })}`);
+    return true;
+  }
+
+  /** [组A/N3,MA sendspin_bridge.py:640-693 _restart_transport 同形态] 轻量重启:
+   *  清内容管线(锚点/对齐器/首帧时戳全部作废)+ flush 推流,下一帧在新锚点重排;
+   *  **绝不 reconnectRaop**(RAOP socket 仍 warm 复用,与 MA "kept, still-connected
+   *  stream" 一致)。触发面:自愈分级第二级(retime 无效/shift 超 10s 门)。
+   *  差异取舍:MA 清 write_queue+held chunks;本仓锚点状态在 session 字段,
+   *  清法与 onBoundary 换代重启分支(1780)同款 —— 已被真机验证的重锚三件套。 */
+  lightRestart(reason: string): boolean {
+    if (this.closed) return false;
+    log.warn(`[airplay-bridge] ${JSON.stringify({
+      ev: "late-selfheal-light-restart", dev: this.deviceId, gen: this.generation, reason,
+      note: "清锚点/对齐器 + flush 重锚,不拆 socket(MA _restart_transport 形态)",
+    })}`);
+    this.firstFrameTsUs = null;
+    this.aligner = null;
+    this.anchors = null;
+    this.anchorUs = null;
+    this.commandedLeadUs = null;
+    this.firstPacketLeadUs = null;
+    this.streamAborted = true;
+    this.player?.flush();
     return true;
   }
 
@@ -3273,6 +3328,10 @@ type BridgeStatsSink = (row: {
   /** AP2 会话标记:S8 复核② —— AP2 执行端(applyAnchorShift)是 no-op,
    *  排除出校准判定面,避免「每 10s 判定→下发→false→空转」。 */
   isAp2: boolean;
+  /** [组A] 设备侧累计 late 帧(RAOP 352/44100≈7.98ms/帧)—— 自愈分级 retime 的
+   *  shift 估计输入(上行链:本 sink → childMain bridgeStats → 主进程 supervisor →
+   *  sendspin bridgeHealth rpc → server.bridgeLateTotal → 守卫三级分级)。 */
+  lateTotal: number;
 }) => void;
 let bridgeStatsSink: BridgeStatsSink | null = null;
 
@@ -3417,6 +3476,17 @@ export class BridgeSessionManager {
     for (const s of this.sessions.values()) {
       if (s.deviceId !== deviceId) continue;
       if (await s.rebuildForShift(shiftUs, reason)) return true;
+    }
+    return false;
+  }
+
+  /** [组A/N3] 按 deviceId 轻量重启内容管线(自愈分级第二级,清管线不拆 socket)。
+   *  @returns true = 命中会话并已重启;false = 该设备当前无桥会话。 */
+  lightRestart(deviceId: string, reason: string): boolean {
+    this.pruneClosed();
+    for (const s of this.sessions.values()) {
+      if (s.deviceId !== deviceId) continue;
+      return s.lightRestart(reason);
     }
     return false;
   }

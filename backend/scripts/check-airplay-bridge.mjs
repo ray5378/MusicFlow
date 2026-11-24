@@ -1038,15 +1038,15 @@ console.log("===== ⑳ D4~D9:组时间线唯一(D4/D5/D7/D8)+ 成员补偿必生
     "childMain 未把 bridgeRebuildDelay 落到 rebuildForShift",
   );
   check(
-    "D9/方案1: 运行中改补偿只 applyAnchorShift(原地 retime),绝不 TEARDOWN 重建会话",
-    /if\s*\(\s*!this\.applyAnchorShift\(\s*shiftUs\s*\)\s*\)\s*return\s+false\s*;/.test(bs) &&
+    "D9/方案1: 运行中改补偿只 applyAnchorShift(原地 retime),绝不 TEARDOWN 重建会话 —— [组A] 变量改 effectiveShift(late-selfheal-retime 桥自估),钉面同步",
+    /if\s*\(\s*!this\.applyAnchorShift\(\s*(?:effectiveShift|shiftUs)\s*\)\s*\)\s*return\s+false\s*;/.test(bs) &&
       /ev:\s*"set-delay-inplace"/.test(bs) &&
       !/ev:\s*"rebuild-shift"/.test(bs),
     "rebuildForShift 又回到重建会话(rebuild-shift),或丢了 applyAnchorShift / set-delay-inplace",
   );
   check(
-    "D9: AP2 出口无 RTP 时间线 ⇒ rebuildForShift 只更新 opts 并返回 false(交由路由重建兜底)",
-    /if\s*\(\s*this\.ap2Session\s*!==\s*null\s*\)\s*\{\s*this\.applyAnchorShift\(\s*shiftUs\s*\)\s*;\s*return\s+false\s*;/.test(bs),
+    "D9: AP2 出口无 RTP 时间线 ⇒ rebuildForShift 只更新 opts 并返回 false(交由路由重建兜底) —— [组A] effectiveShift 同步",
+    /if\s*\(\s*this\.ap2Session\s*!==\s*null\s*\)\s*\{\s*this\.applyAnchorShift\(\s*(?:effectiveShift|shiftUs)\s*\)\s*;\s*return\s+false\s*;/.test(bs),
     "AP2 分支未返回 false(调用方会误以为已生效)",
   );
   check(
@@ -1055,6 +1055,61 @@ console.log("===== ⑳ D4~D9:组时间线唯一(D4/D5/D7/D8)+ 成员补偿必生
       /else\s+if\s*\(\s*isBridgeRouteActive\(\s*id\s*\)\s*\)\s*\{[\s\S]{0,200}?rebuilt\s*=\s*await\s+rebuildBridgeRoutes\(\s*id\s*\)/.test(route) &&
       /await\s+bridgeJoinMember\(\s*id\s*,/.test(route),
     "路由未按 成员原地 retime → 组桥重建 → 成员 join 的兜底顺序",
+  );
+}
+
+// ㉒ 组A:自愈三级分级(late-selfheal retime→lightRestart→exhausted)+ lateTotal 上行(2026-11-25)
+// ---------------------------------------------------------------------------
+console.log("===== ㉒ 组A:自愈三级分级 + lateTotal 上行 =====");
+{
+  const bs = code(BRIDGE_SESSION);
+  const ctl = code(CONTROL);
+  const child = code(CHILD_MAIN);
+  const server = code("backend/src/services/sendspin/server.ts");
+  const consts = code("backend/src/services/sendspin/constants.ts");
+  const schild = code("backend/src/services/sendspin/childMain.ts");
+  const sproto = code("backend/src/services/sendspin/ipcProtocol.ts");
+  check(
+    "组A: 守卫三级分级三日志行齐备(retime/light-restart/exhausted)+ 档位与基线 Map",
+    server.includes("bridgeSelfhealLevel")
+      && server.includes("bridgeLateAtArmed")
+      && server.includes("bridge-late-selfheal-retime")
+      && server.includes("bridge-late-selfheal-light-restart")
+      && server.includes("bridge-late-selfheal-exhausted"),
+    "守卫三级分级缺档位 Map/基线 Map/日志行",
+  );
+  check(
+    "组A: 一级动作经 selfhealBus 上行;量级门 BRIDGE_SELFHEAL_RETIME_SHIFT_MAX_US=10s 与帧口径常量钉死",
+    server.includes("selfhealBus.request")
+      && count(consts, "export const BRIDGE_SELFHEAL_RETIME_SHIFT_MAX_US = 10_000_000;") === 1
+      && count(consts, "export const BRIDGE_RAOP_FRAME_US = 7980;") === 1
+      && count(consts, "export const BRIDGE_REBASE_SHIFT_MAX_US = 16_000_000;") === 1,
+    "selfhealBus 上行缺失,或常量被改动(rebase 门 16s / retime 门 10s / RAOP 帧 7980µs)",
+  );
+  check(
+    "组A: lateTotal 全链上行(桥 sink → airplay childMain → sendspin bridgeHealth → server Map)",
+    bs.includes("lateTotal: this.player?.bridgeLateCount ?? 0")
+      && child.includes("lateTotal: row.lateTotal")
+      && schild.includes("setBridgeLateTotal")
+      && server.includes("setBridgeLateTotal"),
+    "lateTotal 上行链断点(sink/转发/rpc 接收/server Map)",
+  );
+  check(
+    "组A: 桥侧 lightRestart 存在且绝不 reconnectRaop;retime 自估带基线防重放与 skip 留痕",
+    bs.includes("lightRestart(reason: string)")
+      && bs.includes("ev: \"late-selfheal-light-restart\"")
+      && bs.includes("lastRetimeLateTotal")
+      && bs.includes("ev: \"late-selfheal-retime-skip\"")
+      && /lightRestart[\s\S]{0,900}?(?!.*reconnectRaop)/.test(bs.slice(0, 0)) || !/lightRestart\(reason[\s\S]{0,900}?reconnectRaop/.test(bs),
+    "lightRestart 内出现 reconnectRaop 或缺 skip 留痕",
+  );
+  check(
+    "组A: 主进程执行器与 RPC 全链(selfhealExec → control → airplay childMain case → manager.lightRestart)",
+    sproto.includes('t: "bridgeSelfhealAction"')
+      && child.includes('case "bridgeLightRestart"')
+      && ctl.includes("export async function bridgeLightRestart")
+      && bs.includes("lightRestart(deviceId: string, reason: string)"),
+    "主进程执行链断点(事件类型/RPC case/control 入口/manager 分发)",
   );
 }
 

@@ -104,7 +104,11 @@ export type SendspinChildEvent =
   /** 新曲**真正出声**的那一刻(泵的可听位越过下界)。主进程据此立刻放开 displayHold
    *  并广播一次状态：此前只能等 400ms 观察器轮询 + 子进程 RPC 回来，实测迟 1~2s，
    *  界面第一眼就是「02 秒」而不是 00:00。 */
-  | { t: "audibleStarted"; clientId: string; songId: string; positionMs: number; durationMs: number };
+  | { t: "audibleStarted"; clientId: string; songId: string; positionMs: number; durationMs: number }
+  /** [组A] 自愈分级动作上行(守卫 armed→触发):level 1=retime 2=lightRestart。
+   *  主进程经 airplay/selfhealExec 落到 control 层 RPC(bridgeRebuildDelay /
+   *  bridgeLightRestart),执行体在 airplay 桥子进程。 */
+  | { t: "bridgeSelfhealAction"; deviceId: string; level: number; shiftUs: number };
 
 /** 主进程 → child。 */
 export type ParentToSendspinChild = HostToChild<SendspinHostExtra>;

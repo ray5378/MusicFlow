@@ -78,6 +78,17 @@ export function dispatchSendspinChildEvent(ev: SendspinChildEvent, hooks: Superv
     case "audibleStarted":
       try { hooks.onAudibleStarted?.(ev.clientId, ev.songId, ev.positionMs, ev.durationMs); } catch { /* ignore */ }
       return;
+    case "bridgeSelfhealAction":
+      // [组A] 自愈分级动作 → airplay 桥子进程。动态 import 与 markSongUnplayableInMain
+      // 同款(静态引入 control.ts 会把 API/registry 链拉进来成环);fire-and-forget,
+      // 执行失败守卫侧按「未奏效」自行升级,不回传。
+      void (async () => {
+        try {
+          const { bridgeSelfhealDispatch } = await import("../airplay/selfhealExec.js");
+          bridgeSelfhealDispatch(ev.deviceId, ev.level, ev.shiftUs);
+        } catch { /* 分发失败不影响推流 */ }
+      })();
+      return;
     default:
       return;
   }

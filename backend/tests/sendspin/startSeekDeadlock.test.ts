@@ -315,4 +315,38 @@ describe("start-seek 死锁修复(P0)", () => {
     }
     expect(srv.logs.filter((l: string) => l.includes("bridge-start-seek-deadlock")).length).toBe(1);
   });
+
+  // [组A-分级/01:05 事故标定] shift 量级门:超大 shift(40s > 8s 门)⇒ 轻重启:
+  // 旧代内容作废、泵新帧接投递下沿、BOUNDARY{seek}、游标复位 —— 不整环前移
+  // (整环前移在 01:05 实证会把 30s+ 的环压进窗口 ⇒ 环空 + offset 累计爆炸)。
+  it("⑥ 超大 shift ⇒ mode=light-restart:旧代作废、泵新帧接下沿、游标复位", async () => {
+    const { g, srv, handles } = groupWith(["dev-a"]);
+    const now = nowUs();
+    const epoch = (g as any).bridgeContentEpoch;
+    const key = (g as any).encoderKey("pcm", 100);
+    (g as any).bcEpoch.set(key, epoch);
+    // 环内容整体在 now+40s(超大 shift 形态;01:05 实测 29s)
+    for (let i = 0; i < 40; i++) addRingFrame(g, now + 40_000_000n + BigInt(i) * 25_000n, epoch);
+    (g as any).deliveredPeak = 40 * 48_000;
+    (g as any).encoders.set(key, new PhaseEncoder());
+
+    (g as any).bridgeBroadcastTick(now);
+    (g as any).bridgeBroadcastTick(now + 250_000n);
+    const lines = srv.logs.filter((l: string) => l.includes("bridge-start-seek-deadlock"));
+    expect(lines.length).toBe(1);
+    expect(lines[0]).toContain("mode=light-restart"); // 走轻重启,不是整环前移
+    expect(handles["dev-a"].boundaries).toContain("seek");
+    expect((g as any).bcCursor.get("dev-a")).toBe(now + 250_000n);
+    // 旧代内容已作废(环里不再有旧时间线 +40s 的帧)
+    expect(ringTail(g)).toBeLessThan(now + 5_000_000n);
+    // 泵打戳偏移已把后续新帧拉回投递下沿附近
+    expect((g as any).bridgeTimelineOffsetUs).toBeLessThan(0n);
+
+    // 真实 append:泵按旧累计打戳(+40s 尾)⇒ 经偏移后新帧必须落在下沿附近(非 +40s)
+    const pushed = await g.pushFrame(now + 41_000_000n, new Float32Array(2400));
+    expect(Number(pushed)).toBeGreaterThan(0);
+    const newTail = ringTail(g);
+    expect(newTail).toBeGreaterThan(now); // 时间轴不倒退
+    expect(newTail).toBeLessThan(now + 5_000_000n); // 不再挂在 +40s 错位时间线上
+  });
 });

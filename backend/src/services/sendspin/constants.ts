@@ -169,6 +169,28 @@ export const BRIDGE_BACKFILL_MAX_US = 6_000_000;
 // 守卫:父侧每拍看「该设备积压 0 而自己仍在投」的连续 tick 数,达到阈值做**一次**
 // 受限重锚(sendBoundary("seek")+游标复位);此后受恢复守卫冷却约束,防止守卫本身
 // 变成 churn 源(对齐 MA BRIDGE_TRANSPORT_RECOVERY_GUARD_SECONDS=30)。
+/** [组A-分级/01:05 事故标定] 死锁兜底 shift 量级门(µs)。
+ *  shift ≤ 此值 ⇒ 整环前移(原方案:《燃》15s 场景真机+测试已验证有效,6e47da5c/
+ *  2124a743 时代多次实证;14:45 shift=6.5s 同路径成功);
+ *  shift > 此值 ⇒ 轻重启(recoverStartSeekDeadlock mode=light-restart):
+ *  240 真机 01:05 实证 shift=29s 时整环前移把 30s+ 的环压进窗口 ⇒ 环空
+ *  (no-frame-in-window)+ timelineOffsetUs 累计 -31.8s ⇒ 设备落后墙钟 57.5s,
+ *  最终只能 restart 清状态。
+ *  门取 16s:下界覆盖已验证有效的 15s 事故场景(不得挡掉);上界低于 29s 崩坏
+ *  场景。**注意**:01:05 的崩坏另有游标覆盖 bug(2624cc30 已修)叠加,门值真机
+ *  复采时需再校准 —— 若修复后 29s 场景整环前移不再环空,门可放宽。 */
+export const BRIDGE_REBASE_SHIFT_MAX_US = 16_000_000;
+/** [组A-分级] late-selfheal retime 的 shift 量级门(µs)。
+ *  一级动作(retime,平移 RTP↔NTP 映射)只对「轻错位」有效:shift ≤ 10s 才试,
+ *  超过 ⇒ 直接跳二级 lightRestart(清管线重锚)。真机标定(2026-11-25 F4/F7b):
+ *  设备全判 late 时 late ≈ +123 帧/s,RAOP 帧 352/44100 ≈ 7.98ms ⇒ ≈0.98s/s
+ *  (即 1x 实时落后);10s armed 窗口内 late 增量 ≈ 9.8s shift —— 门设在 10s 恰好
+ *  覆盖正常窗口,超出即判定「错位深于 retime 能救的范围」(对齐 MA
+ *  _absorb_playout_shift 只折回可证实增量的克制语义,sendspin_bridge.py:1411-1446)。 */
+export const BRIDGE_SELFHEAL_RETIME_SHIFT_MAX_US = 10_000_000;
+/** [组A-分级] RAOP 帧时长(µs):352 采样 / 44100Hz ≈ 7.98ms —— late 帧增量 × 此值
+ *  = 设备内容时间线的估计滞后量(与 raop.ts 发送节拍注释同口径)。 */
+export const BRIDGE_RAOP_FRAME_US = 7980;
 /** 触发阈值(连续 tick 数)。tick = BRIDGE_PUSH_TICK_MS ⇒ 40 tick ≈ 10s。 */
 export const BRIDGE_LATE_SELFHEAL_TICKS = 40;
 /** 一次自愈重锚后的冷却(ms)。 */

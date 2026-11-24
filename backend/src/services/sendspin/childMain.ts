@@ -21,6 +21,7 @@ import type {
   PairRecordMirrorMsg,
 } from "./ipcProtocol.js";
 import { paceBumpBus } from "./paceBumpBus.js";
+import { selfhealBus } from "./selfhealBus.js";
 import type { SendspinServer } from "./server.js";
 import {
   playCore,
@@ -71,6 +72,16 @@ export class SendspinChildController extends ChildRpcHost<SendspinChildToParent,
     });
     this.deps = deps;
     this.sendRaw = send;
+    // [组A] 自愈分级动作上行:守卫(selfhealBus.request) → 1s 周期 drain → emit 主进程。
+    // 延迟容忍秒级(armed 10s + 30s 冷却的节奏),1s 周期足够;onStop 里清 interval。
+    const selfhealTimer = setInterval(() => {
+      for (const a of selfhealBus.drain()) {
+        try {
+          this.sendRaw({ t: "bridgeSelfhealAction", deviceId: a.deviceId, level: a.level, shiftUs: a.shiftUs });
+        } catch { /* 通道断了不影响推流,丢失可容忍 —— 下轮 armed 重新累计会再次触发同一分级 */ }
+      }
+    }, 1000);
+    selfhealTimer.unref?.();
     // 泵「新曲开始出声」→ 主进程(立刻放开封面延迟 + 广播状态)。
     setAudibleStartSink((clientId, songId, positionMs, durationMs) => {
       try {
@@ -435,6 +446,10 @@ export class SendspinChildController extends ChildRpcHost<SendspinChildToParent,
         // 7ba87e0d 之前 minInQueueMs 版本没有本接收端 ⇒ 转发被 catch 丢弃。
         const m = (p as { backlogMs?: Record<string, number> }).backlogMs;
         if (m && typeof m === "object") srv?.setBridgeBacklog(m);
+        // [组A] lateTotal 与 backlogMs 同链上行(设备累计 late 帧)——自愈分级 retime
+        // 的 shift 估计输入。缺省空对象 = 无数据,守卫按「无增量」处理(不乱估)。
+        const lt = (p as { lateTotal?: Record<string, number> }).lateTotal;
+        if (lt && typeof lt === "object") srv?.setBridgeLateTotal(lt);
         return null;
       }
       case "applyCfg": {
