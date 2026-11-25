@@ -2027,3 +2027,65 @@ this.continuityDenied   = continuityDrainSkip && !this.continuityCommitted;
 sendspin childMain → `server.setBridgeLateTotal`(Map,整体替换语义同 bridgeBacklogMs)。
 守卫读 `server.bridgeLateTotal` 与 `bridgeBacklogMs` 同源同拍 —— **两处缺一不可**,
 测试 stub 只给其中之一时守卫按「无数据」退化(shiftUs=0,一级走桥自估裁决)。
+
+### F-4 投递侧断粮自动补静音 + 时间线偏移钳位(2026-11-25 切歌真空事故)
+
+**现象**(v4.15.2 真机, 03:23/03:27): 切歌后同一台 HiVi 连环 5 次
+`bridge-start-seek-deadlock`,shift 每次 6.0~6.5s、`timelineOffsetUs` 从 -6.5s
+线性累到 **-31.1s**;而 `bridge-gap-fill` 全程 **0 次**。设备侧 tick 仍健康
+(late ≤ 28、silenceChunks=2),即错位困在环/泵内部,未传导成设备失步。
+
+**根因链**:
+1. 切歌(提前切/`continuity=1` 自然播完)时环内出现 ~6.5s 内容真空,位于
+   投递视界(5s+ahead)之外 1s 处。
+2. 每拍投递把游标推到 horizon 上沿(`deliv=5500`),撞真空即 `candCount=0`
+   → 判死锁。
+3. 死锁兜底"**整体平移**环 6s + `offset -= 6s`":平移能让当拍可投
+   (真机实测 `firstCandVsNow=25ms / cand=220`),但**不改变环内相对结构**
+   —— 真空跟着一起平移,1.25s 后再次 `cand=0`(真机 `firstCand=6525ms`)。
+4. `bridgeTimelineOffsetUs` 仅在 `bridgeContentEpoch` 变化时清零;`continuity=1`
+   换代直接 `return` 不增 epoch(见 notifyBridgeGeneration),故同代次内的
+   连续平移只减不清、无 clamp ⇒ 线性累加。
+5. `noteBridgeAutoTrackGap` 只在 streamEngine 的 `endedNaturally && !prefetch
+   && !prefetchInFlight` 触发(streamEngine.ts:2185-2206),上述两条路径都没走到
+   ⇒ 真空无人填。
+
+**修复(治本 + 治标)**:
+- **治本**: `bridgePushTick` 增加投递侧断粮自动启动 —— 判据
+  `contentTailUs() < now + BRIDGE_PUSH_FLOOR_US` 且 `!paused && current != null`;
+  换代后 **1.5s 静默窗口**内不启动(起播初期内容尾天然偏小,误判会把起播 lead
+  推大,真机回归 bridgePumpGeneration 暖复用 lead 断言即被顶到 >3s)。有料时
+  `pushFrame` 首行的 `endBridgeAutoTrackGap("content")` 每帧收工,不会持续灌静音。
+  日志 `bridge-gap-fill-autostart ... reason=delivery-starved`。
+  MA 出处: sendspin_bridge.py:1518-1560 `_align_chunk` 按 ts 逐块定位、
+  `_queue_silence(drift_frames)` 填时间线空洞 —— MA 从**不平移整环**,本仓改为
+  「按实际断粮填洞」与之同语义(差异:本仓静音只写 ring 不写成员)。
+- **治本 v2(2026-11-25,连环死锁的真根因)**: 重锚落点留一个投递周期余量。
+  真机实证(v4.15.2, `shiftMs=6000` 整帧对齐): 前移落点 = now ⇒ 环头精确落在
+  now ⇒ 投递循环 `e.tsUs <= cursor` 把整帧对齐的首帧跳过 ⇒ 本拍仍 `cand=0`
+  ⇒ 1.25s 后二次死锁 ⇒ offset 连环累到 **-31M**(实测 5 连)。
+  修法: 落点 = `now + BRIDGE_PUSH_TICK_MS(250ms)`。
+  **绝不能改成「投递不投满」**: 那会把投递速率压到 1.0x、设备缓冲卡在首灌水平
+  涨不上去(2026-11-25 13:06 实测 inQMs 卡 1575)——余量只能加在**落点侧**。
+  对 3.5s 缓冲的影响: 设备侧少收 250ms(5.25s vs 5.5s),仍 < 容量 4.16s 且受
+  子进程水位伺服保护 ⇒ 既不溢出也不饿死。
+  真机验证(2026-11-25 12:59 部署): 起播仅 1 次死锁(`shiftMs=6250` /
+  `headVsNowMs=6500`,差额 = 余量),之后 **100s 零死锁**; late 3~12、
+  inQueue 2675~2700、deltaUs +1.56/+2.06s。
+
+- **治标(自审后整体回退,未上线)**: 曾设计 `BRIDGE_TIMELINE_OFFSET_MAX_US` 钳位 +
+  把 light-restart 的 offset 改成「重置」。自审发现两处硬伤:
+  ①`tailUs` 已含旧 offset,而 `pullBack` 正是基于它算出的 ⇒ 正确式是
+  `offset -= pullBack`;改成 `= -pullBack` 会让新帧 ts 偏 `offset_old`
+  (例:offset_old=-6.5s ⇒ 偏 +6.5s 超前 ⇒ 再次死锁)。
+  ②钳位越门后走 light-restart,其 `pullBack`(≈32s) 比整环前移(6s) 更大
+  ⇒ offset 反而从 -15s 恶化到 -47s。
+  **故整体回退,仅保留治本**: 治本消除真空后连续死锁不再发生,offset 自然不会
+  累积。守卫新增钉子「LR 必须 `-= pullBack`」防此错回潮。
+
+**真机注入验证(2026-11-25 12:20~12:23)**: 5 种注入(连点下一首×3 / seek 近曲末
+自然切歌 / stop→play×2 / 连续快切×6 / pause 7s→恢复)—— **零死锁、零 offset
+累积、autostart 零误触发**;连续快切后 2s 即恢复到 inQ 2525/late 6。正面触发
+autostart 受环境限制:本地库取源快、空窗 <1.5s,需冷源/网络慢场景才能复现
+(与 F5/F6b 断网注入同类限制)。逻辑由单测 ⑥ 条钉死
+(`tests/sendspin/startSeekDeadlock.test.ts` ⑦~⑫)。

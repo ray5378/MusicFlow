@@ -2636,3 +2636,7 @@ raisedUs/sharedLeadUs)。真机:换代后两台 publish 锚点差 <1ms(修复前
 | `clock-stalled` | 设备 timing 未就绪仍锚定(STALLED 姿态) |
 | `mode=light-restart`(deadlock) | 死锁兜底超大 shift 走轻重启 |
 | `group-anchor-floormiss` | 组级 lead 被本设备 splice 下限抬高 |
+
+| `bridge-gap-fill-autostart` | 投递侧断粮自动启动续静音(治本;上游 endedNaturally 未覆盖的切歌路径) |
+| `bridge-gap-fill-stop reason=content` | 真内容到达后自动收工(不持续灌静音) |
+| `timelineOffsetUs` 单向累加 | 时间线偏移无界累加(治标钳位经自审回退;靠治本填真空断根,见 sendspin F-4) |

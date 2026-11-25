@@ -1454,3 +1454,14 @@ v4.10.1 在 MAJ-07 之前插入自动救回梯(细节以 airplay 权威文档 v4
   尚无 —— 深层修复待办);在修复前,三级自愈分级(见 sendspin 权威文档附录 F)是
   兜底:armed(10s)→ retime(桥自估,超 10s 门 skip)→ light-restart 清管线拉回,
   真机闭环 inQ 0/late 4030 ⇒ 4950/late=2。
+
+### G-10 组级补静音与时间线偏移(2026-11-25)
+
+补静音(`pushBridgeOnlySilence`)与偏移(`bridgeTimelineOffsetUs`)都是**组级**动作:
+ring 组内共享,`fillBridgeAutoTrackGap` 每 tick 只补一次,两台设备投同一份静音 ⇒
+组内同步不破。偏移同样整组平移(成员下发/ring/桥投递 ts 同源)。
+
+真机注意:切歌真空导致的连环死锁只在**环内内容真空**出现时发生,与组规模无关;
+上游续静音(streamEngine)未覆盖 `continuity=1` 与提前切歌两条路径,故投递侧
+自兜底(见 sendspin 文档 F-4)。诊断:`bridge-gap-fill-autostart` 出现=治本生效;
+`bridge-start-seek-deadlock` 连环 + `timelineOffsetUs` 单向累加=旧形态复发。
