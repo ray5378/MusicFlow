@@ -2666,3 +2666,29 @@ raisedUs/sharedLeadUs)。真机:换代后两台 publish 锚点差 <1ms(修复前
 **`droppedFrames` 语义(勿再误判)**:统计 ts 早于内容锚点的帧被裁/跳 = **旧曲尾
 未播完部分**,不是新曲开头丢帧。判据是 `contentVsNowMs > finalLeadMs` 且
 `newgen-skip` 两台一致;锚点越靠首帧 dropped 反而越大(旧曲尾落入锚点前更多)。
+## v4.15.6 增补(倍速热切换时桥侧零改动的原因,2026-11-25)
+
+服务端改倍速已改为**泵内热换解码窗口**，不再整泵重建（机制见 [sendspin-权威方案文档.md](./sendspin-权威方案文档.md) 的 v4.15.6 增补）。**桥侧一行代码都没改**，理由如下：
+
+- **时间基不变**：`bridgeSession.ts` 的 `targetFrames = round((tsUs − A) × rate / 1e6)` 里 `rate` 是**采样率**（48k 常量），不是倍速。`atempo` 不改变输出采样率 ⇒ 这条线性映射在变速前后**完全不变**。桥是「按 tsUs 到点投递 + 漂移对齐」，不是「收即发」。
+- **样本流连续**：换源只换「解码哪个窗口、按什么速度解」，对桥来说 PCM 样本仍是一条连续序列。
+- **不得下发新 `bridgeSpec`**：换速**绝不**重新 `syncGroupBridges` / 重算锚点 / 重新 hold chunk，否则桥重锚即为断点。
+- **不得让 `notifyBridgeGeneration` 被调用**：靠泵内独立的 `rateSeq`（与 `epoch` / `timelineReseed` 严格分离）保证。一旦 `epoch` 或 `timelineReseed` 变动，桥会收到 `reason=track` / `rehost` ⇒ BOUNDARY ⇒ 断点。
+- **不得发 `stream/start|clear|end`**：撤回已投给桥的旧速率 PCM 只有 `stream/clear`，而「发 clear」正是断点的定义。
+
+**成员延迟补偿仍然正确**：`pushAudio(e.data, e.tsUs - ahead + shift)` 中的 `ahead` 是**时间量（µs）**、**每帧独立施加**。变速不改变采样率 ⇒ 补偿量语义不变；换源后新帧走同一 ts 接续源 ⇒ 不二次补偿、也不漏补。
+
+**语义边界**：无缝 ≠ 立即。已投给桥的旧速率 PCM 不可撤回，真正变速时刻 = 推送前沿那个 `tsUs`，听感延迟 ≈ 该成员推送提前量（`send_ahead` 800ms 起 / 桥按成员延迟表）。组内所有成员在**同一 ts** 变速，不是依次变速。
+
+**真机验收**（240「全屋」= 纯 AirPlay 双桥组，iEAST_7334 + HiVi H5MKII，1x→1.5x 与 1.5x→1x 双向）：
+
+| 指标 | 改速前后 | 旧路径对照 |
+|---|---|---|
+| `inQueueMs` | 2650~2675 → 2675~2725 | 2725 → **1200**（塌一半） |
+| `realigned` | 19 → **19**（不变） | 80 → **180**（+100 次强制重对齐） |
+| `droppedFrames` | 220388 → **220388**（不变） | +30 万 |
+| `skipFrames` / `insertFrames` / `late-drop` | 全 0 或不变 | — |
+
+无 `bridge-start-seek`、无 `newgen-skip`、无 `reason=track`；`ffmpeg` 侧只剩一条解码进程且 `atempo` 正确。HiVi（2017 MUZO 老固件）**未出现自行重同步**。
+
+⚠️ 前提：若将来引入**非 48k 输出或按倍速改采样率**的方案（"省带宽"思路），上述线性映射与时间量语义会同时失效，本节结论随之作废。

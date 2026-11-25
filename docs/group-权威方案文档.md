@@ -1488,3 +1488,22 @@ sendspin F-4/F-5):
 17 次 `continuity=1` 自然切歌零误伤,双机进度差 397 条 `|残差| max=8ms`,
 `realigned`/`dropped` 增量两台完全对称 ⇒ 组同步健康。出现
 `bridge-start-seek-deadlock` 连环 + `timelineOffsetUs` 单向累加才是旧形态复发。
+## v4.15.6 增补(组内改倍速:同 ts 变速,2026-11-25)
+
+组内改倍速已改为**泵内热换解码窗口**，不再整泵重建（机制见 [sendspin-权威方案文档.md](./sendspin-权威方案文档.md) v4.15.6 增补；桥侧零改动理由见 [airplay-权威方案文档.md](./airplay-权威方案文档.md) 同名增补）。对组语义的影响只有三条，且都不需要改既有代码：
+
+1. **同 ts 变速，不是依次变速**：换源后所有帧仍走**唯一** ts 来源 `cursorUs`（按编码器实测样本数推进），而成员延迟补偿 `b.pushAudio(e.data, e.tsUs - ahead + shift)`（`server.ts:1281` / `:1664`）是**每帧独立施加的时间量**。故换源后自动一致：既不二次补偿，也不漏补。
+2. **组位置 / 显示位置同比重锚**：`group.positionMs` / `group.displayPositionMs` 在换源那一拍 `×r0/r1`（输出轴毫秒），出口 `posOut = positionMs × rate` 因此连续。**显示值仍是纯派生量** —— 禁止 `Math.max` 历史值那类补丁（会让往回拖卡死）。
+3. **混合组锚点与 lead 不动**：`mixed_anchor_lead_ms` / `BRIDGE_MIXED_GROUP_ANCHOR_LEAD_US` / `bridgeStartLeadUs` 在换速时**不重算、不重锚**。锚点是 µs 时间量，变速不改变采样率 ⇒ 仍然正确。换速也**不**重建 `bridgeSpec`。
+
+**适用范围**：
+
+| 拓扑 | 无缝（不断流） | 同步（不错位） |
+|---|---|---|
+| Sendspin 单设备 | ✅ | — |
+| AirPlay 单设备（走桥） | ✅ | — |
+| 纯 AirPlay 组（`isPureBridge`） | ✅ | ✅ 桥的 A 锚点是唯一时间基 |
+| 混合组（AirPlay + Sendspin） | ✅ | ✅ 共享 ts 轴，同 ts 时刻变速 |
+| DLNA | ❌ | — 拉流必须换 URL，**保留断点**（刻意例外，同 §3「起播即落位」性质） |
+
+**验收判据**（不依赖人耳）：日志出现 `[pump][rate] ... 已提交 pump=<epoch>/<reseed>` 且 `epoch`/`timelineReseed` **均未变**；无 `[pump][play]`、无 `gen=...reason=track`、无 `newgen-skip`；`inQueueMs` 不塌（旧路径 2725→1200）、`realigned` 不变（旧路径 +100）、`droppedFrames` 不变（旧路径 +30 万）。`dur` 换算正确：265000/1.5 = 176667。

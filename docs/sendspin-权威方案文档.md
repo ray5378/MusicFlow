@@ -2128,3 +2128,35 @@ F-4 的余量修复经真机证明**单独不足**(05:04 `shiftMs=5549` vs `head
 397 条 `|残差| max=8ms avg=2.8ms`、>50ms 为 0,换代 ±30s 峰值全 ≤6ms。
 **诚实边界**:v3/v4/v5/v7 分支与显示纠错触发条件在本采样窗内均未自然出现,
 目前为单测证据 + 稳态无回归,待自然场景触发闭环。
+## v4.15.6 增补(倍速热切换:泵内换源,不断流,2026-11-25)
+
+**背景**：改倍速原走 `QueueController.setPlaybackSpeed` → `playCurrent` → 整泵重建 ⇒ 桥判 `reason=track` 换代 ⇒ `newgen-skip` 丢 ~1.2s + 上百次 `realigned` + `droppedFrames` +30 万。真机实测断点 **1.66s**，其中桥换代占 **88%**，ffmpeg 建源只占 205ms —— 这就是"热换源"的收益空间。方案与验收：[倍速无缝切换-设计方案-20261125.md](./倍速无缝切换-设计方案-20261125.md)。
+
+**机制**（`streamEngine.ts` 的 `GroupPump.switchRate`）：
+
+| 步骤 | 动作 |
+|---|---|
+| 建窗 | `C0 = playCursorMs × r0`（内容 ms）→ `srcFn(songId, C0/r1, { speed: r1 })` 后台建新窗口（**旧窗口继续推流，不断粮**）→ `await ready()` |
+| 校准 | 循环 ≤3 轮：每轮重取最新前沿 `C = max(buildContentMs, playCursorMs × r0)` → `seekTo(C/r1 + 一帧)`；命中（只改下标）即跳出；未命中（内部已杀 ffmpeg 按 `-ss` 重起）→ `await ready()` 再一轮 |
+| 提交 | `pendingSwap = { seq, win, rate, prevRate, buildContentMs, seekedOutMs }` |
+| 换源 | `pushLoop` 取帧**前**同一同步段（中间无 await）：`win = this.window`、`this.rate = r1`、`playCursorMs = min(seekedOutMs, alignFrameMs(playCursorMs × r0/r1))`、`durationMs / reportedFloorMs / playContentMs ×= r0/r1`、`paceAnchorMs = 新游标`、`paceAnchorWall = Date.now()`、`group.positionMs / displayPositionMs` 同比换算 |
+| 收尾 | `prevWin.close()`（提交原子段之外）；`releaseAudio()` 里兜底 close 未消费的 `pendingSwap.win`（否则切歌/seek 抢先时就是一条孤儿 ffmpeg 陪跑到曲末） |
+
+**四条硬约束**：
+
+1. **不碰 `epoch` / `timelineReseed`**：这两者变动会让 `pushLoop` 走重锚并调 `notifyBridgeGeneration(epoch*1000003 + timelineReseed, "track"|"rehost")` ⇒ 桥换代 ⇒ 断点。故新增**独立序号** `rateSeq`（循环内用局部 `consumedRateSeq` 做消费水位），**换源不通知桥**。
+2. **`this.rate` 与输出轴重锚必须同拍**：`pollCore` 出口是 `posOut = positionMs × rate`。若先改 rate、后一拍才改 positionMs，中间那一拍会跳（客户端进度条肉眼可见）。这与「一个数字不能同时当判定和显示」是同一条铁律的变体。
+3. **切换点取提交时刻前沿 C1，不是建窗时刻 C0**：`ready()` 期间旧流仍在推、前沿已从 C0 走到 C1；按 C0 提交 = 把 C0~C1 这段**已推给设备**的音频再推一遍 = 听感倒退重播。
+4. **`seekTo` 参数是绝对输出轴毫秒 `C1/r1`**，不是相对偏移 `(C1-C0)/r1`（写成相对会定位到曲首附近，是最容易写错的一处）。
+
+**时间戳接续**：不新增任何字段 —— 走既有 `else { tsUs = cursorUs }` 分支。`cursorUs` 按编码器**实测样本数**推进，与 rate 无关 ⇒ 换源后天然连续。（`rateSwitchTsUs` 试过：多余，且会与 `handoffTsUs`（预取交接）互串，已删。）
+
+**校准循环为什么必须有**：建窗 + 预缓冲实测 **2.4~3.9s**（远程源 + `loudnorm` 单遍收敛，极端一次 9.7s），一次 `seekTo` 必然超出已解前沿。首版在此判「未覆盖」回落整泵重投，断点原样复现。重起后 `baseSample` 已等于上一轮目标 ⇒ 新目标只比 base 多出「预缓冲那一小段」⇒ 第二轮必命中（命中 = 只改下标，零成本）。**教训：凡是"等一段时间再对齐"的设计，都必须假设等待时间不可控。**
+
+**降级**：`switchRate` 返回 false 的七种情形（未运行 / 无窗口 / 起播在飞 `playInFlight` / 同速率 / 非法值 / 已在建窗 / 建窗失败 / 整包音源无 ffmpeg 链；另加建窗期间 `epoch` 已变的世代守卫），调用方回落 `playCurrent`（等价旧行为：有断点但不无声）。**同倍率在 `setPlaybackRateCore` 层翻成 true**（幂等，不换源不断流）—— 否则重启后客户端回灌当前倍速会白断一次流（实测丢 984ms 音频）。
+
+**跨进程链路**：泵在 sendspin **子进程**，主进程 `QueueController` 够不着。`QueueController.tryHotRateSwitch` → `index.ts::sendspinGroupSetPlaybackRate`（fork 走 rpc / in-proc 直调）→ `childMain.ts` 的 `case "setRate"`（**必须返回布尔，不能并进 `transport` —— 那条统一 `return null`，并进去会静默失效**）→ `playerCore.setPlaybackRateCore`。判「有没有泵」的唯一入口是 `sendspinGroupNameForPeer`：`sendspin:<id>`→`<id>`、`group:<gid>`→`ug:<gid>`，其余（DLNA / AirPlay 直投 / 本机）→ null 回落重投。
+
+**P0 前置修正（v4.15.5）**：新窗口的 `-ss` 必须传内容秒，不能再拿输出轴毫秒顶替（老代码在 rate≠1 时落点偏移因子恰好等于 rate）。换源一律 `seekTo(target, { spawnContentSec: streamToContentSec(target/1000, r1) })`。
+
+**单测**（`pumpRateHotSwitch.test.ts` 5 条 + `childMain` +1 + `streamSource` +3）：不换代 / ts 逐帧 25ms 接续 / 内容不倒退 / 旧窗口已关闭 / 建窗慢于前沿仍成功 / 失败时原样继续 / 同倍率幂等 / `setRate` 回布尔而非 null / `-ss` 口径。
