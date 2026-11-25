@@ -702,7 +702,37 @@ export class GroupPump {
    */
   private rate = 1;
 
-  /** 设置播放倍速(下一次 play 生效;运行中变速由 QueueController 重投实现)。 */
+  /**
+   * 倍速热切换序号(2026-11-25,§4.4)。
+   *
+   * 为什么必须另起一个序号,而不复用 `timelineReseed`/`epoch`:后两者任一变动都会让
+   * pushLoop 的首帧分支走「重锚 + `notifyBridgeGeneration(…, "rehost"|"track", …)`」
+   * ⇒ 桥侧判换代 ⇒ 重锚/清缓冲 ⇒ **听感断点**(240 实测 1.66s 空窗 + `newgen-skip`
+   * 丢 1226ms)。而改倍速时时间轴**不能重锚**(ts 必须逐帧接续)、桥也**不该感知换代**
+   * —— 故另设序号,pushLoop 见它只做「换窗口引用 + 输出轴换算」。
+   *
+   * 与 `setPlaybackRate` 的分工见该方法注释。
+   */
+  private rateSeq = 0;
+  /** 待提交的热换源(由 `switchRate` 建好后填入,pushLoop 取帧前消费一次即清空)。 */
+  private pendingSwap: {
+    seq: number;
+    win: PcmWindow;
+    /** 新倍率。 */
+    rate: number;
+    /** 建窗时的旧倍率:提交前复核「还没被别人改过」(否则换算系数会算错)。 */
+    prevRate: number;
+    /** 建窗基准内容位置(内容毫秒):仅日志/诊断用,不参与换算。 */
+    buildContentMs: number;
+    /** 已在新窗口内 seekTo 到的输出轴位置(**上限**,提交时游标不得越过它)。 */
+    seekedOutMs: number;
+    /** 建窗耗时(ms):日志用。 */
+    buildCostMs: number;
+  } | null = null;
+  /** 热换源正在建窗:并发守卫(A9),在途时再次调用直接返回 false(由调用方重投兜底)。 */
+  private rateSwitching = false;
+
+  /** 设置播放倍速(**下一次 play 生效**;运行中的真无缝热切换见 `switchRate`)。 */
   setPlaybackRate(rate: number): void {
     const r = Number(rate);
     this.rate = Number.isFinite(r) && r > 0 ? r : 1;
@@ -710,6 +740,144 @@ export class GroupPump {
 
   get playbackRate(): number {
     return this.rate;
+  }
+
+  /**
+   * 热切换播放倍速:**不重建泵、不发任何生命周期消息、时间戳逐帧接续**。
+   *
+   * ## 为什么需要它(与 MA 的对照)
+   *
+   * MA 的 `set_playback_speed`(`player_queues/controller.py:504`)只能
+   * 「结算旧速度墙钟 → `resume()` → `play_index()` 重开整条流」—— 因为它是**设备来拉**
+   * 的 HTTP 架构,改速度必须换 URL。本项目 Sendspin 是**服务端推块 + 每块带绝对可听
+   * 时刻戳**(`[0x04][i64 µs][data]`),只要新块的 ts 接着旧块、且不重发
+   * `stream/start|clear|end`(改倍速不改 codec/采样率/声道数),设备端就感知不到换流
+   * —— 这是「真无缝」的物理基础,MA 不具备。故本方法是**超越 MA**,不是对齐 MA;
+   * atempo 本身仍与 MA 同构(`playbackSpeed.ts::withAtempo`,链尾、保音高)。
+   *
+   * ## 流程(`docs/倍速无缝切换-设计方案-20261125.md` §4.2)
+   *
+   * ```
+   * C0 = playCursorMs × r0                  建窗基准(内容毫秒)
+   *   → 新窗口 -ss(C0/r1) + atempo=r1, await ready()   ← 旧窗口持续供流,不断粮
+   * C1 = playCursorMs × r0                  提交时刻前沿(C1 ≥ C0)
+   *   → 新窗口 seekTo(C1/r1 + 一帧余量)      ← 命中已解区间则只改下标,零成本
+   *   → this.pendingSwap = { … }             由 pushLoop 下一拍原子提交
+   * ```
+   *
+   * ⚠️ **切换点必须取 C1(提交时刻前沿),不能取 C0**。`ready()` 实测 0.2~2s,期间旧流
+   * 继续推、前沿已从 C0 推进到 C1;按 C0 提交等于把 C0~C1 这段**已推给设备**的音频再推
+   * 一遍 —— 听感是「倒退重播」。
+   *
+   * @returns `false` = 条件不满足(未运行 / 无窗口 / 起播在飞 / 同速率 / 非法值 /
+   *          已在建窗 / 建窗失败),**调用方必须回落整泵重投**(有断点但不无声)。
+   */
+  async switchRate(nextRate: number): Promise<boolean> {
+    const r1 = Number(nextRate);
+    if (!Number.isFinite(r1) || r1 <= 0) return false;
+    // 只在「整曲已在推流」状态下热换:起播在飞(playInFlight)时起播位置尚未定,
+    // 建窗基准无从取起,交给调用方重投(与 §8.3「暂停中改速」路径一致)。
+    if (!this.running || !this.window || !this.songId) return false;
+    if (this.playInFlight || this.rateSwitching) return false;
+    const r0 = this.rate;
+    if (Math.abs(r1 - r0) < 1e-9) return false;
+    const src = this.srcFn;
+    if (!src) return false;
+    this.rateSwitching = true;
+    const startedAt = Date.now();
+    // 世代守卫基准:建窗期间若 play()/stop() 已经换代(++epoch),新窗口属于**上一段**
+    // 播放上下文,提交上去就是把旧曲音频灌进新曲时间轴(必须就地掐掉)。
+    const myEpoch = this.epoch;
+    // 序号先取:即便本轮失败也保持单调,避免与上一轮的 seq 撞号(A9 幂等键)。
+    this.rateSeq += 1;
+    const seq = this.rateSeq;
+    let newWin: PcmWindow | null = null;
+    try {
+      // C0:建窗基准内容位置。`playCursorMs` 是**输出轴**,乘 r0 折回内容轴(不变量)。
+      const buildContentMs = Math.max(0, this.playCursorMs) * r0;
+      // 新窗口起点(输出轴)必须与帧栅格同源 —— 否则接缝 ≤25ms 偏移,且子进程
+      // 会因 lo < baseSample 的量化差走微任务自旋(见 alignFrameMs 的硬约束)。
+      const startOutMs = alignFrameMs(buildContentMs / r1);
+      const built = await src(this.songId, startOutMs, {
+        ...(this.srcRowId ? { preferRowId: this.srcRowId } : {}),
+        dspFilters: this.dspFilters,
+        speed: r1,
+      });
+      newWin = built.stream ?? null;
+      if (!newWin) {
+        // 整包路径(TTS announce)没有 ffmpeg 链可换 atempo ⇒ 交给调用方重投。
+        this.rateSwitching = false;
+        return false;
+      }
+      // C1:提交时刻前沿。`await` 期间旧流仍在推 ⇒ 前沿必已前进(C1 ≥ C0)。
+      // 多留一帧:pushLoop 提交本身可能晚几十毫秒,余量保证「绝不倒退重播」
+      // (宁可多解 25ms 内容 —— 新窗口在后台解,零成本)。
+      //
+      // ★ 为什么是**循环**而不是一次 seekTo(2026-11-25 240 真机实证):
+      //   建窗 + 预缓冲一旦慢到秒级(实测一次 9.7s:远程源 + loudnorm 单遍收敛),
+      //   一次 seekTo 必然「超出已解前沿」⇒ `seekTo` 内部杀 ffmpeg 按 -ss 重起
+      //   ⇒ 又要预缓冲 ⇒ 而旧流仍在推、前沿继续涨。上一版在这里直接判「未覆盖」
+      //   回落整泵重投,结果正是本方案要消灭的东西:桥换代 `reason=track` +
+      //   `newgen-skip` 丢 3777ms + 上百次 realign。
+      //   正确做法:重起后 base 已等于上一轮目标,再取一次前沿再 seek 一次即可 ——
+      //   新目标只比 base 多出「预缓冲那一小段」,第二次必然命中(命中=只改下标,零成本)。
+      //   3 次上限兜极端慢源;超了也接受「刚 ready 的窗口」(base=目标,覆盖成立)。
+      let seekedOutMs = startOutMs;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const commitContentMs = Math.max(buildContentMs, Math.max(0, this.playCursorMs) * r0);
+        const target = alignFrameMs(commitContentMs / r1) + FRAME_MS;
+        seekedOutMs = target;
+        // `ms` 是输出轴,`-ss` 要内容秒(与 construction 同口径,P0 修正)。
+        const respawned = await newWin.seekTo(target, {
+          spawnContentSec: streamToContentSec(target / 1000, r1),
+        });
+        if (!respawned) break; // 命中:零成本,直接用
+        // 重起后**必须**等预缓冲再提交:否则 pushLoop 的 slice 会挂在未解码区间
+        // (await 到超时才返回 = 断粮),那比「不换源」更糟。
+        await newWin.ready();
+        // 上限轮:刚 ready 的窗口 base 已等于 target,覆盖成立,直接接受。
+        if (attempt === 2) break;
+      }
+      // 世代守卫:建窗期间泵已停/已换代 ⇒ 新窗口是孤儿苗子,就地掐掉(同 play 的 superseded)。
+      if (!this.running || !this.window || this.epoch !== myEpoch) {
+        try { newWin.close(); } catch { /* ignore */ }
+        this.rateSwitching = false;
+        logSafe(
+          this.server,
+          "info",
+          `[pump][rate] song=${this.songId} 建窗期间播放上下文已切换(epoch ${myEpoch}→${this.epoch}),新窗口释放`,
+        );
+        return false;
+      }
+      // ★ A8:旧预取窗口是按**旧 rate** 解的 atempo,换源后必须丢帧(保留「下一首是谁」)。
+      this.cancelNextTrackPrefetch(true);
+      this.pendingSwap = {
+        seq,
+        win: newWin,
+        rate: r1,
+        prevRate: r0,
+        buildContentMs,
+        seekedOutMs,
+        buildCostMs: Date.now() - startedAt,
+      };
+      this.rateSwitching = false;
+      logSafe(
+        this.server,
+        "info",
+        `[pump][rate] song=${this.songId} ${r0}x→${r1}x 建窗 内容Ms=${Math.round(buildContentMs)} ` +
+          `起点=${startOutMs}ms 追至=${seekedOutMs}ms 耗时=${Date.now() - startedAt}ms 待提交`,
+      );
+      return true;
+    } catch (e: any) {
+      try { newWin?.close(); } catch { /* ignore */ }
+      this.rateSwitching = false;
+      logSafe(
+        this.server,
+        "warn",
+        `[pump][rate] 热换源建窗失败,回落整泵重投 song=${this.songId} ${r0}x→${r1}x: ${e?.message || e}`,
+      );
+      return false;
+    }
   }
 
   constructor(server: SendspinServer, group: SendspinGroup) {
@@ -952,6 +1120,13 @@ export class GroupPump {
   /** 释放音频持有(整包缓冲 / 流式窗口＋ffmpeg 二选一,调用方无需区分)。 */
   private releaseAudio(): void {
     this.pcm = null;
+    // ★ 热换源「在途/待提交」的窗口也必须一并释放:它**不在** `this.window` 里,
+    //   漏了就是一个孤儿 ffmpeg(切歌/seek 抢先时 pendingSwap 从未被 pushLoop 消费)。
+    //   close() 幂等,与 this.window 撞车时第二次为空操作。
+    if (this.pendingSwap) {
+      try { this.pendingSwap.win.close(); } catch { /* ignore */ }
+      this.pendingSwap = null;
+    }
     if (this.window) {
       try { this.window.close(); } catch { /* ignore */ }
       this.window = null;
@@ -1334,7 +1509,9 @@ export class GroupPump {
 
   /** 推流主循环:按真实墙钟节奏取 PCM 段 → 编码 → 下发,时间戳按**实测样本数**推进。 */
   private async pushLoop(myEpoch: number): Promise<void> {
-    const win = this.window;
+    // ⚠️ 必须是 `let`:倍速热切换(`switchRate`)在循环内换窗口引用,**不重建循环**
+    //    (重建循环 = 重建泵 = 断点,与无缝目标互斥)。
+    let win = this.window;
     const pcm = this.pcm;
     if (!win && !pcm) { this.running = false; return; }
     const frameSamples = Math.floor((SAMPLE_RATE * CHANNELS * FRAME_MS) / 1000);
@@ -1380,6 +1557,8 @@ export class GroupPump {
     this.group.timelineBaseUs = 0n; // 起播重置:锚点在首块时按当时墙钟确立
     /** 本循环已消费到的 seek 重锚序号(与字段比较,见 timelineReseed 注释)。 */
     let consumedReseed = this.timelineReseed;
+    /** 本循环已消费到的**倍速热切换**序号(与 `timelineReseed` 严格分离,见 rateSeq 注释)。 */
+    let consumedRateSeq = this.rateSeq;
     /** 连续未让出宏任务的帧数(B2,见 YIELD_EVERY_FRAMES 注释)。 */
     let sinceYield = 0;
     /** 本轮最后一次「已推送」的媒体位置(曲末排空期间刷新上报进度用)。
@@ -1417,12 +1596,85 @@ export class GroupPump {
           this.paceAnchorWall = Date.now();
           continue;
         }
+        // ==================== 倍速热切换提交(§4.2 / A12) ====================
+        // 为什么放在「取帧之前」:换源后 `playCursorMs` 已折算到新输出轴,同一拍的
+        // `i/lo` 必须按新游标算,否则这一帧会从旧位置取数(内容倒退/超前)。
+        //
+        // ⚠️ 三条铁律(破任一条就退化成断点):
+        //   ① **不碰** `epoch` / `timelineReseed` / `handoffTsUs` —— 任一变动都会让下方
+        //      首帧分支走重锚 + notifyBridgeGeneration ⇒ 桥换代 ⇒ 断点;
+        //   ② `this.rate` 与全部输出轴字段**同一条同步语句序列内**写完,中间不得 await
+        //      —— 否则 pollCore 的 `posOut = positionMs × rate` 会有一拍跳变(客户端可见);
+        //   ③ 时间戳**不重锚**:下方 `else { tsUs = cursorUs }` 原样接续,`cursorUs` 是
+        //      按编码器实测样本数推进的绝对时间线,与 rate 无关 ⇒ ts 天然连续。
+        if (this.pendingSwap && this.pendingSwap.seq !== consumedRateSeq) {
+          const sw = this.pendingSwap;
+          this.pendingSwap = null;
+          // seek / 切歌先到 ⇒ 热换源作废:它们会整条重建,新窗口已失去意义
+          // (此时 playCursorMs 已是另一条时间轴的语义,套用会算出错误落点)。
+          // 第四条:建窗期间倍率被 `setPlaybackRate` 改过 ⇒ 换算系数 k 已失效。
+          if (
+            !this.running ||
+            this.timelineReseed !== consumedReseed ||
+            this.pendingSeekMs !== null ||
+            Math.abs(this.rate - sw.prevRate) > 1e-9
+          ) {
+            try { sw.win.close(); } catch { /* ignore */ }
+            logSafe(this.server, "info", `[pump][rate] song=${this.songId} 热换源作废(被 seek/切歌/再次改速抢先) seq=${sw.seq}`);
+          } else {
+            consumedRateSeq = sw.seq;
+            const r0 = sw.prevRate;
+            const r1 = sw.rate;
+            const k = r0 / r1; // 输出轴换算系数(内容量不变 ⇒ 输出轴 = 内容 / 新倍率)
+            // 新游标:提交时刻的前沿折到新轴,**绝不超过已预解码位置**(seekedOutMs)。
+            // 落后于前沿的部分(几十 ms)由新窗口按序补解 —— 绝不倒退重播。
+            const aheadOutMs = Math.max(0, this.playCursorMs) * k;
+            const nextCursor = Math.min(sw.seekedOutMs, alignFrameMs(aheadOutMs));
+            // ------- 原子段(此间禁止 await)-------
+            this.rate = r1;
+            this.playCursorMs = nextCursor;
+            if (this.durationMs > 0) this.durationMs = this.durationMs * k;
+            this.reportedFloorMs = this.reportedFloorMs * k;
+            this.playContentMs = this.playContentMs * k;
+            // 对外位置同为输出轴:不同拍换算 ⇒ pollCore 会看到 `旧位置 × 新倍率` 的一拍跳变。
+            this.group.positionMs = this.group.positionMs * k;
+            // 显示位置是**纯派生量**(不写历史最大值):同比换算即可保持连续。
+            this.group.displayPositionMs = this.group.displayPositionMs * k;
+            floorMs = this.reportedFloorMs;
+            // pacing 锚点必须挪到当下:否则 dueMs 全部落在过去 ⇒ 帧无节制连发 ⇒ 灌爆设备环。
+            this.paceAnchorMs = nextCursor;
+            this.paceAnchorWall = Date.now();
+            this.pendingSeekMs = null;
+            const prevWin = win;
+            win = sw.win;
+            this.window = sw.win;
+            // ------- 原子段结束 -------
+            // ★ 旧窗口必须在这里**立刻**关掉:上面 `this.window` 已指向新窗口,旧对象
+            //   再无引用;不关就是一条孤儿 ffmpeg 一直解码到曲末(240 真机实测:改速后
+            //   `ps` 里同时挂着 1x 与 1.5x 两条解码进程,各吃一份 CPU/IO,而且旧的那条
+            //   还占着上游连接)。
+            //   放在原子段**之后**是刻意的:上面那几句同步赋值是「出口两量同源同拍」的
+            //   保障(A12),`close()` 涉及 SIGTERM 与日志,不该挤进那段。
+            try { prevWin?.close(); } catch { /* 已退/未起 */ }
+            logSafe(
+              this.server,
+              "info",
+              `[pump][rate] song=${this.songId} ${r0}x→${r1}x 已提交 内容Ms=${Math.round(sw.buildContentMs)} ` +
+                `游标P1=${Math.round(nextCursor)}ms dur=${Math.round(this.durationMs)}ms 建窗=${sw.buildCostMs}ms ` +
+                `pump=${this.epoch}/${this.timelineReseed}`,
+            );
+          }
+        }
         const i = Math.floor(this.playCursorMs / FRAME_MS);
         const lo = i * frameSamples;
         let seg: Float32Array;
         if (win) {
+          // ⚠️ 本拍窗口引用必须固定成局部常量:`win` 已是 `let`(倍速热切换会在循环内换
+          //   引用),若 catch/EOF 诊断里直接读 `win`,可能读到**已被换掉的新窗口**,
+          //   而这里的 `lo` 仍是按旧窗口坐标系算的 —— 贴齐值会算错(2026-11-25 引入)。
+          const curWin = win;
           try {
-            seg = await win.slice(lo, lo + frameSamples);
+            seg = await curWin.slice(lo, lo + frameSamples);
           } catch (e) {
             // 淘汰 == 回放点已不在窗口:只发生在 seekTo 重定位竞态里,
             // 重定位已完成,按新 position 重取即可。
@@ -1433,7 +1685,7 @@ export class GroupPump {
               // (心跳/poll RPC 全停 → 看门狗 SIGKILL),日志连锚点都到不了。
               // 这里把落后于窗口基准的游标**贴齐**到基准(向上取到帧栅格):
               // 贴齐后 lo >= base,下一次 slice 必然成功 —— 保证每轮淘汰都朝前走。
-              const baseMs = win.baseMs;
+              const baseMs = curWin.baseMs;
               const snapMs = Math.ceil(baseMs / FRAME_MS) * FRAME_MS;
               if (snapMs > this.playCursorMs) {
                 logSafe(this.server, "warn", `sendspin 游标落后窗口基准,贴齐继续: ${this.playCursorMs}ms → ${snapMs}ms song=${this.songId}`);
@@ -1449,7 +1701,7 @@ export class GroupPump {
           }
           // EOF 耗尽(短片/空):与整包 `i >= total` 同义。
           if (seg.length === 0) {
-            logSafe(this.server, "warn", `sendspin 流式窗口提前 EOF: lo=${lo} frame=${i} pid=${win.pid} eof=${win.eof} failed=${win.failedReason ?? "-"} decoded=${win.decoded} song=${this.songId}`);
+            logSafe(this.server, "warn", `sendspin 流式窗口提前 EOF: lo=${lo} frame=${i} pid=${curWin.pid} eof=${curWin.eof} failed=${curWin.failedReason ?? "-"} decoded=${curWin.decoded} song=${this.songId}`);
             contentEnded = true; endReason = "stream-eof"; break;
           }
         } else {
