@@ -2160,3 +2160,47 @@ F-4 的余量修复经真机证明**单独不足**(05:04 `shiftMs=5549` vs `head
 **P0 前置修正（v4.15.5）**：新窗口的 `-ss` 必须传内容秒，不能再拿输出轴毫秒顶替（老代码在 rate≠1 时落点偏移因子恰好等于 rate）。换源一律 `seekTo(target, { spawnContentSec: streamToContentSec(target/1000, r1) })`。
 
 **单测**（`pumpRateHotSwitch.test.ts` 5 条 + `childMain` +1 + `streamSource` +3）：不换代 / ts 逐帧 25ms 接续 / 内容不倒退 / 旧窗口已关闭 / 建窗慢于前沿仍成功 / 失败时原样继续 / 同倍率幂等 / `setRate` 回布尔而非 null / `-ss` 口径。
+
+## v4.15.8 增补(容量投递 + 裁环:混合组改倍速 30s→约5s,2026-11-25)
+
+**问题**：v4.15.6 的泵内热换源只解决「换源不断流」，提交点仍取**写前沿**。泵稳态贴 30s 前瞻
+（`PUMP_LOOKAHEAD_DEFAULT_US`，对齐 MA `sleep_to_limit_buffer`）⇒ 新倍速内容只能追加在那 30s
+旧帧之后 ⇒ 必须等它播完。240 实测 `tailVsNow=35.26s` / `cursorVsNow=5.49s`，用户听感「等约 30 秒」。
+
+**方案**（详见 [按容量投递-设计方案-20261125.md](./按容量投递-设计方案-20261125.md)）：
+
+| 块 | 落点 | 内容 |
+|---|---|---|
+| 逐成员投递闸 | `SendspinConnection.canAccept` | 三道闸：① 已发未播字节 + 本帧 ≤ `buffer_capacity`（对齐 aiosendspin `BufferTracker`）② 本帧末尾 ≤ 最落后桥投递游标 `B`（本仓新增）③ 本帧末尾 ≤ `now + prefill_buffer_ms 档位`。⇒ **`D = min(容量, 档位, B)`** |
+| 记账 | `issuedFrames` / `issuedBytes` / `issuedFrontUs` + `prunePlayed` | 与 `BufferTracker.prune_consumed` 同口径（按 `endUs <= now` 剔除已播） |
+| 裁环 | `SendspinGroup.trimRingAfter` | 删 `tsUs > cutUs` 的**当前代次**帧（尾部回扫，遇 `<= cutUs` 即停），并把各设备 `bcCursor` 钳到 ≤ cutUs（只钳不删） |
+| 提交点 | `streamEngine.resolveTrimPoint` | `min(桥游标 B, 最落后成员前沿 D)`；无桥 / 游标全 0 ⇒ `null` 回落写前沿 |
+
+**四条硬约束**：
+
+1. **提交原子段内裁环 + `cursorUs` 同拍回退**（`cursorUs = trimCommit.tsUs`）。不回退则新帧 ts 从旧前沿续，
+   与裁后环尾形成几十秒断层 ⇒ 桥按 hole-fill 灌静音，比不换源更糟。
+2. **`pumpMemberQueue` 绝不 `await`**：`pushFrame` 单循环同步等全体成员，出队器阻塞会让泵 stall ——
+   越过 `STALL_GRACE_US`(500ms) 告警，`maxSilentDegradeUs()`(5s) 直接判编码器零产出并**放弃本曲提前切歌**。
+3. **投递闸只对桥组启用**（`audioGateOn = cap>0 && bridges.size>0`）：无桥组没有 30s 背压，前沿由 pacing
+   决定，保持旧行为以缩小改动面 —— 这是刻意分叉，不是遗漏。
+4. **队列内存上限 = `capacity × 3`**，溢出丢最旧并计数（`droppedByQueueCap`）；既不 OOM 也不静默。
+
+**为什么混合组现在可以裁**：P1 之前对混合组一刀切 `null`，因为直连成员的内容由 `pushFrame` 无条件下发、
+环里那 30 秒它们早已收到，裁了会造成组内相差一整个前瞻深度（真机 30s 档 = 24.5s 分叉）。
+闸②③ 把 `D` 压到 `D ≤ B` 后该前提不成立 ⇒ 裁到 `min(B,D)` 时两方都没拿到过被裁内容。
+
+**prefill 档位是旋钮**：闸③ 读 `group.prefillWantedMsCache`（由 `streamEngine` 每帧 pacing **单向**写入；
+server 不能直接读 `prefillTargetMs()`，否则循环依赖 + 跨进程读到陈旧值）。用户把「设备缓冲深度(抗卡顿)」
+改 5s ⇒ 混合组改速约 5s 生效；改 10s ⇒ 约 5.3s（此时被设备容量封顶）。
+
+**240 实测（2026-11-25，混合组 esp32-player2 + 2×AirPlay）**：档位 10s ⇒
+`[pump][trim] B=5412ms D=5336ms tail=35437ms 采用=5336ms`；档位 5s ⇒ `D=4745~4943ms`。
+双向 `1x ↔ 1.25x`：提交 231 / 314ms、裁环 1211 / 1219 帧、`gen` 不变、`inQueueMs=2575ms` 稳、
+`silenceChunks=0`、`loss*=0`、无 STALL、队列丢弃 0。
+
+**守卫与单测**：`backend/scripts/check-speed-switch.mjs`（S1–S38，全部做过变异验证，CI 作业
+`speed-switch-guard`）；`pumpRateTrim.test.ts` 18 例（裁环 / 三闸 / prune / 队列不丢帧 / 组内一致性）。
+
+⚠️ 降级不变：`switchRate` 返回 false（未运行 / 起播在飞 / 同速率 / 非法值 / 已在建窗 / 建窗失败 /
+整包无 ffmpeg 链 / 建窗期间换代）时调用方回落 `playCurrent` —— 有断点但不无声。
