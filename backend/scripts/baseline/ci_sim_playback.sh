@@ -203,7 +203,7 @@ for i in $(seq 1 60); do
     SONG=$(python3 -c '
 import json,sys
 d=json.load(open(sys.argv[1],encoding="utf-8"))
-rows=d if isinstance(d,list) else (d.get("songs") or [])
+rows=d if isinstance(d,list) else (d.get("songs") or d.get("items") or [])
 print(rows[0]["id"] if rows else "")
 ' "$WORK/logs/songs.json" 2>/dev/null || true)
   fi
