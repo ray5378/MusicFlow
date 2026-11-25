@@ -1120,10 +1120,10 @@ console.log("===== ㉒ 组A:自愈三级分级 + lateTotal 上行 =====");
     "重锚落点余量缺失 ⇒ shift=整数时连环死锁复发(真机 offset 累到 -31M)",
   );
   check(
-    "治本 v6: 锚点向首帧靠拢(>1.5s 空洞才抬, 4s 上限) + 组锚 floor 用抬升前值",
+    "治本 v6: 锚点向首帧靠拢(>=1.5s 空洞才抬, 30s 上限) + 组锚 floor 用抬升前值",
     bs.includes("BRIDGE_START_WAIT_MAX_US")
       && bs.includes("useLeadPreLift")
-      && bs.includes("target - useLead > 1_500_000n"),
+      && bs.includes("target - useLead >= 1_500_000n"),
     "锚点未向首帧靠拢 ⇒ 切歌先静音后丢帧(真机 droppedFrames +145272≈3.3s);或组锚 floor 污染",
   );
   check(

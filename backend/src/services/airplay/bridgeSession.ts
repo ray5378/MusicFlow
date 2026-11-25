@@ -773,7 +773,7 @@ export function planBridgeAnchor(opts: {
         // 真机 06:14 实证: 切歌时 contentVsNowMs=4708 而 finalLeadMs=2500 ⇒ 锚点比
         // 首帧早 2.2s ⇒ 该段先播静音、随后被判过期丢弃(droppedFrames +145272≈3.3s)。
         // 抬到「首帧−200ms」使设备恰好在内容到达时出声, 消除空洞。
-        // 上限 BRIDGE_START_WAIT_MAX_US(4s): 取源慢(首帧更晚)时只等 4s, 绝不挂死;
+        // 上限 BRIDGE_START_WAIT_MAX_US(30s): 取源慢(首帧更晚)时只等 30s, 绝不挂死;
         // 剩余差额仍是静音, 但绝不会出现「无限等待」。
         // 上限 30s(用户口径: 宁可多等也要稳)。实际永不触顶: 父侧投递视界只有
         // CAP 5s + ahead 0.5s, contentVsNow 最大约 5.5s, 故真实等待仍 ~4.5s;
