@@ -170,6 +170,32 @@ for p in rows:
 # 真正的判据是下面「设备是否上线」，不要把中间步骤的 5xx 当死因。
 api PUT /plugins/"$PID" '{"enabled":true}' >/dev/null || \
   echo "警告：启用 $PID 返回错误，继续等设备上线（以 peer 是否出现为准）"
+
+# ★ 纯 AirPlay 桥组的 PCM 源是 sendspin 组泵：sendspin 服务没起 ⇒ 泵 playMedia
+# 抛「sendspin 服务未运行」⇒ 桥 prepare 后立刻 stop ⇒ cast FAILED ⇒ 采样 0 tick。
+# 空库里该插件默认不启用，必须显式 toggle（toggle 才会 startSendspinService）。
+SPID=$(printf '%s' "$PLUGINS" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+rows=d if isinstance(d,list) else (d.get("plugins") or [])
+for p in rows:
+    if "sendspin" in str(p.get("name","")).lower():
+        print(p.get("id") or p.get("name")); break
+')
+SEN=$(printf '%s' "$PLUGINS" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+rows=d if isinstance(d,list) else (d.get("plugins") or [])
+for p in rows:
+    if "sendspin" in str(p.get("name","")).lower():
+        print(int(bool(p.get("enabled")))); break
+' || echo 0)
+if [ -n "$SPID" ] && [ "$SEN" != "1" ]; then
+  api PUT /plugins/"$SPID"/toggle '{}' >/dev/null || die "启用 sendspin 服务失败"
+  sleep 3
+  docker logs "$CONTAINER" 2>&1 | grep -aiq 'sendspin' || \
+    echo "警告：3s 内日志未见 sendspin 启动记录，继续（以 tick 为准）"
+fi
 PEER=""
 for i in $(seq 1 90); do
   PEER=$(api GET /peers 2>/dev/null | json_pick prefix 'airplay:' | head -1 || true)
