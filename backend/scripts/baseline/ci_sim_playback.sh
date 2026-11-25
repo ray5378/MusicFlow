@@ -39,15 +39,18 @@ cleanup() {
 trap cleanup EXIT
 
 api() {
-  # 保留错误响应体：CI 里 curl -f 只报 22，看不出是认证、参数还是服务启动失败。
-  local out code
-  out=$(curl -sS --max-time 25 -u "${CI_USER}:${CI_PASS}" \
-    -H 'Content-Type: application/json' -w '\n%{http_code}' \
-    "${BASE}/rest/api/v1$1" ${2:+-d "$2"}) || return 1
+  # api METHOD PATH [BODY]。必须显式 -X：curl 只有带 -d 时才自动 POST，
+  # 无 body 的 POST（如 /sources/:id/scan）会被当 GET → 404。
+  # 同时保留错误响应体，CI 里 curl -f 只报 22 看不出是认证还是服务失败。
+  local method=$1 path=$2 body=${3:-} out code
+  local args=(-sS --max-time 25 -u "${CI_USER}:${CI_PASS}" -X "$method"
+              -H 'Content-Type: application/json' -w '\n%{http_code}')
+  [ -n "$body" ] && args+=(-d "$body")
+  out=$(curl "${args[@]}" "${BASE}/rest/api/v1${path}") || return 1
   code=$(printf '%s' "$out" | tail -1)
   out=$(printf '%s' "$out" | sed '$d')
   if [ "$code" -lt 200 ] || [ "$code" -ge 400 ]; then
-    printf 'HTTP %s on %s: %s\n' "$code" "$1" "$out" >&2
+    printf 'HTTP %s %s %s: %s\n' "$code" "$method" "$path" "$out" >&2
     return 1
   fi
   printf '%s' "$out"
@@ -146,13 +149,13 @@ c.commit(); c.close()
 PY
 docker start "$CONTAINER" >/dev/null
 for i in $(seq 1 60); do
-  api /songs >/dev/null 2>&1 && break
+  api GET /songs >/dev/null 2>&1 && break
   sleep 1
   [ "$i" -eq 60 ] && die "测试用户认证 60s 内未通过"
 done
 
 say "3/7 启用 AirPlay 接收插件并等待模拟设备上线"
-PLUGINS=$(api /plugins) || die "GET /plugins 失败"
+PLUGINS=$(api GET /plugins) || die "GET /plugins 失败"
 # /v1/plugins 返回的 id 是 DB 行 id（UUID），name 才是 airplay-renderer 这类稳定标识。
 PID=$(printf '%s' "$PLUGINS" | python3 -c '
 import json,sys
@@ -165,11 +168,11 @@ for p in rows:
 [ -n "$PID" ] || die "插件列表里找不到 airplay"
 # 启用接口会顺带启动接收服务；即便它返回错误，DB 里的 enabled 也可能已落库。
 # 真正的判据是下面「设备是否上线」，不要把中间步骤的 5xx 当死因。
-api /plugins/"$PID" '{"enabled":true}' >/dev/null || \
+api PUT /plugins/"$PID" '{"enabled":true}' >/dev/null || \
   echo "警告：启用 $PID 返回错误，继续等设备上线（以 peer 是否出现为准）"
 PEER=""
 for i in $(seq 1 90); do
-  PEER=$(api /peers 2>/dev/null | json_pick prefix 'airplay:' | head -1 || true)
+  PEER=$(api GET /peers 2>/dev/null | json_pick prefix 'airplay:' | head -1 || true)
   [ -n "$PEER" ] && break
   sleep 1
 done
@@ -179,10 +182,10 @@ echo "peer=$PEER"
 say "4/7 本地媒体源 + 3 分钟测试音"
 ffmpeg -hide_banner -loglevel error -f lavfi -i 'sine=frequency=440:duration=180' \
   -ar 48000 -ac 2 -c:a flac -y "$WORK/music/ci_tone.flac" >/dev/null
-api /sources "{\"name\":\"mf-ci\",\"type\":\"local\",\"config\":{\"path\":\"/local/music\"}}" \
+api POST /sources "{\"name\":\"mf-ci\",\"type\":\"local\",\"config\":{\"path\":\"/local/music\"}}" \
   > "$WORK/logs/source-create.json" || die "创建 media source 失败"
 cat "$WORK/logs/source-create.json"
-api /sources > "$WORK/logs/sources-list.json" || die "列出 media source 失败"
+api GET /sources > "$WORK/logs/sources-list.json" || die "列出 media source 失败"
 # 不信任 create 响应的 id：一律按 name 从列表反查（历史上这里取错过 id 导致 scan 404）。
 SRC=$(python3 -c '
 import json,sys
@@ -193,10 +196,10 @@ for s in rows:
 ' "$WORK/logs/sources-list.json")
 [ -n "$SRC" ] || die "sources 列表里找不到 mf-ci：$(head -c 300 "$WORK/logs/sources-list.json")"
 echo "source id=$SRC"
-api /sources/"$SRC"/scan >/dev/null || die "触发扫描失败"
+api POST /sources/"$SRC"/scan >/dev/null || die "触发扫描失败"
 SONG=""
 for i in $(seq 1 60); do
-  if api '/songs?limit=3' > "$WORK/logs/songs.json" 2>/dev/null; then
+  if api GET '/songs?limit=3' > "$WORK/logs/songs.json" 2>/dev/null; then
     SONG=$(python3 -c '
 import json,sys
 d=json.load(open(sys.argv[1],encoding="utf-8"))
@@ -211,7 +214,7 @@ done
 echo "source=$SRC song=$SONG"
 
 say "5/7 建组并起播（采样器按组 /status 取进度）"
-GROUP_JSON=$(api /groups "{\"name\":\"mf-ci\",\"memberIds\":[\"$PEER\"]}") || die "建组失败"
+GROUP_JSON=$(api POST /groups "{\"name\":\"mf-ci\",\"memberIds\":[\"$PEER\"]}") || die "建组失败"
 printf '%s' "$GROUP_JSON" > "$WORK/logs/group-create.json"
 GID=$(python3 -c '
 import json,sys
@@ -220,7 +223,7 @@ g=d.get("group") if isinstance(d,dict) else d
 print((g or {}).get("id") or "")
 ' "$WORK/logs/group-create.json")
 [ -n "$GID" ] || die "建组响应里没有 id: $GROUP_JSON"
-api "/peers/group%3A${GID}/queue/play" \
+api POST "/peers/group%3A${GID}/queue/play" \
   "{\"items\":[{\"songId\":\"$SONG\",\"title\":\"CI Tone\",\"mime\":\"audio/flac\"}],\"startIndex\":0}" \
   >/dev/null || die "起播失败"
 
