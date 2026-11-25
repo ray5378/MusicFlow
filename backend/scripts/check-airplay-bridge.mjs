@@ -1111,6 +1111,28 @@ console.log("===== ㉒ 组A:自愈三级分级 + lateTotal 上行 =====");
       && bs.includes("lightRestart(deviceId: string, reason: string)"),
     "主进程执行链断点(事件类型/RPC case/control 入口/manager 分发)",
   );
+
+  // ---- ㉓ [2026-11-25] 切歌真空治本 + offset 累加治标 ----------------------
+  check(
+    "治本: 重锚落点留一个投递周期余量(now+PUSH_TICK),防整帧对齐首帧被 `ts<=cursor` 跳过",
+    server.includes("rebaseLandingMarginUs")
+      && server.includes("headUs > now + rebaseLandingMarginUs"),
+    "重锚落点余量缺失 ⇒ shift=整数时连环死锁复发(真机 offset 累到 -31M)",
+  );
+  check(
+    "治本: 投递侧断粮自动补静音(与上游 endedNaturally 语义解耦, 对齐 MA _align_chunk 填洞)",
+    server.includes("bridge-gap-fill-autostart")
+      && server.includes("reason=delivery-starved")
+      && server.includes("noteBridgeAutoTrackGap(startTail)")
+      && server.includes("Date.now() - this.bridgeGenEpochMs > 1500"),
+    "断粮自动启动/起播静默窗口缺失 ⇒ 切歌真空会复发(真机 bridge-gap-fill 全程 0 次)",
+  );
+  check(
+    "防守: light-restart 的 offset 必须 `-= pullBack`(尾帧 ts 已含旧偏移,改成 = -pullBack 会超前错位)",
+    server.includes("if (pullBack > 0n) this.bridgeTimelineOffsetUs -= pullBack;")
+      && !server.includes("bridgeTimelineOffsetUs = pullBack > 0n ? -pullBack"),
+    "light-restart 偏移语义被改坏 ⇒ 新帧 ts 偏 offset_old,起播/重锚后超前再死锁",
+  );
 }
 
 // ---------------------------------------------------------------------------

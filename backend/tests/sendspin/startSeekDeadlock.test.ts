@@ -215,7 +215,9 @@ describe("start-seek 死锁修复(P0)", () => {
     // 观测:只允许首轮那一次兜底;不得出现第二次
     expect(srv.logs.filter((l) => l.includes("bridge-start-seek-deadlock")).length).toBe(1);
     expect(handles["dev-a"].pushed.length).toBeGreaterThan(pushedAtStart);
-    expect((g as any).bridgeDeadTicks.size).toBe(0);
+    // 落点后移 250ms ⇒ [now, now+250ms] 无内容,允许末拍残留 1 次计数;
+    // 关键判据是「不得出现第二次兜底」(上一行日志数=1)且计数未累到 2。
+    expect(Math.max(0, ...(g as any).bridgeDeadTicks.values())).toBeLessThan(2);
   });
 
   it("④c 稳态 20 拍正常投递 ⇒ 兜底不误触发(无 BOUNDARY seek、deadTicks 恒空)", () => {
@@ -348,5 +350,70 @@ describe("start-seek 死锁修复(P0)", () => {
     const newTail = ringTail(g);
     expect(newTail).toBeGreaterThan(now); // 时间轴不倒退
     expect(newTail).toBeLessThan(now + 5_000_000n); // 不再挂在 +40s 错位时间线上
+  });
+
+  // ==================== [治本 2026-11-25] 投递侧断粮自动补静音 ====================
+  // 真机(v4.15.2, 03:23/03:27):切歌后环内 ~6.5s 真空,`bridge-gap-fill` 全程 0 次
+  // ⇒ 连环死锁 5 次 + offset 累到 -31.1s。修法:投递 tick 按「内容尾 < 投递下沿」
+  // 自动启动续静音(对齐 MA _align_chunk 按 ts 填洞,不依赖上游 endedNaturally 语义)。
+  it("⑦ 断粮(tail<下沿)+在播 ⇒ 自动启动续静音", () => {
+    const { g, srv } = groupWith(["dev-a"]);
+    const now = nowUs();
+    const epoch = (g as any).bridgeContentEpoch;
+    (g as any).bcEpoch.set((g as any).encoderKey("pcm", 100), epoch);
+    g.current = { songId: "s1", durationMs: 200000 };
+    g.paused = false;
+    addRingFrame(g, now + 1_000_000n, epoch); // 仅 1s 存量,低于 2.5s 下沿
+
+    g.bridgePushTick();
+    expect((g as any).bridgeGapFillTailUs).not.toBeNull();
+    expect(srv.logs.some((l) => l.includes("bridge-gap-fill-autostart"))).toBe(true);
+  });
+
+  it("⑧ 内容充足(tail=now+30s) ⇒ 不启动(正常播放零干扰)", () => {
+    const { g, srv } = groupWith(["dev-a"]);
+    const now = nowUs();
+    const epoch = (g as any).bridgeContentEpoch;
+    (g as any).bcEpoch.set((g as any).encoderKey("pcm", 100), epoch);
+    g.current = { songId: "s1", durationMs: 200000 };
+    g.paused = false;
+    addRingFrame(g, now + 30_000_000n, epoch);
+
+    g.bridgePushTick();
+    expect((g as any).bridgeGapFillTailUs).toBeNull();
+    expect(srv.logs.some((l) => l.includes("bridge-gap-fill-autostart"))).toBe(false);
+  });
+
+  it("⑨ 无曲目 / 暂停 ⇒ 不启动(停止后不得灌静音)", () => {
+    const { g } = groupWith(["dev-a"]);
+    const now = nowUs();
+    const epoch = (g as any).bridgeContentEpoch;
+    (g as any).bcEpoch.set((g as any).encoderKey("pcm", 100), epoch);
+    addRingFrame(g, now + 1_000_000n, epoch);
+
+    g.current = null;
+    g.paused = false;
+    g.bridgePushTick();
+    expect((g as any).bridgeGapFillTailUs).toBeNull();
+
+    g.current = { songId: "s1", durationMs: 200000 };
+    g.paused = true;
+    g.bridgePushTick();
+    expect((g as any).bridgeGapFillTailUs).toBeNull();
+  });
+
+  it("⑩ 真内容到达 ⇒ 自动收工(不持续灌静音)", async () => {
+    const { g } = groupWith(["dev-a"]);
+    const now = nowUs();
+    const epoch = (g as any).bridgeContentEpoch;
+    (g as any).bcEpoch.set((g as any).encoderKey("pcm", 100), epoch);
+    g.current = { songId: "s1", durationMs: 200000 };
+    g.paused = false;
+    addRingFrame(g, now + 1_000_000n, epoch);
+    g.bridgePushTick();
+    expect((g as any).bridgeGapFillTailUs).not.toBeNull();
+
+    await g.pushFrame(now + 32_000_000n, new Float32Array(2400));
+    expect((g as any).bridgeGapFillTailUs).toBeNull();
   });
 });

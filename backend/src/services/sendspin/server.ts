@@ -1928,7 +1928,18 @@ export class SendspinGroup {
       headUs = e.tsUs;
       break;
     }
-    const shiftUs = headUs > now ? headUs - now : 0n;
+    // [治本 v2 2026-11-25] 前移落点留一个投递周期余量:落点 = now + PUSH_TICK(250ms)
+    // 而不是 now。真机实证(v4.15.2, shiftMs=6000 整帧对齐):cursor 复位到 now 后,
+    // 环头精确落在 now ⇒ 投递循环 `e.tsUs <= cursor` 把整帧对齐的首帧跳过 ⇒ 本拍
+    // 仍 cand=0 ⇒ 1.25s 后二次死锁 ⇒ offset 累到 -31M 的连环(5 次实测)。
+    // 留 250ms 后环头落在视界内侧深处,首拍必有候选;设备侧只少收 250ms
+    // (5.25s vs 5.5s,仍 < 容量 4.16s 且受子进程水位伺服保护,不溢出)。
+    // ⚠️ 不能改成「投递不投满」:那会把投递速率压到 1.0x,设备缓冲卡在首灌水平
+    // 涨不上去(2026-11-25 13:06 实测 inQMs 卡 1575)——余量只能加在落点侧。
+    const rebaseLandingMarginUs = BigInt(BRIDGE_PUSH_TICK_MS) * 1000n;
+    const shiftUs = headUs > now + rebaseLandingMarginUs
+      ? headUs - now - rebaseLandingMarginUs
+      : 0n;
     if (shiftUs <= 0n) return null;
     this.bridgeRebaseAtMs = Date.now();
     // [组A-分级/01:05 事故标定] shift 量级门:超大 shift 走**轻重启**,不整环前移
@@ -2025,6 +2036,38 @@ export class SendspinGroup {
     //   放在 per-bridge 循环之前 —— ring 是组共享的,只需补一次。
     // ⚠️ 2026-11-23 教训：广播路径早期实现把这一句连同投递段一起 return 掉了，
     //    结果曲末没有静音尾补位 ⇒ 环耗尽 ⇒ 泵停 ⇒ 播放停在半途。
+    // [治本 2026-11-25] 投递侧断粮**自动**补静音 —— 对齐 MA `_align_chunk` 的
+    // 「按 ts 逐块定位、洞就填静音」语义(sendspin_bridge.py:1518-1560 用
+    // `_queue_silence(drift_frames)` 填时间线空洞,不依赖上游「是否自然结束」)。
+    // 本仓差异:上游 streamEngine 的 `noteBridgeAutoTrackGap` 只在 `endedNaturally`
+    // (自然播完且无预取在飞)时触发(streamEngine.ts:2185-2206);真机 2026-11-25
+    // 03:23(提前切)/03:27(continuity=1)两次都没走到 ⇒ `bridge-gap-fill` 全程 0 次
+    // ⇒ 环内 ~6.5s 真空无人填 ⇒ 连环死锁 + offset 累到 -31s。
+    // 这里改按「投递是否真的断粮」启动,与上游语义解耦;有料时 pushFrame 首行的
+    // `endBridgeAutoTrackGap("content")` 每帧都会收工,不会持续灌静音。
+    // 起播/换代后 1.5s 内不自动启动:泵还没产出首帧时内容尾天然偏小,那不是
+    // 「断粮」而是「还没开始产」—— 立刻补静音会把起播 lead 推大
+    // (真机回归:tests/sendspin/bridgePumpGeneration 暖复用 lead 断言被顶到 >3s)。
+    if (
+      this.bridgeGapFillTailUs === null &&
+      !this.paused &&
+      this.current !== null &&
+      Date.now() - this.bridgeGenEpochMs > 1500
+    ) {
+      const starveTail = this.contentTailUs();
+      // 断粮:当前代次内容尾跌到投递下沿(now+FLOOR)之下 ⇒ 下一拍必然投不出。
+      // 起点取 max(tail, now):过期段补不回来(设备已经播过去),从 now 起补才不会
+      // 把静音写进过去时间线。
+      if (starveTail > 0n && starveTail < now + BigInt(BRIDGE_PUSH_FLOOR_US)) {
+        const startTail = starveTail > now ? starveTail : now;
+        this.noteBridgeAutoTrackGap(startTail);
+        this.server.log(
+          "info",
+          `bridge-gap-fill-autostart group=${this.name} ` +
+            `tailVsNowMs=${Math.round(Number(starveTail - now) / 1000)} reason=delivery-starved`,
+        );
+      }
+    }
     this.fillBridgeAutoTrackGap(now);
     // [2026-11-25 legacy 清理] 广播投递是唯一路径（真机 11 分钟零异常验证通过）。
     this.bridgeBroadcastTick(now);
