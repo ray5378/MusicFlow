@@ -39,8 +39,18 @@ cleanup() {
 trap cleanup EXIT
 
 api() {
-  curl -fsS --max-time 25 -u "${CI_USER}:${CI_PASS}" \
-    -H 'Content-Type: application/json' "${BASE}/rest/api/v1$1" ${2:+-d "$2"}
+  # 保留错误响应体：CI 里 curl -f 只报 22，看不出是认证、参数还是服务启动失败。
+  local out code
+  out=$(curl -sS --max-time 25 -u "${CI_USER}:${CI_PASS}" \
+    -H 'Content-Type: application/json' -w '\n%{http_code}' \
+    "${BASE}/rest/api/v1$1" ${2:+-d "$2"}) || return 1
+  code=$(printf '%s' "$out" | tail -1)
+  out=$(printf '%s' "$out" | sed '$d')
+  if [ "$code" -lt 200 ] || [ "$code" -ge 400 ]; then
+    printf 'HTTP %s on %s: %s\n' "$code" "$1" "$out" >&2
+    return 1
+  fi
+  printf '%s' "$out"
 }
 
 # 递归找 JSON 里符合条件的值，避免依赖接口的包装层级（可能是裸数组 / {data:[]}）。
@@ -145,7 +155,10 @@ say "3/7 启用 AirPlay 接收插件并等待模拟设备上线"
 PLUGINS=$(api /plugins) || die "GET /plugins 失败"
 PID=$(printf '%s' "$PLUGINS" | json_pick prefix airplay | head -1)
 [ -n "$PID" ] || die "插件列表里找不到 airplay"
-api /plugins/"$PID" '{"enabled":true}' >/dev/null || die "启用 $PID 失败"
+# 启用接口会顺带启动接收服务；即便它返回错误，DB 里的 enabled 也可能已落库。
+# 真正的判据是下面「设备是否上线」，不要把中间步骤的 5xx 当死因。
+api /plugins/"$PID" '{"enabled":true}' >/dev/null || \
+  echo "警告：启用 $PID 返回错误，继续等设备上线（以 peer 是否出现为准）"
 PEER=""
 for i in $(seq 1 90); do
   PEER=$(api /peers 2>/dev/null | json_pick prefix 'airplay:' | head -1 || true)
