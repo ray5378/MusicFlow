@@ -9,7 +9,7 @@ GitHub 托管 runner 没有设备、也进不了内网，**采不出 A 层数据
 但「判读器本身有没有被改软」完全可以离线回归 —— 否则守卫被悄悄放宽阈值、
 删掉某条判据、或把设备失配从 FAIL 降级，线上会永久假绿，等于没有守卫。
 
-本文件用仓库内固化的三份真实样本（fixtures/）做四层断言：
+本文件用仓库内固化的三份真实样本（fixtures/）做九节断言：
   1. fixture 完整性   —— 设备集合、关键字段都在（防止 fixture 被截断后"看起来 PASS"）
   2. 正样本必须 PASS  —— v4.15.8 基准自比；v4.15.3 前版样本对 v4.15.8 基准
   3. 反样本必须 FAIL  —— v4.15.9 坏样本（真实回归，见文档 §7.3）命中 >=7 条，
@@ -18,6 +18,8 @@ GitHub 托管 runner 没有设备、也进不了内网，**采不出 A 层数据
   4. 阈值有牙齿        —— 把两项容差放大 1e3 倍后对应 FAIL 必须消失（证明红是阈值判出来的，
                          不是别的原因碰巧红）；同时断言 7 个容差常量未被静默改写
   5. 设备失配不可假绿  —— strict 模式下基准里没有的设备必须 FAIL（CI 发版体检用）
+  9. CI 模拟播放判据  —— invariant_guard.py 用绝对阈值（不依赖真机基准），
+                          正样本 PASS / v4.15.9 反样本 FAIL / 阈值被放宽后失去牙齿
 
 退出码：0=全部通过；1=有断言失败
 用法：python3 backend/scripts/baseline/selftest.py [-v]
@@ -232,6 +234,48 @@ def main():
     c.check("渲染含每台设备关键量", md.count("deltaUs p50=") == len(good_devs), "")
     md_bad = "\n".join(sm.render("/nonexistent/x.json"))
     c.check("采样文件缺失时降级为一行说明，不抛异常", "读取失败" in md_bad, md_bad)
+
+    print("== 9. CI 模拟播放判据（invariant_guard）==")
+    # GitHub 托管 runner 没有真设备，CI 里的模拟接收端走 absolute invariants，
+    # 不能和真机基准逐项比。这条链路同样要钉死，否则 CI 会永久假绿。
+    inv_path = os.path.join(HERE, "invariant_guard.py")
+    spec3 = importlib.util.spec_from_file_location("invariant_guard", inv_path)
+    iv = importlib.util.module_from_spec(spec3)
+    spec3.loader.exec_module(iv)
+
+    def run_inv(sample):
+        cmd = [sys.executable, inv_path, "--input", os.path.join(FIX, sample)]
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=180, env=env)
+
+    p_iv_good = run_inv("base_v4.15.8.json")
+    c.check("模拟判据：正常样本 exit=0 且 VERDICT PASS",
+            p_iv_good.returncode == 0 and "VERDICT PASS" in p_iv_good.stdout,
+            "rc=%s out=%r" % (p_iv_good.returncode, p_iv_good.stdout[-160:]))
+    p_iv_bad = run_inv("base_v4.15.9_bad.json")
+    iv_bad_lines = [l for l in p_iv_bad.stdout.splitlines() if l.startswith("  FAIL")]
+    c.check("模拟判据：v4.15.9 反样本 exit=1 且 FAIL>=5 条",
+            p_iv_bad.returncode == 1 and len(iv_bad_lines) >= 5,
+            "rc=%s fails=%d" % (p_iv_bad.returncode, len(iv_bad_lines)))
+    c.check("模拟判据：反样本命中 negPct 与 inQueueMs.p95（可听缺口两种形态）",
+            any("deltaUs.negPct" in l for l in iv_bad_lines)
+            and any("inQueueMs.p95" in l for l in iv_bad_lines),
+            "fails=%s" % [l.strip() for l in iv_bad_lines][:6])
+    p_iv_missing = subprocess.run(
+        [sys.executable, inv_path, "--input", os.path.join(FIX, "no_such.json")],
+        capture_output=True, text=True, timeout=60, env=env)
+    c.check("模拟判据：样本缺失 exit=2（环境失败不冒充指标 FAIL）",
+            p_iv_missing.returncode == 2, "rc=%s" % p_iv_missing.returncode)
+    c.check("模拟判据：容量常量 4163ms 未被改软",
+            iv.DEVICE_QUEUE_CAP_MS == 4163, "got=%s" % iv.DEVICE_QUEUE_CAP_MS)
+    old_lo = iv.DELTA_P50_MIN_US
+    try:
+        iv.DELTA_P50_MIN_US = -10 ** 9
+        loosened = iv.judge(good, min_ticks=20)
+        c.check("模拟判据：把 deltaUs 下限放宽后 deltaUs.p50 不再报红（证明红来自阈值）",
+                not any(r[0] == "FAIL" and r[2] == "deltaUs.p50" for r in loosened),
+                "fails=%s" % [r for r in loosened if r[0] == "FAIL"])
+    finally:
+        iv.DELTA_P50_MIN_US = old_lo
 
     return c.summary()
 

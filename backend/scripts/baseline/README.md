@@ -8,7 +8,9 @@
 |---|---|---|---|
 | `baseline_cap.py` | 离线分析 `base.jsonl` → 统计 JSON（A 层 tick/ring/prog + B 层 status 偏差） | 需要样本文件 | 无 |
 | `baseline_guard.py` | 用基准 JSON 判读一份样本，输出 PASS/FAIL/WARN 与退出码 | 现场采集时需要 | 无 |
-| `selftest.py` | 判读器自检（CI blocking，39 条断言），fixtures 驱动 | **不需要** | 无 |
+| `invariant_guard.py` | CI 模拟播放判据：**绝对阈值**，不依赖真机基准（0=PASS/1=指标 FAIL/2=环境问题） | **不需要** | 无 |
+| `selftest.py` | 判读器自检（CI blocking，45 条断言），fixtures 驱动 | **不需要** | 无 |
+| `ci_sim_playback.sh` | GitHub runner 上的模拟 AirPlay 播放全流程（起镜像 → 建组起播 → 采样 → 判读） | **不需要** | 测试用户 `ci-probe` |
 | `fixtures/*.json` | 三份真实样本：正常基准 / 前版正常 / 真实回归反例（**设备 key 已脱敏为 `DEVICE_*`**，只用于判读器回归，不可用于判真机样本） | — | 无 |
 
 采集器本体（会调 `/rest/api/v1`，要 Basic 认证）不在本目录，脱敏示例在 `docs/examples/`。
@@ -72,8 +74,20 @@ python3 baseline_guard.py --baseline baseline/base_v4.15.8.json --input /tmp/cap
 判死顺序：`silenceChunks` → `deltaUs<0` → `inQueueMs>4163` → `realigned` 暴涨 → `late` 暴涨。
 两台设备**对称**出问题 = 服务端；**单台** = 该设备链路。
 
-## 四、CI 两层（`.github/workflows/playback-baseline.yml`）
+## 四、CI 三层（`.github/workflows/playback-baseline.yml`）
 
+- **L0 `sim-e2e`**（`ubuntu-latest`，tag / 手动触发）
+  在 runner 自己的 docker 里起**被测镜像**（等 `build.yml` 推完，最多 25 分钟），
+  同时起一个 `shairport-sync` 模拟 AirPlay 接收端（广播 `_raop._tcp`，输出到 FIFO 丢弃），
+  然后真实走：启用 airplay 插件 → 等设备上线 → 建本地媒体源 + 生成 3 分钟正弦音 →
+  建组 → `queue/play` → 采样 `MF_MINUTES` 分钟 → `baseline_cap.py` → `invariant_guard.py`。
+  **为什么模拟 AirPlay 而不是 sendspin**：A 层 `ev:"tick"` / `ring-diag` /
+  `deltaUs` / `inQueueMs` 全部由 `services/airplay/bridgeSession.ts` 在服务端计算，
+  sendspin 模拟端不产生这些字段。
+  判据是绝对不变量（`deltaUs p50 ∈ [0.5,4]s` 且 `negPct≤1%`、`inQueueMs p95≤4163ms`、
+  `overCapPct≤5%`、`realigned/min≤30`、`advanceRate∈[0.98,1.02]`），
+  因此不需要真机基准，也不会因为模拟设备 key 不同就假 FAIL。
+  样本不足（tick<20）算**环境问题 exit 2**，不冒充指标 FAIL。
 - **L1 `judge-selftest`**（`ubuntu-latest`，blocking，push/PR/tag 都跑）
   `selftest.py` 用 fixtures 断言：正常样本必须 PASS、v4.15.9 反例必须命中 ≥7 条且覆盖五类判据、
   放大容差后对应红必须消失（证明阈值真有牙齿）、7 个容差常量字面量指纹、设备失配在 strict 下必须 FAIL、
@@ -86,7 +100,7 @@ python3 baseline_guard.py --baseline baseline/base_v4.15.8.json --input /tmp/cap
   默认关闭：需仓库变量 `MF_LIVE_CHECK=true`（可选 `MF_WATCH_DIR`）且内网 runner 具备
   docker 权限（`baseline_cap.py` 用 `docker exec` 取 dist 指纹）。
 
-> L2 刻意**不挂在 `build.yml` 的 needs 链上**：tag CI 的门禁失败会触发回滚 job，
+> L0/L2 刻意**不挂在 `build.yml` 的 needs 链上**：tag CI 的门禁失败会触发回滚 job，
 > 把 GHCR/DockerHub 的 `:X.Y.Z` 与 `:latest` 打回旧 digest。体检只出报告，不允许反向动镜像。
 
 真机体检要人等设备出声，因此 tag 触发时若不满足条件（没人播、设备离线），
@@ -100,3 +114,5 @@ python3 baseline_guard.py --baseline baseline/base_v4.15.8.json --input /tmp/cap
 2. 新采的基准替换 `fixtures/base_*.json` 时，`selftest.py` 的 `BAD_MUST_HIT` 必须仍然全部命中
    （即新基准要能把 v4.15.9 反例判红）。
 3. 采样器改动同步 `docs/examples/baseline_sampler.example.py` 与手册附录 C。
+4. `invariant_guard.py` 的阈值常量改动必须同步 `selftest.py` §9 与基线文档 §4；
+   改 `ci_sim_playback.sh` 的接口调用前先用 `bash -n` + tag 手动跑一轮 L0。

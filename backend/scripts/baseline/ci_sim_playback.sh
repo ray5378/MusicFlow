@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+# ============================================================================
+# GitHub Actions 里的「模拟播放 → 基线不变量体检」全流程（ubuntu-latest）
+#
+# 为什么这里模拟 AirPlay 而不是 sendspin：
+#   基准文档的 A 层指标（ev:"tick" / ring-diag / deltaUs / inQueueMs）
+#   全部由 backend/src/services/airplay/bridgeSession.ts 在**服务端**计算，
+#   接收端只需要完成 RAOP 握手并持续收 UDP 音频；sendspin 模拟端根本
+#   不产生这些字段，拿它判基线只会得到空样本。
+#
+# 产物：<MF_WORKDIR>/cap.json + 判读 exit code + <MF_WORKDIR>/logs/
+# 只读现网无关：容器名固定 musicflow，但跑在 runner 自己的 docker 里。
+# ============================================================================
+set -euo pipefail
+
+WORK=${MF_WORKDIR:-"${PWD}/.mf-ci"}
+IMAGE=${MF_IMAGE:?MF_IMAGE 必填，例如 ghcr.io/ray5378/musicflow:4.15.8}
+MINUTES=${MF_MINUTES:-8}
+PORT=${MF_PORT:-46400}
+BASE="http://127.0.0.1:${PORT}"
+CI_USER=ci-probe
+CI_PASS=ci-probe
+CONTAINER=musicflow
+mkdir -p "$WORK/data" "$WORK/music" "$WORK/logs"
+REPO=${GITHUB_WORKSPACE:-$(pwd)}
+
+say() { printf '\n=== %s ===\n' "$*"; }
+die() { printf '::error::%s\n' "$*" >&2; exit 2; }
+
+cleanup() {
+  local rc=$?
+  say "清理（保留证据到 $WORK）"
+  docker logs "$CONTAINER" > "$WORK/logs/container.log" 2>&1 || true
+  docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+  [ -f "$WORK/shairport.pid" ] && kill "$(cat "$WORK/shairport.pid")" >/dev/null 2>&1 || true
+  [ -f "$WORK/dd.pid" ] && kill "$(cat "$WORK/dd.pid")" >/dev/null 2>&1 || true
+  exit "$rc"
+}
+trap cleanup EXIT
+
+api() {
+  curl -fsS --max-time 25 -u "${CI_USER}:${CI_PASS}" \
+    -H 'Content-Type: application/json' "${BASE}/rest/api/v1$1" ${2:+-d "$2"}
+}
+
+# 递归找 JSON 里符合条件的值，避免依赖接口的包装层级（可能是裸数组 / {data:[]}）。
+json_pick() {
+  python3 -c '
+import json,sys
+mode,needle=sys.argv[1],sys.argv[2]
+o=json.load(sys.stdin)
+out=[]
+def walk(x):
+    if isinstance(x,dict):
+        for k,v in x.items():
+            if mode=="key" and k==needle and isinstance(v,str): out.append(v)
+            walk(v)
+    elif isinstance(x,list):
+        for v in x: walk(v)
+    elif isinstance(x,str) and mode=="prefix" and x.startswith(needle): out.append(x)
+walk(o)
+for v in dict.fromkeys(out): print(v)
+' "$1" "$2"
+}
+
+say "0/7 环境：shairport-sync + avahi + ffmpeg"
+sudo apt-get update -qq >/dev/null
+sudo apt-get install -y -qq shairport-sync avahi-daemon avahi-utils ffmpeg jq >/dev/null
+shairport-sync -h > "$WORK/logs/shairport-help.txt" 2>&1 || true
+grep -qi pipe "$WORK/logs/shairport-help.txt" || die "shairport-sync 未编译 pipe 输出后端（见 help 日志）"
+grep -qi avahi "$WORK/logs/shairport-help.txt" || die "shairport-sync 未编译 avahi mDNS 后端（见 help 日志）"
+sudo avahi-daemon -D >/dev/null 2>&1 || sudo service avahi-daemon start >/dev/null 2>&1 || true
+avahi-browse -at >/dev/null 2>&1 || true
+
+# FIFO 必须有读者，否则 shairport 会阻塞在写端。
+rm -f "$WORK/ap.pipe"; mkfifo "$WORK/ap.pipe"
+(dd if="$WORK/ap.pipe" of=/dev/null bs=4096 >/dev/null 2>&1 & echo $! > "$WORK/dd.pid")
+cat > "$WORK/shairport.conf" <<EOF
+general =
+{
+  name = "MF-CI-Receiver";
+  output_backend = "pipe";
+  mdns_backend = "avahi";
+  regtype = "_raop._tcp";
+  interpolation = "basic";
+};
+pipe =
+{
+  name = "${WORK}/ap.pipe";
+};
+EOF
+sudo shairport-sync -c "$WORK/shairport.conf" > "$WORK/logs/shairport.log" 2>&1 &
+echo $! > "$WORK/shairport.pid"
+sleep 3
+kill -0 "$(cat "$WORK/shairport.pid")" 2>/dev/null || {
+  cat "$WORK/logs/shairport.log" >&2
+  die "shairport-sync 启动失败"
+}
+say "接收端已广播 _raop._tcp: MF-CI-Receiver"
+
+say "1/7 启动被测镜像（空库）"
+# 容器内进程 uid 与 runner 用户不一定一致，给空库目录开放写权限。
+chmod -R a+rwX "$WORK/data" "$WORK/music"
+docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+docker run -d --name "$CONTAINER" --network host \
+  -e TZ=Asia/Shanghai -e UV_USE_IO_URING=0 \
+  -v "$WORK/data:/app/backend/data" \
+  -v "$WORK/music:/local/music:ro" \
+  "$IMAGE" >/dev/null
+for i in $(seq 1 90); do
+  curl -fsS --max-time 3 "${BASE}/ping" >/dev/null 2>&1 && break
+  sleep 1
+  [ "$i" -eq 90 ] && { docker logs "$CONTAINER" --tail 80 >&2; die "容器 90s 内未响应 /ping"; }
+done
+
+say "2/7 建测试用户（admin 首次登录带 must_change_password，不用它）"
+docker stop "$CONTAINER" >/dev/null
+python3 - "$WORK/data/musicflow.db" "$CI_USER" "$CI_PASS" <<'PY'
+import hashlib, sqlite3, sys, uuid
+db, user, pw = sys.argv[1], sys.argv[2], sys.argv[3]
+c = sqlite3.connect(db)
+salt, sub = uuid.uuid4().hex, uuid.uuid4().hex
+c.execute(
+    "INSERT OR REPLACE INTO users (id,username,password,salt,subsonic_salt,is_admin,is_active,email,must_change_password,created_at) "
+    "VALUES (?,?,?,?,?,1,1,'',0,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+    (uuid.uuid4().hex, user, hashlib.md5((pw + sub).encode()).hexdigest(), salt, sub),
+)
+c.commit(); c.close()
+PY
+docker start "$CONTAINER" >/dev/null
+for i in $(seq 1 60); do
+  api /songs >/dev/null 2>&1 && break
+  sleep 1
+  [ "$i" -eq 60 ] && die "测试用户认证 60s 内未通过"
+done
+
+say "3/7 启用 AirPlay 接收插件并等待模拟设备上线"
+PLUGINS=$(api /plugins) || die "GET /plugins 失败"
+PID=$(printf '%s' "$PLUGINS" | json_pick prefix airplay | head -1)
+[ -n "$PID" ] || die "插件列表里找不到 airplay"
+api /plugins/"$PID" '{"enabled":true}' >/dev/null || die "启用 $PID 失败"
+PEER=""
+for i in $(seq 1 90); do
+  PEER=$(api /peers 2>/dev/null | json_pick prefix 'airplay:' | head -1 || true)
+  [ -n "$PEER" ] && break
+  sleep 1
+done
+[ -n "$PEER" ] || { docker logs "$CONTAINER" --tail 60 >&2; die "90s 内未发现 shairport 模拟设备"; }
+echo "peer=$PEER"
+
+say "4/7 本地媒体源 + 3 分钟测试音"
+ffmpeg -hide_banner -loglevel error -f lavfi -i 'sine=frequency=440:duration=180' \
+  -ar 48000 -ac 2 -c:a flac -y "$WORK/music/ci_tone.flac" >/dev/null
+SRC=$(api /sources "{\"name\":\"mf-ci\",\"type\":\"local\",\"config\":{\"path\":\"/local/music\"}}" | json_pick key id | head -1)
+[ -n "$SRC" ] || die "创建 media source 失败"
+api /sources/"$SRC"/scan >/dev/null || die "触发扫描失败"
+SONG=""
+for i in $(seq 1 60); do
+  SONG=$(api '/songs?limit=3' 2>/dev/null | json_pick key id | head -1 || true)
+  [ -n "$SONG" ] && break
+  sleep 1
+done
+[ -n "$SONG" ] || die "扫描 60s 后仍无歌曲"
+echo "source=$SRC song=$SONG"
+
+say "5/7 建组并起播（采样器按组 /status 取进度）"
+GROUP_JSON=$(api /groups "{\"name\":\"mf-ci\",\"memberIds\":[\"$PEER\"]}") || die "建组失败"
+GID=$(printf '%s' "$GROUP_JSON" | json_pick key id | head -1)
+[ -n "$GID" ] || die "建组响应里没有 id: $GROUP_JSON"
+api "/peers/group%3A${GID}/queue/play" \
+  "{\"items\":[{\"songId\":\"$SONG\",\"title\":\"CI Tone\",\"mime\":\"audio/flac\"}],\"startIndex\":0}" \
+  >/dev/null || die "起播失败"
+
+say "6/7 采样 ${MINUTES} 分钟（tick/ring/prog）"
+# 先让桥接跑到稳态（首包 lead + anchor 落定），再开始计数。
+sleep 12
+export MF_USER="$CI_USER" MF_PASS="$CI_PASS" MF_GROUP_ID="$GID" \
+       MF_DEVICES="${PEER#airplay:}" MF_OUTDIR="$WORK" \
+       MF_CONTAINER="$CONTAINER" MF_BASE_URL="$BASE"
+timeout "$((MINUTES * 60 + 30))" python3 \
+  "$REPO/docs/examples/baseline_sampler.example.py" > "$WORK/logs/sampler.log" 2>&1 || true
+TICKS=$(grep -ac '"type":"tick"' "$WORK/base.jsonl" 2>/dev/null || echo 0)
+echo "采样 tick 行数=$TICKS"
+[ "$TICKS" -ge 20 ] || { tail -40 "$WORK/logs/container.log" >&2; die "tick 不足 20 条：桥接没跑起来"; }
+
+say "7/7 汇总 + 不变量判读"
+export MF_WATCH_DIR="$WORK"
+python3 "$REPO/backend/scripts/baseline/baseline_cap.py" \
+  --window "$MINUTES" --label "ci-sim-$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)" \
+  --out "$WORK/cap.json" || die "baseline_cap 失败"
+python3 "$REPO/backend/scripts/baseline/invariant_guard.py" \
+  --input "$WORK/cap.json" --min-ticks 20

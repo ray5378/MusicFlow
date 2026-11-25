@@ -1,6 +1,14 @@
 name: Playback Baseline
 
-# 播放基线体检（两层，职责不同）
+# 播放基线体检（三层，职责不同）
+#
+#   L0 sim-e2e（托管 runner，tag 触发）
+#      —— 在 GitHub Actions 里自己起被测镜像 + 一个 shairport-sync 模拟
+#         AirPlay 接收端，真实建组/起播/采样，再用绝对不变量判据判读。
+#         基准 A 层（tick/ring-diag/deltaUs/inQueueMs）由 AirPlay 桥在
+#         **服务端**计算，所以模拟接收端足以产出同口径数据；sendspin
+#         模拟端不产生这些字段，不能替代。
+#         与 L1 一样不需要真机、不需要 self-hosted runner，但耗时 ~10 分钟。
 #
 #   L1 judge-selftest（托管 runner，blocking）
 #      —— 判读器与容差阈值本身的回归。真机样本只能在能出声的内网采，
@@ -20,13 +28,10 @@ name: Playback Baseline
 on:
   push:
     branches: ["main"]
-    paths:
-      - "backend/scripts/baseline/**"
-      - "docs/examples/baseline_sampler.example.py"
-      - "docs/播放基线-基准值与判读-*.md"
-      - "backend/src/services/sendspin/**"
-      - "backend/src/services/player/**"
-      - ".github/workflows/playback-baseline.yml"
+    # 发版必须触发 L0。若这里保留 paths 过滤，tag 指向的 commit 没改基线目录时
+    # 整个 workflow 会被跳过 —— 「每次发版跑一轮」就落空了，故 push 不过滤路径，
+    # 只有 PR 过滤（PR 只跑秒级 L1）。
+    tags: ["v*"]
   pull_request:
     paths:
       - "backend/scripts/baseline/**"
@@ -43,6 +48,10 @@ on:
         description: "同时跑真机体检（需内网 self-hosted runner）"
         type: boolean
         default: false
+      sim_minutes:
+        description: "模拟播放采样分钟数（L0）"
+        default: "8"
+        required: false
 
 concurrency:
   group: playback-baseline-${{ github.ref }}
@@ -50,8 +59,81 @@ concurrency:
 
 permissions:
   contents: read
+  packages: read
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # L0：托管 runner 上的模拟播放 + 基线不变量判读（发版时跑）
+  # ---------------------------------------------------------------------------
+  sim-e2e:
+    name: simulated AirPlay playback baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Resolve released image
+        id: image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          echo "${GH_TOKEN}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          V="${GITHUB_REF_NAME#v}"
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER}/musicflow:${V}"
+          echo "image=${IMAGE}" | tee -a "$GITHUB_OUTPUT"
+          # build.yml 与本 workflow 同时被 tag 触发，镜像可能还没推完：最多等 25 分钟。
+          for i in $(seq 1 60); do
+            if docker manifest inspect "${IMAGE}" >/dev/null 2>&1; then
+              echo "镜像就绪（第 ${i} 次探测）"; exit 0
+            fi
+            sleep 25
+          done
+          echo "::error::25 分钟内未等到 ${IMAGE}；build.yml 可能失败或镜像为私有且 token 无权限"
+          exit 2
+
+      - name: Run simulated playback and judge
+        env:
+          MF_IMAGE: ${{ steps.image.outputs.image }}
+          MF_MINUTES: ${{ inputs.sim_minutes || '8' }}
+          MF_WORKDIR: ${{ runner.temp }}/mf-ci-sim
+        run: |
+          set -o pipefail
+          bash backend/scripts/baseline/ci_sim_playback.sh 2>&1 | tee /tmp/mf_sim_run.log
+
+      - name: Write job summary
+        if: always()
+        run: |
+          {
+            echo "### 模拟播放基线体检 — \`${GITHUB_REF_NAME}\`"
+            echo ""
+            echo "<details><summary>判读全文</summary>"
+            echo ""
+            echo '```'
+            tail -80 /tmp/mf_sim_run.log 2>/dev/null || echo "(无输出)"
+            echo '```'
+            echo ""
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload simulated playback evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline-sim-${{ github.ref_name }}
+          path: |
+            ${{ runner.temp }}/mf-ci-sim/cap.json
+            ${{ runner.temp }}/mf-ci-sim/base.jsonl
+            ${{ runner.temp }}/mf-ci-sim/logs/
+            /tmp/mf_sim_run.log
+          if-no-files-found: warn
+          retention-days: 30
+
   # ---------------------------------------------------------------------------
   # L1：判读器回归（不需要真机）
   # ---------------------------------------------------------------------------
@@ -73,13 +155,14 @@ jobs:
           python3 -m py_compile \
             backend/scripts/baseline/baseline_cap.py \
             backend/scripts/baseline/baseline_guard.py \
+            backend/scripts/baseline/invariant_guard.py \
             backend/scripts/baseline/summary_md.py \
             backend/scripts/baseline/selftest.py \
             docs/examples/baseline_sampler.example.py
           echo "OK: py_compile 全部通过"
 
-      # 核心：34 条断言。失败即说明判读逻辑/阈值/退出码契约被改坏。
-      - name: Judge selftest (39 assertions)
+      # 核心：45 条断言。失败即说明判读逻辑/阈值/退出码契约被改坏。
+      - name: Judge selftest (45 assertions)
         run: |
           set -o pipefail
           python3 backend/scripts/baseline/selftest.py 2>&1 | tee /tmp/selftest.log
