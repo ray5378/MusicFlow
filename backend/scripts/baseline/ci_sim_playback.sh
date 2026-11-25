@@ -153,7 +153,15 @@ done
 
 say "3/7 启用 AirPlay 接收插件并等待模拟设备上线"
 PLUGINS=$(api /plugins) || die "GET /plugins 失败"
-PID=$(printf '%s' "$PLUGINS" | json_pick prefix airplay | head -1)
+# /v1/plugins 返回的 id 是 DB 行 id（UUID），name 才是 airplay-renderer 这类稳定标识。
+PID=$(printf '%s' "$PLUGINS" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+rows=d if isinstance(d,list) else (d.get("plugins") or [])
+for p in rows:
+    if "airplay" in str(p.get("name","")).lower():
+        print(p.get("id") or p.get("name")); break
+')
 [ -n "$PID" ] || die "插件列表里找不到 airplay"
 # 启用接口会顺带启动接收服务；即便它返回错误，DB 里的 enabled 也可能已落库。
 # 真正的判据是下面「设备是否上线」，不要把中间步骤的 5xx 当死因。
@@ -171,21 +179,46 @@ echo "peer=$PEER"
 say "4/7 本地媒体源 + 3 分钟测试音"
 ffmpeg -hide_banner -loglevel error -f lavfi -i 'sine=frequency=440:duration=180' \
   -ar 48000 -ac 2 -c:a flac -y "$WORK/music/ci_tone.flac" >/dev/null
-SRC=$(api /sources "{\"name\":\"mf-ci\",\"type\":\"local\",\"config\":{\"path\":\"/local/music\"}}" | json_pick key id | head -1)
-[ -n "$SRC" ] || die "创建 media source 失败"
+api /sources "{\"name\":\"mf-ci\",\"type\":\"local\",\"config\":{\"path\":\"/local/music\"}}" \
+  > "$WORK/logs/source-create.json" || die "创建 media source 失败"
+cat "$WORK/logs/source-create.json"
+api /sources > "$WORK/logs/sources-list.json" || die "列出 media source 失败"
+# 不信任 create 响应的 id：一律按 name 从列表反查（历史上这里取错过 id 导致 scan 404）。
+SRC=$(python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1],encoding="utf-8"))
+rows=d if isinstance(d,list) else (d.get("sources") or [])
+for s in rows:
+    if s.get("name")=="mf-ci": print(s["id"]); break
+' "$WORK/logs/sources-list.json")
+[ -n "$SRC" ] || die "sources 列表里找不到 mf-ci：$(head -c 300 "$WORK/logs/sources-list.json")"
+echo "source id=$SRC"
 api /sources/"$SRC"/scan >/dev/null || die "触发扫描失败"
 SONG=""
 for i in $(seq 1 60); do
-  SONG=$(api '/songs?limit=3' 2>/dev/null | json_pick key id | head -1 || true)
+  if api '/songs?limit=3' > "$WORK/logs/songs.json" 2>/dev/null; then
+    SONG=$(python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1],encoding="utf-8"))
+rows=d if isinstance(d,list) else (d.get("songs") or [])
+print(rows[0]["id"] if rows else "")
+' "$WORK/logs/songs.json" 2>/dev/null || true)
+  fi
   [ -n "$SONG" ] && break
   sleep 1
 done
-[ -n "$SONG" ] || die "扫描 60s 后仍无歌曲"
+[ -n "$SONG" ] || die "扫描 60s 后仍无歌曲：$(head -c 300 "$WORK/logs/songs.json" 2>/dev/null || echo no-file)"
 echo "source=$SRC song=$SONG"
 
 say "5/7 建组并起播（采样器按组 /status 取进度）"
 GROUP_JSON=$(api /groups "{\"name\":\"mf-ci\",\"memberIds\":[\"$PEER\"]}") || die "建组失败"
-GID=$(printf '%s' "$GROUP_JSON" | json_pick key id | head -1)
+printf '%s' "$GROUP_JSON" > "$WORK/logs/group-create.json"
+GID=$(python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1],encoding="utf-8"))
+g=d.get("group") if isinstance(d,dict) else d
+print((g or {}).get("id") or "")
+' "$WORK/logs/group-create.json")
 [ -n "$GID" ] || die "建组响应里没有 id: $GROUP_JSON"
 api "/peers/group%3A${GID}/queue/play" \
   "{\"items\":[{\"songId\":\"$SONG\",\"title\":\"CI Tone\",\"mime\":\"audio/flac\"}],\"startIndex\":0}" \
