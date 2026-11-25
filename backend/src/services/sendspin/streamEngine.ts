@@ -761,21 +761,40 @@ export class GroupPump {
    * [旧游标, 新游标] 这段**已经投递出去**的内容也裁掉 ⇒ 桥重投 ⇒ 听感重复。
    */
   private resolveTrimPoint(): { outMs: number; tsUs: bigint } | null {
-    // ★ 仅纯桥组可裁（关键安全闸，2026-11-25 实机复核）：
-    //   混合组里直连 sendspin 成员的内容由 `pushFrame` **即时下发**（遍历 this.members
-    //   直接 sendAudio），根本不经过 `bcCursor`。环里 [投递游标, 写前沿] 这一段它们
-    //   早就收到了 —— 裁掉后桥从游标重取新倍速内容、而直连成员只能播完手上的旧内容
-    //   ⇒ 组内相差一整个前瞻深度（真机 30s 档 = 24.5s 分叉，比"慢"严重得多）。
-    //   混合组一律回落写前沿：延迟仍是前瞻上限，与本优化引入前完全一致。
-    if (this.group.hasDirectMembers?.() === true) return null;
-    const trimUs = this.group.bridgeTrimCursorUs?.();
-    if (trimUs === null || trimUs === undefined || trimUs === 0n) return null;
+    // 可裁上界 = 所有接收方「都还没拿到」的第一个点。
+    //   桥：最落后投递游标 B（环里 [可听, B] 已被桥取走并变成 RTP 帧，收不回来）。
+    //   直连成员：实收前沿 D（`slowestDirectMemberFrontUs`）。
+    //   取 min ⇒ 既不超过桥游标（否则桥读到空档），也不超过任何成员已收位置（否则 ts 重叠重发）。
+    //
+    //   ⚠️ 历史：P1 之前这里对混合组一刀切 `hasDirectMembers() => null` —— 直连成员的内容
+    //   由 `pushFrame` 无条件下发、环里那 30 秒它们早已收到，裁了会造成组内相差一整个
+    //   前瞻深度（真机 30s 档 = 24.5s 分叉）。P1 的逐成员投递闸把 D 压到
+    //   `min(prefill 档位, 设备容量, 桥游标)` 之后，该前提不再成立 ⇒ 混合组可安全裁环。
+    const bridgeUs = this.group.bridgeTrimCursorUs?.() ?? null;
+    if (bridgeUs === null || bridgeUs === 0n) return null; // 无桥 ⇒ 旧路径（写前沿）
+    let trimUs = bridgeUs;
+    const directUs = this.group.slowestDirectMemberFrontUs?.() ?? null;
+    if (directUs !== null && directUs > 0n && directUs < trimUs) trimUs = directUs;
+    if (trimUs === 0n) return null;
     const tailUs = this.group.pumpTailUs?.() ?? 0n;
+
     if (tailUs === 0n) return null;
     const playMs = Math.max(0, this.playCursorMs);
     const offsetUs = tailUs - BigInt(Math.round(playMs * 1000));
     const outMs = Number(trimUs - offsetUs) / 1000;
     if (!Number.isFinite(outMs) || outMs <= 0) return null;
+    // 诊断：三个上界的实际值（相对可听位置）。改速时才打，低频。
+    //   B = 桥游标（物理下限）、D = 直连成员最落后实收前沿（投递闸压出来的）、
+    //   tail = 写前沿（30s 前瞻）。trim 应 = min(B, D)。
+    {
+      const n = Number(nowUs());
+      const ms = (v: bigint | null) => (v === null ? "null" : String(Math.round((Number(v) - n) / 1000)));
+      logSafe(
+        this.server,
+        "info",
+        `[pump][trim] B=${ms(bridgeUs)}ms D=${ms(directUs)}ms tail=${ms(tailUs)}ms 采用=${Math.round((Number(trimUs) - n) / 1000)}ms song=${this.songId}`,
+      );
+    }
     return { outMs: Math.min(outMs, playMs), tsUs: trimUs };
   }
 
@@ -2166,6 +2185,10 @@ export class GroupPump {
         const capacityCapMs = this.group.capacityLimitedPrefillMs?.() ?? PREFILL_BUFFER_MAX_MS;
         const wantedMs = prefillTargetMs();
         const targetUs = Math.min(wantedMs, capacityCapMs) * 1000;
+        // 单向写给组：server 侧逐成员投递闸（`canAccept` ③）用它作**统一上界**，
+        // 让直连成员的实收前沿贴住用户配置的水位 ⇒ 混合组改速延迟 = 该档位。
+        // （server 不能 import 本文件：会形成循环依赖，故用字段传递。）
+        this.group.prefillWantedMsCache = wantedMs;
         // ⚠️ 等到**已有实测码率**再打:首帧时 pushedSamples 还是 0,码率走名义回落
         //   (FLAC 名义 134400B/s),打出来的实际秒数偏保守,会让人误以为「设备只能装这么点」。
         //   真机实测 105052B/s → 1.6MB 装 15.2s;名义值算出来只有 11.9s。

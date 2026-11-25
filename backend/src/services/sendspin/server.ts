@@ -174,6 +174,8 @@ const BRIDGE_BULK_QUEUE_MARGIN_MS = 1_000;
 const BRIDGE_GEN_LOSS_WINDOW_US = 20_000_000;
 /** 每帧时长(µs)，与 streamEngine.FRAME_MS 同源（不 import 以免循环依赖）。 */
 const BRIDGE_GEN_LOSS_FRAME_US = 25_000;
+/** 逐成员投递队列的重试节拍（ms）。与桥投递定时器同量级；只在队列非空时存在。 */
+const AUDIO_QUEUE_TICK_MS = 250;
 
 export interface SendspinServerOptions {
   pairkeys: Identity;
@@ -1021,6 +1023,31 @@ export class SendspinGroup {
   hasDirectMembers(): boolean {
     return this.members.size > 0;
   }
+
+  /** 用户配置的设备侧期望水位（`prefill_buffer_ms` 档位原值，ms）。
+   *  由 `streamEngine` 每帧 pacing 时**单向写入**（server 不能 import streamEngine，
+   *  会形成循环依赖），仅供 `SendspinConnection.canAccept` 的第三道闸读取。
+   *  0 = 尚未写过（此时不启用该闸，退回容量闸 + 桥游标闸）。 */
+  prefillWantedMsCache = 0;
+
+  /** 直连成员的**最落后**实收前沿（内容轴 µs）；null = 无可用成员。
+   *
+   *  语义 = 「所有直连成员都已经收到过的内容末尾」的最小值。热换源裁环点取它可保证
+   *  **没有任何成员需要重收**（ts 不重叠）。`issuedFrontUs === 0n` 的成员（刚连上、
+   *  尚未出队任何帧）跳过 —— 否则会把裁环点拉到 0，等于放弃热切换。
+   *
+   *  与 `bridgeTrimCursorUs()` 的关系：投递闸（`canAccept` ②）保证 `D <= B`，
+   *  故此处返回值天然不超过桥游标；两者取 min 只是防御性写法。 */
+  slowestDirectMemberFrontUs(): bigint | null {
+    let min: bigint | null = null;
+    for (const c of this.members) {
+      const f = c.issuedFrontUs;
+      if (f === 0n) continue;
+      if (min === null || f < min) min = f;
+    }
+    return min;
+  }
+
 
   /** 当前桥内容代次(只读)。S1 预取的消费方(streamEngine)在预取开始时记下
    *  `bridgeContentEpoch + 1`,采纳前校验它仍是当前值 —— 中途 seek/rehost/切歌
@@ -2961,7 +2988,11 @@ export class SendspinGroup {
         if (data && data.length > 0) {
           bytes += data.length;
           // 同一份字节分发给组内全部成员 —— 字节与时间戳序列完全一致。
-          for (const c of g.members) c.sendAudio(ts + this.sendspinDelayUsOf(c.clientId ?? ""), data);
+          for (const c of g.members) {
+            // 第三个参数是**内容轴** ts（未补偿）：投递闸要用它跟桥游标比较，
+            // 用已补偿值会让 D 虚高 ⇒ 触发重发。
+            c.sendAudio(ts + this.sendspinDelayUsOf(c.clientId ?? ""), data, ts);
+          }
           if (n > 0) ring.push({ tsUs: ts, durUs: Math.round((n * 1_000_000) / SAMPLE_RATE), data, ep: this.bridgeContentEpoch });
           // 桥投递(§6.2):挂在 pcm:100 组的 chunk 循环体里 —— 桥按
           // s16le/48k/2ch 消费(与 PCM 编码器字面输出一致,即 MFAB AUDIO payload)。
@@ -3098,7 +3129,7 @@ export class SendspinGroup {
     // 与 pushFrame 同一偏移(按成员):否则 late-join 的新成员会比老成员早/晚补偿量,
     // 进场瞬间听出一个跳变(ring 内仍是时间线域戳,故此处补)。
     const dspDelayUs = this.sendspinDelayUsOf(c.clientId ?? "");
-    for (const it of items) c.sendAudio(it.tsUs + dspDelayUs, it.data);
+    for (const it of items) c.sendAudio(it.tsUs + dspDelayUs, it.data, it.tsUs);
     this.server.log(
       "info",
       `sendspin late-join 回填: client=${c.clientId} codec=${c.codec} chunks=${items.length} ` +
@@ -3418,6 +3449,27 @@ export class SendspinConnection {
    *  的那个数。 */
   bufferCapacityBytes = 0;
 
+  /** ---- 逐成员投递闸（P1，对齐 aiosendspin `BufferTracker`）----
+   *  病灶：`pushFrame` 对全组 `for (const c of g.members) c.sendAudio(...)` **无条件下发**，
+   *  而泵在有桥时会把环产到 30s 前瞻（`PUMP_LOOKAHEAD_DEFAULT_US`）。设备只装得下自己
+   *  宣告的 `buffer_capacity`，超出的部分要么被设备拒收、要么堆在服务端内存里。
+   *  MA 的做法（`aiosendspin/server/connection.py` 每帧发送前 + `server/audio.py:36`
+   *  `BufferTracker`）：按 `capacity_bytes` 逐 role 背压，装不下就**这一帧不发**。
+   *  本仓差异：只在**组内有桥**时启用（见 `audioGateOn`），纯 sendspin 组保持旧行为。 */
+  private audioQueue: { tsUs: bigint; baseTsUs: bigint; durUs: number; data: Uint8Array }[] = [];
+  private audioQueueBytes = 0;
+  private audioQueueTimer: ReturnType<typeof setInterval> | null = null;
+  /** 已发出、尚未到播放时刻的帧（口径 = 设备侧 bufferedBytes）。 */
+  private issuedFrames: { endUs: bigint; bytes: number }[] = [];
+  private issuedBytes = 0;
+  /** 已发出内容的**内容轴**末尾（不含 sendspinDelayUs）—— P2 的「成员实收前沿 D」。 */
+  issuedFrontUs = 0n;
+  /** 队列超上限时丢弃的最旧帧数（对齐 MA late-drop，必须可观测）。 */
+  droppedByQueueCap = 0;
+  private audioGateLogAt = 0;
+  /** 投递闸「首次启用」日志去重（每连接只打一条，确认闸真的开了）。 */
+  private audioGateLogged = false;
+
   /** 设备在 `client/hello` 里宣告的**最高采样率**(Hz,见 `parseHelloSupportedFormats`)。
    *  0 = 未宣告(旧固件)→ 出流按缺省 48000。用于「设置面板回显」+「出流目标采样率
    *  裁决」,落 `player_output_configs.probed_rate`(见 services/playerRate.ts)。 */
@@ -3478,6 +3530,12 @@ export class SendspinConnection {
     this.heartbeatTimer.unref?.();
     ws.on("close", () => {
       if (this.heartbeatTimer) { clearInterval(this.heartbeatTimer); this.heartbeatTimer = null; }
+      // 投递队列随连接一起清（定时器不清会泄漏，队列不清会让新连接误发旧内容）。
+      this.stopAudioTimer();
+      this.audioQueue.length = 0;
+      this.audioQueueBytes = 0;
+      this.issuedFrames.length = 0;
+      this.issuedBytes = 0;
       this.server.onConnectionClosed(this);
     });
   }
@@ -4294,12 +4352,136 @@ export class SendspinConnection {
     }
     this._sendPlain(body);
   }
-  sendAudio(tsUs: bigint, codecData: Uint8Array): void {
+  /** 下发一帧音频。
+   *
+   *  两种路径：
+   *   - **未启用投递闸**（无桥 / 设备未宣告容量 / 纯 sendspin 组）⇒ 立即发送，与旧版逐字一致；
+   *   - **启用** ⇒ 入队后立刻尝试出队（`pumpMemberQueue` 同步跑一轮，装得下就当场发出）。
+   *
+   *  `baseTsUs` 是**内容轴**时间戳（不含 `sendspinDelayUs` 补偿），只用于记账与
+   *  「不超过桥游标」判定；实际下发的仍是 `tsUs`（已补偿），保证设备侧行为不变。
+   *  不传时视为同一值（无补偿成员）。 */
+  sendAudio(tsUs: bigint, codecData: Uint8Array, baseTsUs?: bigint, durUs = BRIDGE_GEN_LOSS_FRAME_US): void {
     if (this.ws.readyState !== WebSocket.OPEN) return;
-    // 帧头 = 9B(1B type + 8B 微秒时间戳),**不含 send_ahead**。
-    // ⚠️ 曾经这里多塞 4B send_ahead(13B 头),设备把其当成 FLAC 数据前 4 字节 →
-    //    首字节 0x00 ≠ 0xFF → 每包 `Serious error decoding FLAC file` → 完全无声。
-    //    详见 framing.ts packAudioChunk 注释(2026-09-17 实锤)。
+    if (!this.audioGateOn()) {
+      this._sendAudioNow(tsUs, codecData);
+      return;
+    }
+    if (!this.audioGateLogged) {
+      this.audioGateLogged = true;
+      this.server.log(
+        "info",
+        `[pump][gate] 启用逐成员投递闸 cap=${this.bufferCapacityBytes}B ` +
+          `prefill=${this.group?.prefillWantedMsCache ?? 0}ms B=${(this.group?.bridgeTrimCursorUs?.() ?? 0n).toString()} ` +
+          `client=${this.clientId ?? ""}`,
+      );
+    }
+    this.audioQueue.push({ tsUs, baseTsUs: baseTsUs ?? tsUs, durUs, data: codecData });
+    this.audioQueueBytes += codecData.length;
+    // 队列内存上限 = capacity×3（方案不变式 7）：逼近只丢最旧并计数，绝不无界增长。
+    const capQ = this.bufferCapacityBytes * 3;
+    while (this.audioQueueBytes > capQ && this.audioQueue.length > 1) {
+      const drop = this.audioQueue.shift()!;
+      this.audioQueueBytes -= drop.data.length;
+      this.droppedByQueueCap++;
+      const now = Date.now();
+      if (now - this.audioGateLogAt > 30_000) {
+        this.audioGateLogAt = now;
+        this.server.log(
+          "warn",
+          `sendspin 投递队列超上限(>${capQ}B)丢弃最旧帧 累计=${this.droppedByQueueCap} ` +
+            `client=${this.clientId ?? ""}（设备长期不消费或消费远慢于产出）`,
+        );
+      }
+    }
+    this.pumpMemberQueue();
+    if (this.audioQueue.length > 0) this.ensureAudioTimer();
+  }
+
+  /** 投递闸是否启用。**只在组内有桥时启用**：
+   *  桥组里泵会产到 30s 前瞻，设备只装得下自己的容量 —— 不设闸就是「无条件下发 + 设备拒收」；
+   *  纯 sendspin 组没有桥、没有 30s 背压（`pumpHeadroomUs` 返回 null），前沿由 pacing 决定，
+   *  保持旧行为以缩小改动面。
+   *  MA 对照：aiosendspin 对**所有** role 都按 BufferTracker 背压，本仓只对桥组成员启用。 */
+  private audioGateOn(): boolean {
+    return this.bufferCapacityBytes > 0 && !!this.group && this.group.bridges.size > 0;
+  }
+
+  /** 能否再收这一帧。两道闸：
+   *   ① 设备容量：已发未播字节 + 本帧 ≤ `buffer_capacity`（MA `BufferTracker` 同款语义）；
+   *   ② 桥投递游标：本帧末尾 ≤ 最落后桥游标。**本仓新增**，理由见
+   *      `docs/按容量投递-设计方案-20261125.md` §5.2 A：
+   *      组内一致要求直连成员实收前沿 D 恰好等于桥游标 B —— D > B 会把设备已收的
+   *      (B, D] 重发一遍（ts 重叠 ⇒ 重复播放），D < B 会给设备留 `(D, B]` 空洞。 */
+  private canAccept(bytes: number, baseTsUs: bigint, durUs: number): boolean {
+    const endUs = baseTsUs + BigInt(Math.round(durUs));
+    if (this.bufferCapacityBytes > 0 && this.issuedBytes + bytes > this.bufferCapacityBytes) return false;
+    const b = this.group?.bridgeTrimCursorUs?.() ?? null;
+    if (b !== null && b !== 0n && endUs > b) return false;
+    // ③ 设备侧期望水位（`prefill_buffer_ms` 档位，用户可调）：组内**统一**上界，
+    //    使各成员实收前沿都贴住同一个值（相互差 <= 数帧）⇒ 取 min 时重叠极小。
+    //    ⇒ 该档位实际就是「混合组改速延迟」的旋钮：设 5 秒，混合组就约 5 秒生效。
+    const pfMs = this.group?.prefillWantedMsCache ?? 0;
+    if (pfMs > 0 && endUs > nowUs() + BigInt(Math.round(pfMs * 1000))) return false;
+    return true;
+  }
+
+  /** 出队发送，直到设备装不下。**绝不 await / 不阻塞**：
+   *  `pushFrame` 是单循环同步 await 全体成员，这里阻塞会让泵 stall ⇒
+   *  `starvationUs >= STALL_GRACE_US(500ms)` 告警、`>= maxSilentDegradeUs()`(5s)
+   *  直接判「编码器零产出」放弃本曲提前切歌（streamEngine.ts:2046-2053 的红线）。 */
+  pumpMemberQueue(): void {
+    if (this.ws.readyState !== WebSocket.OPEN) {
+      this.audioQueue.length = 0;
+      this.audioQueueBytes = 0;
+      this.stopAudioTimer();
+      return;
+    }
+    let guard = 0;
+    while (this.audioQueue.length > 0 && guard++ < 4096) {
+      const head = this.audioQueue[0];
+      if (!this.canAccept(head.data.length, head.baseTsUs, head.durUs)) break;
+      this.audioQueue.shift();
+      this.audioQueueBytes -= head.data.length;
+      this._sendAudioNow(head.tsUs, head.data);
+      const endUs = head.baseTsUs + BigInt(Math.round(head.durUs));
+      this.issuedFrames.push({ endUs, bytes: head.data.length });
+      this.issuedBytes += head.data.length;
+      if (endUs > this.issuedFrontUs) this.issuedFrontUs = endUs;
+    }
+    this.prunePlayed(nowUs());
+    if (this.audioQueue.length === 0) this.stopAudioTimer();
+  }
+
+  /** 把「已播完」的记账移出（对齐 aiosendspin `BufferTracker.prune_consumed`）。
+   *  `issuedFrames` 按 endUs 单调递增（ts 只增），故从头部扫。 */
+  prunePlayed(now: bigint): void {
+    let k = 0;
+    while (k < this.issuedFrames.length && this.issuedFrames[k].endUs <= now) {
+      this.issuedBytes -= this.issuedFrames[k].bytes;
+      k++;
+    }
+    if (k > 0) this.issuedFrames.splice(0, k);
+    if (this.issuedBytes < 0) this.issuedBytes = 0;
+  }
+
+  private ensureAudioTimer(): void {
+    if (this.audioQueueTimer) return;
+    this.audioQueueTimer = setInterval(() => this.pumpMemberQueue(), AUDIO_QUEUE_TICK_MS);
+    this.audioQueueTimer.unref?.();
+  }
+
+  private stopAudioTimer(): void {
+    if (this.audioQueueTimer) {
+      clearInterval(this.audioQueueTimer);
+      this.audioQueueTimer = null;
+    }
+  }
+
+  /** 真正落 socket 的唯一出口。帧头 = 9B(1B type + 8B 微秒时间戳)，**不含 send_ahead**。
+   *  ⚠️ 曾多塞 4B send_ahead(13B 头)，设备把其当成 FLAC 数据前 4 字节 → 首字节 0x00 ≠ 0xFF
+   *     → 每包 `Serious error decoding FLAC file` → 完全无声。见 framing.ts packAudioChunk。 */
+  private _sendAudioNow(tsUs: bigint, codecData: Uint8Array): void {
     const pkt = packAudioChunk(tsUs, codecData);
     if (this.legacy) {
       this.ws.send(Buffer.from(pkt), { binary: true });

@@ -10,7 +10,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { GroupPump, overridePumpSource, type GroupAudio } from "./streamEngine.js";
 import { PcmWindow } from "./streamSource.js";
-import { SendspinGroup } from "./server.js";
+import { SendspinGroup, SendspinConnection } from "./server.js";
+import { nowUs } from "./clock.js";
 
 const SPEED = "4";
 const FRAME_US = 25_000;
@@ -188,15 +189,29 @@ describe("GroupPump.resolveTrimPoint 投递游标 → 输出轴换算", () => {
     expect(r.outMs).toBe(10_000);
   });
 
-  it("混合组(hasDirectMembers=true)一律 null:直连成员不走 bcCursor,裁环会让组内分叉", () => {
-    const { group, server } = stubGroup(); // 默认 hasDirectMembers: () => true
+  it("混合组:直连实收前沿 D 参与取小;D 缺失/越界时退回桥游标", () => {
+    const { group, server } = stubGroup(); // hasDirectMembers = () => true
     group.pumpTailUs = () => 1_000_000_000n;
-    group.bridgeTrimCursorUs = () => 975_500_000n;
+    group.bridgeTrimCursorUs = () => 975_500_000n; // B
     const pump = new GroupPump(server, group);
-    (pump as any).playCursorMs = 120_000;
-    // 换算本身完全成立（纯桥组下 outMs 会是 95_500），但混合组必须被闸门挡掉：
-    // 直连成员的内容由 pushFrame 即时下发，环里这段它们早已收到。
-    expect((pump as any).resolveTrimPoint()).toBeNull();
+    (pump as any).playCursorMs = 120_000; // offset = 1e9 - 120e6 = 880e6
+
+    // ① 桩没有 slowestDirectMemberFrontUs ⇒ D 未知 ⇒ 用 B(与旧版等价)
+    expect((pump as any).resolveTrimPoint().tsUs).toBe(975_500_000n);
+
+    // ② D 比 B 更落后 3s ⇒ 裁到 D(设备已收内容一点不重发)
+    group.slowestDirectMemberFrontUs = () => 972_500_000n;
+    const r2 = (pump as any).resolveTrimPoint();
+    expect(r2.tsUs).toBe(972_500_000n);
+    expect(r2.outMs).toBeCloseTo(92_500, 3);
+
+    // ③ D 比 B 更靠前(投递闸失效) ⇒ 仍取 B,绝不越过桥游标
+    group.slowestDirectMemberFrontUs = () => 978_000_000n;
+    expect((pump as any).resolveTrimPoint().tsUs).toBe(975_500_000n);
+
+    // ④ D = 0n(成员刚连上还没出队) ⇒ 忽略,用 B
+    group.slowestDirectMemberFrontUs = () => 0n;
+    expect((pump as any).resolveTrimPoint().tsUs).toBe(975_500_000n);
   });
 });
 
@@ -288,17 +303,20 @@ describe("GroupPump 有桥时提交点下移(裁环 + ts 回退)", () => {
     pump.stop();
   });
 
-  it("混合组(有直连成员):一步都不做,ts 全程等距 —— 绝不能让组内分叉", async () => {
+  it("混合组:裁环点取 min(B, D),ts 只回退一次后继续等距、泵不换代", async () => {
     overridePumpSource(makeSource());
     const { group, frames, notify, server } = stubGroup(); // hasDirectMembers = true
     const trimCalls: bigint[] = [];
     group.pumpTailUs = () => (frames.length ? frames[frames.length - 1] : 0n);
     group.bridgeTrimCursorUs = () =>
       frames.length ? frames[frames.length - 1] - 2_000_000n : null;
+    // 直连成员比桥再落后 1s ⇒ 裁环点必须取它(否则设备会重收)
+    group.slowestDirectMemberFrontUs = () =>
+      frames.length ? frames[frames.length - 1] - 3_000_000n : null;
     group.trimRingAfter = (cut: bigint) => { trimCalls.push(cut); return 80; };
 
     const pump = new GroupPump(server, group);
-    await pump.play("song-mixed");
+    await pump.play("song-mixed-d");
     await waitFor(() => (pump as any).playCursorMs >= 3_000, 30_000, "推进 3s 内容");
     const notify0 = notify.length;
 
@@ -310,16 +328,131 @@ describe("GroupPump 有桥时提交点下移(裁环 + ts 回退)", () => {
     );
     await waitFor(() => frames.length >= 14, 30_000, "继续推帧");
 
-    // 裁了就说明闸门失效：直连成员会继续播旧内容，与桥差一整个前瞻深度
-    expect(trimCalls.length, "混合组被裁环 ⇒ 直连成员与桥分叉").toBe(0);
+    expect(trimCalls.length, "混合组的 D 已被投递闸压住 ⇒ 应当裁环").toBe(1);
     expect(notify.length).toBe(notify0);
+    let backs = 0;
     const bad: number[] = [];
     for (let k = 1; k < frames.length; k++) {
       const d = Number(frames[k] - frames[k - 1]);
-      if (d !== FRAME_US) bad.push(d);
+      if (d < 0) backs++;
+      else if (d !== FRAME_US) bad.push(d);
     }
-    expect(bad.length, `混合组不该有 ts 跳变: ${JSON.stringify(bad.slice(0, 5))}`).toBe(0);
+    expect(backs, "应恰好一次 ts 回退(裁环点)").toBe(1);
+    expect(bad.length, `回退后应继续等距: ${JSON.stringify(bad.slice(0, 5))}`).toBe(0);
 
     pump.stop();
+  });
+});
+
+
+// ---------------------------------------------------------------- 投递闸(P1)
+// 目的:把「直连成员实收前沿 D」的真正来源钉死 —— D 由三道闸共同限制：
+//   ① 设备容量 ② 桥投递游标 ③ 用户配置的 prefill 档位。
+// 其中 ③ 是「混合组改速延迟」的旋钮：设 5 秒 ⇒ 混合组约 5 秒生效。
+function fakeConn(group: any, cap = 1_000_000): any {
+  const conn: any = Object.create(SendspinConnection.prototype);
+  conn.clientId = "c1";
+  conn.legacy = false;
+  conn.ws = { readyState: 1, send: () => {} };
+  conn.bufferCapacityBytes = cap;
+  conn.issuedBytes = 0;
+  conn.issuedFrames = [];
+  conn.issuedFrontUs = 0n;
+  conn.audioQueue = [];
+  conn.audioQueueBytes = 0;
+  conn.audioQueueTimer = null;
+  conn.droppedByQueueCap = 0;
+  conn.audioGateLogAt = 0;
+  conn.group = group;
+  conn.server = { log: () => {} };
+  conn.__sent = [] as bigint[];
+  conn._sendAudioNow = (ts: bigint) => { conn.__sent.push(ts); };
+  return conn;
+}
+
+function bridgeGroup(over: any = {}): any {
+  return {
+    bridges: new Map([["b1", {}]]),
+    bridgeTrimCursorUs: () => null,
+    prefillWantedMsCache: 0,
+    ...over,
+  };
+}
+
+describe("SendspinConnection 逐成员投递闸(P1)", () => {
+  const DATA = new Uint8Array(1000);
+  const DUR = 25_000;
+
+  it("① 容量闸:已发未播 + 本帧 > buffer_capacity ⇒ 拒收", () => {
+    const conn = fakeConn(bridgeGroup(), 10_000);
+    conn.issuedBytes = 9_500;
+    expect(conn.canAccept(1000, 0n, DUR)).toBe(false);
+    expect(conn.canAccept(400, 0n, DUR)).toBe(true);
+  });
+
+  it("② 桥游标闸:本帧末尾 > B ⇒ 拒收(D 不得超过桥游标)", () => {
+    const t0 = nowUs();
+    const conn = fakeConn(bridgeGroup({ bridgeTrimCursorUs: () => t0 + 5_000_000n }));
+    expect(conn.canAccept(1000, t0 + 5_000_000n - 25_000n, DUR)).toBe(true);
+    expect(conn.canAccept(1000, t0 + 5_000_000n, DUR)).toBe(false);
+  });
+
+  it("③ prefill 闸:档位即旋钮 —— 5 秒档只放到 now+5s", () => {
+    const t0 = nowUs();
+    const conn = fakeConn(bridgeGroup({ prefillWantedMsCache: 5000 }));
+    expect(conn.canAccept(1000, t0 + 4_900_000n, DUR)).toBe(true);
+    expect(conn.canAccept(1000, t0 + 5_000_000n, DUR)).toBe(false);
+  });
+
+  it("设备未宣告容量 ⇒ 容量闸关(大字节也放行),但桥闸仍生效", () => {
+    const t0 = nowUs();
+    const g = bridgeGroup({ bridgeTrimCursorUs: () => t0 + 5_000_000n });
+    const conn = fakeConn(g, 0);
+    conn.issuedBytes = 10_000_000;
+    expect(conn.canAccept(1000, t0 + 1_000_000n, DUR)).toBe(true);
+    expect(conn.canAccept(1000, t0 + 6_000_000n, DUR)).toBe(false);
+  });
+
+  it("无桥 / 无容量 ⇒ 投递闸不启用(纯 sendspin 组旧行为零变化)", () => {
+    expect(fakeConn(bridgeGroup({ bridges: new Map() })).audioGateOn()).toBe(false);
+    expect(fakeConn(bridgeGroup(), 0).audioGateOn()).toBe(false);
+    expect(fakeConn(bridgeGroup()).audioGateOn()).toBe(true);
+  });
+
+  it("prunePlayed 只回收已播字节,未播的仍计入占用", () => {
+    const t0 = nowUs();
+    const conn = fakeConn(bridgeGroup());
+    conn.issuedFrames.push({ endUs: t0 - 1n, bytes: 100 }, { endUs: t0 + 1_000_000n, bytes: 300 });
+    conn.issuedBytes = 400;
+    conn.prunePlayed(t0);
+    expect(conn.issuedBytes).toBe(300);
+    expect(conn.issuedFrames.length).toBe(1);
+  });
+
+  it("队列:装不下的留在队列(不丢帧),腾出空间后自动续发且顺序不乱", () => {
+    const t0 = nowUs();
+    let bLimit = t0 + 100_000n;
+    const conn = fakeConn(bridgeGroup({ bridgeTrimCursorUs: () => bLimit }));
+    for (let k = 0; k < 8; k++) {
+      const ts = t0 + BigInt(k * 25_000);
+      conn.sendAudio(ts, DATA, ts, DUR);
+    }
+    expect(conn.__sent.length).toBe(4);
+    expect(conn.audioQueue.length).toBe(4);
+    expect(conn.droppedByQueueCap).toBe(0);
+
+    bLimit = t0 + 1_000_000n;
+    conn.pumpMemberQueue();
+    expect(conn.__sent.length).toBe(8);
+    expect(conn.audioQueue.length).toBe(0);
+    const sent = conn.__sent as bigint[];
+    for (let k = 1; k < sent.length; k++) expect(sent[k] > sent[k - 1]).toBe(true);
+  });
+
+  it("issuedFrontUs 记的是内容轴(未补偿)ts:补偿值不会把 D 抬高", () => {
+    const t0 = nowUs();
+    const conn = fakeConn(bridgeGroup());
+    conn.sendAudio(t0 + 500_000n, DATA, t0, DUR); // 下发带 500ms 补偿
+    expect(conn.issuedFrontUs).toBe(t0 + 25_000n);
   });
 });
