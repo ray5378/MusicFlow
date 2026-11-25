@@ -121,7 +121,8 @@ done
 
 say "2/7 建测试用户（admin 首次登录带 must_change_password，不用它）"
 docker stop "$CONTAINER" >/dev/null
-python3 - "$WORK/data/musicflow.db" "$CI_USER" "$CI_PASS" <<'PY'
+# 容器写出的 db 文件属主是容器内 uid，runner 用户可能只有读权限。
+sudo python3 - "$WORK/data/musicflow.db" "$CI_USER" "$CI_PASS" <<'PY'
 import hashlib, sqlite3, sys, uuid
 db, user, pw = sys.argv[1], sys.argv[2], sys.argv[3]
 c = sqlite3.connect(db)
