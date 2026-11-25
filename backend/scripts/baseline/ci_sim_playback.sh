@@ -273,7 +273,8 @@ export MF_USER="$CI_USER" MF_PASS="$CI_PASS" MF_GROUP_ID="$GID" \
        MF_CONTAINER="$CONTAINER" MF_BASE_URL="$BASE"
 timeout "$((MINUTES * 60 + 30))" python3 \
   "$REPO/docs/examples/baseline_sampler.example.py" > "$WORK/logs/sampler.log" 2>&1 || true
-TICKS=$(grep -ac '"type":"tick"' "$WORK/base.jsonl" 2>/dev/null || echo 0)
+# json.dumps 默认输出 `"type": "tick"`（冒号后有空格），不能用无空格 pattern 计数。
+TICKS=$(grep -ac '"type": *"tick"' "$WORK/base.jsonl" 2>/dev/null || echo 0)
 echo "采样 tick 行数=$TICKS"
 [ "$TICKS" -ge 20 ] || { tail -40 "$WORK/logs/container.log" >&2; die "tick 不足 20 条：桥接没跑起来"; }
 
