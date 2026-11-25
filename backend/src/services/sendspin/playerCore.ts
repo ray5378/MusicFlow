@@ -905,9 +905,27 @@ export function seekCore(srv: SendspinServer | null, clientId: string, seconds: 
       // syncGroupBridges 对未变规格热复用句柄(不重连,BLK-02)。
       // 可选读取:最小组桩(单测)没有 bridgeSpecs 字段 —— 与流引擎对 stub 组的可选调用风格一致
       const bridgeSpecs = g.bridgeSpecs?.length > 0 ? g.bridgeSpecs : undefined;
-      playGroupCore(srv, clientId, memberIds, item, onFailed, clampedMs, bridgeSpecs, undefined, undefined, (g as any).playbackRate ?? 1);
+      // ⚠️ 位置传参共 **11** 项:8=onUnplayable、9=nextSongId、10=preferRowId、11=speed。
+      //    少写一个 undefined 就会让倍速滑进 preferRowId —— seek 重建后倍速静默丢失
+      //    (2026-11-25 240 真机定位:`[pump][play] ... speed=1x`,用户 1.5x 拖动即回原速;
+      //     `as any` 让 tsc 抓不到这个错位,故此处按项分行并标注)。
+      playGroupCore(
+        srv, clientId, memberIds, item, onFailed, clampedMs, bridgeSpecs,
+        undefined, // onUnplayable
+        undefined, // nextSongId
+        undefined, // preferRowId
+        (g as any).playbackRate ?? 1, // speed
+      );
     } else {
-      playCore(srv, clientId, item, onFailed, clampedMs, g.bridgeSpecs?.length > 0 ? g.bridgeSpecs : undefined, undefined, undefined, undefined, (g as any).playbackRate ?? 1);
+      // 位置传参共 **10** 项(与 playGroupCore 的 11 项不同,勿互抄;差在 memberIds)。
+      playCore(
+        srv, clientId, item, onFailed, clampedMs,
+        g.bridgeSpecs?.length > 0 ? g.bridgeSpecs : undefined,
+        undefined, // onUnplayable
+        undefined, // nextSongId
+        undefined, // preferRowId
+        (g as any).playbackRate ?? 1, // speed
+      );
     }
     // 暂停中 seek:重建流后立刻恢复暂停(playCore 会把 pump 的 paused 置回 false)。
     if (wasPaused) pauseCore(srv, clientId);
