@@ -38,6 +38,49 @@
   目前为单测证据 + 结构性兜底,待自然场景出现 `bridge-hole-fill` 或
   `bridge-continuity-degraded` 即闭环。
 
+### Fix v5~v7 换代/轻重启时间线基准错乱 + 显示进度视觉停顿
+
+承接上面死锁连环的根因继续下挖,又找到三层更深缺陷,均按「治本优先」对标
+Music Assistant 修复(凡对齐处代码带 MA 出处注释):
+
+- **v5 轻重启后强制换代**:原地平移会让起播瞬间的内容「既不在旧位置也不在新
+  位置」—— 06:01 真机实证 `droppedFrames` 一次性 +291723(6.6s)、`late` +110,
+  时间线错乱(用户报《燃》没播完就切、进度却仍在推进直到结束)。修法:LR 分支
+  末尾 `bridgeContentEpoch++`,环重建、旧帧被 epoch 过滤、偏移下一拍归零。
+- **v6 锚点向首帧靠拢**:原锚点「只降不升」,切歌时 `contentVsNow=4.7s` 而
+  `lead=2.5s`,锚点比首帧早 2.2s ⇒ 曲首被当旧内容裁掉。改为向首帧靠拢,只处理
+  >1.5s 空洞,等待上限 30s(实际受投递视界 5.5s 限制,永不触顶;用户口径
+  「宁可多等要稳」)。两处踩坑:阈值用 `>` 时 4000-2500 恰好 1500 不触发
+  (改 `>=`);抬升后的 lead 污染组锚 floor、把组锚顶到 now+4s 失去同源
+  (组锚改用抬升前值,单测 groupAnchorShare 抓出)。
+- **droppedFrames 语义澄清**:该计数 = ts 早于内容锚点的帧被裁/跳,**统计的是
+  旧曲尾未播完部分,不是新曲开头丢帧**。反直觉实证:锚点越靠首帧,dropped
+  反而越大(落入锚点前的旧曲尾更多)。正确判据是 `contentVsNowMs > finalLeadMs`
+  且 `newgen-skip` 两台一致;《燃》06:34 锚点 4517 < 首帧 4717(200ms 保护),
+  新曲首帧未被裁。
+- **v7 轻重启后重置泵累计(真正的根)**:LR 只做 splice 清环 + 偏移累减 + 游标
+  复位,**不动泵累计 `deliveredByGroup`/`deliveredPeak`**(唯一重置它们的
+  `resetPushMeter()` 只在新起播路径调用,LR 从不调)⇒ 偏移清零后泵仍按旧累计
+  (可达 35s)打戳 ⇒ 新帧落在未来、环头超前视界 ⇒ `cand=0` ⇒ 再次死锁
+  (06:04 实证 shift 33910→9623 连环)。修法:LR 后置 `deliveredPeak` 为 now
+  等价样本数并 `deliveredByGroup.clear()`—— **不是清零**(清零会让 ts 从
+  1970 起全部过期)。
+- **显示进度视觉停顿**:音频正常但曲末附近进度条快速停顿又继续。根因
+  `displayPosition = framePos - depthMs + lead` 而 `depthMs = cursor - now`;
+  cursor 在换代/重锚时复位到 now ⇒ depthMs 从 ~5.5s 突变 0 ⇒ 显示凭空前跳
+  被 `capDisplayByElapsed` 钳住 ⇒ 进度停住等墙钟追上(既有行为,非 v6 引入)。
+  修法:组级 `displayDepthMs` 限速跟随(每拍 ≤50ms,抹平突变、真实缓冲缓变
+  仍跟随),换曲/seek 处随 `displayPositionMs` 一并清 null。**不用硬粘/
+  历史最大值** —— 那会让 seek 往回拖时进度卡死(2026-11-21 血律)。
+- **验证**:sendspin 987 条、check-display-progress 19 钉、静态守卫 v5/v6/v7
+  新增钉全过。240 部署后 56min(07:22~08:19 UTC)采样:死锁/LR/填洞/降级/
+  cursor-jump **全部 0**;17 次 `continuity=1` 自然切歌零误伤;两台 late
+  3→61 / 3→76 单调缓增无跳变、inQ 1776~3000ms、realigned 与 dropped 增量
+  两台完全对称;双机进度差 397 条 `|残差| max=8ms avg=2.8ms`、>50ms 为 0,
+  换代 ±30s 峰值全 ≤6ms ⇒ 进度条停顿不再出现。**诚实边界**:v5/v7 的 LR
+  分支与显示纠错触发条件(deadlock/LR/重锚)在本采样窗内均未出现,目前为
+  单测证据 + 稳态无回归,待自然场景触发闭环。
+
 ## [4.15.2] - 2026-11-25
 
 ### Fix 桥自愈三级分级 + 防御自愈对齐 MA(起播空窗/裁头/锚点分裂/死锁兜底连环失效)
