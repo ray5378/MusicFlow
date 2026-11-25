@@ -2,6 +2,32 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.15.4] - 2026-11-25
+
+### Internal 倍速无缝切换设计方案定稿（服务端推流倍速）
+
+新增 `docs/倍速无缝切换-设计方案-20261125.md`（485 行），确定 Sendspin 推块架构下
+「改倍速不重建流」的完整落地路径，并附带一处独立缺陷的修复方案。**本版仅文档，
+无运行时改动，不影响任何播放行为。**
+
+- **前提结论**：MA 做不到无缝切倍速 —— sendspin `player.py:2515` 的 `playback_speed`
+  是 Metadata 播放/暂停标记而非倍速；AirPlay provider 只有 `sample_rate`（RAOP/AP2
+  无变速信令）；group provider 无倍速逻辑；`set_playback_speed` 走
+  `resume()` → `play_index()` 整条流重建。故本方案定位**超越 MA**，刻意不对齐其重建流路径。
+- **核心设计**：预建新窗口（新 atempo）→ `ready()` 后提交 → `pushLoop` 换窗口引用 +
+  输出轴重锚 + 时间戳接续 → 关旧窗。三条硬约束：不改 `epoch`/`timelineReseed`
+  （否则桥按 track/rehost 换代即断点，改用独立 `rateSeq`）；`const win` 必须改 `let`；
+  `paceAnchorWall` 必设（否则 dueMs 全落过去灌爆环形缓冲）。
+- **适用范围**：Sendspin 单机 / AirPlay 单机 / 纯 AirPlay 组 / 混合组 均可无缝且同步
+  （桥的 `tsUs → RAOP 帧位置` 映射线性不变，`ahead` 为每帧施加的 µs 时间量）；DLNA 拉流
+  不可，保留断点。
+- **附带发现（P0 前置修正）**：`PcmWindow` 把同一个 `startMs` 既当输出轴基准算
+  `baseSample`，又当 `-ss`（后者需内容秒）—— 倍速下 seek 落点偏移因子 = 倍速，
+  速率 1 时无偏差故长期未暴露。
+- **决策记录**：接受改速生效延迟 2~3s（缓冲不可撤回，D1）；不设灰度开关（D3 撤销）；
+  客户端无需改动（已自带倍速实现，D5 撤销）；接缝接受 atempo OLA 相位跳变（D2）；
+  失败静默回落整泵重投（D4）。
+
 ## [4.15.3] - 2026-11-25
 
 ### Fix 桥「环满贴边」死锁连环(切歌 4~5 秒卡顿 + 时间线偏移累到 -34s)
