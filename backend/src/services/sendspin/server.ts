@@ -1973,6 +1973,69 @@ export class SendspinGroup {
     return headroom > 0 ? headroom : 0;
   }
 
+  /** 当前代次内容环的**最后帧 ts**（µs；0n = 环空）。
+   *
+   *  供倍速热切换换算「环 ts ↔ 输出轴毫秒」的**固定偏移**：
+   *  `offsetUs = pumpTailUs() − playCursorMs × 1000`（写指针与环尾同拍推进，偏移恒定）。
+   *  环时间线的裸 ts 是绝对 monotonic 量，进不了换算；必须借这条偏移折回输出轴。 */
+  pumpTailUs(): bigint {
+    return this.contentTailUs();
+  }
+
+  /** 最落后桥投递游标（µs）；**null = 无桥 / 游标全 0**（不可裁）。
+   *
+   *  语义：这是「已经变成 pushAudio、发往设备」的最远位置。它之后的内容只存在于共享环里，
+   *  **没有任何设备收到过** ⇒ 可以整段丢弃（倍速热切换的裁上界）。
+   *
+   *  与 `pumpHeadroomUs()` 的 min 同源同口径，用途相反：那个算「前沿超前多少」（背压），
+   *  这个取「能安全裁到哪」（热换源提交基准）。过滤条件一致（`bridges.has(id)` + 非 0n），
+   *  摘桥残留的冻结游标不会污染结果。 */
+  bridgeTrimCursorUs(): bigint | null {
+    if (this.bridges.size === 0) return null;
+    let min: bigint | null = null;
+    for (const [id, c] of this.bcCursor.entries()) {
+      if (c !== 0n && this.bridges.has(id) && (min === null || c < min)) min = c;
+    }
+    return min;
+  }
+
+  /** 倍速热切换专用：把环裁到 `cutUs`（删掉 tsUs > cutUs 的当前代次帧），并把各设备
+   *  投递游标钳到 ≤ cutUs。返回删掉的帧数。
+   *
+   *  ## 为什么必须裁（240 真机 2026-11-25，用户实测「改倍速等 30 秒」）
+   *
+   *  泵稳态贴 30s 前瞻（`PUMP_LOOKAHEAD_DEFAULT_US`，对齐 MA `sleep_to_limit_buffer`）。
+   *  热换源的提交点若取「写前沿」，新倍速内容只能追加在那 30s 旧帧之后 ⇒ 必须等
+   *  `前沿 − 可听位置` 播完才听得到（实测 `tailVsNow=35.26s` / `cursorVsNow=5.49s`）。
+   *  而 [投递游标, 前沿] 这段**桥还没取走**（没发过 pushAudio），丢弃不损失任何已发出的
+   *  音频 ⇒ 延迟降到 `投递游标 − 可听位置` ≈ lead + RTP 队列（240 实测 5.5s）。
+   *
+   *  ## 不变量
+   *  · 只裁 `ep === bridgeContentEpoch`；历史代次帧留着由 `pruneRecent` 清。
+   *  · 「追加顺序 = ts 递增」⇒ 从尾部回扫，遇到 tsUs ≤ cutUs 即停。
+   *  · 调用方必须**同一拍**把 pushLoop 的 `cursorUs` 回退到 cutUs（否则新帧 ts 从旧前沿
+   *    续，与裁后的环尾形成几十秒断层 ⇒ 桥按 hole-fill 灌静音，比不换源更糟）。
+   *  · 游标只钳不删：钳回 cutUs 后桥会从新内容重新取，不会重复（环里旧的已删）。
+   */
+  trimRingAfter(cutUs: bigint): number {
+    const key = this.encoderKey("pcm", 100);
+    const ring = this.recentByGroup.get(key);
+    let removed = 0;
+    if (ring) {
+      for (let i = ring.length - 1; i >= 0; i--) {
+        if (ring[i].ep !== this.bridgeContentEpoch) continue;
+        if (ring[i].tsUs <= cutUs) break;
+        ring.splice(i, 1);
+        removed += 1;
+      }
+      if (ring.length === 0) this.recentByGroup.delete(key);
+    }
+    for (const [id, c] of this.bcCursor.entries()) {
+      if (c > cutUs) this.bcCursor.set(id, cutUs);
+    }
+    return removed;
+  }
+
   /** [P0]投递游标的**有效种子**(游标缺失/回退时用;缺失绝不等价于内容 0)。
    *  取环内当前代次最早帧:
    *    · 已过期(≤ now) ⇒ now(过期内容投出去也来不及播);

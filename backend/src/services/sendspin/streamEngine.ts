@@ -728,6 +728,8 @@ export class GroupPump {
     seekedOutMs: number;
     /** 建窗耗时(ms):日志用。 */
     buildCostMs: number;
+    /** 建窗基准的输出轴位置(旧轴 ms)。提交时只作诊断/夹逼用。 */
+    buildOutMs: number;
   } | null = null;
   /** 热换源正在建窗:并发守卫(A9),在途时再次调用直接返回 false(由调用方重投兜底)。 */
   private rateSwitching = false;
@@ -740,6 +742,41 @@ export class GroupPump {
 
   get playbackRate(): number {
     return this.rate;
+  }
+
+  /**
+   * 解析「可裁到的安全输出轴位置」—— 倍速热切换的提交基准。
+   *
+   * `tsUs` = 最落后桥投递游标（µs）;`outMs` = 它在**当前输出轴**上的毫秒值。
+   * 换算靠固定偏移：`offsetUs = 环尾 ts − playCursorMs × 1000`（写指针与环尾同拍推进,
+   * 偏移恒定 ⇒ 任取当前值算都一致）。
+   *
+   * 返回 null 的四种情形（调用方一律回落 `playCursorMs`，即旧行为：延迟 = 泵前瞻上限）：
+   *  · 无桥（`bridgeTrimCursorUs()` 为 null）—— 纯 sendspin 组不走共享环背压；
+   *  · 游标全 0（起播/换代豁免期，还没开始投递）；
+   *  · 环空（`pumpTailUs()` 为 0n，无从算偏移）；
+   *  · 算出的位置非正/越过写前沿（防御：游标不可能超前于已产出内容）。
+   *
+   * ⚠️ 必须**每轮重取**：建窗耗时 0.2~3.9s，期间游标持续推进；沿用旧值会把
+   * [旧游标, 新游标] 这段**已经投递出去**的内容也裁掉 ⇒ 桥重投 ⇒ 听感重复。
+   */
+  private resolveTrimPoint(): { outMs: number; tsUs: bigint } | null {
+    // ★ 仅纯桥组可裁（关键安全闸，2026-11-25 实机复核）：
+    //   混合组里直连 sendspin 成员的内容由 `pushFrame` **即时下发**（遍历 this.members
+    //   直接 sendAudio），根本不经过 `bcCursor`。环里 [投递游标, 写前沿] 这一段它们
+    //   早就收到了 —— 裁掉后桥从游标重取新倍速内容、而直连成员只能播完手上的旧内容
+    //   ⇒ 组内相差一整个前瞻深度（真机 30s 档 = 24.5s 分叉，比"慢"严重得多）。
+    //   混合组一律回落写前沿：延迟仍是前瞻上限，与本优化引入前完全一致。
+    if (this.group.hasDirectMembers?.() === true) return null;
+    const trimUs = this.group.bridgeTrimCursorUs?.();
+    if (trimUs === null || trimUs === undefined || trimUs === 0n) return null;
+    const tailUs = this.group.pumpTailUs?.() ?? 0n;
+    if (tailUs === 0n) return null;
+    const playMs = Math.max(0, this.playCursorMs);
+    const offsetUs = tailUs - BigInt(Math.round(playMs * 1000));
+    const outMs = Number(trimUs - offsetUs) / 1000;
+    if (!Number.isFinite(outMs) || outMs <= 0) return null;
+    return { outMs: Math.min(outMs, playMs), tsUs: trimUs };
   }
 
   /**
@@ -793,8 +830,17 @@ export class GroupPump {
     const seq = this.rateSeq;
     let newWin: PcmWindow | null = null;
     try {
-      // C0:建窗基准内容位置。`playCursorMs` 是**输出轴**,乘 r0 折回内容轴(不变量)。
-      const buildContentMs = Math.max(0, this.playCursorMs) * r0;
+      // C0:建窗基准内容位置。
+      // ★ 基准取「可裁到的安全点」= 最落后桥投递游标（`resolveTrimPoint`），**不是**写前沿。
+      //   240 真机 2026-11-25（用户实测「改倍速等 30 秒」）：泵稳态贴 30s 前瞻
+      //   （`PUMP_LOOKAHEAD_DEFAULT_US`，对齐 MA `sleep_to_limit_buffer`），按前沿提交则
+      //   新倍速内容只能追加在那 30s 旧帧之后 ⇒ 必须等它播完。而 [投递游标, 前沿] 这段
+      //   桥根本没取走（没发过 pushAudio），丢弃无损 ⇒ 延迟降到 lead + RTP 队列（≈5.5s）。
+      //   无桥/游标不可用 ⇒ null，回落写前沿（纯 sendspin 组行为完全不变）。
+      const trimStart = this.resolveTrimPoint();
+      const buildOutMs = trimStart ? trimStart.outMs : Math.max(0, this.playCursorMs);
+      // `buildOutMs` 是**输出轴**,乘 r0 折回内容轴(不变量)。
+      const buildContentMs = Math.max(0, buildOutMs) * r0;
       // 新窗口起点(输出轴)必须与帧栅格同源 —— 否则接缝 ≤25ms 偏移,且子进程
       // 会因 lo < baseSample 的量化差走微任务自旋(见 alignFrameMs 的硬约束)。
       const startOutMs = alignFrameMs(buildContentMs / r1);
@@ -824,7 +870,12 @@ export class GroupPump {
       //   3 次上限兜极端慢源;超了也接受「刚 ready 的窗口」(base=目标,覆盖成立)。
       let seekedOutMs = startOutMs;
       for (let attempt = 0; attempt < 3; attempt++) {
-        const commitContentMs = Math.max(buildContentMs, Math.max(0, this.playCursorMs) * r0);
+        // 建窗期间投递游标仍在前进 ⇒ 每轮重取（只前进不倒退：与 buildOutMs 取 max）。
+        const trimNow = this.resolveTrimPoint();
+        const curOutMs = trimNow
+          ? Math.max(buildOutMs, trimNow.outMs)
+          : Math.max(0, this.playCursorMs);
+        const commitContentMs = Math.max(buildContentMs, curOutMs * r0);
         const target = alignFrameMs(commitContentMs / r1) + FRAME_MS;
         seekedOutMs = target;
         // `ms` 是输出轴,`-ss` 要内容秒(与 construction 同口径,P0 修正)。
@@ -859,6 +910,7 @@ export class GroupPump {
         buildContentMs,
         seekedOutMs,
         buildCostMs: Date.now() - startedAt,
+        buildOutMs,
       };
       this.rateSwitching = false;
       logSafe(
@@ -1626,9 +1678,15 @@ export class GroupPump {
             const r0 = sw.prevRate;
             const r1 = sw.rate;
             const k = r0 / r1; // 输出轴换算系数(内容量不变 ⇒ 输出轴 = 内容 / 新倍率)
-            // 新游标:提交时刻的前沿折到新轴,**绝不超过已预解码位置**(seekedOutMs)。
-            // 落后于前沿的部分(几十 ms)由新窗口按序补解 —— 绝不倒退重播。
-            const aheadOutMs = Math.max(0, this.playCursorMs) * k;
+            // ★ 提交基准 = 可裁到的安全点（最落后桥投递游标），见 switchRate 的 C0 注释。
+            //   必须在**这里**再取一次：建窗耗时 0.2~3.9s，期间游标仍在前进；沿用建窗
+            //   时的旧游标会把 [旧游标, 新游标] 那段**已投递**内容也裁掉 ⇒ 桥重投。
+            const trimCommit = this.resolveTrimPoint();
+            const prevPlayMs = Math.max(0, this.playCursorMs);
+            const baseOutMs = trimCommit ? Math.max(sw.buildOutMs, trimCommit.outMs) : prevPlayMs;
+            // 新游标:基准折到新轴,**绝不超过已预解码位置**(seekedOutMs)。
+            // 落后于基准的部分(几十 ms)由新窗口按序补解 —— 绝不倒退重播。
+            const aheadOutMs = Math.max(0, baseOutMs) * k;
             const nextCursor = Math.min(sw.seekedOutMs, alignFrameMs(aheadOutMs));
             // ------- 原子段(此间禁止 await)-------
             this.rate = r1;
@@ -1648,6 +1706,18 @@ export class GroupPump {
             const prevWin = win;
             win = sw.win;
             this.window = sw.win;
+            // ★ 裁环 + ts 回退（本优化的核心，漏一步就退回 30s）：
+            //   ① 环里 [裁剪点, 写前沿] 这段桥还没取走 ⇒ 必须删，否则新倍速内容会排在
+            //      这 30s 旧帧之后（`trimRingAfter` 同时把各设备投递游标钳回来）。
+            //   ② pushLoop 的 `cursorUs` 是**按编码样本累计的绝对量**，必须同拍回退到
+            //      裁剪点 —— 不回退则新帧 ts 从旧前沿续，与裁后的环尾形成几十秒断层，
+            //      桥按 hole-fill 灌静音（比不换源更糟）。
+            //   `trimCommit` 为 null（无桥/游标不可用）⇒ 一步都不做，行为与旧版完全一致。
+            let trimmedFrames = 0;
+            if (trimCommit) {
+              trimmedFrames = this.group.trimRingAfter?.(trimCommit.tsUs) ?? 0;
+              cursorUs = trimCommit.tsUs;
+            }
             // ------- 原子段结束 -------
             // ★ 旧窗口必须在这里**立刻**关掉:上面 `this.window` 已指向新窗口,旧对象
             //   再无引用;不关就是一条孤儿 ffmpeg 一直解码到曲末(240 真机实测:改速后
@@ -1661,6 +1731,7 @@ export class GroupPump {
               "info",
               `[pump][rate] song=${this.songId} ${r0}x→${r1}x 已提交 内容Ms=${Math.round(sw.buildContentMs)} ` +
                 `游标P1=${Math.round(nextCursor)}ms dur=${Math.round(this.durationMs)}ms 建窗=${sw.buildCostMs}ms ` +
+                `裁环=${trimmedFrames}帧 提前=${Math.round(Math.max(0, prevPlayMs - baseOutMs))}ms ` +
                 `pump=${this.epoch}/${this.timelineReseed}`,
             );
           }
