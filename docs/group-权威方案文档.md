@@ -1174,7 +1174,7 @@ PUT 语义：`memberId` 必须是本组成员（命名空间 id **原样整条**
 
 ## 附 F v4.9.4 增补(桥 prepare DLNA settle,2026-10-28)
 
-> 仅热补丁(240),未发版;用户真机确认后随下版入 tag。与正文冲突处以本节为准。
+> 已随 v4.15.3 发版(2026-11-25);曾仅热补丁(240)。与正文冲突处以本节为准。
 
 | # | 变更 | 现状(代码为准) | 位置 |
 |---|------|------------------|------|
@@ -1187,7 +1187,7 @@ PUT 语义：`memberId` 必须是本组成员（命名空间 id **原样整条**
 
 ## v4.9.4-ex 增补(RAOP now 锚实验,2026-10-28)
 
-> **实验性质**:env `MF_BRIDGE_RAOP_NOW_ANCHOR`(缺省 ON,0/false 关闭);仅热补丁(240),未发版。桥 RAOP 出口对 MUZO 类固件改 now 锚:`planBridgeAnchor` 增 forceNow 分支(anchorUs=now,首包即发;对齐器零点取首帧 tsUs,防 skip 跳段把 RTP 标回未来)。组语义影响:该成员的组 lead 段(~2.3s)相对组时间线**提前播** —— 单成员组无感;混合组同步待实验定论后定最终形态。泵侧投递与 AP2 出口零改动;`MF_BRIDGE_RAOP_NOW_ANCHOR=0` 一键回旧路径。详见 airplay 权威文档 v4.9.4-ex 节。
+> **实验性质**:env `MF_BRIDGE_RAOP_NOW_ANCHOR`(缺省 ON,0/false 关闭);已随 v4.15.3 发版(2026-11-25),曾仅热补丁(240)。桥 RAOP 出口对 MUZO 类固件改 now 锚:`planBridgeAnchor` 增 forceNow 分支(anchorUs=now,首包即发;对齐器零点取首帧 tsUs,防 skip 跳段把 RTP 标回未来)。组语义影响:该成员的组 lead 段(~2.3s)相对组时间线**提前播** —— 单成员组无感;混合组同步待实验定论后定最终形态。泵侧投递与 AP2 出口零改动;`MF_BRIDGE_RAOP_NOW_ANCHOR=0` 一键回旧路径。详见 airplay 权威文档 v4.9.4-ex 节。
 
 ---
 
@@ -1465,3 +1465,26 @@ ring 组内共享,`fillBridgeAutoTrackGap` 每 tick 只补一次,两台设备投
 上游续静音(streamEngine)未覆盖 `continuity=1` 与提前切歌两条路径,故投递侧
 自兜底(见 sendspin 文档 F-4)。诊断:`bridge-gap-fill-autostart` 出现=治本生效;
 `bridge-start-seek-deadlock` 连环 + `timelineOffsetUs` 单向累加=旧形态复发。
+
+
+### G-11 v3~v7 对组级时间线的收口(v4.15.3, 2026-11-25)
+
+G-10 的组级补静音/组级偏移仍是正确底座,但仅靠它挡不住「坏 offset 随
+`continuity=1` 传进新曲」的自我强化环。v4.15.3 在组级补齐五层(详见
+sendspin F-4/F-5):
+
+- **v3 投递洞填充**:组内共享 ring,cursor→环头真空时补 250ms 静音分片,
+  两台投同一份 ⇒ 组内同步不破;填洞后置 `candCount=1` 防死锁误判。
+- **v4 continuity 洁净门**:组级 `|offset|>1s` 时 `continuity=1` 降级 REBUILD,
+  整组重新换代,不让单台的坏偏移拖着全组连环死锁。
+- **v5/v7 轻重启收尾**:LR 后强制 `bridgeContentEpoch++` 并重置泵累计到 now
+  等价样本数,保证组内新一轮打戳基准回到墙钟,不会因某台 LR 把组时间线打乱。
+- **v6 组锚同源保护**:锚点向首帧靠拢时组锚 floor 用抬升前值 `useLeadPreLift`,
+  避免组级 lead 被单台提前抬升污染(组锚分裂会直接破坏组内同步)。
+- **显示进度**:组级 `displayDepthMs` 限速跟随,换代/重锚时两台进度条都不再
+  视觉停顿(音频本就正常)。
+
+**组级诊断口径(v4.15.3 验证后)**:稳态 56min 内死锁/LR/降级/填洞全 0,
+17 次 `continuity=1` 自然切歌零误伤,双机进度差 397 条 `|残差| max=8ms`,
+`realigned`/`dropped` 增量两台完全对称 ⇒ 组同步健康。出现
+`bridge-start-seek-deadlock` 连环 + `timelineOffsetUs` 单向累加才是旧形态复发。

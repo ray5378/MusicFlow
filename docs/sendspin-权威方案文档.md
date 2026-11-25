@@ -1704,7 +1704,7 @@ prev、音量/静音、自然结束自动下一首、停止）+ 组播 6 项（`
 
 ## v4.9.4 增补(桥 prepare DLNA settle,2026-10-28)
 
-> 仅热补丁(240),未发版。Sendspin 侧零改码;本节记录锚点 lead 对 settle 延迟的覆盖核实。
+> 已随 v4.15.3 发版(2026-11-25);曾长期仅热补丁(240)。Sendspin 侧零改码;本节记录锚点 lead 对 settle 延迟的覆盖核实。
 
 | # | 变更 | 现状(代码为准) | 位置 |
 |---|------|------------------|------|
@@ -1715,7 +1715,7 @@ prev、音量/静音、自然结束自动下一首、停止）+ 组播 6 项（`
 
 ## v4.9.4-ex 增补(RAOP now 锚实验,2026-10-28)
 
-> **实验性质**:env `MF_BRIDGE_RAOP_NOW_ANCHOR`(缺省 ON,0/false 关闭);仅热补丁(240),未发版。sendspin 泵与桥投递协议**零改动**(帧/tsUs/generation/BOUNDARY 原样);变化全部在 airplay 侧 RAOP 出口:now 锚(forceNow)让 MUZO 类固件到包即播,泵 lead 段相对组时间线提前播,对齐器以首帧 tsUs 为零点持续对齐。详见 airplay 权威文档 v4.9.4-ex 节。
+> **实验性质**:env `MF_BRIDGE_RAOP_NOW_ANCHOR`(缺省 ON,0/false 关闭);已随 v4.15.3 发版(2026-11-25),曾仅热补丁(240)。sendspin 泵与桥投递协议**零改动**(帧/tsUs/generation/BOUNDARY 原样);变化全部在 airplay 侧 RAOP 出口:now 锚(forceNow)让 MUZO 类固件到包即播,泵 lead 段相对组时间线提前播,对齐器以首帧 tsUs 为零点持续对齐。详见 airplay 权威文档 v4.9.4-ex 节。
 
 ---
 
@@ -2089,3 +2089,42 @@ sendspin childMain → `server.setBridgeLateTotal`(Map,整体替换语义同 bri
 autostart 受环境限制:本地库取源快、空窗 <1.5s,需冷源/网络慢场景才能复现
 (与 F5/F6b 断网注入同类限制)。逻辑由单测 ⑥ 条钉死
 (`tests/sendspin/startSeekDeadlock.test.ts` ⑦~⑫)。
+
+
+### F-5 v3~v7 完整修复链 + 显示进度(v4.15.3, 2026-11-25)
+
+F-4 的余量修复经真机证明**单独不足**(05:04 `shiftMs=5549` vs `headVsNowMs=5799`
+差额恒 250 仍 4 连)。继续下挖出五层,全部随 **v4.15.3** 发版:
+
+- **v3 投递洞填充**:`candCount=0` 且 cursor 到环头有 250ms~2s 真空时,分片推
+  250ms 静音(**不写 ring**,保『追加顺序 = ts 递增』不变量);填洞后置
+  `candCount=1`,否则死锁判据照样累 deadTicks(单测抓到的 bug)。对齐 MA
+  `sendspin_bridge.py:1518-1560 _align_chunk` 按需填洞。
+- **v4 continuity 洁净门**:`continuity=1 && |timelineOffsetUs| > 1s` 时降级
+  REBUILD(`bridge-continuity-degraded`),断开「坏 offset → 真空 → 死锁 → 更坏
+  offset」自我强化闭环。REBUILD 换代清零偏移,代价是切歌处一个极短断点。
+- **v5 轻重启后强制换代**:LR 末尾 `bridgeContentEpoch++`。原地平移会让起播
+  瞬间内容「既不在旧位置也不在新位置」—— 06:01 实证 `droppedFrames` 一次性
+  +291723(≈6.6s)、`late` +110,时间线错乱(《燃》没播完就切、进度仍在走)。
+- **v6 锚点向首帧靠拢**:原「只降不升」致锚点比首帧早 2.2s、曲首被当旧内容裁。
+  改为 `>=1.5s` 空洞才抬,上限 `BRIDGE_START_WAIT_MAX_US=30s`(实际受投递视界
+  5.5s 限制,永不触顶)。两处踩坑:阈值用 `>` 时 4000-2500 恰好 1500 不触发;
+  抬升后的 lead 污染组锚 floor(组锚改用抬升前值 `useLeadPreLift`,单测抓出)。
+- **v7 轻重启后重置泵累计(真正的根)**:LR 只做 splice 清环 + 偏移累减 + 游标
+  复位,**不动泵累计 `deliveredByGroup`/`deliveredPeak`**(唯一重置它们的
+  `resetPushMeter()` 只在新起播路径调用,LR 从不调)⇒ 偏移清零后泵仍按旧累计
+  (可达 35s)打戳 ⇒ 新帧落未来、环头超前视界 ⇒ `cand=0` 再死锁(06:04 实证
+  shift 33910→9623 连环)。修法:`deliveredPeak` 置 now 等价样本数 +
+  `deliveredByGroup.clear()`——**不是清零**(清零会让 ts 从 1970 起全过期)。
+- **显示进度视觉停顿**:`displayPosition = framePos - depthMs + lead`,而
+  `depthMs = cursor - now`;cursor 在换代/重锚时复位到 now ⇒ depthMs 从 ~5.5s
+  突变 0 ⇒ 显示前跳被 `capDisplayByElapsed` 钳住 ⇒ 进度条停顿(音频正常)。
+  修法:组级 `displayDepthMs` 每拍最多变 50ms 限速跟随,换曲/seek 清 null。
+  **不用硬粘/历史最大值** —— 那会让 seek 往回拖时进度卡死(2026-11-21 血律)。
+
+**v4.15.3 验证(部署后 56min,07:22~08:19 UTC)**:死锁/LR/填洞/降级/cursor-jump
+**全部 0**;17 次 `continuity=1` 自然切歌零误伤;两台 late 3→61/3→76 单调缓增
+无跳变、inQ 1776~3000ms、`realigned`/`dropped` 增量两台完全对称;双机进度差
+397 条 `|残差| max=8ms avg=2.8ms`、>50ms 为 0,换代 ±30s 峰值全 ≤6ms。
+**诚实边界**:v3/v4/v5/v7 分支与显示纠错触发条件在本采样窗内均未自然出现,
+目前为单测证据 + 稳态无回归,待自然场景触发闭环。

@@ -1699,7 +1699,7 @@ routes/api/groups.ts:129  PUT /v1/groups/:id/delays  {memberId, ms}
 
 ## v4.9.4 增补(桥 prepare DLNA settle,2026-10-28)
 
-> 仅热补丁(240),未发版。互斥章节补充:**桥路径也走同一 settle 助手**。
+> 已随 v4.15.3 发版(2026-11-25);曾仅热补丁(240)。互斥章节补充:**桥路径也走同一 settle 助手**。
 
 | # | 变更 | 现状(代码为准) | 位置 |
 |---|------|------------------|------|
@@ -1712,7 +1712,7 @@ routes/api/groups.ts:129  PUT /v1/groups/:id/delays  {memberId, ms}
 
 ## v4.9.4-ex 增补(RAOP now 锚实验,2026-10-28)
 
-> **实验性质**:env `MF_BRIDGE_RAOP_NOW_ANCHOR` 门控(缺省 ON,显式 0/false 关闭回旧路径);仅热补丁(240),未发版。根因定性(240 实证 + 代码考古):MUZO/Linkplay 类固件只支持「到包即播/now 锚」语义,对「SYNC 未来锚 2.3s + 首包延迟 1.25s」的桥会话永不开始渲染;v4.7 时代出声的桥路径即 Phase 3 旧墙钟 stream()(now 锚),Phase 4 四锚点改造后无出声实证。
+> **实验性质**:env `MF_BRIDGE_RAOP_NOW_ANCHOR` 门控(缺省 ON,显式 0/false 关闭回旧路径);已随 v4.15.3 发版(2026-11-25),曾仅热补丁(240)。根因定性(240 实证 + 代码考古):MUZO/Linkplay 类固件只支持「到包即播/now 锚」语义,对「SYNC 未来锚 2.3s + 首包延迟 1.25s」的桥会话永不开始渲染;v4.7 时代出声的桥路径即 Phase 3 旧墙钟 stream()(now 锚),Phase 4 四锚点改造后无出声实证。
 
 | # | 变更 | 现状(代码为准) | 位置 |
 |---|------|------------------|------|
@@ -2543,7 +2543,7 @@ if (opts.coldPreheat === false && wantLeadUs <= floorLeadUs && leadUs < warmUs) 
 
 ## 2026-11-25 未发布增补(自愈三级分级 + 防御自愈对齐 MA + 传输守卫)
 
-> 修复链 13 commit(fix/start-seek-cursor-seed 分支,fe07ad43…0cefbbeb,未 push)。
+> 修复链 13 commit(fix/start-seek-cursor-seed 分支,fe07ad43…0cefbbeb,已随 v4.15.2 发版;本段增补内容随 v4.15.3 补齐)。
 > 背景:死锁兜底重锚(6e47da5c)真机暴露三处次生缺陷 —— 非接续换代裁头(缺陷 B)、
 > splice 残留口径低估致 MUZO 族时戳域整体错位、起播空窗 late 暴涨无自愈。
 > 全部对齐 MA music-assistant airplay provider(sendspin_bridge.py)实现,**凡对齐处
@@ -2639,4 +2639,30 @@ raisedUs/sharedLeadUs)。真机:换代后两台 publish 锚点差 <1ms(修复前
 
 | `bridge-gap-fill-autostart` | 投递侧断粮自动启动续静音(治本;上游 endedNaturally 未覆盖的切歌路径) |
 | `bridge-gap-fill-stop reason=content` | 真内容到达后自动收工(不持续灌静音) |
-| `timelineOffsetUs` 单向累加 | 时间线偏移无界累加(治标钳位经自审回退;靠治本填真空断根,见 sendspin F-4) |
+| `timelineOffsetUs` 单向累加 | 时间线偏移无界累加(治标钳位经自审回退;靠 v3 填洞 + v4 continuity 洁净门 + v5/v7 LR 换代与泵累计重置断根,见 sendspin F-4/F-5) |
+
+
+## v4.15.3 桥时间线收尾(v5/v6/v7 + 显示进度,2026-11-25)
+
+承接 B-7 自愈三级分级,本版把「换代 / 轻重启 / 锚点 / 显示」四处时间线错乱一并收口,
+全部随 **v4.15.3** 发版;凡对齐 MA 的参数与逻辑处代码均带 MA 出处注释(用户铁律)。
+
+- **v5 LR 后强制换代**:`light-restart` 分支末尾 `bridgeContentEpoch++`,旧帧被
+  epoch 过滤、偏移下一拍归零。真机 06:01 实证原地平移丢 6.6s 内容
+  (`droppedFrames` +291723、`late` +110,《燃》进度继续走却已切歌)。
+- **v6 锚点向首帧靠拢**:`planBridgeAnchor` 从「只降不升」改为向首帧靠拢,
+  `>=1.5s` 空洞才抬,上限 `BRIDGE_START_WAIT_MAX_US=30s`(实际受投递视界 5.5s
+  限制,永不触顶)。组锚 floor 用抬升前值 `useLeadPreLift`,防止组锚被顶到
+  now+4s 失去同源。对齐 MA `sendspin_bridge.py` START 锚定语义(差异:本仓
+  以投递视界而非固定等待封顶)。
+- **v7 LR 后重置泵累计**:LR 分支置 `deliveredPeak` = now 等价样本数并清
+  `deliveredByGroup`(不是清零;清零会让 ts 从 1970 起全过期)。根因:泵累计
+  唯一重置点 `resetPushMeter()` 只在新起播路径,LR 从不调 ⇒ 偏移清零后泵仍
+  按旧累计(可达 35s)打戳,新帧落未来 ⇒ 再次死锁(06:04 shift 33910→9623)。
+- **显示进度视觉停顿(桥路两侧现象)**:音频完全正常,仅进度条在换代/重锚时
+  快速停顿又继续。根因在 sendspin 侧 `displayDepthMs = cursor - now` 的突变
+  (见 sendspin F-5);桥侧不改协议,只依赖 `displayDepthMs` 限速跟随消除视觉停顿。
+
+**`droppedFrames` 语义(勿再误判)**:统计 ts 早于内容锚点的帧被裁/跳 = **旧曲尾
+未播完部分**,不是新曲开头丢帧。判据是 `contentVsNowMs > finalLeadMs` 且
+`newgen-skip` 两台一致;锚点越靠首帧 dropped 反而越大(旧曲尾落入锚点前更多)。
