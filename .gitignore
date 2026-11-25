@@ -73,3 +73,7 @@ _p6b/
 # 注意：上面的 `data/` 会连 backend/src/data 一起忽略，这里显式放开。
 !backend/src/data/
 !backend/src/data/**
+
+# Python 字节码（backend/scripts/baseline 等工具 py_compile 生成）
+__pycache__/
+*.pyc

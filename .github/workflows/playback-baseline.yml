@@ -1,0 +1,173 @@
+name: Playback Baseline
+
+# 播放基线体检（两层，职责不同）
+#
+#   L1 judge-selftest（托管 runner，blocking）
+#      —— 判读器与容差阈值本身的回归。真机样本只能在能出声的内网采，
+#         但「判据有没有被删掉、阈值有没有被悄悄放宽、设备失配会不会假绿」
+#         完全可以用仓库内固化的三份真实样本（fixtures/）离线钉死。
+#         这一层跑得快（秒级）、不依赖任何设备，所以 push / PR / tag 都跑。
+#
+#   L2 live-check（self-hosted，非阻塞）
+#      —— 对现网真机采样后判读。**故意不放进 build.yml 的 needs 里**：
+#         tag CI 的门禁失败会触发回滚 job，把已推的 GHCR/DockerHub 镜像
+#         打回旧 digest。体检结果只作为发版后的观察报告，绝不允许它反过来动镜像。
+#         默认关闭，需仓库变量 MF_LIVE_CHECK=true 且存在 [self-hosted, musicflow-live] runner。
+#
+# 判定口径见 docs/播放基线-基准值与判读-20261126.md；采集器示例见
+# docs/examples/baseline_sampler.example.py（手册附录 C）。
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "backend/scripts/baseline/**"
+      - "docs/examples/baseline_sampler.example.py"
+      - "docs/播放基线-基准值与判读-*.md"
+      - "backend/src/services/sendspin/**"
+      - "backend/src/services/player/**"
+      - ".github/workflows/playback-baseline.yml"
+  pull_request:
+    paths:
+      - "backend/scripts/baseline/**"
+      - "docs/examples/baseline_sampler.example.py"
+      - "docs/播放基线-基准值与判读-*.md"
+      - ".github/workflows/playback-baseline.yml"
+  workflow_dispatch:
+    inputs:
+      window:
+        description: "采样回看窗口（分钟）"
+        default: "12"
+        required: false
+      live:
+        description: "同时跑真机体检（需内网 self-hosted runner）"
+        type: boolean
+        default: false
+
+concurrency:
+  group: playback-baseline-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # L1：判读器回归（不需要真机）
+  # ---------------------------------------------------------------------------
+  judge-selftest:
+    name: baseline judge selftest (blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # 语法体检：三个脚本 + 采样器示例都必须能编译（示例脚本曾因缩进/编码问题静默失活）
+      - name: Python syntax check
+        run: |
+          set -o pipefail
+          python3 -m py_compile \
+            backend/scripts/baseline/baseline_cap.py \
+            backend/scripts/baseline/baseline_guard.py \
+            backend/scripts/baseline/summary_md.py \
+            backend/scripts/baseline/selftest.py \
+            docs/examples/baseline_sampler.example.py
+          echo "OK: py_compile 全部通过"
+
+      # 核心：34 条断言。失败即说明判读逻辑/阈值/退出码契约被改坏。
+      - name: Judge selftest (39 assertions)
+        run: |
+          set -o pipefail
+          python3 backend/scripts/baseline/selftest.py 2>&1 | tee /tmp/selftest.log
+
+      - name: Upload selftest log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline-selftest-log
+          path: /tmp/selftest.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # L2：真机采样体检（内网 self-hosted；失败不阻塞任何发布动作）
+  # ---------------------------------------------------------------------------
+  live-check:
+    name: live baseline (self-hosted, non-blocking)
+    runs-on: [self-hosted, musicflow-live]
+    timeout-minutes: 30
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.live) ||
+      (startsWith(github.ref, 'refs/tags/v') && vars.MF_LIVE_CHECK == 'true')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Capture A-layer sample
+        shell: bash
+        env:
+          MF_WATCH_DIR: ${{ vars.MF_WATCH_DIR }}
+        run: |
+          set -o pipefail
+          D="${MF_WATCH_DIR:-/root/mf_watch}"
+          W="${{ inputs.window }}"; if [ -z "$W" ]; then W=12; fi
+          echo "watch_dir=$D window=${W}min ref=$GITHUB_REF_NAME"
+          MF_WATCH_DIR="$D" python3 backend/scripts/baseline/baseline_cap.py \
+            --window "$W" --label "ci-${GITHUB_REF_NAME}" --out /tmp/mf_ci_cap.json
+          ls -l /tmp/mf_ci_cap.json
+
+      # --strict-devices：基准里没有的设备也算 FAIL。发版体检必须开，
+      # 否则设备重配（sendspin peerId 是 psk 派生 hash）后指标全不可比，守卫永久假绿。
+      - name: Judge against committed baseline
+        shell: bash
+        id: verdict
+        env:
+          MF_WATCH_DIR: ${{ vars.MF_WATCH_DIR }}
+        run: |
+          set -o pipefail
+          D="${MF_WATCH_DIR:-/root/mf_watch}"
+          # 基准用**宿主机上的真实基准**（含真实设备 key）；仓库 fixtures 已脱敏，
+          # 只能用于 selftest —— 拿它判真机样本会全员 strict FAIL（设备 key 对不上）。
+          B="${D}/baseline/base_v4.15.8.json"
+          if [ ! -f "$B" ]; then
+            echo "::error::宿主机缺少真实基准 $B；先采一份：python3 $D/baseline_cap.py --window 24 --label official --out $B"
+            exit 2
+          fi
+          MF_WATCH_DIR="$D" python3 backend/scripts/baseline/baseline_guard.py \
+            --baseline "$B" \
+            --input /tmp/mf_ci_cap.json --strict-devices 2>&1 | tee /tmp/mf_ci_verdict.txt
+
+      - name: Write job summary
+        if: always()
+        shell: bash
+        run: |
+          set -o pipefail
+          {
+            echo "### 播放基线体检 — \`${GITHUB_REF_NAME}\`"
+            echo ""
+            python3 backend/scripts/baseline/summary_md.py /tmp/mf_ci_cap.json || echo "| 采样文件 | 未生成 |"
+            echo ""
+            echo "<details><summary>判读全文</summary>"
+            echo ""
+            echo '```'
+            cat /tmp/mf_ci_verdict.txt 2>/dev/null || echo "(无输出)"
+            echo '```'
+            echo ""
+            echo "</details>"
+            echo ""
+            echo "> 本 job 不阻塞发布：镜像已在 build.yml 中推送完成，这里只做在线体检并留证据。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline-live-${{ github.ref_name }}
+          path: |
+            /tmp/mf_ci_cap.json
+            /tmp/mf_ci_verdict.txt
+          if-no-files-found: warn
+          retention-days: 30

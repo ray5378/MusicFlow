@@ -1,0 +1,198 @@
+{
+ "meta": {
+  "label": "v4.15.8-baseline",
+  "capturedAt": "2026-11-26T01:57:57",
+  "windowMin": 24.0,
+  "windowEnd": "file-tail",
+  "rowsParsed": 2974,
+  "source": "/root/mf_watch/base.jsonl",
+  "sampler": "base_sampler v3",
+  "codeFingerprint": {
+   "dist_sha256_16": {
+    "streamEngine.js": "7968389a4eb00820",
+    "playerCore.js": "d96d271825732e56",
+    "QueueController.js": "b58e4039812e801d",
+    "protocolPlayer.js": "a2fe2a79b18e7b0d"
+   },
+   "image": "ray5378/musicflow@sha256:e3eb5ba7aaf9cd25007bbd86e250d11bf8a87637e34634830469f843888a9c7e"
+  },
+  "devCapMsAssumed": 4163,
+  "principle": "A层(tick/ring/prog)=判定; B层(status/media)=仅记录出口偏差",
+  "sanitized": "设备 key 已脱敏为占位 DEVICE_ALPHA/DEVICE_BETA（真实 key 是 12 位十六进制设备 MAC，绝不入仓）。fixtures 只用于判读器回归；真机体检必须用宿主机上的真实基准。"
+ },
+ "A_tick": {
+  "DEVICE_ALPHA": {
+   "samples": 726,
+   "spanMin": 24.0,
+   "tickPerMin": 30.2,
+   "state": {
+    "live": 100.0
+   },
+   "deltaUs": {
+    "p5": 1557195.0,
+    "p50": 1560944.0,
+    "p95": 1564352.0,
+    "min": 1556596,
+    "negPct": 0.0
+   },
+   "inQueueMs": {
+    "p5": 2500.0,
+    "p50": 2625.0,
+    "p95": 2725.0,
+    "max": 2750,
+    "overCapPct": 0.0
+   },
+   "queueMs": {
+    "p50": 206.0,
+    "p95": 215.0
+   },
+   "driftUs": {
+    "p50": 0.0,
+    "p95Abs": 23.0
+   },
+   "timingAgeMs": {
+    "p50": 1838.0,
+    "p95": 2876.0
+   },
+   "perMin": {
+    "realigned": 0.0,
+    "late": 1.25,
+    "lossReq": 0.083,
+    "lossResent": 0.083,
+    "lossMiss": 0.0,
+    "lossStale": 0.0,
+    "lossFuture": 0.0,
+    "ap2LateSkips": 0.0
+   },
+   "totals": {
+    "silenceChunks": 0,
+    "newgenSkipFrames": 0,
+    "skippedFrames": 0,
+    "droppedFrames": 0,
+    "insertedFrames": 0
+   },
+   "audibleGapEvidence": false
+  },
+  "DEVICE_BETA": {
+   "samples": 726,
+   "spanMin": 24.0,
+   "tickPerMin": 30.2,
+   "state": {
+    "live": 100.0
+   },
+   "deltaUs": {
+    "p5": 2057148.0,
+    "p50": 2060771.0,
+    "p95": 2064493.0,
+    "min": 2056793,
+    "negPct": 0.0
+   },
+   "inQueueMs": {
+    "p5": 2500.0,
+    "p50": 2625.0,
+    "p95": 2744.0,
+    "max": 2750,
+    "overCapPct": 0.0
+   },
+   "queueMs": {
+    "p50": 204.0,
+    "p95": 215.0
+   },
+   "driftUs": {
+    "p50": 0.0,
+    "p95Abs": 0.0
+   },
+   "timingAgeMs": {
+    "p50": 1511.0,
+    "p95": 2858.0
+   },
+   "perMin": {
+    "realigned": 0.0,
+    "late": 0.833,
+    "lossReq": 0.208,
+    "lossResent": 0.208,
+    "lossMiss": 0.0,
+    "lossStale": 0.0,
+    "lossFuture": 0.0,
+    "ap2LateSkips": 0.0
+   },
+   "totals": {
+    "silenceChunks": 0,
+    "newgenSkipFrames": 0,
+    "skippedFrames": 0,
+    "droppedFrames": 0,
+    "insertedFrames": 0
+   },
+   "audibleGapEvidence": false
+  }
+ },
+ "A_ring": {
+  "DEVICE_ALPHA": {
+   "samples": 290,
+   "inQMs": {
+    "p5": 2400.0,
+    "p50": 2525.0,
+    "min": 2400
+   },
+   "budgetMs": {
+    "p50": 475.0,
+    "p95": 600.0
+   },
+   "bufferedZeroPct": 100.0,
+   "perMin": {
+    "dropOld": 0.0
+   }
+  },
+  "DEVICE_BETA": {
+   "samples": 290,
+   "inQMs": {
+    "p5": 2400.0,
+    "p50": 2550.0,
+    "min": 2375
+   },
+   "budgetMs": {
+    "p50": 450.0,
+    "p95": 600.0
+   },
+   "bufferedZeroPct": 100.0,
+   "perMin": {
+    "dropOld": 0.0
+   }
+  }
+ },
+ "A_prog": {
+  "samples": 310,
+  "state": {
+   "PLAYING": 85.16,
+   "IDLE": 1.94,
+   "BUFFERING": 12.9
+  },
+  "advanceRate": 1.0005,
+  "curvedSamples": 1197.0,
+  "backwardsCount": 0,
+  "backwardsSamples": []
+ },
+ "B_status": {
+  "samples": 632,
+  "note": "本段全部是 /status 出口缺陷的量化，不是健康判据",
+  "uaAgeMs": {
+   "p50": 0.0,
+   "p95": 0.5,
+   "min": -3.8,
+   "max": 0.8,
+   "gt1000Pct": 0.0
+  },
+  "groupMinusAirplaySec": {
+   "p5": 2.0,
+   "p50": 2.0,
+   "p95": 223.78,
+   "zeroPct": 2.85
+  },
+  "groupMinusSendspinSec": {
+   "p50": 1.61
+  },
+  "bufferingPct": 4.75,
+  "groupMediaNullPct": 86.87,
+  "positionBackwards": 0
+ }
+}
