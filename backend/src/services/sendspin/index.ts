@@ -905,6 +905,25 @@ export async function sendspinGroupTransport(
   }
 }
 
+/** 播放倍速热切换(§5 B1/B7):**流内换解码源**,不重建泵、不发生命周期消息。
+ *
+ *  与 `sendspinGroupTransport` 分开的理由:那条是「指令型、无回执」(`return null`),
+ *  而这里主进程必须要一个布尔来决定「留着 pump 还是回落整泵重投」,故单独一条 RPC。
+ *
+ *  ⚠️ 只在「那个组真有活泵」时返回 true;`dlna:` / AirPlay 直投 / 本机根本没有泵,
+ *  由调用方(`QueueController.setPlaybackSpeed` 的 `sendspinGroupNameForPeer`)先挡掉。 */
+export async function sendspinGroupSetPlaybackRate(
+  groupName: string,
+  rate: number,
+): Promise<boolean> {
+  if (isForkMode()) {
+    if (!sendspinSupervisor.isRunning()) return false;
+    return sendspinSupervisor.rpc<boolean>("setRate", { group: groupName, rate });
+  }
+  const { setPlaybackRateCore } = await import("./playerCore.js");
+  return setPlaybackRateCore(getServer(), groupName, rate);
+}
+
 /** 泵侧组桥事实源(对账/观测用):全部组桥句柄扁平快照。
  *  fork → rpc bridgeStatus(子进程侧事实);in-proc → 直读本地 server。 */
 export async function sendspinBridgeStatus(): Promise<

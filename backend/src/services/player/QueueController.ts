@@ -723,6 +723,20 @@ export class QueueController extends EventEmitter {
     // 夹紧到当前曲时长内：位置已到曲尾时按原值重投会立刻 EOF。
     const curDurSec = this.knownDuration(q.items[q.currentIndex]);
     if (curDurSec > 0) posSec = Math.min(posSec, Math.max(0, curDurSec - 1));
+    // ★ 热换源优先(方案 §5 B7):sendspin 泵 / 用户组(含纯 AirPlay 桥组、AirPlay+Sendspin
+    // 混合组)都属于「单泵多成员」,可以**在流内换解码源** —— 不重建泵、不发
+    // `stream/start|clear|end`、时间戳逐帧接续,于是设备端没有断点(实测旧路径 1.66s 里
+    // 有 1.45s 花在桥换代 + 100 次 realign,全由整泵重建引起)。
+    // DLNA / AirPlay 直投 / 本机在服务端侧没有推送泵(设备来拉的 HTTP 架构),
+    // `sendspinGroupNameForPeer` 直接返回 null ⇒ 落到下面的整泵重投。那是拉流模型的
+    // 天花板,不追(§4.7 适用范围矩阵)。
+    if (await this.tryHotRateSwitch(playerId, rawPlayerId, next)) {
+      // 必须同步 appliedSpeed:否则用户「暂停→继续」时 transport(play) 会以为
+      // 设备上还是旧速率,又白重投一次(见上面 transport(play) 的 speedChanged 分支)。
+      this.appliedSpeed.set(playerId, next);
+      log.info(`[QueueController][speed] ${playerId}: ${next}x 已热换(不重建流,不断点)`);
+      return next;
+    }
     log.info(`[QueueController][speed] ${playerId}: 以 ${next}x 从 ${posSec.toFixed(2)}s 重投`);
     this.advancing.add(playerId);
     try {
@@ -736,6 +750,38 @@ export class QueueController extends EventEmitter {
       this.advancing.delete(playerId);
     }
     return next;
+  }
+
+  /** 尝试「泵内热换倍速」。返回 `true` = 已接单，**调用方不得再重投**。
+   *
+   *  判据是 `sendspinGroupNameForPeer(带前缀 peerId)` —— 与本仓既有的「泵移交 /
+   *  pumpActive」同一口径，不另造协议判定表：它把 `sendspin:<id>` → `<id>`、
+   *  `group:<gid>` → `ug:<gid>`，其余（DLNA / AirPlay 直投 / 本机）返回 `null`。
+   *  `null` 即「服务端侧没有推送泵」⇒ 只能走整泵重投（会断一次，拉流架构使然）。
+   *
+   *  `rawPlayerId` 作兜底：路由/集成传进来的 id 可能不带前缀，而
+   *  `this.players` 里的 `UniversalPlayer.playerId` **一定**带前缀，优先用它。
+   *
+   *  异常一律回落重投而不外抛：用户点了倍速就必须生效，不能因为热换通道出问题
+   *  变成「选了但没动静」（旧实现正是靠重投保底，这个兜底不能丢）。 */
+  private async tryHotRateSwitch(
+    playerId: string,
+    rawPlayerId: string,
+    rate: number,
+  ): Promise<boolean> {
+    try {
+      const { sendspinGroupNameForPeer } = await import("../sendspin/playerCore.js");
+      const protoPeerId = this.players.get(playerId)?.playerId ?? rawPlayerId;
+      const groupName = sendspinGroupNameForPeer(protoPeerId);
+      if (!groupName) return false;
+      const { sendspinGroupSetPlaybackRate } = await import("../sendspin/index.js");
+      return await sendspinGroupSetPlaybackRate(groupName, rate);
+    } catch (e: any) {
+      log.warn(
+        `[QueueController][speed] ${playerId}: 热换通道异常，回落整泵重投: ${e?.message || e}`,
+      );
+      return false;
+    }
   }
 
   /** 归一化倍速（路由层入参校验用，避免把 0.9 这类值直接下发）。 */

@@ -40,6 +40,7 @@ import {
   joinGroupCore,
   leaveGroupCore,
   bridgeSyncCore,
+  setPlaybackRateCore,
 } from "./playerCore.js";
 import { setAudibleStartSink } from "./streamEngine.js";
 import { syncGroupBridges, detachGroupBridge, type BridgeSocketSpec } from "./bridgeAttach.js";
@@ -215,6 +216,14 @@ export class SendspinChildController extends ChildRpcHost<SendspinChildToParent,
         setMutedCore(srv, String(p.clientId), !!p.muted);
         this.requestSnapshot(true);
         return null;
+      }
+      case "setRate": {
+        // 倍速热切换(§5 B1):**独立 op 而非复用 transport** —— transport 分支统一
+        // `return null`(指令型),而这里必须把「能不能热换」的布尔回给主进程,由
+        // QueueController 决定是否回落整泵重投。reason 与 transport 同为指令,
+        // 故不回快照:泵提交换源后自己会 broadcastGroupState。
+        if (!srv) throw new Error("sendspin server 未运行");
+        return setPlaybackRateCore(srv, String(p.group), Number(p.rate));
       }
       case "groupPlay": {
         // 用户组起播:共享组＋单 pump 同一时间线(多房间同步),成员离线自动跳过。

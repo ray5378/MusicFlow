@@ -134,6 +134,20 @@ describe("SendspinChildController(IPC 桥)", () => {
     expect(state.clients[0].muted).toBe(true);
   });
 
+  it("setRate 回布尔而非 null(主进程据此决定留泵 / 回落重投)", async () => {
+    // ⚠️ 这条钉的是**回执形状**:若哪天把它并回 transport 分支(统一 return null),
+    //   主进程拿到 null 会当成「不可热换」而永远走重投 —— 功能静默失效,没有任何报错
+    //   能提示这件事,只有这条断言会红。
+    // 本夹具没有泵(GroupPump 实例不在 pumpByGroup 里)⇒ 必须回 false。
+    const noPump = await rpc("setRate", { group: "PC-1", rate: 1.5 });
+    expect(noPump.ok).toBe(true);
+    expect(noPump.result).toBe(false);
+    // 未注册组名同样 false,不抛(绝不能因为算不出组名就把用户操作打回 500)
+    const noGroup = await rpc("setRate", { group: "ug:no-such", rate: 1.5 });
+    expect(noGroup.ok).toBe(true);
+    expect(noGroup.result).toBe(false);
+  });
+
   it("unpair 删配对记录并断开该客户端现存连接", async () => {
     const res = await rpc("unpair", { clientId: "PC-1" });
     expect(res.ok).toBe(true);

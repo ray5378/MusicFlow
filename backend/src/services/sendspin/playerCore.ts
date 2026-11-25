@@ -936,6 +936,59 @@ export function seekCore(srv: SendspinServer | null, clientId: string, seconds: 
   log.debug(`[Sendspin][seekCore] ${clientId} 无 server,落 ephemeral 标记 ${Date.now() - t0}ms`);
 }
 
+/** 倍速热切换核心(`docs/倍速无缝切换-设计方案-20261125.md` §5 B 组)。
+ *
+ *  **与 MA 的差异(刻意不「对齐」)**:MA 的 `set_playback_speed`
+ *  (`controllers/player_queues/controller.py:504`)改速只能
+ *  「结算旧速度墙钟 → `resume()` → `play_index()`」重开整条流 —— 它是**设备来拉**的
+ *  HTTP 架构,改速必然换 URL。本项目 Sendspin 是服务端**推块 + 每块带绝对可听时刻戳**,
+ * 于是可以在流内换解码源:不重建泵、不发 `stream/start|clear|end`、时间戳逐帧接续,
+ * 设备端感知不到换流。该能力 MA 不具备,不要再回头按 MA 的方式做(§1.2)。
+ *
+ *  **返回语义**:`true` = 已把 `pendingSwap` 交给泵的 pushLoop,下一拍原子完成换源;
+ *  `false` = **不可热换**(没有活泵 / 起播在飞 / 建窗失败 / 并发),调用方**必须**回落
+ * 「以当前位置整泵重投」的旧路径 —— 那条路有断点,但不会重复推送已发出去的内容。
+ *
+ *  适用范围(§4.7):`sendspin:` 单设备与 `group:` 用户组(纯 AirPlay 桥组、
+ *  AirPlay+Sendspin 混合组同属「单泵多成员」)都走这里;`dlna:` / AirPlay 直投 /
+ *  本机由 `sendspinGroupNameForPeer` 在上一层拒掉,不会进本函数。 */
+export async function setPlaybackRateCore(
+  srv: SendspinServer | null,
+  groupName: string,
+  rate: number,
+): Promise<boolean> {
+  if (!srv) return false;
+  const r = normalizePlaybackSpeed(rate);
+  const g = srv.groups.get(groupName) as (SendspinGroup & { playbackRate?: number }) | undefined;
+  if (!g) return false;
+  // 偏好先落组:seek 重建(本文件 seekCore 的两处分派)与 poll 兜底都读这个字段。
+  // ⚠️ 此刻只写它、**不动泵的 rate** 是安全的:pollCore 出口的倍率
+  //   `normalizePlaybackSpeed(peekPump(g)?.playbackRate ?? g.playbackRate ?? 1)`
+  //   **优先读泵**,而泵在 `pendingSwap` 提交前仍是旧倍率 ⇒ 出口
+  //   `posOut = positionMs × rate` 两量同源同拍,显示不会跳(§4.3 / A12)。
+  (g as any).playbackRate = r;
+  const pump = peekPump(g);
+  if (!pump || !pump.active) {
+    log.debug(`[Sendspin][rate] ${groupName}: 无活泵,改速交回落重投 ${r}x`);
+    return false;
+  }
+  const from = pump.playbackRate;
+  // 幂等:已经是这个倍率就**什么都不做**,但必须回 true。
+  // 为什么不是 false:false 的语义是「你重投吧」—— 那会白断一次流。
+  // 这条路径真实存在且很常见:启动/重启后客户端回灌持久化的倍率,而主进程的
+  // appliedSpeed 初值是 1,于是「再设一次 1.5x」被当成改速(240 真机 2026-11-25 实测:
+  // 泵本来就是 1.5x,回落重投后 `gen=reason=track` + `newgen-skip` 白丢 984ms 音频)。
+  if (Math.abs(from - r) < 1e-9) {
+    log.info(`[Sendspin][rate] ${groupName}: 已是 ${r}x,无需换源(不断流)`);
+    return true;
+  }
+  const ok = await pump.switchRate(r);
+  log.info(
+    `[Sendspin][rate] ${groupName}: 热换 ${from}x→${r}x ${ok ? "已提交" : "被拒(调用方回落重投)"}`,
+  );
+  return ok;
+}
+
 /** 把当前组音量/静音**立刻**下发给设备(MA 语义:音量由设备输出级实时施加)。
  *
  *  这是「改了群组音量要等 30s 缓冲里的旧增益播完才生效」的根治点:命令是控制面
