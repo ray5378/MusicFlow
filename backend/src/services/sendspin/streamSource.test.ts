@@ -460,3 +460,45 @@ describe("dspPeerIdForGroup 组名 → 音色配置键(P4)", () => {
     expect(dspPeerIdForGroup("ug")).toBe("sendspin:ug");
   });
 });
+
+describe("P0 -ss 口径: 内容秒 vs 输出轴(2026-11-25)", () => {
+  // 背景：PcmWindow 的 `startMs` 是**输出流绝对毫秒**（atempo 压缩后），用于 baseSample；
+  // 而 ffmpeg `-ss` 吃的是**内容秒**。旧实现同一个值直通两处 ⇒ 倍速下起播/重定位按
+  // 倍速偏移（r=2 拖到内容 100s 实际从 50s 出声）。此处钉死两个口径分离。
+
+  it("构造：倍速下 -ss 取内容秒，baseSample 仍取输出轴", () => {
+    // 输出轴 50s + speed=2 ⇒ 内容 100s
+    const w = new PcmWindow({ input: wav120, loudness: { enabled: false }, speed: 2 }, 50_000, {
+      spawnContentSec: 100,
+    });
+    try {
+      expect(w.ffmpegStartSec).toBeCloseTo(100, 6);
+      expect(w.baseMs).toBeCloseTo(50_000, 3);
+    } finally {
+      w.close();
+    }
+  });
+
+  it("构造：未给 spawnContentSec 时缺省 = startMs/1000（1x 行为不变）", () => {
+    const w = new PcmWindow({ input: wav120, loudness: { enabled: false } }, 5_000);
+    try {
+      expect(w.ffmpegStartSec).toBeCloseTo(5, 6);
+      expect(w.baseMs).toBeCloseTo(5_000, 3);
+    } finally {
+      w.close();
+    }
+  });
+
+  it("seekTo：重定位同样吃内容秒（否则重起 ffmpeg 会跳回 1/rate 处）", async () => {
+    const w = new PcmWindow({ input: wav120, loudness: { enabled: false }, speed: 2 }, 0);
+    try {
+      await w.ready(10_000);
+      // 目标输出轴 50s ⇒ 内容 100s；ready 只解到约 2s 输出 ⇒ 必然走重起路径
+      expect(await w.seekTo(50_000, { spawnContentSec: 100 })).toBe(true);
+      expect(w.ffmpegStartSec).toBeCloseTo(100, 6);
+      expect(w.baseMs).toBeCloseTo(50_000, 3);
+    } finally {
+      w.close();
+    }
+  }, 30_000);
+});

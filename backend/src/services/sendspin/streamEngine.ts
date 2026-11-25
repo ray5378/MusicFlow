@@ -31,6 +31,7 @@ import {
   PREFILL_BUFFER_MIN_MS,
 } from "./constants.js";
 import { paceBumpBus } from "./paceBumpBus.js";
+import { streamToContentSec } from "../player/playbackSpeed.js";
 // S7 消费驱动产出：上限常量复用 contentDemand 的 30s（对齐 MA
 // _PRODUCER_BUFFER_LIMIT_US），不新增第二个 30s。contentDemand 零依赖 ⇒ 无环。
 import { PUMP_LOOKAHEAD_DEFAULT_US } from "./contentDemand.js";
@@ -374,7 +375,11 @@ async function streamingSource(
   // songId 透传到回环 URL(sid):该曲已预取进主进程 membuf 时 ffmpeg 直读内存,
   // 不再回源(网盘 FLAC 回源实测 6.4s,足以让桥补 1.555s 静音)。
   const source = await resolveFfmpegInput(direct, songId);
-  // startMs 直达 ffmpeg `-ss`(PcmWindow 构造本就支持,此前未透传):
+  // startMs 同时喂给两处,**口径不同**:
+  //   ① PcmWindow 的 baseSample = 输出流绝对毫秒(atempo 压缩后);
+  //   ② ffmpeg `-ss` = 内容秒。
+  // 倍速下两者不等(1.5x 时输出 40s 对应内容 60s),故 spawnContentSec 必须显式换算
+  // (2026-11-25 修:此前同一 startMs 直通 `-ss`,倍速下起播位置按倍速偏移)。
   // 起播即定位,省掉「先建流再 seekTo 冷起一次」的整段空窗。
   // 解码窗口上限(插件配置「解码窗口上限」):歌长 ≤ 上限 → 整曲保留(前后 seek 零成本);
   // 歌长 > 上限 → 滑动窗口(背压+淘汰),照样播完。duration 未知(0/null)时保守走滑动。
@@ -392,7 +397,14 @@ async function streamingSource(
       ...(speed !== 1 ? { speed } : {}),
     },
     startMs,
-    { highSec: windowSec, retainWholeSong, meta: { songId, durationSec: durSec } },
+    {
+      highSec: windowSec,
+      retainWholeSong,
+      meta: { songId, durationSec: durSec },
+      // startMs 是**输出轴**毫秒(baseSample 用),`-ss` 要**内容秒**:
+      // r=2 时输出 50s 对应内容 100s。1x 下两者相等,故旧行为不变。
+      spawnContentSec: streamToContentSec(startMs / 1000, speed),
+    },
   );
   try {
     await window.ready();

@@ -201,7 +201,20 @@ export class PcmWindow {
   constructor(
     source: WindowSource,
     startMs = 0,
-    opts?: { highSec?: number; retainWholeSong?: boolean; meta?: { songId?: string; durationSec?: number } },
+    opts?: {
+      highSec?: number;
+      retainWholeSong?: boolean;
+      meta?: { songId?: string; durationSec?: number };
+      /**
+       * ffmpeg `-ss` 起点（**内容秒**，源文件时间轴）。缺省 = `startMs / 1000`。
+       *
+       * ⚠️ `startMs` 是**输出流绝对毫秒**（曲首起算，atempo 压缩后），用于算 `baseSample`；
+       * 而 `-ss` 吃的是**内容秒**。倍速 ≠ 1 时两者不等（r=2 时内容 100s 对应输出 50s），
+       * 必须由调用方显式给出，否则倍速下 seek 落点按倍速偏移（2026-11-25 定位）。
+       * 1x 时两者相等 ⇒ 缺省值与旧行为逐字节一致。
+       */
+      spawnContentSec?: number;
+    },
   ) {
     this.source = source;
     this.meta = opts?.meta ?? null;
@@ -212,7 +225,7 @@ export class PcmWindow {
     this.baseSample = startSample;
     this.decodedSamples = startSample;
     this.consumedSamples = startSample;
-    this.spawn(startMs / 1000);
+    this.spawn(opts?.spawnContentSec ?? startMs / 1000);
   }
 
   get decoded(): number { return this.decodedSamples; }
@@ -220,6 +233,9 @@ export class PcmWindow {
    *  调用方(pushLoop)用它把落后于基准的游标**贴齐** —— 保证淘汰之后必然前进,
    *  不会退化成"游标不变 → 再淘汰"的自旋(见 slice 的亚帧容错注释)。 */
   get baseMs(): number { return (this.baseSample / (SAMPLE_RATE * CHANNELS)) * 1000; }
+  /** 本次 ffmpeg 起播的 `-ss` 秒数（**内容轴**）。与 `baseMs`（输出轴）是两个口径，
+   *  倍速下必然不等 —— 排障「拖到内容 100s 却从 50s 出声」时看这一个字段即可。 */
+  get ffmpegStartSec(): number { return this.spawnStartSec; }
   /** debug 取证公共字段:歌曲定位(songId/歌长)+ 当前已消费到的播放位置。
    *  positionMs 口径:consumedSamples 是**曲首起算的绝对交错样本**,除 (48k×2) 即播放位置 ——
    *  异常事件带上它,就能回答「这首歌播到第几秒挂的」。 */
@@ -304,7 +320,7 @@ export class PcmWindow {
    * (调用方只改 positionMs 即可);窗口外杀掉 ffmpeg 按 `-ss` 重起,返回 true。
    * 绝对偏移保持"曲首起算"连续,调用方下标算法无需改动。
    */
-  async seekTo(ms: number): Promise<boolean> {
+  async seekTo(ms: number, opts?: { spawnContentSec?: number }): Promise<boolean> {
     if (this.closed) throw new WindowClosedError();
     const target = Math.max(0, Math.floor((ms / 1000) * SAMPLE_RATE * CHANNELS));
     if (!this.failed && target >= this.baseSample && target <= this.decodedSamples) {
@@ -330,7 +346,8 @@ export class PcmWindow {
     this.eofSample = null;
     this.failed = null;
     this.paused = false;
-    this.spawn(ms / 1000);
+    // 同构造：`ms` 是输出轴，`-ss` 要内容秒。缺省保持旧行为（1x 等价）。
+    this.spawn(opts?.spawnContentSec ?? ms / 1000);
     return true;
   }
 
