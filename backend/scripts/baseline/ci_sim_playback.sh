@@ -108,7 +108,7 @@ pipe =
   name = "${WORK}/ap.pipe";
 };
 EOF
-sudo shairport-sync -c "$WORK/shairport.conf" > "$WORK/logs/shairport.log" 2>&1 &
+sudo shairport-sync -vvv -c "$WORK/shairport.conf" > "$WORK/logs/shairport.log" 2>&1 &
 echo $! > "$WORK/shairport.pid"
 sleep 3
 kill -0 "$(cat "$WORK/shairport.pid")" 2>/dev/null || {
@@ -122,7 +122,7 @@ say "1/7 启动被测镜像（空库）"
 chmod -R a+rwX "$WORK/data" "$WORK/music"
 docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
 docker run -d --name "$CONTAINER" --network host \
-  -e TZ=Asia/Shanghai -e UV_USE_IO_URING=0 \
+  -e TZ=Asia/Shanghai -e UV_USE_IO_URING=0 -e LOG_LEVEL=debug \
   -v "$WORK/data:/app/backend/data" \
   -v "$WORK/music:/local/music:ro" \
   "$IMAGE" >/dev/null
@@ -228,6 +228,18 @@ api POST "/peers/group%3A${GID}/queue/play" \
   >/dev/null || die "起播失败"
 
 say "6/7 采样 ${MINUTES} 分钟（tick/ring/prog）"
+# 先确认真的起流：cast 失败时 8 分钟采样只会得到空样本，白等且难诊断。
+TICK_READY=0
+for i in $(seq 1 45); do
+  if docker logs "$CONTAINER" 2>&1 | grep -aq '"ev":"tick"'; then TICK_READY=1; break; fi
+  sleep 2
+done
+if [ "$TICK_READY" -ne 1 ]; then
+  echo "::error::起播后 90s 内无 ev:tick，桥接未起流；容器日志尾部见下"
+  docker logs "$CONTAINER" 2>&1 | tail -120 >&2
+  tail -80 "$WORK/logs/shairport.log" >&2
+  die "bridge 未产出 tick"
+fi
 # 先让桥接跑到稳态（首包 lead + anchor 落定），再开始计数。
 sleep 12
 export MF_USER="$CI_USER" MF_PASS="$CI_PASS" MF_GROUP_ID="$GID" \
