@@ -195,7 +195,10 @@ def peer_sample(pid, kind):
 
 
 def media_sample(ss_id):
-    rec = {"type": "media", "t": datetime.datetime.now().strftime("%H:%M:%S"),
+    # 必须和 tick/ring/prog 的 `_t` 同口径(CST)：docker logs -t 前缀被本脚本转成 CST，
+    # 而 runner 本地时区通常是 UTC（GitHub Actions），混用会让 baseline_cap 的窗口
+    # 把全部 tick 判成「窗口外」——表面上采到了，汇总却是 0 设备。
+    rec = {"type": "media", "t": datetime.datetime.now(CST).strftime("%H:%M:%S"),
            "wall": int(time.time() * 1000),
            "group": None, "devs": {}, "ss": None}
     g = peer_sample("group:" + GID, "group")
