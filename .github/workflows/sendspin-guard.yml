@@ -23,9 +23,13 @@ name: Sendspin Guard
 #       "The spec reserves stream/end for queue-empty, not track changes."
 #       —— trackChangeKeepStream.test.ts
 #
-#   P5 帧级成员延迟补偿（v4.11.0）：组内每个成员的延迟补偿**逐帧、按成员**加在
-#      下发时间戳上 —— `sendAudio(ts + sendspinDelayUsOf(clientId), data)`。
+#   P5 帧级成员延迟补偿（v4.11.0；v4.15.8 起多第三参）：组内每个成员的延迟补偿**逐帧、
+#      按成员**加在下发时间戳上 —— `sendAudio(ts + sendspinDelayUsOf(clientId), data, ts)`。
 #       偏移只作用于「该成员收到的 ts」，ring / 桥投递仍用组时间线原戳；
+#       **第三参 `baseTsUs` 必须是内容轴原戳**（补偿前），它只喂逐成员投递闸与记账 ——
+#       传补偿后的值会让该成员的容量闸与「不超过桥游标」判定整体平移一个补偿量。
+#       纯 sendspin 组不启用投递闸（audioGateOn=false），所以这种错法在纯 SENDSPIN
+#       设备上完全测不出来，只有混合组真机才暴露 —— 故在此钉死。
 #       迟入组(late-join)回填必须用**同一偏移**，否则新成员进场瞬间跳变。
 #       静默失效形态：漏加偏移 → 该成员永远不生效；只加一处 → 进场/稳态不同步。
 #       —— tests/sendspin/sendspinFrameDelay.test.ts
@@ -221,21 +225,34 @@ jobs:
           if [ "$miss" -eq 0 ]; then echo "OK: 暂停中 seek 保持暂停在位"; fi
           exit "$miss"
 
-      # —— P5：帧级成员延迟补偿（v4.11.0）——
+      # —— P5：帧级成员延迟补偿（v4.11.0；v4.15.8 起多一个内容轴原戳参数）——
       # 偏移只加在「该成员收到的 ts」上（逐帧、按成员），ring/桥投递仍用组时间线原戳；
+      # 第三参 baseTsUs 只喂投递闸与记账，必须是**补偿前**的内容轴戳。
       # late-join 回填必须复用同一偏移。静默失效形态：单测桩 server 缺 groupDelayUs
-      # 会兜底 0n，消费侧全绿而真机该成员永不生效 —— 所以这里钉生产侧三个点。
+      # 会兜底 0n，消费侧全绿而真机该成员永不生效 —— 所以这里钉生产侧这些点。
       - name: "Guard P5 - per-member frame delay offset (send + late-join)"
         shell: bash
         run: |
           miss=0
           SERV=backend/src/services/sendspin/server.ts
-          if ! grep -qF 'for (const c of g.members) c.sendAudio(ts + this.sendspinDelayUsOf(c.clientId ?? ""), data);' "$SERV"; then
-            echo "::error::P5 回归:帧下发必须是 sendAudio(ts + sendspinDelayUsOf(clientId), data)(漏加偏移 = 该成员补偿永远不生效)"
+          if ! grep -qF 'c.sendAudio(ts + this.sendspinDelayUsOf(c.clientId ?? ""), data, ts);' "$SERV"; then
+            echo "::error::P5 回归:帧下发必须是 sendAudio(ts + sendspinDelayUsOf(clientId), data, ts)(漏加偏移 = 该成员补偿永远不生效;漏第三参 = 投递闸拿补偿后戳算容量)"
+            miss=1
+          fi
+          if ! awk '/for \(const c of g\.members\) \{/ { lastfor = NR }
+              /c\.sendAudio\(ts \+ this\.sendspinDelayUsOf\(c\.clientId/ {
+                if (lastfor > 0 && NR - lastfor <= 20) ok = 1
+              }
+              END { exit (ok ? 0 : 1) }' "$SERV"; then
+            echo "::error::P5 回归:帧下发必须位于 for (const c of g.members) { … } 内(遍历被截断/换成子集 = 部分成员收不到音频)"
             miss=1
           fi
           if grep -qF 'c.sendAudio(ts, data)' "$SERV"; then
             echo "::error::P5 回归:仍存在未加成员偏移的 sendAudio(ts, data)(组内个别成员与其他人错位)"
+            miss=1
+          fi
+          if grep -qE 'c\.sendAudio\([^;]*, data, ts *\+' "$SERV"; then
+            echo "::error::P5 回归:sendAudio 的 baseTsUs 被传成补偿后的值(逐成员投递闸与桥游标判定会整体平移该成员的补偿量)"
             miss=1
           fi
           if ! grep -qF 'return typeof this.server.groupDelayUs === "function" ? this.server.groupDelayUs(this.name, clientId) : 0n;' "$SERV"; then
@@ -250,8 +267,12 @@ jobs:
             echo "::error::P5 回归:late-join 回填缺少成员偏移快照(新成员进场会比老成员早/晚一个补偿量)"
             miss=1
           fi
-          if ! grep -qF 'for (const it of items) c.sendAudio(it.tsUs + dspDelayUs, it.data);' "$SERV"; then
-            echo "::error::P5 回归:late-join 回填必须用同一偏移 it.tsUs + dspDelayUs"
+          if ! grep -qF 'for (const it of items) c.sendAudio(it.tsUs + dspDelayUs, it.data, it.tsUs);' "$SERV"; then
+            echo "::error::P5 回归:late-join 回填必须用同一偏移 it.tsUs + dspDelayUs,且第三参回内容轴原戳 it.tsUs"
+            miss=1
+          fi
+          if grep -qE 'sendAudio\(it\.tsUs *\+[^;]*, it\.data, it\.tsUs *\+' "$SERV"; then
+            echo "::error::P5 回归:late-join 的 baseTsUs 被传成补偿后的值(新成员投递闸从头就偏)"
             miss=1
           fi
           if [ "$miss" -eq 0 ]; then echo "OK: 帧级/迟入组回填的按成员补偿在位"; fi
