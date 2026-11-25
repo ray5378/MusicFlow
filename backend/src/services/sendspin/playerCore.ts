@@ -357,6 +357,7 @@ export function playCore(
   //   归属判据挂在**组**上,泵换代(新实例)不会重复清零。
   if (g.displaySongId !== item.songId) {
     g.displayPositionMs = 0;
+    g.displayDepthMs = null;
     g.displayLeadMs = 0;
   }
   // 当前曲元数据进组状态:status.media / queue currentMedia 据此上报,
@@ -523,6 +524,7 @@ export function playGroupCore(
   //   归属判据挂在**组**上,泵换代(新实例)不会重复清零。
   if (g.displaySongId !== item.songId) {
     g.displayPositionMs = 0;
+    g.displayDepthMs = null;
     g.displayLeadMs = 0;
   }
   g.current = { songId: item.songId, title: item.title, artist: item.artist, album: item.album, coverArt: item.coverArt, mime: item.mime, durationMs: (item.duration ?? 0) * 1000 };

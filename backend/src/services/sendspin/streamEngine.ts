@@ -1460,6 +1460,7 @@ export class GroupPump {
             this.group.displaySongId = this.songId;
             this.group.displayLeadMs = 0;
             this.group.displayPositionMs = 0;
+            this.group.displayDepthMs = null;
             logSafe(this.server, "info", `[pump] display-reset song=${this.songId} reason=new-song`);
           }
           consumedReseed = this.timelineReseed;
@@ -1755,7 +1756,20 @@ export class GroupPump {
             //   pushed−depth 还是负的,钳 0 之后再加 lead ⇒ 进度凭空从 2s 起步
             //   (用户报「切歌到下一首,进度直接是 02 秒」)。这里取未钳值再加 lead,
             //   最后统一钳 [0, dur]:起播头 lead 秒显示 0.0→2.05,与真实出声同步。
-            const depthMs = (Number(cursorUs) - Number(nowUs())) / 1000;
+            // [显示 2026-11-25] `cursor - now` 在换代/重锚时从 ~5.5s 突变成 0
+            // (cursor 复位到 now) ⇒ 显示位置凭空 +5.5s ⇒ 被 capDisplayByElapsed 钳住
+            // ⇒ 进度条停顿数秒(音频正常)。**限速跟随**: 每拍最多变 50ms, 突变抹平、
+            // 真实缓冲缓变仍跟随; 换曲/seek 由 displayPositionMs=0 处一并清 null。
+            const depthNowMs = (Number(cursorUs) - Number(nowUs())) / 1000;
+            if (this.group.displayDepthMs === null) {
+              this.group.displayDepthMs = depthNowMs;
+            } else {
+              const prev = this.group.displayDepthMs;
+              const step = depthNowMs - prev;
+              const MAX_STEP_MS = 50;
+              this.group.displayDepthMs = prev + Math.max(-MAX_STEP_MS, Math.min(MAX_STEP_MS, step));
+            }
+            const depthMs = this.group.displayDepthMs;
             const raw = framePosMs - depthMs + leadBack;
             let capped = this.durationMs > 0 ? Math.min(this.durationMs, raw) : raw;
             capped = this.capDisplayByElapsed(capped);

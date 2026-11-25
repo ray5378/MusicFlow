@@ -792,6 +792,13 @@ export class SendspinGroup {
   positionMs = 0;
   /** 对外显示用位置(真实可听 + 桥 commandedLead)。唱完/切歌判定仍用 positionMs。 */
   displayPositionMs = 0;
+  /** [显示] 粘住的「游标超前墙钟深度」(ms)。cursor 在换代/重锚时复位到 now,
+   *  会让 `cursor - now` 从 ~5.5s 突变成 0 ⇒ 显示位置凭空 +5.5s ⇒ 被
+   *  capDisplayByElapsed 钳住 ⇒ 进度条停顿数秒(用户 2026-11-25 报「视觉上快速
+   *  停顿又继续」,音频正常)。这里**限速跟随**而非硬粘:每拍最多变 50ms,
+   *  突变被抹平, 真实缓冲缓变仍能跟上(不会长期偏离)。换曲/seek 时随
+   *  displayPositionMs 一并清 null。 */
+  displayDepthMs: number | null = null;
   /** 显示位置已归属的 songId(按**组**记,不按泵实例记)。曲末泵换代(handover)时
    *  新泵实例的同名曲首帧不能清零显示,否则「曲末 pin 到时长 → 换代回真实值」= 回退 9s。 */
   displaySongId = "";

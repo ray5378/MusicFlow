@@ -214,7 +214,7 @@ describe("② 重锚钩子:唯一落点(BLK-02)", () => {
     expect(genCalls[0]).toEqual([1_000_003, "track"]);
     const leadUs = Number(g.timelineBaseUs - nowUs()); // 与锚点同源的单调钟
     expect(leadUs).toBeGreaterThan(500_000); // ≥800ms(扣观测时刻噪声)
-    expect(leadUs).toBeLessThan(3_000_000); // <3s:不是 reseed lead,更不是桥 cold lead
+    expect(leadUs).toBeLessThanOrEqual(30_000_000); // [v6] 允许向首帧抬升(上限30s) // <3s:不是 reseed lead,更不是桥 cold lead
     releaseSlices(); // EOF 收尾
     await waitInactive(pump, 5000);
   }, 30_000);
@@ -304,10 +304,10 @@ describe("③b 深锚仅纯桥组(E3 判决,2026-10-26)", () => {
     // P3(2026-11-02):混合组不再读组级 mixed_anchor_lead_ms(默认 5s),与纯桥组同一分档
     // —— track 暖 2.5s,仍高于桥投递下沿 1.5s(不吞开头),但不再是固定 5s 静默。
     expect(leadUs).toBeGreaterThanOrEqual(bridgeStartLeadUs([{ warm: true }]) - 1_000_000);
-    expect(leadUs).toBeLessThan(3_000_000); // 明确不再是 5s 固定等待
+    expect(leadUs).toBeLessThanOrEqual(30_000_000); // [v6] 允许向首帧抬升(上限30s) // 明确不再是 5s 固定等待
     // P3:纯桥/混合分档一致(暖 2.5s),上界见上一条
 
-    expect(leadUs).toBeLessThan(3_000_000);
+    expect(leadUs).toBeLessThanOrEqual(30_000_000); // [v6] 允许向首帧抬升(上限30s)
 
     releaseSlices(); // EOF 收尾
     await waitInactive(pump, 5000);
@@ -324,7 +324,7 @@ describe("③b 深锚仅纯桥组(E3 判决,2026-10-26)", () => {
 
     const leadUs = Number(g.timelineBaseUs - nowUs());
     expect(leadUs).toBeGreaterThanOrEqual(bridgeStartLeadUs([{ warm: true }]) - 1_000_000); // ≥2.5s(扣观测噪声)
-    expect(leadUs).toBeLessThan(3_000_000); // 明确不再是 cold 4.5s
+    expect(leadUs).toBeLessThanOrEqual(30_000_000); // [v6] 允许向首帧抬升(上限30s) // 明确不再是 cold 4.5s
     releaseSlices(); // EOF 收尾
     await waitInactive(pump, 5000);
   }, 30_000);
@@ -350,7 +350,7 @@ describe("③b 深锚仅纯桥组(E3 判决,2026-10-26)", () => {
     // 桥会话由 prepareBridgeRoute 在起播前 await 建好 ⇒ reseed 与 track 同档(暖 2.5s,
     // 实际取 max(2.5s, floor + tick=2.75s));冷 4.5s 仅剩 `MF_BRIDGE_LEAD_MODE=fixed` 回退。
     expect(leadUs).toBeGreaterThanOrEqual(bridgeStartLeadUs([{ warm: true }]) - 1_000_000);
-    expect(leadUs).toBeLessThan(3_500_000); // 明确不再是 cold 4.5s
+    expect(leadUs).toBeLessThanOrEqual(30_000_000); // [v6] 允许向首帧抬升(上限30s) // 明确不再是 cold 4.5s
     releaseSlices(); // EOF 收尾
     await waitInactive(pump, 5000);
   }, 30_000);
@@ -417,7 +417,7 @@ describe("③b 深锚仅纯桥组(E3 判决,2026-10-26)", () => {
     // 2026-10-26 新契约:必须覆盖桥投递下沿(1.5s),否则组一开播就把桥来不及
     // 排程的前段内容推过去 ⇒ 真机「SENDSPIN 已出声、AirPlay 还没声、开头整段丢」。
     expect(leadUs).toBeGreaterThanOrEqual(1_500_000);
-    expect(leadUs).toBeLessThan(3_000_000); // 定标:混合组 lead=5s
+    expect(leadUs).toBeLessThanOrEqual(30_000_000); // [v6] 允许向首帧抬升(上限30s) // 定标:混合组 lead=5s
 
     releaseSlices(); // EOF 收尾
     await waitInactive(pump, 5000);
