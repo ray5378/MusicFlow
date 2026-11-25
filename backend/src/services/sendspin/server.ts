@@ -2071,6 +2071,16 @@ export class SendspinGroup {
       //   · offset 在下一拍 `bcEpoch !== epoch` 时清零, 不再残留巨额偏移。
       // 代价: 切歌处一个**明确**的短跳, 取代「丢 6.6s 且位置不确定」。
       this.bridgeContentEpoch++;
+      // [治本 v7 2026-11-25] 泵累计重置到「now 的等价样本数」—— 不是清零。
+      // 根因: LR 此前只清环和 offset, 不动 `deliveredByGroup`/`deliveredPeak`,
+      // 于是 offset 清零后泵仍按旧累计(可达 35s)打戳 ⇒ 新帧 ts 落在未来 35s ⇒
+      // 环头超前视界 ⇒ cand=0 ⇒ 再次死锁 ⇒ 06:04 实证连环(shift 33910→9623)。
+      // 清零(`resetPushMeter`)会让 ts 从 0 起(1970)全过期, 故取 now 等价样本数:
+      // 打戳公式 peakBase = deliveredPeak*1e6/SR = now ⇒ 新帧 ts ≈ tsUs,
+      // 时间线基准回到墙钟, 与设备/播放器同域。
+      const nowSamples = Math.round((Number(now) * SAMPLE_RATE) / 1_000_000);
+      this.deliveredPeak = nowSamples;
+      this.deliveredByGroup.clear();
       return now;
     }
     // [P0-补]**所有**组环的当前代次帧整体前移 —— 不能只移 pcm:100:泵时间线是

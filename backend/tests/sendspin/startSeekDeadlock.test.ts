@@ -509,4 +509,27 @@ describe("start-seek 死锁修复(P0)", () => {
     expect(srv.logs.filter((l) => l.includes("bridge-start-seek-deadlock")).length).toBe(1);
     expect(handles["dev-a"].boundaries).toContain("seek");
   });
+
+  // ==================== [治本 v7] LR 后泵累计重置到 now ====================
+  // 真机 06:04: LR 只清环+offset、不清 deliveredPeak ⇒ 新帧仍按旧累计 35s 打戳
+  // ⇒ 环头超前 ⇒ 连环 LR(33910→9623)。重置到 now 等价样本数后基准回到墙钟。
+  it("⑱ LR 后泵累计重置到 now 等价样本数(不是清零)", () => {
+    const { g } = groupWith(["dev-a"]);
+    const now = nowUs();
+    const epoch0 = (g as any).bridgeContentEpoch;
+    const key = (g as any).encoderKey("pcm", 100);
+    (g as any).bcEpoch.set(key, epoch0);
+    for (let i = 0; i < 40; i++) addRingFrame(g, now + 40_000_000n + BigInt(i) * 25_000n, epoch0);
+    (g as any).deliveredPeak = 40 * 48_000; // 旧累计(小, 仅证明会被改)
+    (g as any).encoders.set(key, new PhaseEncoder());
+
+    (g as any).bridgeBroadcastTick(now);
+    (g as any).bridgeBroadcastTick(now + 250_000n);
+
+    const expectPeak = Math.round((Number(now) * 48_000) / 1_000_000);
+    const got = (g as any).deliveredPeak as number;
+    // 允许 nowUs 在两次调用间的微小漂移(几秒内)
+    expect(Math.abs(got - expectPeak)).toBeLessThan(48_000 * 5);
+    expect((g as any).deliveredByGroup.size).toBe(0);
+  });
 });
