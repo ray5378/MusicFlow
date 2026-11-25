@@ -1120,6 +1120,20 @@ console.log("===== ㉒ 组A:自愈三级分级 + lateTotal 上行 =====");
     "重锚落点余量缺失 ⇒ shift=整数时连环死锁复发(真机 offset 累到 -31M)",
   );
   check(
+    "治本 v4: continuity=1 的时间线洁净门(offset 越 ±1s 必须降级 REBUILD)",
+    server.includes("bridge-continuity-degraded")
+      && server.includes("BRIDGE_CONTINUITY_OFFSET_MAX_US")
+      && server.includes("offsetBad"),
+    "洁净门缺失 ⇒ 坏偏移经接续传播成真空(真机 05:04 offset-6.7s ⇒ 5 连死锁累到 -34M)",
+  );
+  check(
+    "治本 v3: 投递洞填充(MA _align_chunk) + 填洞后置 candCount=1 防死锁判据误命中",
+    server.includes("bridge-hole-fill")
+      && server.includes("BRIDGE_HOLE_OVERSHOOT_MAX_US")
+      && server.includes("candCount = 1;"),
+    "填洞缺失/被绕过 ⇒ 切歌真空退回整环前移(offset 每次 -shift 连环累加)",
+  );
+  check(
     "治本: 投递侧断粮自动补静音(与上游 endedNaturally 语义解耦, 对齐 MA _align_chunk 填洞)",
     server.includes("bridge-gap-fill-autostart")
       && server.includes("reason=delivery-starved")

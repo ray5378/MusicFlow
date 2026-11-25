@@ -135,6 +135,16 @@ const BRIDGE_DRAIN_SILENCE_SLICE_US = 25_000;
  *  RAOP 落后墙钟 ~2s ⇒ 6 次 `pacing rebase(lag)` + `newgen-skip 13.48s`。
  *  上限必须覆盖音源解析预算,不能让"补静音比空窗先结束"。 */
 const BRIDGE_GAP_FILL_MAX_MS = 40_000;
+/** [治本 v3 2026-11-25] 填洞的「环头超视界量」上限(µs)。环头只比视界多出这一点点时,
+ *  说明是切歌真空(真机 05:04: 环头 5.8s / 视界 5.5s ⇒ 0.3s);超过则说明内容整体
+ *  在远处(如单测 ① 环头 15s),整体前移更高效 —— 否则要 38 拍(9.5s)才填得到。 */
+const BRIDGE_HOLE_OVERSHOOT_MAX_US = 2_000_000;
+/** [治本 v4 2026-11-25] `continuity=1` 允许「接续」的前提:时间线是干净的。
+ *  `bridgeTimelineOffsetUs` 越过 ±1s 说明这条时间线已被死锁重基准打歪 —— 此时
+ *  continuity 不 epoch++、不清 offset,会把坏偏移直接传给新曲打戳(真机 05:04:
+ * offset=-6.7s ⇒ continuity=1 ⇒ 6 秒后开始 5 连死锁,offset 累到 -34M)。
+ *  降级 REBUILD 可断开这个自我强化闭环; 代价是切歌处一个极短断点。 */
+const BRIDGE_CONTINUITY_OFFSET_MAX_US = 1_000_000;
 
 /** 控制端(WS)全部断开、但仍有桥成员在播时的最长保留时间(ms)。桥是真实听者,
  *  不随控制端掉线立即拆;超过该时长仍无任何 WS 连接才终态回收(防「无听众还继续
@@ -1057,13 +1067,31 @@ export class SendspinGroup {
     //   BOUNDARY{track} 会让 airplay 侧重锚(哪怕 S2 保留队列),旧曲尾与新曲首帧
     //   本来就能在环里连续接上,重锚只会把首帧推到「下沿」之外。
     if (continuity === true) {
+      // [治本 v4 2026-11-25] 时间线已病态时**禁止接续**:continuity 的语义是「同一
+      // 时间线纯内容替换」,前提是那条时间线干净。offset 越过 ±1s 说明它已被死锁
+      // 重基准打歪 —— 真机实证(v4.15.3, 05:04):offset=-6.7s 时 continuity=1 既不
+      // epoch++ 也不清 offset ⇒ 坏偏移直传新曲打戳 ⇒ cursor 与环头之间出真空 ⇒
+      // cand=0 ⇒ 死锁 ⇒ offset 更负,5 连自我强化到 -34M(设备侧 inQ 掉 25/late 9148)。
+      // 降级 REBUILD 断开闭环; 代价是切歌处一个极短断点,远小于 5 连死锁的可闻卡顿。
+      const offsetBad =
+        this.bridgeTimelineOffsetUs > BigInt(BRIDGE_CONTINUITY_OFFSET_MAX_US) ||
+        this.bridgeTimelineOffsetUs < -BigInt(BRIDGE_CONTINUITY_OFFSET_MAX_US);
+      if (!offsetBad) {
+        this.server.log(
+          "info",
+          `bridge-generation group=${this.name} gen=${generation} reason=${reason} continuity=1 keep=queue,epoch,watermarks`,
+        );
+        this.pendingTrackLeadUs = 0n;
+        this.ensureBridgePushTimer();
+        return;
+      }
       this.server.log(
-        "info",
-        `bridge-generation group=${this.name} gen=${generation} reason=${reason} continuity=1 keep=queue,epoch,watermarks`,
+        "warn",
+        `bridge-continuity-degraded group=${this.name} gen=${generation} ` +
+          `offsetUs=${this.bridgeTimelineOffsetUs} ⇒ 降级 REBUILD` +
+          `(时间线已病态:接续会把坏偏移传给新曲)`,
       );
-      this.pendingTrackLeadUs = 0n;
-      this.ensureBridgePushTimer();
-      return;
+      // 不 return —— 落到下方完整换代路径(epoch++ / 环保留判定 / 下一拍 offset 清零)。
     }
     // S6（2026-11-23 真机实证）：**单台设备的会话重建（rehost）不是内容换代**。
     //   组时间线没变，若在这里 bridgeContentEpoch++ ⇒ 所有设备的水位被清、环里的帧被判旧代次，
@@ -1633,6 +1661,61 @@ export class SendspinGroup {
         }
         cursor = e.tsUs;
         deliveredUs += BigInt(Math.round((e.durUs)));
+      }
+      // [治本 v3 2026-11-25] 投递洞填充(cursor 与环头之间的切歌真空):
+      // 真机 v4.15.3 采样(05:04)实证——`cursorVsNow=-681ms`、`backlogMs=0`、
+      // `deliveredMs=0` 连续三拍投不出,而 `tailVsNow=34524`(环里 34.5s 内容充足),
+      // 即内容在、但 cursor 与环头之间有 ~6.5s 真空;cand=0 被判死锁后整环前移,
+      // offset 每次 -5.5M、4 连累到 -34M。**加余量无效**(shiftMs 5549 vs
+      // headVsNowMs 5799 差额恒 250 仍 4 连)。
+      // 对齐 MA `_align_chunk`(按 ts 逐块定位、洞就填静音): 直接给桥推静音覆盖
+      // [cursor, min(环头, horizon)], **不写 ring** —— 避免破坏「追加顺序 = ts 递增」
+      // 不变量。分片 250ms 推, 单次最大 horizon 量(≈5.5s), 不会一次灌几十秒。
+      // 洞本来就是切歌真空的真实听感; 而前移会把整组时间线记错账(offset 累加), 两害取其轻。
+      const holeOvershootUs = firstCand > 0n ? firstCand - horizonFinal : 0n;
+      if (
+        candCount === 0 &&
+        firstCand > 0n &&
+        holeOvershootUs <= BigInt(BRIDGE_HOLE_OVERSHOOT_MAX_US)
+      ) {
+        const fillEnd = firstCand < horizonFinal ? firstCand : horizonFinal;
+        const holeUs = fillEnd - cursor;
+        // 只填「大于一个投递周期」的洞: 正常稳态 cursor 贴 horizon 时洞只有一帧(25ms),
+        // 填它纯属噪声。真机真空是 6.2s(cursor -681ms / 视界 5.5s),远大于此门。
+        if (holeUs > BigInt(BRIDGE_PUSH_TICK_MS) * 1000n) {
+          let pushed = 0;
+          let ts = cursor;
+          let remain = holeUs;
+          try {
+            while (remain > 0n) {
+              const d = remain > 250_000n ? 250_000n : remain;
+              const frames = Math.round((Number(d) * SAMPLE_RATE) / 1_000_000);
+              if (frames > 0) {
+                handle.pushAudio(Buffer.alloc(frames * 4), ts - ahead + shift);
+                pushed += 1;
+              }
+              ts += d;
+              remain -= d;
+            }
+          } catch (err) {
+            this.server.log("warn", `bridge-hole-fill-err dev=${deviceId}: ${(err as Error).message}`);
+          }
+          if (pushed > 0) {
+            cursor = fillEnd;
+            this.bcCursor.set(deviceId, cursor);
+            this.bridgeDeadTicks.delete(deviceId);
+            // [关键] 填洞 = 本拍确有内容推出, 必须置 candCount 让下面的死锁判据不再命中;
+            // 否则 candCount 仍 0 ⇒ 填洞当拍就累 deadTicks, 下一拍(洞只剩一帧不满足填洞门)
+            // 直接累到 2 触发整环前移 —— 填洞等于白做(单测 ⑬ 抓到的就是这个)。
+            candCount = 1;
+            this.server.log(
+              "warn",
+              `bridge-hole-fill dev=${deviceId} holeMs=${Math.round(Number(holeUs) / 1000)} ` +
+                `cursorVsNowMs=${Math.round(Number(cursor - now) / 1000)} slices=${pushed} ` +
+                `(MA _align_chunk 填洞语义; 不写 ring)`,
+            );
+          }
+        }
       }
       // [P0]死锁兜底:连续 2 拍「本代内容整体越过视界」⇒ 显式把环时间线推回
       // 可投递范围并重锚(见 recoverStartSeekDeadlock),不再无限 content-beyond-horizon。

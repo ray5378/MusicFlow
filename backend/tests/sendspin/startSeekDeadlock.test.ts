@@ -416,4 +416,68 @@ describe("start-seek 死锁修复(P0)", () => {
     await g.pushFrame(now + 32_000_000n, new Float32Array(2400));
     expect((g as any).bridgeGapFillTailUs).toBeNull();
   });
+
+  // ==================== [治本 v3 2026-11-25] 投递洞填充 ====================
+  // 真机 v4.15.3(05:04)实证: cursorVsNow=-681ms / backlogMs=0 / deliveredMs=0
+  // 连续三拍投不出, 而 tailVsNow=34524(环里 34.5s 内容充足) ⇒ cursor 与环头之间
+  // 有真空; 旧路径被判定死锁后整环前移, offset 每次 -5.5M、4 连累到 -34M。
+  // 加余量(shiftMs 5549 vs headVsNowMs 5799 差额恒 250)无效。
+  // 填洞后应直接推静音跨过真空, 不触发死锁。
+  it("⑬ cursor 与环头之间有真空 ⇒ 填静音跨过, 不触发死锁", () => {
+    const { g, srv, handles } = groupWith(["dev-a"]);
+    const now = nowUs();
+    const epoch = (g as any).bridgeContentEpoch;
+    const key = (g as any).encoderKey("pcm", 100);
+    (g as any).bcEpoch.set(key, epoch);
+    (g as any).frozenSendAheadUs = 500_000; // 固定 ahead ⇒ 视界 = now+5s+0.5s = 5.5s
+    (g as any).bcCursor.set("dev-a", now + 4_000_000n); // 游标已推到 4s
+    // 环从 now+5.8s 起 1400 帧 ⇒ 4s~5.8s 之间是真空(超视界 0.3s, 填洞应在 3 拍内跨过)
+    for (let i = 0; i < 1400; i++) addRingFrame(g, now + 5_800_000n + BigInt(i) * 25_000n, epoch);
+    (g as any).deliveredPeak = 1400 * 48_000;
+    (g as any).encoders.set(key, new PhaseEncoder());
+
+    for (let k = 0; k < 8; k++) {
+      (g as any).bridgeBroadcastTick(now + BigInt(k) * 250_000n);
+    }
+    expect(srv.logs.some((l) => l.includes("bridge-hole-fill"))).toBe(true);
+    expect(srv.logs.filter((l) => l.includes("bridge-start-seek-deadlock")).length).toBe(0);
+    expect(handles["dev-a"].pushed.length).toBeGreaterThan(0);
+    expect((g as any).bridgeTimelineOffsetUs).toBe(0n); // 填洞不记账, 不累加 offset
+  });
+
+  it("⑭ 环头在视界内 ⇒ 正常投递, 不触发填洞(零误伤)", () => {
+    const { g, srv } = groupWith(["dev-a"]);
+    const now = nowUs();
+    const epoch = (g as any).bridgeContentEpoch;
+    const key = (g as any).encoderKey("pcm", 100);
+    (g as any).bcEpoch.set(key, epoch);
+    for (let i = 0; i < 200; i++) addRingFrame(g, now + 1_000_000n + BigInt(i) * 25_000n, epoch);
+    (g as any).deliveredPeak = 200 * 48_000;
+    (g as any).encoders.set(key, new PhaseEncoder());
+
+    (g as any).bridgeBroadcastTick(now);
+    expect(srv.logs.some((l) => l.includes("bridge-hole-fill"))).toBe(false);
+  });
+
+  // ==================== [治本 v4] continuity=1 的时间线洁净门 ====================
+  // 真机 05:04: offset=-6.7s 时 continuity=1 不换代不清偏移 ⇒ 坏偏移传新曲 ⇒
+  // 真空 ⇒ 5 连死锁累到 -34M。offset 越 ±1s 时必须降级 REBUILD。
+  it("⑮ continuity=1 且 offset 病态 ⇒ 降级 REBUILD(换代,不传播坏偏移)", () => {
+    const { g, srv } = groupWith(["dev-a"]);
+    const epoch0 = (g as any).bridgeContentEpoch;
+    (g as any).bridgeTimelineOffsetUs = -6_700_000n;
+    (g as any).notifyBridgeGeneration(101, "track", undefined, true);
+    expect(srv.logs.some((l) => l.includes("bridge-continuity-degraded"))).toBe(true);
+    expect((g as any).bridgeContentEpoch).toBe(epoch0 + 1); // 走了完整换代
+  });
+
+  it("⑯ continuity=1 且 offset 干净 ⇒ 仍接续(零误伤,不换代)", () => {
+    const { g, srv } = groupWith(["dev-a"]);
+    const epoch0 = (g as any).bridgeContentEpoch;
+    (g as any).bridgeTimelineOffsetUs = 0n;
+    (g as any).notifyBridgeGeneration(102, "track", undefined, true);
+    expect(srv.logs.some((l) => l.includes("continuity=1 keep"))).toBe(true);
+    expect(srv.logs.some((l) => l.includes("bridge-continuity-degraded"))).toBe(false);
+    expect((g as any).bridgeContentEpoch).toBe(epoch0); // 不换代
+  });
 });
