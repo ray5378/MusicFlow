@@ -69,6 +69,11 @@ sudo apt-get install -y -qq shairport-sync avahi-daemon avahi-utils ffmpeg jq >/
 shairport-sync -h > "$WORK/logs/shairport-help.txt" 2>&1 || true
 grep -qi pipe "$WORK/logs/shairport-help.txt" || die "shairport-sync 未编译 pipe 输出后端（见 help 日志）"
 grep -qi avahi "$WORK/logs/shairport-help.txt" || die "shairport-sync 未编译 avahi mDNS 后端（见 help 日志）"
+# apt 安装会顺手拉起系统自带的 shairport-sync（占 5000 端口 + 广播另一个名字），
+# 必须先停掉，否则我们的实例启动即 fatal: could not establish a service on port 5000。
+sudo systemctl stop shairport-sync >/dev/null 2>&1 || true
+sudo systemctl disable shairport-sync >/dev/null 2>&1 || true
+pkill -x shairport-sync >/dev/null 2>&1 || true
 sudo avahi-daemon -D >/dev/null 2>&1 || sudo service avahi-daemon start >/dev/null 2>&1 || true
 avahi-browse -at >/dev/null 2>&1 || true
 
@@ -82,6 +87,7 @@ general =
   output_backend = "pipe";
   mdns_backend = "avahi";
   regtype = "_raop._tcp";
+  port = 5100;
   interpolation = "basic";
 };
 pipe =
