@@ -129,6 +129,14 @@ name: ci
 #      positionMs」,旧口径作为注释保留)、check-frontend-no-qr.mjs、check-runtime-identity.mjs。
 #      没挂 CI 的守卫等于不存在:playback-regression 已静默腐化 4 条断言(降级到旧设计),
 #      直到本次人工跑才暴露。
+#  29. 倍速整链路守卫(scripts/check-speed-switch.mjs,S1–S38)——两条发版线叠出来的坑:
+#      v4.15.6 热换源(泵内换窗口、不换代)与 v4.15.8 容量投递(逐成员闸 + 裁环)互相咬合,
+#      单独看哪一条都对,拆掉任一处就静默退化:提交点回到写前沿 ⇒ 改速又等 30s;裁环不回退
+#      ts ⇒ 几十秒断层被 hole-fill 灌静音;少一道投递闸 ⇒ 直连成员比桥多收 (B,D] ⇒ 组内分叉;
+#      出队器出现 await ⇒ 泵 stall 越 500ms 宽限,5s 后判编码器死亡放弃本曲;档位不下传 ⇒
+#      用户把「设备缓冲深度」改 5s 毫无效果;同倍率幂等回 false ⇒ 重启回灌倍率白断一次流。
+#      动态契约在 pumpRateHotSwitch/pumpRateTrim 单测里,本守卫钉的是「那些用例的前提还在不在」
+#      (min(B,D) / 原子段无 await / case setRate 回布尔 / 显示纯派生),S1–S38 全部做过变异验证。
 # 镜像发布仍由 build.yml(v* tag)负责,与本 CI 互不影响。
 
 on:
@@ -503,6 +511,18 @@ jobs:
           path: /tmp/fetch-coverage.log
           if-no-files-found: ignore
           retention-days: 3
+
+  # 倍速整链路静态回归守卫(S1–S38)。与上面各 guard 同构:零依赖 node 脚本,只读源码文本
+  # (先剥注释),不启动服务、不连设备,秒级完成。动态契约见 pumpRateHotSwitch.test.ts 与
+  # pumpRateTrim.test.ts;本 job 守护的是它们的**前提**(提交点 min(B,D)、原子段无 await、
+  # 投递闸三道、队列非阻塞、跨进程 setRate 回布尔、prefill 档位单向下传)。
+  speed-switch-guard:
+    name: "倍速回归守卫(S1–S38:投递闸/裁环/原子段/不换代/旋钮/幂等)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 校验倍速全链路 38 条不变量(提交点/三道闸/非阻塞/跨进程布尔/档位下传)
+        run: node backend/scripts/check-speed-switch.mjs
 
   test:
     name: 类型检查 + 全量测试
