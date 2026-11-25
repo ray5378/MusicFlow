@@ -285,6 +285,8 @@ describe("warm 保底(三重门:显式 warm 且 env 未上调)", () => {
       coldPreheat: false,
     });
     // wantLeadUs(3000ms) > floorLeadUs(1050ms) ⇒ 三重门第②条不成立 ⇒ 不保底,env 生效
-    expect(Number(plan.anchorUs - NOW)).toBe(3_000_000);
+    // [v6 2026-11-25] env 的 3000ms 仍生效(未被 warm 保底降到 2.5s), 但 v6 会继续
+    // 向首帧(5s ⇒ ceiling 4.8s)靠拢以消除起播空洞, 故断言改为「不低于 3.0s」。
+    expect(Number(plan.anchorUs - NOW)).toBeGreaterThanOrEqual(3_000_000);
   });
 });

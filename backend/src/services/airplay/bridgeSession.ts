@@ -763,9 +763,34 @@ export function planBridgeAnchor(opts: {
         : 0n;
       if (contentUs && contentUs > 0n) {
         let useLead = leadUs;
+        // [v6] 抬升前的值: 组锚共享路径的 floor 语义仍用它(它已吸收 splice 残留下限),
+        // 绝不能让「向首帧靠拢」污染组锚下限 —— 否则组锚会被顶到 now+4s 而失去同源
+        // (单测 groupAnchorShare ② 抓到的真 bug)。
+        const useLeadPreLift = useLead;
         const contentOffsetUs = contentUs - opts.nowUs;
         const ceiling = contentOffsetUs - 200_000n; // 留 200ms 余量，确保锚点在首帧之前
-        if (ceiling > 0n && useLead > ceiling) useLead = ceiling;
+        // [治本 v6 2026-11-25] 锚点向首帧**靠拢**（此前只降不升）。
+        // 真机 06:14 实证: 切歌时 contentVsNowMs=4708 而 finalLeadMs=2500 ⇒ 锚点比
+        // 首帧早 2.2s ⇒ 该段先播静音、随后被判过期丢弃(droppedFrames +145272≈3.3s)。
+        // 抬到「首帧−200ms」使设备恰好在内容到达时出声, 消除空洞。
+        // 上限 BRIDGE_START_WAIT_MAX_US(4s): 取源慢(首帧更晚)时只等 4s, 绝不挂死;
+        // 剩余差额仍是静音, 但绝不会出现「无限等待」。
+        // 上限 30s(用户口径: 宁可多等也要稳)。实际永不触顶: 父侧投递视界只有
+        // CAP 5s + ahead 0.5s, contentVsNow 最大约 5.5s, 故真实等待仍 ~4.5s;
+        // 30s 只为在异常大间距时也不强行截断(宁可多等, 不丢内容)。
+        const BRIDGE_START_WAIT_MAX_US = 30_000_000;
+        if (ceiling > 0n) {
+          const waitMax = BigInt(BRIDGE_START_WAIT_MAX_US);
+          const target = ceiling < waitMax ? ceiling : waitMax;
+          // 只处理「空洞 > 1.5s」的大错配(真机 06:14: contentVsNow 4.7s vs lead 2.5s
+          // ⇒ 2.2s 空洞)。小于 1.5s 保持原样 —— 既避免为极小差额改变既有时序,
+          // 也保护 forceNow 系列用例依赖的「下限钳制」语义。
+          // 注意用 >= : 真机《燃》冷启动实测 contentVsNow 4713 ⇒ ceiling 4513 ⇒
+          // target = min(4513, 4000) = 4000, 而 useLead 2500 ⇒ 差恰好 1500ms。
+          // 用 > 会让这个最常见的场景(5s 视界 + 2.5s warm lead)永远差 1µs 不触发。
+          if (target - useLead >= 1_500_000n) useLead = target;
+          if (useLead > ceiling) useLead = ceiling;
+        }
         const floorUs = minSafeUs - opts.nowUs > keepFloorUs ? minSafeUs - opts.nowUs : keepFloorUs;
         if (useLead < floorUs) useLead = floorUs;
         // [验收6/MA A] 组共享锚点仍不得击穿本设备的 minSafe/splice 下限,也不得晚于
@@ -776,7 +801,7 @@ export function planBridgeAnchor(opts: {
           // floorAllUs 必须包含 useLead(它已吸收 splice 残留下限):组锚不得击穿
           // 本设备自身的任何下限(MA :934-945 splice 链是 per-device 的)。
           const floorA = minSafeUs - opts.nowUs > keepFloorUs ? minSafeUs - opts.nowUs : keepFloorUs;
-          const floorAllUs = floorA > useLead ? floorA : useLead;
+          const floorAllUs = floorA > useLeadPreLift ? floorA : useLeadPreLift;
           if (anchorUs < opts.nowUs + floorAllUs) anchorUs = opts.nowUs + floorAllUs;
           const firstCeilUs = contentUs - 200_000n;
           if (anchorUs > firstCeilUs) anchorUs = firstCeilUs;

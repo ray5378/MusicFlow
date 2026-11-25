@@ -2061,6 +2061,16 @@ export class SendspinGroup {
         this.bcCursor.set(id, now);
         this.bridgeDeadTicks.delete(id);
       }
+      // [治本 v5 2026-11-25] 轻重启后**强制换代**。上面已 splice 作废旧代内容,
+      // 但原地平移(巨额 offset + BOUNDARY seek)会让起播瞬间有一段内容既不在旧位置
+      // 也不在新位置 —— 真机 06:01:01→07 实证: droppedFrames 一次性暴涨
+      // **291,723 帧(≈6.6s 音频)**、late +110(≈0.88s), 用户听感是「跳了一段」
+      // 而进度条照走(音频与进度脱节)。epoch++ 让环重建:
+      //   · 旧帧全部被 ep 过滤 ⇒ 环空 ⇒ tail=0 ⇒ 死锁判据 `tail>horizon` 不成立,
+      //     不会因此连环(泵下一帧带新 ep 立即成为可投内容);
+      //   · offset 在下一拍 `bcEpoch !== epoch` 时清零, 不再残留巨额偏移。
+      // 代价: 切歌处一个**明确**的短跳, 取代「丢 6.6s 且位置不确定」。
+      this.bridgeContentEpoch++;
       return now;
     }
     // [P0-补]**所有**组环的当前代次帧整体前移 —— 不能只移 pcm:100:泵时间线是

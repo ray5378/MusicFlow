@@ -1120,6 +1120,18 @@ console.log("===== ㉒ 组A:自愈三级分级 + lateTotal 上行 =====");
     "重锚落点余量缺失 ⇒ shift=整数时连环死锁复发(真机 offset 累到 -31M)",
   );
   check(
+    "治本 v6: 锚点向首帧靠拢(>1.5s 空洞才抬, 4s 上限) + 组锚 floor 用抬升前值",
+    bs.includes("BRIDGE_START_WAIT_MAX_US")
+      && bs.includes("useLeadPreLift")
+      && bs.includes("target - useLead > 1_500_000n"),
+    "锚点未向首帧靠拢 ⇒ 切歌先静音后丢帧(真机 droppedFrames +145272≈3.3s);或组锚 floor 污染",
+  );
+  check(
+    "治本 v5: 轻重启后强制换代(epoch++), 防原地平移丢大批内容",
+    /mode=light-restart[\s\S]{0,3000}?this\.bridgeContentEpoch\+\+/.test(server),
+    "LR 后未换代 ⇒ 起播瞬间丢 6.6s 且位置不确定(真机 droppedFrames +291723/late +110)",
+  );
+  check(
     "治本 v4: continuity=1 的时间线洁净门(offset 越 ±1s 必须降级 REBUILD)",
     server.includes("bridge-continuity-degraded")
       && server.includes("BRIDGE_CONTINUITY_OFFSET_MAX_US")

@@ -339,8 +339,9 @@ describe("start-seek 死锁修复(P0)", () => {
     expect(lines[0]).toContain("mode=light-restart"); // 走轻重启,不是整环前移
     expect(handles["dev-a"].boundaries).toContain("seek");
     expect((g as any).bcCursor.get("dev-a")).toBe(now + 250_000n);
-    // 旧代内容已作废(环里不再有旧时间线 +40s 的帧)
-    expect(ringTail(g)).toBeLessThan(now + 5_000_000n);
+    // [v5] 轻重启后强制换代 ⇒ 环里旧代内容已被 ep 过滤(环空), 环尾 = 0
+    expect((g as any).bridgeContentEpoch).toBe(epoch + 1);
+    expect(ringTail(g)).toBe(0n);
     // 泵打戳偏移已把后续新帧拉回投递下沿附近
     expect((g as any).bridgeTimelineOffsetUs).toBeLessThan(0n);
 
@@ -479,5 +480,33 @@ describe("start-seek 死锁修复(P0)", () => {
     expect(srv.logs.some((l) => l.includes("continuity=1 keep"))).toBe(true);
     expect(srv.logs.some((l) => l.includes("bridge-continuity-degraded"))).toBe(false);
     expect((g as any).bridgeContentEpoch).toBe(epoch0); // 不换代
+  });
+
+  // ==================== [治本 v5] LR 后强制换代 ====================
+  // 真机 06:01:01→07: LR(shift 34.7s) 后 droppedFrames 一次性暴涨 291,723(≈6.6s),
+  // 用户听到「跳了一段」而进度条照走。换代让环重建, 把「丢 6.6s 且位置不确定」
+  // 变成「从明确位置短跳」。
+  it("⑰ LR(shift>16s) 后强制换代: epoch+1、环空、不连环死锁", () => {
+    const { g, srv, handles } = groupWith(["dev-a"]);
+    const now = nowUs();
+    const epoch0 = (g as any).bridgeContentEpoch;
+    const key = (g as any).encoderKey("pcm", 100);
+    (g as any).bcEpoch.set(key, epoch0);
+    for (let i = 0; i < 40; i++) addRingFrame(g, now + 40_000_000n + BigInt(i) * 25_000n, epoch0);
+    (g as any).deliveredPeak = 40 * 48_000;
+    (g as any).encoders.set(key, new PhaseEncoder());
+
+    (g as any).bridgeBroadcastTick(now);
+    (g as any).bridgeBroadcastTick(now + 250_000n);
+    expect(srv.logs.some((l) => l.includes("mode=light-restart"))).toBe(true);
+    expect((g as any).bridgeContentEpoch).toBe(epoch0 + 1);
+    expect(ringTail(g)).toBe(0n); // 旧代被过滤 ⇒ 环空
+
+    // 环空后继续走:不得再触发死锁(tail=0 ⇒ 判据不成立)
+    for (let k = 3; k <= 10; k++) {
+      (g as any).bridgeBroadcastTick(now + BigInt(k) * 250_000n);
+    }
+    expect(srv.logs.filter((l) => l.includes("bridge-start-seek-deadlock")).length).toBe(1);
+    expect(handles["dev-a"].boundaries).toContain("seek");
   });
 });
