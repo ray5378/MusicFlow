@@ -1,24 +1,34 @@
 name: Playback Baseline Longrun
 
-# 长跑（nightly）：托管 runner 上跑 2 种拓扑的 30 分钟版。
+# 长跑：托管 runner 上跑 2 种拓扑的 3 小时版。
+#
+# 触发来源（两条，都非阻塞）：
+#   - nightly：每天 UTC 19:00（次日 03:00 CST），盯 main 上的日常回归
+#   - 每次发正式版（push v* tag）：盯这一版镜像在长会话下的表现
+# 两者都不参与 tag 发版门禁——失败不影响 Release、不动镜像。Playback Baseline
+# 的短跑才是门禁链路的一部分；长跑是发布后的追溯验证。
 #
 # 只补短跑抓不到的两类问题，不重复短跑已有的覆盖：
-#   1. **缓慢劣化** —— 前 20 分钟健康、后 10 分钟缓冲持续上涨 / 提前量整体搬移。
+#   1. **缓慢劣化** —— 前段健康、后段缓冲持续上涨 / 提前量整体搬移。
 #      全局 p50/p95 会被占多数的正常样本稀释，必须按 5 分钟分桶看斜率，
 #      由 backend/scripts/baseline/longrun_trend.py 判。
-#   2. **长会话** —— 桥会话反复重建 25 次、sendspin 连续推流 30 分钟、
+#   2. **长会话** —— 桥会话反复重建 60 次、sendspin 连续推流 3 小时、
 #      容器 RSS/FD 是否单调增长（resource.jsonl）。
 #
 # 与 playback-baseline.yml 完全独立：
-#   - 不参与 tag 发版门禁，失败不影响 Release，也不动任何镜像
-#   - 独立 concurrency，不占发版体检的并发槽
+#   - 独立 concurrency（单一组 + 自动轮转），不占发版体检的并发槽
 #   - 只跑 mixed + ss-only：AP 单体拓扑的短跑已覆盖，长跑的价值在混合桥与纯帧通路
 #
-# 为什么定 30 分钟（而不是 15 或 60）：
-#   - 趋势判据要 ≥3 个桶才不是噪声，5 分钟一桶 → 30 分钟给 5~6 桶，斜率可信
-#   - 25 次切歌，桥重建次数是 8 分钟版的 5 倍，gen 累加暴露面同步放大
-#   - hosted runner 是 2C/7G，跑满 1 小时 docker 自身稳定性下降、误报率上升
-#   - 仓库是 public，Actions 不计费；时长上限应由「判据可信度」决定而非成本
+# 为什么定 3 小时（而不是 30 分钟或 6 小时）：
+#   - 5 分钟一桶 → 36 桶，斜率的统计置信度比 30 分钟的 6 桶高一个量级
+#   - 切歌间隔 180s（接近真实歌曲时长）→ 60 次切歌。若沿用 60s 间隔会变成
+#     "180 次桥重建压力测试"，切歌冷启动还会污染分桶 p50，趋势判据失真
+#   - GitHub 托管 runner 单 job 硬上限 6 小时（360min），且须含 pull/启动/判读
+#     开销；3 小时留一半余量，不碰硬顶
+#
+# 证据包体积（免费账号 Artifact 配额仅 500MB）：3 小时的 base.jsonl + 帧日志
+# 单拓扑可达百 MB 级。故只上传压缩后的判读证据（保留 2 天），完整 logs/ 目录
+# 也仅在 job 失败时上传（保留 2 天）。不要改回全量裸文件上传。
 #
 # 判定口径见 docs/播放基线-基准值与判读-20261126.md「长跑」一节。
 
@@ -26,24 +36,35 @@ on:
   schedule:
     # 每天 UTC 19:00 = 次日 03:00 CST：避开真机白天播放，也错开发版高峰
     - cron: "0 19 * * *"
+  # 每次发正式版跑一轮。tag push 时 build.yml 可能还在推镜像，
+  # Resolve image 步骤会先等目标 tag 就绪再决定是否回退 latest。
+  push:
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       minutes:
         description: "采样分钟数（标签/回看窗口；真实时长由切歌次数决定）"
-        default: "30"
+        default: "180"
         required: false
       switch_count:
-        description: "切歌次数（每次间隔 60s）"
-        default: "25"
+        description: "切歌次数（真实时长 = 次数 × 间隔）"
+        default: "60"
+        required: false
+      switch_interval:
+        description: "切歌间隔秒数（默认 180s，冒烟测试可临时改小）"
+        default: "180"
         required: false
       image_tag:
-        description: "镜像 tag（默认 main，测即将发布的内容）"
+        description: "镜像 tag（默认 main；留空或 main 时 tag 触发自动用该版本号）"
         default: "main"
         required: false
 
+# 自动轮转：所有触发（nightly / tag / dispatch）共用一个组，新触发直接取消
+# 仍在跑的旧长跑，永远只保留最新那一轮。发版时会立刻接管凌晨未完的 nightly；
+# 被取消的那轮不上传证据包（它本就不参与门禁），artifact 由 retention-days 清理。
 concurrency:
   group: playback-baseline-longrun
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -53,7 +74,7 @@ jobs:
   longrun:
     name: longrun ${{ matrix.topo }}
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 210
     strategy:
       fail-fast: false
       matrix:
@@ -70,34 +91,40 @@ jobs:
         id: image
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.image_tag || 'main' }}
+          TAG_IN: ${{ inputs.image_tag || 'main' }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           echo "${GH_TOKEN}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           REPO="ghcr.io/${GITHUB_REPOSITORY_OWNER}/musicflow"
+          # tag 触发且 dispatch 没显式指定镜像时，测这一版自己的镜像。
+          if [ "$REF_TYPE" = "tag" ] && [ "$TAG_IN" = "main" ]; then TAG="$REF_NAME"; else TAG="$TAG_IN"; fi
+          # GHCR 的镜像 tag 不带 v 前缀（v4.15.9 -> 4.15.9）
+          TAG="${TAG#v}"
           IMAGE="${REPO}:${TAG}"
-          # nightly 默认测 :main（即将发布的内容），提前发现回归；不可用时退回 :latest
+          echo "resolved tag=${TAG} (event=${{ github.event_name }})"
+          # 先等目标 tag 就绪（最多 10 分钟）。不能先 fallback：
+          # tag push 时 build.yml 正在推镜像，先 fallback 会永远测到 :latest。
+          for i in $(seq 1 24); do
+            if docker manifest inspect "$IMAGE" >/dev/null 2>&1; then break; fi
+            sleep 25
+          done
           if ! docker manifest inspect "$IMAGE" >/dev/null 2>&1; then
-            echo "::warning::${IMAGE} 不可用，回退 latest"
+            echo "::warning::${IMAGE} 10 分钟内不可用，回退 latest"
             IMAGE="${REPO}:latest"
             docker manifest inspect "$IMAGE" >/dev/null 2>&1 || {
               echo "::error::既没有 :${TAG} 也没有 :latest"; exit 2; }
           fi
           echo "image=${IMAGE}" | tee -a "$GITHUB_OUTPUT"
-          # 等镜像就绪：main 分支构建可能正在推（最多 10 分钟）
-          for i in $(seq 1 24); do
-            if docker manifest inspect "$IMAGE" >/dev/null 2>&1; then exit 0; fi
-            sleep 25
-          done
-          echo "::error::10 分钟内镜像未就绪"; exit 2
 
       - name: Run longrun playback and judge
         env:
           MF_IMAGE: ${{ steps.image.outputs.image }}
           MF_TOPO: ${{ matrix.topo }}
-          MF_MINUTES: ${{ inputs.minutes || '30' }}
-          MF_SWITCH_COUNT: ${{ inputs.switch_count || '25' }}
-          MF_SWITCH_INTERVAL: "60"
+          MF_MINUTES: ${{ inputs.minutes || '180' }}
+          MF_SWITCH_COUNT: ${{ inputs.switch_count || '60' }}
+          MF_SWITCH_INTERVAL: ${{ inputs.switch_interval || '180' }}
           MF_STEADY_SEC: "90"
           MF_WORKDIR: ${{ runner.temp }}/mf-ci-long-${{ matrix.topo }}
         run: |
@@ -109,7 +136,9 @@ jobs:
         run: |
           {
             echo "### 长跑基线体检 — \`${{ matrix.topo }}\` / ${{
-              inputs.minutes || '30' }}min"
+              inputs.minutes || '180' }}min"
+            echo ""
+            echo "触发：\`${{ github.event_name }}\` / ref：\`${{ github.ref_name }}\`"
             echo ""
             echo "镜像：\`${{ steps.image.outputs.image }}\`"
             echo ""
@@ -124,18 +153,40 @@ jobs:
             echo "> 本 workflow 不参与发版门禁：失败只表示长跑趋势异常，不影响 Release 与镜像。"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # 免费账号 Artifact 配额 500MB：3 小时裸日志单拓扑百 MB 级，
+      # 故只压缩上传判读必需文件；完整 logs/ 仅失败时留 2 天供排障。
+      - name: Pack evidence
+        if: always()
+        env:
+          WORK: ${{ runner.temp }}/mf-ci-long-${{ matrix.topo }}
+        run: |
+          set -euo pipefail
+          [ -d "$WORK" ] || { echo "no workdir, skip pack"; exit 0; }
+          cp /tmp/mf_longrun.log "$WORK/longrun.log" 2>/dev/null || true
+          cd "$WORK"
+          files=""
+          for f in cap.json base.jsonl switch_log.jsonl sendspin_frames.jsonl resource.jsonl longrun.log; do
+            [ -f "$f" ] && files="$files $f"
+          done
+          if [ -n "$files" ]; then
+            tar -czf "/tmp/baseline-longrun-${{ matrix.topo }}-${{ github.run_number }}.tar.gz" $files
+            ls -lh "/tmp/baseline-longrun-${{ matrix.topo }}-${{ github.run_number }}.tar.gz"
+          fi
+
       - name: Upload longrun evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: baseline-longrun-${{ matrix.topo }}-${{ github.run_number }}
-          path: |
-            ${{ runner.temp }}/mf-ci-long-${{ matrix.topo }}/cap.json
-            ${{ runner.temp }}/mf-ci-long-${{ matrix.topo }}/base.jsonl
-            ${{ runner.temp }}/mf-ci-long-${{ matrix.topo }}/switch_log.jsonl
-            ${{ runner.temp }}/mf-ci-long-${{ matrix.topo }}/sendspin_frames.jsonl
-            ${{ runner.temp }}/mf-ci-long-${{ matrix.topo }}/resource.jsonl
-            ${{ runner.temp }}/mf-ci-long-${{ matrix.topo }}/logs/
-            /tmp/mf_longrun.log
+          path: /tmp/baseline-longrun-${{ matrix.topo }}-${{ github.run_number }}.tar.gz
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 2
+
+      - name: Upload failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline-longrun-logs-${{ matrix.topo }}-${{ github.run_number }}
+          path: ${{ runner.temp }}/mf-ci-long-${{ matrix.topo }}/logs/
+          if-no-files-found: warn
+          retention-days: 2
