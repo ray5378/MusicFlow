@@ -46,7 +46,8 @@ jobs:
   test:
     name: 全量测试门禁 (vitest, 非阻塞/失败回滚)
     runs-on: ubuntu-latest
-    # vitest 已切 singleFork 单进程串行(规避 forks 多 worker 派发死锁),给 20 分钟裕量。
+    # vitest maxWorkers=4(2026-11-27 提速,见 vitest.config.ts),本机实测全集 332s(5.5min);
+    # 20 分钟是给慢 runner 的裕量,非串行所需。
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
