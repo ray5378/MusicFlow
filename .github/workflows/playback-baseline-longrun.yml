@@ -29,6 +29,8 @@ name: Playback Baseline Longrun
 # 证据包体积（免费账号 Artifact 配额仅 500MB）：3 小时的 base.jsonl + 帧日志
 # 单拓扑可达百 MB 级。故只上传压缩后的判读证据（保留 2 天），完整 logs/ 目录
 # 也仅在 job 失败时上传（保留 2 天）。不要改回全量裸文件上传。
+# 另设 rotate-artifacts job：每轮结束调 GitHub API 删除更早 run 的同类 artifact，
+# 只保留本轮 —— upload-artifact 的 overwrite 只在同一 run 内生效，跨 run 靠它没用。
 #
 # 判定口径见 docs/播放基线-基准值与判读-20261126.md「长跑」一节。
 
@@ -61,7 +63,7 @@ on:
 
 # 自动轮转：所有触发（nightly / tag / dispatch）共用一个组，新触发直接取消
 # 仍在跑的旧长跑，永远只保留最新那一轮。发版时会立刻接管凌晨未完的 nightly；
-# 被取消的那轮不上传证据包（它本就不参与门禁），artifact 由 retention-days 清理。
+# 被取消的那轮不上传证据包（它本就不参与门禁），旧 artifact 由 rotate job 清理。
 concurrency:
   group: playback-baseline-longrun
   cancel-in-progress: true
@@ -69,6 +71,7 @@ concurrency:
 permissions:
   contents: read
   packages: read
+  actions: write   # rotate-artifacts job 需要删除旧 artifact
 
 jobs:
   longrun:
@@ -190,3 +193,42 @@ jobs:
           path: ${{ runner.temp }}/mf-ci-long-${{ matrix.topo }}/logs/
           if-no-files-found: warn
           retention-days: 2
+
+  # 日志轮转：每轮结束删掉「更早 run」留下的同类 artifact，只留本轮。
+  # 不用 upload-artifact 的 overwrite —— 它只在同一 run 内按名字覆盖，
+  # 而 artifact 名带 run_number，跨 run 根本不同名，overwrite 无效。
+  # 放在独立 job（needs longrun）而非 matrix 内：避免两个 job 同时列/删的竞态。
+  rotate-artifacts:
+    name: rotate old longrun artifacts
+    runs-on: ubuntu-latest
+    needs: longrun
+    if: always()
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Delete artifacts from older runs
+        run: |
+          set -euo pipefail
+          CUR="${{ github.run_number }}"
+          echo "current run=${CUR}; rotating longrun artifacts"
+          # 翻页拿全量，筛出本 workflow 的两类 artifact（证据包 + 失败日志）。
+          # 名字形如 baseline-longrun-mixed-123 / baseline-longrun-logs-mixed-123，
+          # 末尾数字即 run_number；只删 < CUR 的，本轮和并发的其他 run 不动。
+          gh api repos/${GITHUB_REPOSITORY}/actions/artifacts --paginate \
+            --jq '.artifacts[] | select(.name | startswith("baseline-longrun-")) | [.id, .name] | @tsv' \
+          > /tmp/mf_artifacts.tsv
+          deleted=0
+          while IFS=$'\t' read -r id name; do
+            [ -n "$id" ] || continue
+            art_run="${name##*-}"
+            case "$art_run" in
+              ''|*[!0-9]*) continue ;;   # 名字尾部非数字，跳过不动
+            esac
+            if [ "$art_run" -lt "$CUR" ]; then
+              echo "delete id=$id name=$name (run $art_run < $CUR)"
+              gh api -X DELETE "repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}" \
+                && deleted=$((deleted+1)) \
+                || echo "::warning::删除 artifact $id 失败（可能已过期）"
+            fi
+          done < /tmp/mf_artifacts.tsv
+          echo "rotated: deleted $deleted stale artifact(s)"
