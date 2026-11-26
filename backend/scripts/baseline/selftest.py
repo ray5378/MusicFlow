@@ -479,6 +479,67 @@ def main():
             any(r[0] == "WARN" and r[2] == "A_tick.newgenSkipFrames" for r in ng_res)
             and not [r for r in ng_res if r[0] == "FAIL"], str(ng_res))
 
+    inter_res = copy.deepcopy(sample13)
+    for d in inter_res["A_tick"]:
+        inter_res["A_tick"][d]["stream"] = {"gens": 2, "genFlips": 300,
+                                           "genFlipsPerMin": 30.0, "interleaved": True}
+    ir = iv.judge(inter_res, min_ticks=0, topo="mixed", expect_tick_devices=2)
+    c.check("CI 采样流交错必须 FAIL",
+            any(r[0] == "FAIL" and r[2] == "A_tick.stream.interleaved" for r in ir),
+            str([r for r in ir if r[0] == "FAIL"]))
+
+    print("== 14. 采样流完整性（累计量按 gen 断开）==")
+    cap_spec = importlib.util.spec_from_file_location(
+        "baseline_cap", os.path.join(HERE, "baseline_cap.py"))
+    cap = importlib.util.module_from_spec(cap_spec)
+    cap_spec.loader.exec_module(cap)
+
+    # 14.1 240 实测形态：同设备两条流按秒交替，各自 realigned 恒定 →
+    #      旧实现每对记 +51（10min 窗口算出 244.8/min），新实现必须是 0。
+    inter = []
+    for i in range(60):
+        gv = 2000006 if i % 2 == 0 else 0
+        inter.append((1000 + i, {"gen": gv, "realigned": 18 if gv else 69}))
+    c.check("交错流不产生伪 realigned 增量",
+            cap.delta_of(inter, "realigned") == 0,
+            "got=%s 旧实现会算成 %d" % (cap.delta_of(inter, "realigned"), 51 * (len(inter) // 2)))
+
+    sh = cap._stream_health(inter)
+    c.check("交错流被识别为 interleaved", sh["interleaved"] is True, str(sh))
+
+    # 14.2 单写入者随换曲单调换代，不得误判成交错
+    mono = [(1000 + i, {"gen": 100 * (i // 20), "realigned": i}) for i in range(60)]
+    c.check("单调换代不误判交错", cap._stream_health(mono)["interleaved"] is False,
+            str(cap._stream_health(mono)))
+
+    # 14.3 换代重置语义不变：每个 gen 段内累加，跨段的回落不算负增量
+    reset = [(1000 + i, {"gen": 1, "silenceChunks": i}) for i in range(10)]
+    reset += [(1010 + i, {"gen": 2, "silenceChunks": i}) for i in range(10)]
+    c.check("跨 gen 重置仍按段累加（9+9=18）",
+            cap.delta_of(reset, "silenceChunks") == 18,
+            "got=%s" % cap.delta_of(reset, "silenceChunks"))
+
+    # 14.4 计数器按 gen 重置（实测：gen 切换处 insertedFrames 归 0），
+    #      故跨 gen 的 9→10 不是增量；新实现给 18 正确，旧实现多算 1。
+    keep = [(1000 + i, {"gen": 1 + i // 10, "late": i}) for i in range(20)]
+    c.check("跨 gen 不把重置后的差值算成增量（0..19 段内合计=18）",
+            cap.delta_of(keep, "late") == 18, "got=%s" % cap.delta_of(keep, "late"))
+
+    # 14.5 守卫：交错只报 WARN，不升级成播放回归
+    st_bad = copy.deepcopy(good)
+    for d in st_bad["A_tick"]:
+        st_bad["A_tick"][d]["stream"] = {"gens": 2, "genFlips": 300,
+                                        "genFlipsPerMin": 30.0, "interleaved": True}
+    st_res = g.judge(good, st_bad)
+    c.check("真机守卫对交错记 WARN 且不误判 FAIL",
+            any(r[0] == "WARN" and r[2] == "stream.interleaved" for r in st_res)
+            and not [r for r in st_res if r[0] == "FAIL"], str(st_res))
+
+    # 14.6 边界：3 gen 单调 vs 2 gen 交替
+    c.check("交错判据边界 flips>2*(gens-1) 未被放宽",
+            cap._stream_health([(i, {"gen": [1, 2, 3][i // 10]}) for i in range(30)])["interleaved"] is False
+            and cap._stream_health([(i, {"gen": [1, 2][i % 2]}) for i in range(30)])["interleaved"] is True)
+
     return c.summary()
 
 

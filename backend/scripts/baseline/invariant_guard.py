@@ -146,6 +146,14 @@ def judge(data, min_ticks=20, topo="airplay", expect_tick_devices=0,
         live = _num((d.get("state") or {}).get("live"))
         out.append(("PASS" if live >= LIVE_PCT_MIN else "FAIL", dev,
                     "A_tick.live%", "%.2f min=%.1f" % (live, LIVE_PCT_MIN)))
+        # 采样流完整性：CI 只有一个写入者，出现交错说明采样脚本自己重放/双开。
+        # 此时 perMin/totals 虽已按 gen 断开，但样本本身不可信 —— 必须判红，
+        # 否则「脏数据算成 0」会变成永久假绿。
+        sh = d.get("stream")
+        if sh is not None:
+            out.append(("PASS" if not sh.get("interleaved") else "FAIL", dev,
+                        "A_tick.stream.interleaved",
+                        "genFlips=%s gens=%s" % (sh.get("genFlips"), sh.get("gens"))))
         # 切歌窗口只用「桥还在出 tick」判活性，不拿稳态水位要求它
         # （5s lead + 10s 预填充期间 inQ 必然高、realign 必然阶跃）。
         n_steady = int(_num(d.get("samplesSteady"), -1))

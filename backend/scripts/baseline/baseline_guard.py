@@ -146,6 +146,13 @@ def judge(base, cur, strict_devices=False):
         if tpm is not None and tpm < 20:       # 实测 ~30/min（2s 一条日志，内部 250ms 采样聚合）
             out.append(("WARN", dev, "tick/min", tpm, "~30", "tick 稀疏，可能采样缺口"))
 
+        # 7) 采样流完整性：同窗口两条流交错写入时，累计量不可信（见 cap.delta_of）。
+        #    报告采样问题本身，而不是把脏数据算成播放回归。
+        st = c.get("stream") or {}
+        if st.get("interleaved"):
+            out.append(("WARN", dev, "stream.interleaved", st.get("genFlips"), "单调",
+                        "tick 流交错（多写入者/回放），累计量已按 gen 断开"))
+
     # 7) prog 推进速率 / 回退
     cp = cur.get("A_prog") or {}
     bp = base.get("A_prog") or {}

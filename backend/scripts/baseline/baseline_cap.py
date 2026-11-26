@@ -188,17 +188,47 @@ def load(window_min, end_at=None, max_bytes=60 * 1024 * 1024):
 
 
 def delta_of(series, field):
-    """累计量增量（跨重启会回落，故只累加非负差）。"""
+    """累计量增量（跨重启会回落，故只累加非负差）。
+
+    ★ 换代（gen 变化）时必须断开累计 —— 换 gen 就是换了计数器主体。
+    240 实测（2026-11-26 04:28~09:14）：base.jsonl 里同一台设备出现两条
+    tick 流按秒交错写入（gen=2000006/realigned=18 与 gen=0/realigned=69）。
+    只按「v>=prev 就累加」会把 18→69→18→69 的来回跳记成每对 +51，
+    10 分钟窗口算出 realigned 244.8/min，正常播放被判「对齐器空转」——
+    这是采样数据脏，不是播放回归。断开后交替值不产生任何增量。
+    """
     tot = 0
     prev = None
+    prev_gen = None
     for _, d in series:
         v = d.get(field)
         if not isinstance(v, (int, float)):
             continue
-        if prev is not None and v >= prev:
+        g = d.get("gen")
+        if prev is not None and g == prev_gen and v >= prev:
             tot += v - prev
-        prev = v
+        prev, prev_gen = v, g
     return tot
+
+
+def _stream_health(series):
+    """tick 流完整性：同一设备同一窗口里是否出现多股交错写入。
+
+    单写入者：gen 只随换曲单调前进 ⇒ genFlips == gens-1。
+    交错/回放（多进程写同一文件、重启后回放旧行）：A,B,A,B… ⇒
+    genFlips 远大于 gens-1。判据侧据此 WARN —— 采样脏要报采样，
+    不能让它伪装成播放回归，也不能静默当成 0。
+    """
+    gens = [d.get("gen") for _, d in series]
+    distinct = len(set(gens))
+    flips = sum(1 for a, b in zip(gens, gens[1:]) if a != b)
+    span_min = max(1e-6, (series[-1][0] - series[0][0]) / 60.0)
+    return {
+        "gens": distinct,
+        "genFlips": flips,
+        "genFlipsPerMin": r(flips / span_min, 1),
+        "interleaved": bool(distinct > 1 and flips > 2 * (distinct - 1)),
+    }
 
 
 def _tick_metrics(series):
@@ -226,6 +256,9 @@ def _tick_metrics(series):
         "spanMin": r(span_min),
         "tickPerMin": r(len(series) / span_min),
         "state": {k: r(v / n * 100, 2) for k, v in states.items()},
+        # 采样完整性：流交错时下面的 perMin/totals 增量已按 gen 断开，
+        # 但必须让判据知道「这份样本是脏的」，否则脏数据静默变 0 更危险。
+        "stream": _stream_health(series),
         # deltaUs: 设备出音前沿相对锚点的提前量。负值 = 该出声的位置没声（真缺口）
         "deltaUs": {"p5": r(pct(dU, .05), 0), "p50": r(pct(dU, .5), 0),
                     "p95": r(pct(dU, .95), 0), "min": r(min(dU), 0) if dU else None,
