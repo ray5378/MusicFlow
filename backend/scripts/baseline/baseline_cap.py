@@ -40,6 +40,9 @@ DEV_CAP_MS = 4163
 # 切歌后「暂态」窗口 ms：混合组锚点 lead 5s + 预填充 ~10s 的覆盖。
 # 窗口内的水位/阶跃不算稳态病态，但仍必须有 tick / 音频帧证明链路活着。
 SWITCH_WINDOW_MS = int(os.environ.get("MF_SWITCH_WINDOW_MS", "15000"))
+# 切歌后「还有声音」的观察窗：API settle 只有几十毫秒，40fps 下窗内天然
+# 不足 20 帧；必须往后看几秒才谈得上「切完有声」。与 60s 切歌间隔不重叠。
+SWITCH_FRAME_TAIL_MS = int(os.environ.get("MF_SWITCH_FRAME_TAIL_MS", "5000"))
 
 tick_by_dev = defaultdict(list)      # dev -> [(sec, data)]
 ring_by_dev = defaultdict(list)      # dev -> [(sec, data)]
@@ -425,13 +428,26 @@ def analyze_ss_frames(rows, switch_rows):
     if len(ts) < 2:
         return {"chunks": len(rows), "maxGapMs": None, "minPerSwitch": None}
     # 只比较同一相位内的相邻帧：跨切歌边界的大间隔是设计好的等待，不是静音缺口。
-    gaps = [b - a for a, b in zip(ts, ts[1:])
+    # 首帧是探针连上后的第一包，此前没有稳定流；它与第二帧的间隔是
+    # Noise 握手 / playback activation 预热（run9 mixed 实测 4042ms），
+    # 不是播放缺口。单独记录为 warmupGapMs 供审计，但不参与稳态判据。
+    warmup_gap = (int(ts[1] - ts[0]) if len(ts) >= 2 else None)
+    gaps = [b - a for a, b in zip(ts[1:], ts[2:])
             if b >= a and not in_window(a) and not in_window(b)]
     per_sw = []
     for sw in switch_rows or []:
+        # 判据是「切完后还有声音」：用 [min(t0,t1), max(t0,t1)+5s] 观察窗，
+        # 而不是只有几十毫秒的 API settle 窗 —— run9 实测 settle=80ms，
+        # 40fps 下窗内天然不足 20 帧；墙钟还会被 NTP 回拨造成 t0>t1。
+        # framesBefore/After 因探针文件缓冲短窗内可能不增长，仅做缺字段兜底。
         a, b = sw.get("t0"), sw.get("t1")
         if isinstance(a, (int, float)) and isinstance(b, (int, float)):
-            per_sw.append(sum(1 for t in ts if a <= t <= b))
+            lo, hi = min(a, b), max(a, b) + SWITCH_FRAME_TAIL_MS
+            per_sw.append(sum(1 for t in ts if lo <= t <= hi))
+        else:
+            fb, fa = sw.get("framesBefore"), sw.get("framesAfter")
+            if isinstance(fb, (int, float)) and isinstance(fa, (int, float)) and fa >= fb:
+                per_sw.append(int(fa - fb))
     span_min = max(1e-6, (ts[-1] - ts[0]) / 60000.0)
     return {
         "chunks": len(rows),
@@ -441,9 +457,11 @@ def analyze_ss_frames(rows, switch_rows):
         "spanMin": r(span_min, 2),
         "chunksPerMin": r(len(rows) / span_min, 1),
         "maxGapMs": max(gaps) if gaps else None,
+        "warmupGapMs": warmup_gap,
         "gapOver500Count": sum(1 for g in gaps if g > 500),
         "minPerSwitch": min(per_sw) if per_sw else None,
         "perSwitch": per_sw,
+        "perSwitchWindowMs": SWITCH_FRAME_TAIL_MS,
     }
 
 

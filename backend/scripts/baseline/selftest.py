@@ -365,6 +365,37 @@ def main():
     c.check("切歌暂态窗口常量 15000ms 未被改软",
             capmod.SWITCH_WINDOW_MS == 15000, "got=%s" % capmod.SWITCH_WINDOW_MS)
 
+    print("== 12. 帧证据抗时钟回拨 / 排除连接预热 ==")
+    b = 1700000000000
+    # 首帧握手预热 4042ms，其后稳定 25ms 一帧（约 40fps）。
+    rows = [{"t": b, "bytes": 480}, {"t": b + 4042, "bytes": 480}]
+    for i in range(2, 1500):
+        rows.append({"t": b + 4042 + (i - 1) * 25, "bytes": 480})
+    # 切歌 settle 只有 80ms 且墙钟回拨(t1<t0)；短窗内不足 20 帧，
+    # 必须靠切歌后 5s 观察窗判「切完有声」。
+    sw_clock_back = [{"t0": b + 30000, "t1": b + 29920,
+                      "framesBefore": 10, "framesAfter": 10}]
+    frame_stat = capmod.analyze_ss_frames(rows, sw_clock_back)
+    c.check("连接预热 4042ms 不计入稳态静音缺口",
+            frame_stat["warmupGapMs"] == 4042 and frame_stat["maxGapMs"] == 25,
+            str(frame_stat))
+    c.check("切歌窗时钟回拨但 5s 内有帧，仍判有帧",
+            frame_stat["minPerSwitch"] >= 20, str(frame_stat))
+    mid_gap = copy.deepcopy(rows)
+    for r in mid_gap[100:]:
+        r["t"] += 3975
+    mid_stat = capmod.analyze_ss_frames(mid_gap, sw_clock_back)
+    c.check("稳态中段 4000ms 静音缺口必须暴露",
+            mid_stat["maxGapMs"] == 4000, str(mid_stat))
+    silent = [{"t0": b + 100000, "t1": b + 100080,
+               "framesBefore": 10, "framesAfter": 10}]
+    silent_stat = capmod.analyze_ss_frames(rows, silent)
+    c.check("切歌后 5s 观察窗完全无帧必须 FAIL",
+            silent_stat["minPerSwitch"] == 0, str(silent_stat))
+    c.check("切歌后 5s 观察窗常量未被改软",
+            capmod.SWITCH_FRAME_TAIL_MS == 5000,
+            "got=%s" % capmod.SWITCH_FRAME_TAIL_MS)
+
     return c.summary()
 
 

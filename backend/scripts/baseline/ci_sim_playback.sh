@@ -405,7 +405,11 @@ for k in $(seq 1 "$SWITCH_COUNT"); do
   for j in $(seq 1 50); do
     after=$(status_song)
     if [ -n "$after" ] && [ "$after" != "$before" ]; then
-      changed=true; settle=$(( $(date +%s%3N) - t0 )); break
+      changed=true
+      now=$(date +%s%3N)
+      # NTP 回拨时 now 可能小于 t0；钳到 0，真实回拨仍可从 t0/t1 原值看出。
+      if [ "$now" -gt "$t0" ]; then settle=$(( now - t0 )); else settle=0; fi
+      break
     fi
     sleep 0.5
   done
