@@ -489,6 +489,48 @@ if (delayMs > 0) await sleep(delayMs);   // ❌ 落后时完全没有让出点
 > 「接上这条连续轴」上），所以曲末那一拍就用 `cursorUs` 一次性定死 granted / denied，
 > 起播侧与泵侧**只读**结论，不再各判一次（见文末增补 §E-1~§E-6）。
 
+> **[2026-11-26 方案A] 曲末续静音改为「按缺口补」—— 修复每首结尾 8s(单机) / 30s(群组) 可闻静音**
+>
+> **症状**：240 真机（solo 桥 + 全屋组）每首曲末都有一段可闻静音。出口 PCM 探针
+> （`[pcm-probe]`）实证：`12:56:15~12:56:25 rms=0 zeroSamples=35200/35200` 连续 10s 全零，
+> 同期 `silenceChunks=0`、`insertedFrames` 不变 ⇒ 零不是桥补的，是泵在排空期主动注入的共享静音块。
+>
+> **根因**：`bridge-drain-fill` 无条件按 `extraDrainMs` 灌满静音。而 2026-11-24 把泵前瞻从
+> 6s 放宽到 30s（`PUMP_LOOKAHEAD_DEFAULT_US`，对齐 MA `_PRODUCER_BUFFER_LIMIT_US`）后，
+> 曲末设备侧典型还剩 30s 真实音频 ⇒ `rawDrain = cursorUs − nowUs() − ANCHOR_SAFE_LEAD`
+> 恒 ≈34.8s（实测 34784 / 34905 / 34995，**与歌长无关**），排空需求被
+> `BRIDGE_END_DRAIN_SAFE_MAX_MS=8000` 钳成 8s（混合组走原值 ⇒ 30s）。这 8s/30s 静音排在
+> 内容尾之后，被设备**完整播出**。`BRIDGE_END_DRAIN_SAFE_MAX_MS=8000` 那条真机判据
+> （「设备侧真实可播 ≈ 8.06s」）是 6s 前瞻时代标定的，30s 前瞻下已失效。
+>
+> **修法（方案 A）**：桥侧把「设备已收未播」也上行 —— `bridgeSession` tick 的 `deltaUs`
+> 新增为 `bridgeStats.deviceLeadMs`，与既有 `backlogMs` 同链：
+> `bridgeStatsSink` → supervisor `bridgeHealth.record` → sendspin rpc `bridgeHealth`
+> → `SendspinServer.bridgeDeviceLeadMs`。泵侧新增 `bridgeHoldMs()` = 组内**最薄**一座桥的
+> `backlog + deviceLead`，续静音量改判：
+> ```
+> holdFloor    = max(BRIDGE_END_DRAIN_MARGIN_MS, bridgeHoldMs())
+> deviceRemain = max(0, drainCap.contentMs − holdFloor)          // 设备还剩多少真音频
+> silenceNeed  = max(0, min(drainCap.drainMs, PREFILL_MAX) − deviceRemain) / speed
+> ```
+> 存量盖得住排空 ⇒ `reason=covered`，**一帧不补**；盖不住才补缺口（不再补满排空时长）。
+> 单机与群组**同一公式** —— 群组此前 30s 静音同源：`pureBridge=false` 只是不做钳制，
+> 补料分支完全一样。
+>
+> **⚠️ 单位**：`drainCap.*` / `deviceRemain` 是**原始内容毫秒**，`extraDrainMs` 已除 `speed`；
+> 缺口必须在原始域算完再除，否则倍速用例下两者不可比（speed=6 用例抓过一次）。
+>
+> **⚠️ 尾巴推进**：`pushBridgeOnlySilence` 返回 0（桥集合空）时**不得**推进
+> `fillTsUs` / `fillMs`，否则 `contentTailUs` 落到空区间 ⇒ 下一曲锚点指向不存在的位置
+> （可闻=吞开头）。失败后置 `fillBroken` 停试，但**继续走完 sleep 循环** —— 位置推进与
+> 补料是两件事，提前 break 会让曲末位置整段停住。
+>
+> **可观测**：`bridge-drain-fill` 行新增 `needMs/holdMs/drainMs`；`-skip` 行新增
+> `reason=covered` 与 `holdMs/remainMs/drainMs` —— 一眼分辨「没桥 / 没开关 / 存量够」。
+>
+> **回归**：`tests/sendspin/bridgeDrainFill.test.ts` 16 例（covered / 缺口精算 / 小数排空 /
+> disabled / no-api / no-bridge）。回滚：`MF_BRIDGE_DRAIN_SILENCE=0` 整体关闭补料。
+
 ## 2.11 `client/state` 解析：**根层优先**
 
 真机实发 payload：
@@ -2204,3 +2246,108 @@ server 不能直接读 `prefillTargetMs()`，否则循环依赖 + 跨进程读�
 
 ⚠️ 降级不变：`switchRate` 返回 false（未运行 / 起播在飞 / 同速率 / 非法值 / 已在建窗 / 建窗失败 /
 整包无 ffmpeg 链 / 建窗期间换代）时调用方回落 `playCurrent` —— 有断点但不无声。
+
+
+## v4.15.9 增补(泵进程内禁止阻塞 I/O,2026-11-26)
+
+曲中静音根因落在**泵进程的事件循环被同步 I/O 冻住**,故把这条上升为硬约束:
+
+> **`streamEngine` 及其调用链(选源/探测/裁决)里,任何 I/O 都不得同步。**
+> 宁可慢(await 晚一点出结果),也不能阻塞(泵一停,所有设备同时断粮)。
+
+已落实:
+
+| 位置 | 之前 | 现在 |
+|---|---|---|
+| `utils/localSourceProbe.ts` 本地 `l:` | `fs.existsSync` | `await fsp.stat` |
+| `services/source/resolveAudio.ts` ★0 | `existsSync` | `await statAsync` |
+
+判据(可复用):泵被冻结时,`bridge-servo` 的心跳间隔会显著超过周期(实测断档 5.3s)。
+恢复后应为 `周期 + 250ms`(投递定时器相位),例如 2.25s。**任何 >3s 的 servo 间隔都说明泵被阻塞过。**
+
+`better-sqlite3` 的 `.get()` 仍是同步的,但主键查询在 μs 级,不构成风险;若将来出现
+全表扫描类查询进入泵链路,必须改造为预取/缓存,不得直接调用。
+
+配套的桥侧改动(断帧两级)见 [airplay-权威方案文档.md](./airplay-权威方案文档.md) 的 v4.15.9 增补。
+
+## v4.15.10 增补(曲末跳过排空的充分条件,2026-11-26)
+
+### 为什么需要一条充分条件
+
+`曲末排空跳过` 是**负优化捷径**:省掉 8s 排空,但赌「预取帧能接住曲末」。
+一旦赌输,泵在曲末提前收工,而 `playCurrent` 还要走 4s 才发下来,
+中间就是一段**全空**,随后 FLUSH + realign 风暴把空洞再拉长到 ~3s。
+
+实测赌输的那次(`O' Holiday`,185s,`type=web`):
+
+| 量 | 值 |
+|---|---|
+| 预取帧 `startTsUs` | 474125916164 |
+| 曲末游标 | 474098241164 |
+| 差 | **27.675s**(远超一个曲末) |
+| 曲末判定 → 新曲起播 | 22:27:22.462 → 22:27:29.014 = **6.552s** |
+
+### 判据(已落地)
+
+```ts
+export const BRIDGE_PREFETCH_BOUNDARY_TOLERANCE_US = 1_500_000;   // 1.5s
+const canSkipDrain = this.prefetch != null
+  && Math.abs(prefetchBoundaryGapUs) <= BRIDGE_PREFETCH_BOUNDARY_TOLERANCE_US;
+```
+
+- **满足** ⇒ 跳过排空,`continuity=1`(正常路径,实测 cast 22ms、无 stale)。
+- **不满足** ⇒ 落回 `covered` 排空路径(等设备播完缓冲再收流),并打
+  `sendspin 曲末预取未接住曲末:gap=…ms 容差=1500ms ⇒ 不跳过排空`。
+
+### 不要写成「永远不跳过」
+
+健康路径下跳过是有收益的(省 4.7s 等待,且 `warm=true` 起播只要 22ms)。
+问题不在「跳过」,在**跳过前没验证前提**。判据必须读**时间戳**,不能只判 `this.prefetch != null`。
+
+### 与 D2/D3 的关系
+
+本条是同一批缺陷里的第 5 条:
+
+| 编号 | 缺陷 | 本仓落点 |
+|---|---|---|
+| D2 | 泵内同步 `stat` 冻结事件循环 | v4.15.9(已修) |
+| D3 | 2s 无帧即判传输死亡 | airplay v4.15.9(已修) |
+| D5 | 跳过排空不校验预取接住曲末 | **本节**(已修) |
+
+完整取证与误判清单见
+[曲中静音与曲末空洞-判定全流程-20261126.md](./曲中静音与曲末空洞-判定全流程-20261126.md)。
+
+---
+
+## v4.15.11 增补:泵的下一首预解码态机已删除(2026-11-26)
+
+### 泵生命周期简化
+
+v4.15.10 之前,泵在曲末窗口(剩余 ≤5s)会预解下一首前 3s 写进 ring 下一代次,并把
+`handoffTsUs` 作为下一轮首帧锚点。真机统计证明这条捷径 87.5%(35/40)触发
+`new-session-first-delivery` 丢帧 + FLUSH + realign 风暴,而同期的「接续」272 次、
+「covered 排空」8 次全部零触发 ⇒ **整条删除**。
+
+删除后泵侧不再有:
+
+- `prefetch` / `prefetchInFlight` / `handoffTsUs` / `keepNextOnRebuild` 四个字段
+- `maybeStartNextPrefetch()` / `takePrefetchFor()` / `commitPrefetch()` / `closePrefetch()` / `dropPrefetchFrames()`
+- `hasPendingPrefetch()`(起播侧 `clearPlayback` vs `finishPlayback` 不再受预取影响)
+- `play()` 里的「采纳预取跳过 source()」分支
+- `armSeek()` 的「保留下一首提示」保号逻辑(`nextSongId` 仍由 `play()` 直接下发)
+- `BRIDGE_NEXT_PREFETCH_TRIGGER_MS` / `_CONTENT_MS` / `_WAIT_MS`、`BRIDGE_PREFETCH_BOUNDARY_TOLERANCE_US`
+
+### 曲末判定只剩两条
+
+```
+continuityDrainSkip = contentEnded && this.continuitySlotAvailable();   // 接续
+if (contentEnded && !continuityDrainSkip) { …covered 排空(水位精算)… }
+```
+
+`!this.prefetch` 这个附加条件随预取一起消失 —— 这也是守卫
+`check-group-invariants.mjs` 里 `skipDrain` 断言同步改的原因。
+
+### 换歌空窗续静音(§5.7)
+
+原判据 `!this.prefetch && !this.prefetchInFlight`(预取帧占 ts 时不介入)已删,
+现在只要 `endedNaturally && nextSongId !== ""` 就介入 —— 不再有「预取帧同 ts 重叠」这个例外。

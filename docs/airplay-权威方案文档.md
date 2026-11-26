@@ -1446,6 +1446,49 @@ seek 后为 `sendspin timeline RE-anchored after seek: pos=<ms>ms base=…`。
 240 实测(23:31–00:19,跨多首):音频 125.3pps、单流 `maxGap` ≤ 41ms、`>100ms` 空洞 0、
 三桥 `deltaUs` +2.06/+4.46s 稳定、单首 `latePackets` 87~206(旧版 34857)。
 
+> **[2026-11-26 方案A] 曲末续静音改为「按缺口补」—— 修复每首结尾 8s(单机) / 30s(群组) 可闻静音**
+>
+> **症状**：240 真机（solo 桥 + 全屋组）每首曲末都有一段可闻静音。出口 PCM 探针
+> （`[pcm-probe]`）实证：`12:56:15~12:56:25 rms=0 zeroSamples=35200/35200` 连续 10s 全零，
+> 同期 `silenceChunks=0`、`insertedFrames` 不变 ⇒ 零不是桥补的，是泵在排空期主动注入的共享静音块。
+>
+> **根因**：`bridge-drain-fill` 无条件按 `extraDrainMs` 灌满静音。而 2026-11-24 把泵前瞻从
+> 6s 放宽到 30s（`PUMP_LOOKAHEAD_DEFAULT_US`，对齐 MA `_PRODUCER_BUFFER_LIMIT_US`）后，
+> 曲末设备侧典型还剩 30s 真实音频 ⇒ `rawDrain = cursorUs − nowUs() − ANCHOR_SAFE_LEAD`
+> 恒 ≈34.8s（实测 34784 / 34905 / 34995，**与歌长无关**），排空需求被
+> `BRIDGE_END_DRAIN_SAFE_MAX_MS=8000` 钳成 8s（混合组走原值 ⇒ 30s）。这 8s/30s 静音排在
+> 内容尾之后，被设备**完整播出**。`BRIDGE_END_DRAIN_SAFE_MAX_MS=8000` 那条真机判据
+> （「设备侧真实可播 ≈ 8.06s」）是 6s 前瞻时代标定的，30s 前瞻下已失效。
+>
+> **修法（方案 A）**：桥侧把「设备已收未播」也上行 —— `bridgeSession` tick 的 `deltaUs`
+> 新增为 `bridgeStats.deviceLeadMs`，与既有 `backlogMs` 同链：
+> `bridgeStatsSink` → supervisor `bridgeHealth.record` → sendspin rpc `bridgeHealth`
+> → `SendspinServer.bridgeDeviceLeadMs`。泵侧新增 `bridgeHoldMs()` = 组内**最薄**一座桥的
+> `backlog + deviceLead`，续静音量改判：
+> ```
+> holdFloor    = max(BRIDGE_END_DRAIN_MARGIN_MS, bridgeHoldMs())
+> deviceRemain = max(0, drainCap.contentMs − holdFloor)          // 设备还剩多少真音频
+> silenceNeed  = max(0, min(drainCap.drainMs, PREFILL_MAX) − deviceRemain) / speed
+> ```
+> 存量盖得住排空 ⇒ `reason=covered`，**一帧不补**；盖不住才补缺口（不再补满排空时长）。
+> 单机与群组**同一公式** —— 群组此前 30s 静音同源：`pureBridge=false` 只是不做钳制，
+> 补料分支完全一样。
+>
+> **⚠️ 单位**：`drainCap.*` / `deviceRemain` 是**原始内容毫秒**，`extraDrainMs` 已除 `speed`；
+> 缺口必须在原始域算完再除，否则倍速用例下两者不可比（speed=6 用例抓过一次）。
+>
+> **⚠️ 尾巴推进**：`pushBridgeOnlySilence` 返回 0（桥集合空）时**不得**推进
+> `fillTsUs` / `fillMs`，否则 `contentTailUs` 落到空区间 ⇒ 下一曲锚点指向不存在的位置
+> （可闻=吞开头）。失败后置 `fillBroken` 停试，但**继续走完 sleep 循环** —— 位置推进与
+> 补料是两件事，提前 break 会让曲末位置整段停住。
+>
+> **可观测**：`bridge-drain-fill` 行新增 `needMs/holdMs/drainMs`；`-skip` 行新增
+> `reason=covered` 与 `holdMs/remainMs/drainMs` —— 一眼分辨「没桥 / 没开关 / 存量够」。
+>
+> **回归**：`tests/sendspin/bridgeDrainFill.test.ts` 16 例（covered / 缺口精算 / 小数排空 /
+> disabled / no-api / no-bridge）。回滚：`MF_BRIDGE_DRAIN_SILENCE=0` 整体关闭补料。
+
+
 **内容前沿判据(front-rebase,2026-11-02)**:stats tick 里 `deltaUs < 1.4s` ⇒ 调
 `player.requestPacingRebase(1.6s − deltaUs)`(单次 ≤4s,只动 `sendAt`,RTP 映射不动)。
 门控 = `frontier` 本 tick 仍在推进 且 `!closed && !streamAborted && player.isStreaming`
@@ -2708,3 +2751,199 @@ v4.15.6 增补的前提是「混合组不裁环」，所以桥那 30s 前瞻与�
 
 ⚠️ 前提不变：`targetFrames = round((tsUs − A) × rate)` 里的 `rate` 是**采样率**，不是倍速。
 若将来引入按倍速改采样率或非 48k 输出，本文两节结论同时作废。
+
+
+## v4.15.9 增补(曲中静音根治:泵侧零阻塞 I/O + 断帧两级,2026-11-26)
+
+### 症状与定性
+
+真机(240 + HiVi H5MKII)`airplay 播放过程中` **每首歌都出现一次可闻静音**(2~5s),
+位置在曲中偏后 / 切歌交界。此前 D1(曲末续静音)已由方案 A 修复,本节是**另一个独立缺陷**。
+
+### 根因链(四段,缺一不成灾)
+
+| # | 环节 | 证据 |
+|---|---|---|
+| ① | 曲末 `next-prefetch` 调 `resolvePlayableRow(next)` → `resolvePreferredSong` → 逐候选 `probeLocalSourceOk` | 日志 `[resolve] ... (local-probe-ok) ms=636 / 1343 / 2164 / 3510` |
+| ② | 该链路里 `existsSync` 是**同步** stat。15 万首跨挂载点冷 stat 0.6~3.5s(最坏 14.4s) | `[loop-lag] lagMs=3510` 与 ② 的 `ms=` 一一对应;CPU 采样 utime <0.15s ⇒ 是 I/O 阻塞不是死循环 |
+| ③ | sendspin 泵是**单线程**:同步 stat 期间 250ms 投递定时器与 `bridge-servo` 的 2s tick **一起饿死** | `bridge-servo` 心跳断档 5.3s(本应每 2s 无条件一条) |
+| ④ | 桥侧 `checkStalls` 2s 无帧 ⇒ `onLinkStall()` ⇒ `flush()` + 清 `aligner/anchors` ⇒ `pull()` 返回 null ⇒ producer 结束 ⇒ `scheduleRaopReconnect("stream ended")` | `[bridge-server] stall: no frame for 2000ms` → `[airplay-bridge] link stall` → `RAOP FLUSH ... endedBy=stopped` |
+
+**致命放大器**:HiVi(2017 MUZO 固件)收到即播,不吃 RTP 时间戳 ⇒ `queueMs` 稳态只有
+**193~201ms**(上限 1475)。即设备侧只有 0.2s 抗抖动能力,而阈值是 2s —— 结构性必然误杀。
+
+### MA 对照(为什么我们这么严重)
+
+- MA `SendspinBridge._on_audio_chunk` 是**纯回调**,不做任何解析/探测;PCM 走独立 CLI 进程 stdin。
+- MA 只有 **CLI 进程真的退出**才判 `transport_lost`;短暂无数据时设备继续播自己的缓冲
+  (`MAX_DEVICE_BUFFER_SECONDS = 8.0`)。
+- 我们把「2 秒没帧」当成「传输死亡」,把上游 0.2s 抖动放大成整条 RAOP 会话重建(2~5s 真空)。
+
+### 修法(两条,分别对应 ①② 与 ④)
+
+**① 泵内零阻塞 I/O** —— 音频泵进程只喂 PCM,决策链不得出现同步 I/O:
+
+| 位置 | 改动 |
+|---|---|
+| `utils/localSourceProbe.ts` 本地 `l:` 分支 | `fs.existsSync` → `await fsp.stat`(libuv 线程池;await 期间泵循环照常跑) |
+| `services/source/resolveAudio.ts` ★0 硬短路 | 同上,`existsSync` → `await statAsync`;语义不变(stat 通过即硬事实可播,不查缓存) |
+
+负缓存精度同时修正:只有 `ENOENT/ENOTDIR` 才写 5 分钟负记忆,挂载瞬时抖动(`EIO/ESTALE`/超时)
+不再把就在盘上的歌判死。
+
+**② 断帧两级** —— 断帧 ≠ 传输死亡:
+
+| 级别 | 常量 | 行为 |
+|---|---|---|
+| 一级(告警) | `BRIDGE_STALL_NO_FRAME_MS = 2_000` | 只 warn + `onStall({fatal:false})`;**不断流、不 flush、不清锚点**,数据回来按原 `tsUs` 无缝续上 |
+| 二级(判死) | `BRIDGE_STALL_FATAL_MS = 15_000`(新) | `onStall({fatal:true})` ⇒ 原路径:`flush()` + 清锚点,等 `BOUNDARY{rehost}` 重锚 |
+
+取值依据:已观测最长泵内空档 5.3s,留 3 倍余量。`handleFrame` 收帧即复位两级标志,
+所以「抖动→恢复→再抖」每次重新计时;`stallFatal` 保证致命只上报一次。
+
+⚠️ `stallAfterMs` 单独降到 2s 以下不会再造成断流(只是告警更密),但**不要**把它当判死阈值用。
+
+### 真机验收(240,同设备同曲目)
+
+| 指标 | 修复前 | 修复后 |
+|---|---|---|
+| `[bridge-server] stall` | 每首 ≥1 次,紧随 `RAOP FLUSH` + 重连 | **0 次**(420s 窗口内) |
+| `bridge-servo` 心跳间隔 | 断档 5.3s | **max 2.25s**(2.0s 周期 + 250ms 投递定时器相位) |
+| `[resolve] ms=` | 636 / 2164 / 3510(且各自对应一段静音) | 3 / 1343(慢仍然慢,但**不再冻结泵**) |
+| `queueMs` | 194~217(被抽干) | 193~201(稳态,HiVi 收到即播特性) |
+| `bridge-drain-fill-skip` | — | `reason=covered holdMs=4784 remainMs=30049`(方案 A 仍生效) |
+
+⚠️ 本节只解决「上游停顿」。HiVi 的 `queueMs≈200ms` 是设备固件特性(收到即播),
+**不是**可调参数;若将来换吃缓冲的设备,该值会自然抬到秒级,抗抖动能力随之提升。
+
+## v4.15.10 增补(曲末接续精度:跳过排空必须验证「预取真的接住曲末」,2026-11-26)
+
+### 症状
+
+用户报「O' Holiday 曲末出现空洞」。库内确认 `68e89e48-e4c9-4fbf-b2f7-6b7f09acc97d`
+= O' Holiday / Ellem / 185s / `type=web`(天翼网盘 WebDAV 源)。
+
+### ms 级时间线(CST)
+
+| 时刻 | 事件 | 间隔 |
+|---|---|---|
+| 22:27:22.462 | `曲末排空跳过:下一首预取已就绪` ← **泵立刻收工** | — |
+| 22:27:26.488 | `auto-advance` | +4.026s |
+| 22:27:28.992 | `[cast] 起点 idx=3186` | +2.504s |
+| 22:27:29.014 | `起播 protocol=raop warm=true`(cast 21ms) | +0.022s |
+| 22:27:30.149 | `ev:"stale" reason=seek staleFrames=153777`(≈3.49s 音频) | +1.135s |
+| 22:27:30.151 | `RAOP FLUSH` | |
+| 22:27:32.99 起 20ms 内 | `realigned` ×118,`drift` 从 −2936.3ms 追到 0 | |
+
+**净空档 22:27:22.462 → 22:27:29.014 = 6.552s**。当时设备侧 hold ≈4.7s ⇒ 可闻空洞 ≈1.8s;
+FLUSH 又把已排队内容清掉,实际扩展到 ~3s。
+
+### 根因
+
+「预取已就绪 ⇒ 跳过曲末排空」这条捷径的成立前提是**预取帧真的接住曲末**。实测:
+
+```
+预取帧 startTsUs = 474125916164
+曲末游标         = 474098241164
+差               = 27,675,000us = 27.675s      ← 接不住
+```
+
+同时判据写成 `!this.prefetch` 才置 `continuity=false`,于是起播走了完整 cast 路径
+⇒ 6.5s 真空 + FLUSH + 118 次 realign。
+
+### 修法
+
+```ts
+// streamEngine.ts
+export const BRIDGE_PREFETCH_BOUNDARY_TOLERANCE_US = 1_500_000;   // 1.5s
+const canSkipDrain = this.prefetch != null
+  && Math.abs(prefetchBoundaryGapUs) <= BRIDGE_PREFETCH_BOUNDARY_TOLERANCE_US;
+// 不满足 ⇒ 落回已验证的 covered 排空路径,并告警:
+// sendspin 曲末预取未接住曲末:gap=27675ms 容差=1500ms ⇒ 不跳过排空
+```
+
+取值依据:正常接续时预取帧与曲末游标的差在 100ms 量级;1.5s 留 15 倍余量,
+又远小于一次真实切歌的空档(6.5s)。
+
+### 对照:健康路径长什么样(22:38,修复后)
+
+| 时刻 | 事件 |
+|---|---|
+| 22:38:31.364 | `曲末排空:纯桥组,排空量按桥投递上界钳制 34827ms → 8000ms` |
+| 22:38:39.372 | `bridge-drain-fill-skip reason=covered holdMs=4786 remainMs=30041` |
+| 22:38:44.132 | `auto-advance`(设备正好播完缓冲,+4.76s ≈ holdMs) |
+| 22:38:44.157 | `起播 protocol=raop warm=true`,`cast 完成 22ms` |
+
+无 stale、无 FLUSH、无 realign 风暴——设备一直在播,听感连续。
+
+### 观测口径(本节新增硬约束)
+
+- `docker logs -t` 打印 **UTC**;本文与用户听感一律 **CST = UTC+8**。
+- `docker logs --since <裸时间>` 按**容器本地时区(CST)**解释,`--since <时间>Z` 才是 UTC。
+  实测:`--since 2026-11-26T14:34:35` 取到的是 06:34:35Z 起的日志(差 8 小时)。
+  **分段统计一律带 `Z`**,否则会把修复前后混算。
+
+### 完整判定流程
+
+五条独立缺陷(D1 曲末灌静音 / D2 泵内同步 I/O / D3 断帧即判死 / D4 负缓存 / D5 曲末接续不校验)
+的取证、误判清单与可复现命令,见
+[曲中静音与曲末空洞-判定全流程-20261126.md](./曲中静音与曲末空洞-判定全流程-20261126.md)。
+
+---
+
+## v4.15.11 增补:下一首预解码整体删除(2026-11-26,方案 B)
+
+### 为什么删
+
+曲末原本有三条路径,真机(240)全天统计给出决定性对照:
+
+| 路径 | 次数 | 6s 内触发 `bridge-start-seek new-session-first-delivery` |
+|---|---|---|
+| 预取接住曲末 ⇒ 跳过排空 | 40 | **35(87.5%)** |
+| 接续跳过排空(continuity) | 272 | **0** |
+| covered 排空(桥存量盖住) | 8 | **0** |
+
+预取路径「省 8s 等待」的代价是:泵在设备播完前 1.9s 收工 ⇒ 上游 `auto-advance` 还没 cast
+⇒ 新会话首投 seek 丢掉 ~15 万帧(≈3.5s)+ RAOP FLUSH 把设备里 4.7s 存量清掉 + 百余次
+realign 追相位。净亏,且是「每首一次」的普适缺陷。
+
+v4.15.10 加的 1500ms 边界容差只挡住了「接不住还硬跳」那 13%,**87% 的正路仍每次付一次 FLUSH**。
+
+### 删了什么
+
+| 层 | 删除项 |
+|---|---|
+| 泵 | `maybeStartNextPrefetch()` 整个态机、`prefetch`/`prefetchInFlight`/`handoffTsUs`/`keepNextOnRebuild` 字段、曲末容差判定(`prefetchHandlesBoundary`/`BRIDGE_PREFETCH_BOUNDARY_TOLERANCE_US`)、`nextTrackPrefetchEnabled()` 与 `MF_BRIDGE_NEXT_TRACK_PREFETCH` |
+| 组 | `pushBridgePrefetch()`、`dropBridgePrefetchFrames()`、`lastPrefetchFrames`、`keepTail`(保住上一代曲尾)、`notifyBridgeGeneration` 的 `prefetched` 参数 |
+| 接口 | `GET/PUT /v1/sendspin/bridge-prefetch`、`bridgePrefetchConfig.ts` |
+| 前端 | 音频页「下一首预解码」开关卡片 + 双语文案 |
+| CI | `sendspin-guard.yml` 的 P6 由「守护开关在位」改为「守护不得复活」 |
+
+### 删后的曲末路径(只剩两条,且都实测干净)
+
+1. **接续(continuity)**:自然换歌,新曲首锚在上一曲时间线尾,不换代/不清队列/不发 BOUNDARY。
+2. **covered 排空**:等设备播完存量;桥已有足够投递水位时零灌静音
+   (`bridge-drain-fill-skip reason=covered holdMs=…`)。
+
+换代侧相应简化:不再有「保住旧曲尾」的 `keepTail` 分支,非接续边缘**恒走**
+「清水位 + bulk 回填」(无预取时保队尾会在旧尾耗尽后直接断粮);
+切歌垫片回到暖/冷动态挡(不再有 `padUs=0 reason=prefetched`)。
+
+### 影响面
+
+- **纯桥组(单机桥 + 群组桥)**:预取同时覆盖两者(判据是「纯桥组」,不分单机/群组),
+  删除后一起消失。
+- **混合组(桥 + 直连成员)**:本来就不预取(ring 未来帧会被直连成员实时消费 ⇒ 内容重复),
+  **行为零变化**,仍是 covered 排空 + 水位精算。
+- **代价**:每曲多等 ~8s,但设备一直在播(covered 已能零灌静音),听感连续。
+
+### 真机验收(240,重启 23:06:36 CST 起)
+
+| 判据 | 结果 |
+|---|---|
+| `next-prefetch` / `bridge-prefetch` / `bridge-track-keep` 日志 | **0 / 0 / 0** |
+| `[bridge-server] stall` / `link stall` | 0 / 0 |
+| 真实灌静音(非 covered) | 0 |
+| 两个曲末边界(23:10:41、23:12:34) | covered 零灌静音 / continuity 接续,**均 0 FLUSH、0 seek** |
+| `servo` 最大间隔 | 2251ms(周期 2.0s + 相位 0.25s) |
+| 仅有的 2 次 FLUSH | 23:06:50~53 冷启动首播(`warm=false`,建会话必需) |

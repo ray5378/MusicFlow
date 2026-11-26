@@ -1240,6 +1240,49 @@ PUT 语义：`memberId` 必须是本组成员（命名空间 id **原样整条**
   `hasDirectMembers()`;排空期给桥续静音保 RTP 节拍(`pushBridgeOnlySilence`+
   `MF_BRIDGE_DRAIN_SILENCE`,549540f0);`ev=bridge-drain-fill`/`bridge-drain-fill-skip` 单行可观测日志。
 
+> **[2026-11-26 方案A] 曲末续静音改为「按缺口补」—— 修复每首结尾 8s(单机) / 30s(群组) 可闻静音**
+>
+> **症状**：240 真机（solo 桥 + 全屋组）每首曲末都有一段可闻静音。出口 PCM 探针
+> （`[pcm-probe]`）实证：`12:56:15~12:56:25 rms=0 zeroSamples=35200/35200` 连续 10s 全零，
+> 同期 `silenceChunks=0`、`insertedFrames` 不变 ⇒ 零不是桥补的，是泵在排空期主动注入的共享静音块。
+>
+> **根因**：`bridge-drain-fill` 无条件按 `extraDrainMs` 灌满静音。而 2026-11-24 把泵前瞻从
+> 6s 放宽到 30s（`PUMP_LOOKAHEAD_DEFAULT_US`，对齐 MA `_PRODUCER_BUFFER_LIMIT_US`）后，
+> 曲末设备侧典型还剩 30s 真实音频 ⇒ `rawDrain = cursorUs − nowUs() − ANCHOR_SAFE_LEAD`
+> 恒 ≈34.8s（实测 34784 / 34905 / 34995，**与歌长无关**），排空需求被
+> `BRIDGE_END_DRAIN_SAFE_MAX_MS=8000` 钳成 8s（混合组走原值 ⇒ 30s）。这 8s/30s 静音排在
+> 内容尾之后，被设备**完整播出**。`BRIDGE_END_DRAIN_SAFE_MAX_MS=8000` 那条真机判据
+> （「设备侧真实可播 ≈ 8.06s」）是 6s 前瞻时代标定的，30s 前瞻下已失效。
+>
+> **修法（方案 A）**：桥侧把「设备已收未播」也上行 —— `bridgeSession` tick 的 `deltaUs`
+> 新增为 `bridgeStats.deviceLeadMs`，与既有 `backlogMs` 同链：
+> `bridgeStatsSink` → supervisor `bridgeHealth.record` → sendspin rpc `bridgeHealth`
+> → `SendspinServer.bridgeDeviceLeadMs`。泵侧新增 `bridgeHoldMs()` = 组内**最薄**一座桥的
+> `backlog + deviceLead`，续静音量改判：
+> ```
+> holdFloor    = max(BRIDGE_END_DRAIN_MARGIN_MS, bridgeHoldMs())
+> deviceRemain = max(0, drainCap.contentMs − holdFloor)          // 设备还剩多少真音频
+> silenceNeed  = max(0, min(drainCap.drainMs, PREFILL_MAX) − deviceRemain) / speed
+> ```
+> 存量盖得住排空 ⇒ `reason=covered`，**一帧不补**；盖不住才补缺口（不再补满排空时长）。
+> 单机与群组**同一公式** —— 群组此前 30s 静音同源：`pureBridge=false` 只是不做钳制，
+> 补料分支完全一样。
+>
+> **⚠️ 单位**：`drainCap.*` / `deviceRemain` 是**原始内容毫秒**，`extraDrainMs` 已除 `speed`；
+> 缺口必须在原始域算完再除，否则倍速用例下两者不可比（speed=6 用例抓过一次）。
+>
+> **⚠️ 尾巴推进**：`pushBridgeOnlySilence` 返回 0（桥集合空）时**不得**推进
+> `fillTsUs` / `fillMs`，否则 `contentTailUs` 落到空区间 ⇒ 下一曲锚点指向不存在的位置
+> （可闻=吞开头）。失败后置 `fillBroken` 停试，但**继续走完 sleep 循环** —— 位置推进与
+> 补料是两件事，提前 break 会让曲末位置整段停住。
+>
+> **可观测**：`bridge-drain-fill` 行新增 `needMs/holdMs/drainMs`；`-skip` 行新增
+> `reason=covered` 与 `holdMs/remainMs/drainMs` —— 一眼分辨「没桥 / 没开关 / 存量够」。
+>
+> **回归**：`tests/sendspin/bridgeDrainFill.test.ts` 16 例（covered / 缺口精算 / 小数排空 /
+> disabled / no-api / no-bridge）。回滚：`MF_BRIDGE_DRAIN_SILENCE=0` 整体关闭补料。
+
+
 ### 2. 桥失声根因与 B/C/D 方案(细节以 airplay 权威文档 v4.10.0 增补为准,此处只记群组侧结论)
 
 - 根因(2026-10-30 取证):换歌时旧流停止→新流首包的无 RTP 窗口**中位 3.78s**(128 次实测)> 设备 1s
@@ -1524,3 +1567,95 @@ sendspin F-4/F-5):
 
 ⚠️ 纯 sendspin 组（无桥）不启用投递闸，行为与 v4.15.7 完全一致。
 ⚠️ DLNA 仍不能入组、仍无热换源（拉流必须换 URL，刻意例外），本节结论不适用于 DLNA。
+
+
+## v4.15.9 增补(群组同源:曲中静音修复对纯桥组/混合组同样生效,2026-11-26)
+
+本节不改群组逻辑,只登记**跨组形态的影响面**,避免「单机修好了群组又坏」的误判。
+
+- 曲中静音的根因在**泵进程**,一个组只有一个泵 ⇒ 单机 / 纯桥组 / 混合组**同源**,修复自动覆盖全部形态。
+- 桥侧断帧两级对每个桥会话独立判定:`bridges=1` 与 `bridges=2` 行为一致,不存在「多桥更容易触发」的额外路径。
+- 方案 A(桥水位透传到泵侧,`bridgeHoldMs()` 取组内**最薄**桥)与本修复正交,可叠加:
+  真机同时可见 `bridge-drain-fill-skip reason=covered holdMs=4784`(方案 A)与
+  `stall` 归零(本节)。
+- 验证群组时看三点:`bridges=2` 时 `holdMs` 是否取到较小者;`bridge-servo` 间隔 max ≤2.5s;
+  420s 窗口内 `[bridge-server] stall` 为 0。
+
+⚠️ 群组真机验证(全屋组 `bridges=2`)尚未执行,单机已验;待切组后按上面三点复核。
+
+## v4.15.10 增补(群组曲末口径与验收缺口,2026-11-26)
+
+### 群组曲末的两个历史事实
+
+1. **群组比单机更狠**:`pureBridge=false` 时不套 `BRIDGE_END_DRAIN_SAFE_MAX_MS = 8000` 的钳制,
+   实测灌满 **`durMs=30000 / chunks=1200`**(全天 7 次:`01:36 / 15:23 / 15:33 / 15:44 / 16:07 / 19:00 / 19:07`,CST)。
+   单机同缺陷被钳成 8000ms(5 次)。所以「群组是干净的」这个假设是**错的**。
+2. **方案 A 之后统一**:群组与单机走**同一个** `silenceNeed` 公式,
+   `holdMs` 取组内**最薄**桥的 `backlogMs + deviceLeadMs`(最薄的那台先断粮,它决定组能撑多久)。
+   实测 `bridge-drain-fill-skip reason=covered bridges=1 holdMs=4787 remainMs=30109` —— 一帧未灌。
+
+### 曲末接续精度对组的意义
+
+`v4.15.10` 的 `BRIDGE_PREFETCH_BOUNDARY_TOLERANCE_US = 1_500_000` 判据在组上更严格:
+组内任一成员只要接不住曲末,整组都不许跳过排空。理由是组内 `holdMs` 取最薄值,
+最薄的桥一旦断粮,全组一起可闻。
+
+### 待办(明确记账,不要以为已验收)
+
+| 项 | 状态 |
+|---|---|
+| 单机 `bridges=1` 曲末 covered + warm 起播 | 已验(22:38 一次完整曲末,cast 22ms,无 FLUSH) |
+| 群组 `bridges=2` 曲末 covered + 最薄桥取值 | **未验**(需切全屋组,声音会进别的房间) |
+
+完整取证见
+[曲中静音与曲末空洞-判定全流程-20261126.md](./曲中静音与曲末空洞-判定全流程-20261126.md)。
+
+---
+
+## v4.15.11 增补:群组侧预取实现已删除(2026-11-26)
+
+### 群组和单机一起受影响
+
+预取的启动判据是**纯桥组**(`hasBridges && !hasDirectMembers`),与「单机 / 群组」无关:
+DLNA 不能入组 ⇒ 常见群组正是纯桥组 ⇒ **群组每曲都在预取**。全天
+`next-prefetch 开始` 48 次、`就绪` 41 次,其中群组 `bridges=2` 时段占相当比例。
+故本次是整条路径删除,单机与群组同时消失。
+
+### 群组侧删掉的东西
+
+| 项 | 说明 |
+|---|---|
+| `pushBridgePrefetch()` | 把下一首前 3s 按「沿当前组游标的连续 ts」写进 ring 下一代次 |
+| `dropBridgePrefetchFrames()` | 采纳时按代次移除预取帧 |
+| `lastPrefetchFrames` | 供给侧加固用的「真的写进 ring 多少帧」记账 |
+| `keepTail` 整块 | 换代时把**上一代次**帧重打成新代次并保留水位(只服务预取交接) |
+| `notifyBridgeGeneration` 的 `prefetched` 参数 | 预取就绪时「不加切歌垫片 + 保队尾」 |
+| `BRIDGE_KEEP_TAIL_MIN_US` | keepTail 的旧尾最小可投存量阈值 |
+
+### 换代语义(非接续边缘)
+
+删掉 `keepTail` 后,换代恒走:
+
+```
+bridgeContentEpoch++
+bridgeWatermarks.clear()
+bridgeShiftAtDelivery.clear()
+bridgeBulkPending = 全部桥   // bulk 回填,把接收侧 inQueue 拉到 ~6s
+```
+
+原因:没有预取帧接住边界时,「保住旧曲尾但不回填」= 旧尾耗尽即断粮(历史 240 实测
+`keptFrames=7250`(0.16s) ⇒ inQueue 0 ⇒ late 27928 ⇒ 卡顿数分钟)。宁可多灌 ~6s。
+
+切歌垫片回到暖/冷动态挡(冷建 2500ms / 暖复用 800ms),不再有 `padUs=0 reason=prefetched`。
+
+### 混合组:不变
+
+混合组(桥 + 直连成员)本来就不预取 —— ring 里的未来帧会被直连成员实时消费造成内容重复。
+它的曲末一直是 covered 排空 + 桥水位精算,本次删除对它**零影响**。
+
+### 群组验收状态
+
+| 项 | 状态 |
+|---|---|
+| 单机桥(HiVi)两个曲末边界 | **已验**:covered 零灌静音 / continuity 接续,均 0 FLUSH、0 seek |
+| 群组 `bridges=2` 曲末 | **未验**(需切全屋组,声音会进别的房间)—— 待用户确认后补 |
