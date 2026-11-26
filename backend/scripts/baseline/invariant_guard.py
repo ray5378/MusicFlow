@@ -73,7 +73,10 @@ def judge(data, min_ticks=20, topo="airplay", expect_tick_devices=0,
         out.append(("PASS", "-", "A_tick.skipped",
                     "pure-sendspin: no bridge; judge by A_ssFrame"))
     else:
-        total = sum(int(_num((d or {}).get("samples"))) for d in ticks.values())
+        # samples 是**稳态段**条数；全程样本量看 samplesTotal（有分段时用）。
+        # 拿稳态条数去比 min-ticks 会把正常的长切歌测试误判成样本不足。
+        total = sum(int(_num((d or {}).get("samplesTotal", (d or {}).get("samples"))))
+                    for d in ticks.values())
         out.append(("PASS" if total >= min_ticks and ticks else "FAIL", "-", "A_tick.samples",
                     "ticks=%d devices=%d min=%d" % (total, len(ticks), min_ticks)))
         if expect_tick_devices > 0:

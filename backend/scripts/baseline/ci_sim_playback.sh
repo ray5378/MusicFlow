@@ -34,7 +34,7 @@ TOPO=${MF_TOPO:-mixed}
 SWITCH_COUNT=${MF_SWITCH_COUNT:-5}
 # 先跑一段无切歌稳态（A 层绝对阈值判据只用这段），再开始切歌功能验证。
 # 稳态段 60s ≈ 30 条 tick（2s/条），满足 guard 的 samplesSteady>=15。
-STEADY_SEC=${MF_STEADY_SEC:-60}
+STEADY_SEC=${MF_STEADY_SEC:-90}
 SWITCH_INTERVAL=${MF_SWITCH_INTERVAL:-60}   # 5 次 = 300s，8 分钟采样仍留余量
 CI_USER=ci-probe
 CI_PASS=ci-probe
@@ -247,9 +247,12 @@ for p in rows:
 fi
 # 服务已监听后再拨入。探针自身带 30 次/2s 重连，覆盖插件冷启动时间。
 for name in "${SS_NAMES[@]}"; do
-  MF_SS_NAME="$name" MF_SS_FRAME_OUT="$WORK/sendspin_frames.jsonl" \
-    "$WORK/venv/bin/python" "$REPO/backend/scripts/baseline/sendspin_frame_probe.py" \
-    > "$WORK/logs/sendspin-${name}.log" 2>&1 &
+    # 必须带 8 位静态配对码并开配对窗：服务端日志实测未配对会话会
+    # "pairing hold ... 空激活挂起"，不注册 peer（/peers 恒空）。
+    MF_SS_NAME="$name" MF_SS_FRAME_OUT="$WORK/sendspin_frames.jsonl" \
+      "$WORK/venv/bin/python" "$REPO/backend/scripts/baseline/sendspin_frame_probe.py" \
+      "ws://127.0.0.1:38927/sendspin" "12345678" \
+      > "$WORK/logs/sendspin-${name}.log" 2>&1 &
   echo $! >> "$WORK/aux.pids"
 done
 
@@ -302,7 +305,9 @@ done
 say "4/8 本地媒体源 + 10 首（切歌 5 次后仍有余量）"
 # 不同频率 + 不同时长：切歌后 songId / dur 双口径都能看出真的换了。
 for i in $(seq 1 10); do
-  freq=$((380 + i * 45)); dur=$((45 + i))
+  # 时长必须 > 稳态预热(90s)+首段切歌间隔(60s)，否则稳态采样期发生
+  # 自然换曲，其暂态会混进本该纯净的稳态判据段（第五轮实测踩坑）。
+  freq=$((380 + i * 45)); dur=$((180 + i))
   ffmpeg -hide_banner -loglevel error -f lavfi -i "sine=frequency=${freq}:duration=${dur}" \
     -ar 48000 -ac 2 -c:a flac -y "$WORK/music/ci_tone_${i}.flac" >/dev/null
 done

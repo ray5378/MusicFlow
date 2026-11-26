@@ -111,6 +111,11 @@ async def main() -> None:
             await c.connect(URL)
             client = c
             print("[ss-probe] CONNECTED+ADMITTED attempt=%d" % attempt, flush=True)
+            if STATIC_PIN:
+                # 只配 static pin 不够：必须主动开配对窗，服务端才能完成
+                # 配对并 activate（否则日志 "pairing hold ... 空激活挂起"）。
+                c.open_pairing_window()
+                print("[ss-probe] pairing window OPEN", flush=True)
             break
         except Exception as e:
             print("[ss-probe] connect %d/30 failed: %s" % (attempt, e), flush=True)
