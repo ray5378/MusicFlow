@@ -2444,6 +2444,21 @@ export class GroupPump {
               this.group.positionMs = this.durationMs;
             }
             this.group.current = null;
+            // [2026-11-27] 泵已收尾(group.current=null ⇒ pollState 立刻报 IDLE),但队列
+            //   advance 要等 QueueController 下一次设备轮询。这段「已无泵但未切歌」的空窗
+            //   里客户端 /status 现场读泵拿到的就是 STOPPED + 冻结进度 + 空 media,表现为
+            //   「暂停」(240 实测 2026-11-27 02:51:03.4 EOF → 02:51:06.2 才 advance,
+            //   空窗 2.8s,期间 /status 连续 5 次 state=STOPPED pos=192.4 title=null)。
+            //   与 schedulePlayingReport 对称:收尾侧也主动喂一次,让 tracker 立刻 advance
+            //   → playCurrent 建 display-hold,出口随即回到「PLAYING + 旧曲进度」。
+            //   走公开的 nudgePoll(完整复用 poll→reportState→tracker 路径),不自造判定。
+            try {
+              void import("../player/index.js")
+                .then(({ getQueueController }) => {
+                  try { getQueueController().nudgePoll(); } catch { /* 控制器未就绪 */ }
+                })
+                .catch(() => { /* 动态导入失败不影响切歌 */ });
+            } catch { /* 同上 */ }
           }
         } finally {
           // 整首音频到此无用,立即释放(长曲上百 MB),不等下一首覆盖。

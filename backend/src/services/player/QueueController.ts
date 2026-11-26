@@ -187,6 +187,8 @@ export class QueueController extends EventEmitter {
   private pollBusy = false;
   /** F2:本轮轮询发现任一活跃播放器进入「曲末前 20s」→ 下一轮切 1s 缩短换歌等待。 */
   private pollNearEnd = false;
+  /** startPollLoop 里那个自重生 tick 的引用(供 nudgePoll 立刻催一轮)。 */
+  private pollTickFn: (() => void) | null = null;
   // 服务器端定时暂停（sleep timer），key = 裸 deviceId/groupId。到点立即暂停。
   private sleepTimers = new Map<string, { timer: NodeJS.Timeout; deadline: number }>();
   /** 同一首连续卡死计数(key=裸 id):stalled 重投只兜一次 transient,
@@ -815,7 +817,26 @@ export class QueueController extends EventEmitter {
         this.pollTimer = setTimeout(tick, next) as any;
       });
     };
+    this.pollTickFn = tick;
     this.pollTimer = setTimeout(tick, 5000) as any;
+  }
+
+  /** 立刻催一轮设备轮询(不等下一次 setTimeout)。
+   *
+   *  [2026-11-27] 曲末泵收尾时由 streamEngine 调用:泵读到解码 EOF 后立刻置空
+   *  `group.current`,于是 `pollState()` 现场读到的就是 IDLE —— 而客户端 `/status`
+   *  也是现场读泵(不读本控制器的缓存),所以「泵收尾 → 队列 advance」这段空窗里,
+   *  对外一律是 STOPPED + 冻结进度 + 空 media,客户端表现为「暂停」。
+   *  advance 依赖本控制器的设备轮询(5s 档;曲末 1s 档在「泵生产超前消费 30s + 元数据
+   *  时长虚高」下未必进得去),实测空窗 2.8s。催一轮把窗口压到毫秒级。
+   *
+   *  幂等:未 startPollLoop 或轮询在途(pollBusy)时直接返回,绝不重入。
+   */
+  nudgePoll(): void {
+    const tick = this.pollTickFn;
+    if (!tick || this.pollBusy) return;
+    if (this.pollTimer) { clearTimeout(this.pollTimer as any); this.pollTimer = null; }
+    tick();
   }
 
   private async pollAllDevices(_baseUrl: () => string): Promise<void> {
@@ -872,9 +893,18 @@ export class QueueController extends EventEmitter {
         }
         // F2:标记「曲末前 20s」→ 下一轮轮询切 1s 缩短换歌等待。dur<=0(未知时长)
         // 或 position<=0(还没开始走)则不判曲末,保持 5s。
+        // [2026-11-27] 阈值 20s → max(45s, 15% 时长):泵被背压限在生产超前消费约 30s
+        //   (sendspin 窗口上限 30000ms),曲末时 pump 先读到 EOF 并把 group.current 置空
+        //   ⇒ pollState 立刻报 IDLE,而消费游标还差 ~30s;元数据时长又常比实际内容长几秒,
+        //   合计误差可达 35s。按 20s 判则这一档**永远进不去** ⇒ EOF 后要干等满 5s 周期才
+        //   advance。这段「已无泵但未切歌」的窗口对外是 STOPPED + 冻结进度 + 空 media,
+        //   客户端表现为「暂停」：240 实测 2026-11-27 02:51:03.4 EOF → 02:51:06.2 才
+        //   IDLE→advance(空窗 2.8s,/status 连续 5 次 state=STOPPED pos=192.4 title=null)。
+        //   45s 覆盖 30s 背压 + 元数据误差,超长曲再按 15% 放宽,空窗压到 ≤1s。
         const nearItem = q.items[q.currentIndex];
         const nearDur = nearItem ? this.knownDuration(nearItem) : 0;
-        if (nearDur > 0 && state.position > 0 && nearDur - state.position <= 20) this.pollNearEnd = true;
+        const nearEndMargin = Math.max(45, nearDur * 0.15);
+        if (nearDur > 0 && state.position > 0 && nearDur - state.position <= nearEndMargin) this.pollNearEnd = true;
         // state.playerId 已是 "dlna:<deviceId>",直接上报 PlayerController。
         this.ctrls.get(deviceId)?.reportState(state);
         // 轮询快照:debug 级(5s × N 设备,info 下太吵)。排障"进度条回退/不动"时
@@ -2485,6 +2515,14 @@ export class QueueController extends EventEmitter {
     const q = this.queues.get(id);
     const queueAdvanced = !q || q.currentIndex !== hold.index;
     const audible = Date.now() < hold.until || !queueAdvanced;
+    // [2026-11-27] 旧曲内容已响完且队列已前进 ⇒ **整个 hold 失效**,而不是只交还 position。
+    //   只交还 position 会留下「旧曲封面 + 新曲 position(0)」的错配:240 实测 2026-11-27
+    //   02:51:37 出口给出 pos=221 → 0 / dur=226 → 225 而 media 仍是旧曲,UI 上就是
+    //   「进度条突然归零但歌名没变」。整条放开后 media/position/duration 同源于新曲,
+    //   交接处是一次干净的切歌(封面比出声早不足 1s,不可察)。
+    //   注意判据仍是 audible(内容还有没有没响完)——「上一首没播完就切封面」的老问题
+    //   不会回来:那时 audible 为 true,media 照旧持有。
+    if (!audible) return undefined;
     return {
       media: {
         songId: hold.item.songId,
@@ -2493,7 +2531,7 @@ export class QueueController extends EventEmitter {
         album: hold.item.album,
         coverArt: hold.item.coverArt,
       },
-      ...(audible ? { position } : {}),
+      position,
       duration: hold.duration,
     };
   }

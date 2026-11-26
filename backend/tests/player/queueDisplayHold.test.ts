@@ -170,8 +170,8 @@ describe("QueueController 可听显示延迟(4.11.12 A 方案)", () => {
   });
 });
 
-describe("旧曲可听期结束后不冻结进度(2026-11-20 用户报:新曲出声了进度还停在上一首)", () => {
-  it("越过 until 但仍在硬顶内:media 继续持有,position 交还真实值", () => {
+describe("旧曲可听期结束后整体交还真实值(2026-11-20 用户报:新曲出声了进度还停在上一首)", () => {
+  it("越过 until 且队列已前进:整个 hold 失效,不再只交还 position", () => {
     const qc = new QueueController();
     const item = { songId: "s1", title: "t1", mime: "audio/mpeg", duration: 200 };
     qc.setQueue("d1", [item, { songId: "s2", title: "t2", mime: "audio/mpeg" }], 1, "http://base");
@@ -183,10 +183,10 @@ describe("旧曲可听期结束后不冻结进度(2026-11-20 用户报:新曲出
       expect(mid).toBeTruthy();
       expect(mid!.position).toBeGreaterThan(190); // 可听期:按旧曲外推
       vi.advanceTimersByTime(10_000); // 越过 until(10s),仍远早于硬顶(30s)
+      // [2026-11-27] 旧曲内容响完且队列已前进 ⇒ 整体放开(media/position/duration 同源新曲)。
+      //   旧行为只交还 position、保留旧曲 media,出口就成了「旧曲封面 + 新曲 0:00」。
       const late = qc.displayHoldState("d1");
-      expect(late).toBeTruthy();                    // 封面仍按旧曲,不提前切
-      expect(late!.position).toBeUndefined();       // 进度不再冻结,交给真实时间线
-      expect(late!.duration).toBe(200);
+      expect(late).toBeUndefined();
     } finally {
       vi.useRealTimers();
     }
