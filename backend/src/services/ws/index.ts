@@ -177,6 +177,9 @@ async function sendSnapshot(ws: WebSocket): Promise<void> {
         if (typeof hold.position === "number") {
           status.position = hold.position;
           status.duration = hold.duration;
+          // [2026-11-27] 与 onState 同款:hold 的前提是旧曲还在响,状态也必须按在播给,
+          //   否则新连接的快照会一开始就显示「暂停 + 旧曲进度」。
+          status.state = "PLAYING";
         }
       }
       devices[d.id] = { ...status, name: d.name, available: d.available };
@@ -236,8 +239,13 @@ function subscribeAndForward(ws: WebSocket): () => void {
     const hold = getQueueController()?.displayHoldState?.(deviceId);
     const media = hold ? hold.media : getCurrentMedia(deviceId);
     // 显示口径:桥组带 displayPosition(真实 + 设备 lead),判定/库内仍用 position。
+      // [2026-11-27] hold 期间 state 必须一并变成 PLAYING:hold 的前提就是「旧曲还在响」
+      //   (QueueController.setDisplayHold 只在旧曲还有内容没响完时设,任何传输操作都会清),
+      //   而这里的状态字段来自**已换代的新泵**,曲末交接窗口恰是 IDLE/STOPPED。
+      //   只换 position 不换 state ⇒ 客户端拿到「暂停 + 旧曲进度」:显示暂停、进度因非
+      //   playing 停止外推而冻结,恢复时一次跳好几秒(240 实测《淘汰》4:16 冻住→4:22)。
     const state = hold && typeof hold.position === "number"
-      ? { ...st, position: hold.position, duration: hold.duration }
+      ? { ...st, position: hold.position, duration: hold.duration, state: "PLAYING" }
       : (typeof (st as any)?.displayPosition === "number"
         ? { ...st, position: (st as any).displayPosition }
         : st);

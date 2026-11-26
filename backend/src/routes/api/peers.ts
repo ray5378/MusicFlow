@@ -1228,12 +1228,16 @@ app.get("/v1/peers/:peerId/status", async (c) => {
         if (fresh && evtAt !== null && evtAt > 0) status.updatedAt = evtAt;
       }
       // 可听显示延迟:上一首还可听时,status 仍返回旧曲与可听进度(4.11.12)。
+      // [2026-11-27] hold 期间必须连 state 一起按旧曲走:hold 的前提是旧曲还在响,
+      //   而 status.state 来自已换代的新泵(曲末交接窗口是 IDLE)。只换进度不换 state
+      //   ⇒ 客户端「暂停 + 旧曲进度」,进度停止外推后一次跳几秒。
       const hold = getQueueController()?.displayHoldState?.(deviceId);
       if (hold) {
         status.media = hold.media;
         if (typeof hold.position === "number") {
           status.position = hold.position;
           status.duration = hold.duration;
+          status.state = "PLAYING";
         }
       }
       // 队列版本号(4.12.9):客户端据此判断队列是否真的变了,只有变了才拉 /queue。
@@ -1265,12 +1269,15 @@ app.get("/v1/peers/:peerId/status", async (c) => {
       if (status.state === "PAUSED") status.state = "PAUSED_PLAYBACK";
       else if (status.state === "IDLE") status.state = "STOPPED";
       // 可听显示延迟(混合组/桥组:泵内容推完就 advance,设备还有缓冲)—— 显示按住旧曲(4.11.12)。
+      // [2026-11-27] 同上:hold 生效(旧曲还可听)时对外 state 必须是 PLAYING,
+      //   不能沿用新泵的 IDLE(已在上方被翻成 STOPPED)。见 ws/index.ts onState 同款注释。
       const hold = getQueueController()?.displayHoldState?.(parsed.id);
       if (hold) {
         (status as any).media = hold.media;
         if (typeof hold.position === "number") {
           status.position = hold.position;
           status.duration = hold.duration;
+          status.state = "PLAYING";
         }
       }
       return c.json({ ...status, queueRevision: getQueueController().queueRevision(parsed.id), speed: getQueueController().getPlaybackSpeed(parsed.id) });
@@ -1311,7 +1318,15 @@ app.get("/v1/peers/:peerId/status", async (c) => {
     else if (st.state === "IDLE") st.state = "STOPPED";
     // 可听显示延迟(桥路径:新旧曲交叉窗口)—— 显示按住旧曲(4.11.12)。
     const hold = getQueueController()?.displayHoldState?.(parsed.id);
-    if (hold) { st.media = hold.media; st.position = hold.position; st.duration = hold.duration; }
+    // [2026-11-27] hold 生效时 state 一并改 PLAYING:桥路由在曲末换代瞬间给的是
+    //   IDLE/STOPPED(新泵还没接上),而旧曲 tail 仍在响、进度也已换成旧曲。
+    //   两者不一致客户端就会「显示暂停 + 进度冻住 → 恢复时跳几秒」。
+    if (hold) {
+      st.media = hold.media;
+      st.position = hold.position;
+      st.duration = hold.duration;
+      st.state = "PLAYING";
+    }
     return c.json({ ...st, queueRevision: getQueueController().queueRevision(parsed.id), speed: getQueueController().getPlaybackSpeed(parsed.id) });
   }
   // sendspin:进程内播放器的实时状态(Position/Duration 由推流引擎驱动)。
@@ -1326,8 +1341,14 @@ app.get("/v1/peers/:peerId/status", async (c) => {
       const vol = getSendspinDeviceVolume(parsed.id);
       // 可听显示延迟:上一首还可听时,媒体/进度保持旧曲(4.11.12)。
       const hold = getQueueController()?.displayHoldState?.(parsed.id);
+      // [2026-11-27] hold 生效时 state 必须与进度同源:泵已换到新曲,曲末交接窗口
+      //   playbackState 是 IDLE/BUFFERING,而此刻响的还是旧曲 tail、进度的也是旧曲。
+      //   只换进度不换 state ⇒ 客户端「显示暂停 + 进度冻结」,等 hold 结束再一次性
+      //   跳到真实位置(240 实测《淘汰》4:16 冻住 → 约 7 秒后 → 4:22)。
+      const holding = !!hold && typeof hold.position === "number";
       return c.json({
-        state: st.playbackState === PlaybackState.PLAYING ? "PLAYING"
+        state: holding ? "PLAYING"
+          : st.playbackState === PlaybackState.PLAYING ? "PLAYING"
           : st.playbackState === PlaybackState.PAUSED ? "PAUSED_PLAYBACK"
           : st.playbackState === PlaybackState.BUFFERING ? "BUFFERING"
           : "STOPPED",

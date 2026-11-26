@@ -326,12 +326,15 @@ app.get("/v1/dlna/devices/:deviceId/status", async (c) => {
       if (typeof evt.muted === "boolean") status.muted = evt.muted;
     }
     // 可听显示延迟:上一首还可听时,status 必须仍是旧曲 + 可听时间轴的进度(4.11.12)。
+    // [2026-11-27] hold 期间 state 必须与进度同源:旧曲还在响,设备上报的状态
+    //   可能已翻成 STOPPED(曲末交接)。只换进度不换 state ⇒ 客户端显示暂停 + 进度冻结。
     const hold = getQueueController()?.displayHoldState?.(deviceId);
     if (hold) {
       status.media = hold.media;
       if (typeof hold.position === "number") {
         status.position = hold.position;
         status.duration = hold.duration;
+        status.state = "PLAYING";
       }
     }
     return c.json(status);
