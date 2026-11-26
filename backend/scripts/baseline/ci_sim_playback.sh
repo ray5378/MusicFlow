@@ -101,7 +101,7 @@ def walk(x):
     if isinstance(x,dict):
         pid=x.get("peerId") or x.get("id") or ""
         nm=str(x.get("name") or "")
-        if isinstance(pid,str) and pid.startswith(prefix) and want in nm.lower():
+        if isinstance(pid,str) and pid.startswith(prefix) and (want in pid.lower() or want in nm.lower()):
             out.append(pid)
         for v in x.values(): walk(v)
     elif isinstance(x,list):
@@ -301,12 +301,13 @@ rows=d if isinstance(d,list) else (d.get("songs") or d.get("items") or [])
 print(" ".join(str(x["id"]) for x in rows[:10]))
 ' "$WORK/logs/songs.json" 2>/dev/null || true)
   fi
-  [ -n "$SONGS" ] && break
+  # 扫描是异步的：拿到第一首就 break 会让队列只剩 2 首，第 3 次切歌就空了。
+  N=$(echo "$SONGS" | wc -w | tr -d ' ')
+  [ "${N:-0}" -ge 6 ] && break
   sleep 1
 done
-[ -n "$SONGS" ] || die "扫描 60s 后仍无歌曲"
 read -r -a SONG_ARR <<< "$SONGS"
-[ "${#SONG_ARR[@]}" -ge 6 ] || die "歌曲数 ${#SONG_ARR[@]} < 6，撑不起 5 次切歌"
+[ "${#SONG_ARR[@]}" -ge 6 ] || die "扫描 60s 后只有 ${#SONG_ARR[@]} 首（需要 >=6 撑起 5 次切歌）"
 echo "source=$SRC songs=${#SONG_ARR[@]}"
 
 say "5/8 建组并起播（10 首全入队）"
