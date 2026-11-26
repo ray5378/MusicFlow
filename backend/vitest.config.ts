@@ -50,13 +50,15 @@ export default defineConfig({
     // 跑完在进程退出阶段段错误(exit 139);forks 每个文件独立子进程,无此问题。
     fileParallelism: true,
     pool: "forks",
-    // 单 worker 串行:forks 池多 worker 并行时,在文件派发阶段会偶发死锁(多个各自加载
-    // better-sqlite3 的原生 worker 已完成一批文件,调度器却不再派发新文件,worker 空转零
-    // 输出直至 timeout;与并发 worker 数 3→2 无关、与具体文件无关)。maxWorkers=1 后只剩
-    // 一个 worker,不存在多 worker 派发死锁,又保留 forks 池「每个测试文件跑在独立 fork
-    // 子进程」的进程级隔离——避免 singleFork(单进程串行)下 sendspin 服务单例 / ffmpeg /
-    // 沙箱等模块级全局跨文件残留导致的偶发污染。串行跑全集留给 CI 20 分钟足够。
-    maxWorkers: 1,
+    // 4 worker 并行(2026-11-27 提速): forks 池「每个测试文件跑在独立 fork 子进程」的
+    // 进程级隔离保持不变(避免 singleFork 下 sendspin 服务单例 / ffmpeg / 沙箱等模块级
+    // 全局跨文件残留),只是派发到 4 个子进程。此前 maxWorkers=1 的原因是一条旧结论
+    // 「多 worker 在文件派发阶段偶发死锁」——2026-11-27 在 230(nproc=8)用同一份全集
+    // 实测 1/2/4 三档,均 674/674 PASS、无死锁、日志持续增长:
+    //   1 worker → 1151s(19.2min) / 2 → 602s(10min) / 4 → 332s(5.5min)。
+    // 旧死锁应是早期 Vitest 版本遗留,当前 5.0.3 稳定;4 worker 快 3.5× 且留足余量。
+    // 若将来真复现死锁(worker 空转零输出直至 timeout),再退回 maxWorkers=1 并在此记录。
+    maxWorkers: 4,
     minWorkers: 1,
     poolOptions: {
       forks: { singleFork: false },
