@@ -3,11 +3,14 @@ name: Playback Baseline
 # 播放基线体检（三层，职责不同）
 #
 #   L0 sim-e2e（托管 runner，tag 触发）
-#      —— 在 GitHub Actions 里自己起被测镜像 + 一个 shairport-sync 模拟
-#         AirPlay 接收端，真实建组/起播/采样，再用绝对不变量判据判读。
-#         基准 A 层（tick/ring-diag/deltaUs/inQueueMs）由 AirPlay 桥在
-#         **服务端**计算，所以模拟接收端足以产出同口径数据；sendspin
-#         模拟端不产生这些字段，不能替代。
+#      —— 在 GitHub Actions 里自己起被测镜像 + 模拟接收端，真实建组/起播/
+#         切歌 5 次/全程采样，再用绝对不变量判据判读。用 matrix 跑 5 种拓扑：
+#           mixed / ap-only / ap1-only / ap2-only / ss-only
+#         含 AirPlay 成员的组起 1~2 个 shairport-sync（RAOP 握手 + UDP 收流），
+#         A 层 tick/ring-diag/deltaUs/inQueueMs 由 AirPlay 桥在**服务端**计算；
+#         纯 sendspin 组没有桥、永远不会有 tick，改用 aiosendspin 拨入播放器
+#         逐帧采 A_ssFrame（帧数/最大帧间隔/每次切歌后帧增量）。
+#         两种接收端都起，才不会出现「某拓扑永远采不到证据」的假绿。
 #         与 L1 一样不需要真机、不需要 self-hosted runner，但耗时 ~10 分钟。
 #
 #   L1 judge-selftest（托管 runner，blocking）
@@ -66,10 +69,15 @@ jobs:
   # L0：托管 runner 上的模拟播放 + 基线不变量判读（发版时跑）
   # ---------------------------------------------------------------------------
   sim-e2e:
-    name: simulated AirPlay playback baseline
+    name: simulated ${{ matrix.topo }} playback baseline
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 45
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    # 五种拓扑互不依赖：fail-fast=false 保证一个失败时其余四种仍出证据。
+    strategy:
+      fail-fast: false
+      matrix:
+        topo: [mixed, ap-only, ap1-only, ap2-only, ss-only]
     steps:
       - uses: actions/checkout@v4
 
@@ -100,8 +108,9 @@ jobs:
       - name: Run simulated playback and judge
         env:
           MF_IMAGE: ${{ steps.image.outputs.image }}
+          MF_TOPO: ${{ matrix.topo }}
           MF_MINUTES: ${{ inputs.sim_minutes || '8' }}
-          MF_WORKDIR: ${{ runner.temp }}/mf-ci-sim
+          MF_WORKDIR: ${{ runner.temp }}/mf-ci-sim-${{ matrix.topo }}
         run: |
           set -o pipefail
           bash backend/scripts/baseline/ci_sim_playback.sh 2>&1 | tee /tmp/mf_sim_run.log
@@ -110,7 +119,7 @@ jobs:
         if: always()
         run: |
           {
-            echo "### 模拟播放基线体检 — \`${GITHUB_REF_NAME}\`"
+            echo "### 模拟播放基线体检 — \`${GITHUB_REF_NAME}\` / \`${{ matrix.topo }}\`"
             echo ""
             echo "<details><summary>判读全文</summary>"
             echo ""
@@ -125,11 +134,13 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: baseline-sim-${{ github.ref_name }}
+          name: baseline-sim-${{ github.ref_name }}-${{ matrix.topo }}
           path: |
-            ${{ runner.temp }}/mf-ci-sim/cap.json
-            ${{ runner.temp }}/mf-ci-sim/base.jsonl
-            ${{ runner.temp }}/mf-ci-sim/logs/
+            ${{ runner.temp }}/mf-ci-sim-${{ matrix.topo }}/cap.json
+            ${{ runner.temp }}/mf-ci-sim-${{ matrix.topo }}/base.jsonl
+            ${{ runner.temp }}/mf-ci-sim-${{ matrix.topo }}/switch_log.jsonl
+            ${{ runner.temp }}/mf-ci-sim-${{ matrix.topo }}/sendspin_frames.jsonl
+            ${{ runner.temp }}/mf-ci-sim-${{ matrix.topo }}/logs/
             /tmp/mf_sim_run.log
           if-no-files-found: warn
           retention-days: 30
@@ -158,11 +169,12 @@ jobs:
             backend/scripts/baseline/invariant_guard.py \
             backend/scripts/baseline/summary_md.py \
             backend/scripts/baseline/selftest.py \
+            backend/scripts/baseline/sendspin_frame_probe.py \
             docs/examples/baseline_sampler.example.py
           echo "OK: py_compile 全部通过"
 
-      # 核心：45 条断言。失败即说明判读逻辑/阈值/退出码契约被改坏。
-      - name: Judge selftest (45 assertions)
+      # 核心：判读逻辑/阈值/退出码/多拓扑切歌与帧判据的回归断言。
+      - name: Judge selftest (baseline invariants)
         run: |
           set -o pipefail
           python3 backend/scripts/baseline/selftest.py 2>&1 | tee /tmp/selftest.log

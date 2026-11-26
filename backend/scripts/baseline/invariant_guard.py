@@ -18,6 +18,14 @@ GitHub 托管 runner 做不到。但它守的是**相对量**；CI 里由一个�
   * 进度速率 ~1.0、无回退（进度条变快/变慢/回退）
 
 输入是 baseline_cap.py 产出的 JSON。退出码 0=PASS / 1=指标 FAIL / 2=样本或环境问题。
+
+拓扑分叉（--topo）
+------------------
+tick / ring 只有**含 AirPlay 成员**的组才有（bridgeSession 产出）。纯 sendspin
+组不经过桥，等价 A 层真值是 sendspin_frame_probe.py 采到的音频帧（A_ssFrame）：
+  * airplay / mixed  → 判 A_tick + A_prog + A_switch（+ A_ssFrame 若存在）
+  * sendspin         → 跳过 A_tick，判 A_ssFrame + A_prog + A_switch
+所有拓扑都必须有 A_switch.count >= 5（用户定稿：每次发版至少切歌 5 次）。
 """
 import argparse
 import json
@@ -36,6 +44,16 @@ ADVANCE_RATE_MIN = 0.98
 ADVANCE_RATE_MAX = 1.02
 BACKWARDS_MAX = 3
 
+# 多拓扑切歌/帧判据。阈值理由见 docs/播放基线-基准值与判读-20261126.md §4b：
+#   - 切歌确认 25s：混合组锚点 lead 5s + 预填充 10s + 两轮 /status 轮询的余量；
+#   - 帧间隔 500ms：正常 25ms/帧，500ms 已经是 20 帧的静音，远超任何抖动；
+#   - 单次切歌后至少 20 帧：只要求「确实恢复出声」，不苛求满窗口帧数。
+SWITCH_MIN = 5
+SWITCH_SETTLE_MAX_MS = 25_000
+SS_FRAME_MIN = 200
+SS_FRAME_GAP_MAX_MS = 500
+SS_FRAME_MIN_PER_SWITCH = 20
+
 
 def _num(v, default=0.0):
     try:
@@ -44,13 +62,24 @@ def _num(v, default=0.0):
         return default
 
 
-def judge(data, min_ticks=20):
+def judge(data, min_ticks=20, topo="airplay", expect_tick_devices=0,
+          require_switch=False):
     """返回 [(level, dev, metric, detail), ...]；level 为 PASS/FAIL。"""
     out = []
     ticks = data.get("A_tick") or {}
-    total = sum(int(_num((d or {}).get("samples"))) for d in ticks.values())
-    out.append(("PASS" if total >= min_ticks and ticks else "FAIL", "-", "A_tick.samples",
-                "ticks=%d devices=%d min=%d" % (total, len(ticks), min_ticks)))
+    if topo == "sendspin":
+        # 纯 sendspin 不建 RAOP 会话 ⇒ bridgeSession 不可能产出 tick。
+        # 这里显式记一条 PASS，防止有人把「跳过的判据」误当成漏判。
+        out.append(("PASS", "-", "A_tick.skipped",
+                    "pure-sendspin: no bridge; judge by A_ssFrame"))
+    else:
+        total = sum(int(_num((d or {}).get("samples"))) for d in ticks.values())
+        out.append(("PASS" if total >= min_ticks and ticks else "FAIL", "-", "A_tick.samples",
+                    "ticks=%d devices=%d min=%d" % (total, len(ticks), min_ticks)))
+        if expect_tick_devices > 0:
+            out.append(("PASS" if len(ticks) >= expect_tick_devices else "FAIL",
+                        "-", "A_tick.devices",
+                        "devices=%d expect>=%d" % (len(ticks), expect_tick_devices)))
 
     for dev, d in sorted(ticks.items()):
         du = d.get("deltaUs") or {}
@@ -87,6 +116,41 @@ def judge(data, min_ticks=20):
                     "-", "advanceRate", "%.4f band=[%.2f,%.2f]" % (r, ADVANCE_RATE_MIN, ADVANCE_RATE_MAX)))
         out.append(("PASS" if back <= BACKWARDS_MAX else "FAIL",
                     "-", "backwardsCount", "%.0f max=%d" % (back, BACKWARDS_MAX)))
+
+    sw = data.get("A_switch")
+    if sw is None:
+        # 老样本（真机基准 / fixtures）没有切歌证据，默认不判；
+        # CI 用 --require-switch 强制必须有，防止「没切歌也 PASS」的假绿。
+        if require_switch:
+            out.append(("FAIL", "-", "A_switch.missing",
+                        "CI 必须采到切歌证据（>=%d 次）" % SWITCH_MIN))
+    else:
+        cnt = int(_num(sw.get("count")))
+        failed = int(_num(sw.get("failed")))
+        settle = _num(sw.get("maxSettleMs"), -1)
+        out.append(("PASS" if cnt >= SWITCH_MIN else "FAIL", "-", "A_switch.count",
+                    "count=%d min=%d" % (cnt, SWITCH_MIN)))
+        out.append(("PASS" if failed == 0 else "FAIL", "-", "A_switch.failed",
+                    "failed=%d" % failed))
+        out.append(("PASS" if 0 <= settle <= SWITCH_SETTLE_MAX_MS else "FAIL",
+                    "-", "A_switch.maxSettleMs",
+                    "%.0fms max=%dms" % (settle, SWITCH_SETTLE_MAX_MS)))
+
+    fr = data.get("A_ssFrame")
+    if fr is None and topo == "sendspin":
+        out.append(("FAIL", "-", "A_ssFrame.missing",
+                    "纯 sendspin 组没有桥 tick，必须采音频帧"))
+    elif fr is not None:
+        chunks = int(_num(fr.get("chunks")))
+        gap = _num(fr.get("maxGapMs"), float("inf"))
+        per = fr.get("minPerSwitch")
+        out.append(("PASS" if chunks >= SS_FRAME_MIN else "FAIL", "-", "A_ssFrame.chunks",
+                    "chunks=%d min=%d" % (chunks, SS_FRAME_MIN)))
+        out.append(("PASS" if gap <= SS_FRAME_GAP_MAX_MS else "FAIL", "-", "A_ssFrame.maxGapMs",
+                    "%.0fms max=%dms" % (gap, SS_FRAME_GAP_MAX_MS)))
+        out.append(("PASS" if per is not None and per >= SS_FRAME_MIN_PER_SWITCH else "FAIL",
+                    "-", "A_ssFrame.minPerSwitch",
+                    "%s min=%d" % (per, SS_FRAME_MIN_PER_SWITCH)))
     return out
 
 
@@ -94,6 +158,12 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--input", required=True, help="baseline_cap.py 产出的 JSON")
     ap.add_argument("--min-ticks", type=int, default=20)
+    ap.add_argument("--topo", choices=("airplay", "mixed", "sendspin"), default="airplay",
+                    help="airplay/mixed 判 tick；sendspin 跳过 tick 改判音频帧")
+    ap.add_argument("--expect-tick-devices", type=int, default=0,
+                    help="含 AirPlay 成员的拓扑应看到多少台 tick 设备")
+    ap.add_argument("--require-switch", action="store_true",
+                    help="CI 专用：必须采到 >=5 次成功切歌证据")
     ap.add_argument("--quiet", action="store_true")
     a = ap.parse_args(argv)
 
@@ -107,7 +177,9 @@ def main(argv=None):
         print("SAMPLE_INVALID %s: %s" % (a.input, e))
         return 2
 
-    res = judge(data, a.min_ticks)
+    res = judge(data, a.min_ticks, topo=a.topo,
+                expect_tick_devices=a.expect_tick_devices,
+                require_switch=a.require_switch)
     fails = [r for r in res if r[0] == "FAIL"]
     if not a.quiet:
         print("== CI 模拟播放不变量判读 ==")

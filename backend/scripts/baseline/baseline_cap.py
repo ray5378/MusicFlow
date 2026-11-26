@@ -28,6 +28,10 @@ from collections import defaultdict
 # 不设 MF_WATCH_DIR 时所有路径与硬编码时期完全一致。
 ROOT = os.environ.get("MF_WATCH_DIR", "/root/mf_watch")
 JSONL = os.path.join(ROOT, "base.jsonl")
+# CI 多拓扑补充证据（切歌确认 + sendspin 帧级真值）。真机常驻采样不产这两份文件，
+# 缺失时对应段留空，老基准 / 老守卫行为完全不变。
+SWITCH_LOG = os.environ.get("MF_SWITCH_LOG", os.path.join(ROOT, "switch_log.jsonl"))
+SS_FRAME_LOG = os.environ.get("MF_SS_FRAME_LOG", os.path.join(ROOT, "sendspin_frames.jsonl"))
 DEFAULT_OUT_DIR = os.path.join(ROOT, "baseline")
 CONTAINER = os.environ.get("MF_CONTAINER", "musicflow")      # 容器名（指纹用）
 IMAGE = os.environ.get("MF_IMAGE", "ray5378/musicflow:latest")  # 镜像名（指纹用）
@@ -307,6 +311,80 @@ def analyze_prog():
     }
 
 
+def _load_aux(path):
+    """读补充证据 jsonl。缺文件 / 坏行一律跳过：老采样目录没有这些文件。"""
+    rows = []
+    if not path or not os.path.exists(path):
+        return rows
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except Exception:
+                continue
+    return rows
+
+
+def analyze_switch(rows, window_min):
+    """切歌证据：CI 每次 POST next 后轮询 /status 确认 songId 真的换了才落一行。
+
+    只数 API 调用次数没有意义 —— 队列空 / 切歌没生效时调用照样返回 200。
+    这里同时记 settleMs（从按 next 到 songId 变化），超长说明切歌卡住。
+    """
+    if not rows:
+        return None
+    rows = sorted(rows, key=lambda x: x.get("at", 0))
+    if window_min > 0 and rows:
+        end = max(r.get("at", 0) for r in rows)
+        cut = end - window_min * 60 * 1000
+        rows = [r for r in rows if r.get("at", 0) >= cut]
+    if not rows:
+        return None
+    settles = [r.get("settleMs") for r in rows
+               if isinstance(r.get("settleMs"), (int, float))]
+    per_sw = [r.get("framesAfter", 0) - r.get("framesBefore", 0) for r in rows
+              if isinstance(r.get("framesAfter"), (int, float))
+              and isinstance(r.get("framesBefore"), (int, float))]
+    return {
+        "count": len(rows),
+        "changed": sum(1 for r in rows if r.get("changed") is True),
+        "failed": sum(1 for r in rows if r.get("changed") is not True),
+        "maxSettleMs": r(max(settles), 0) if settles else None,
+        "minFramesPerSwitch": min(per_sw) if per_sw else None,
+        "switches": rows[-12:],
+    }
+
+
+def analyze_ss_frames(rows, switch_rows):
+    """sendspin 音频帧真值。纯 sendspin 组没有桥 tick，这一层替代 A_tick。"""
+    if not rows:
+        return None
+    rows = sorted(rows, key=lambda x: x.get("t", 0))
+    ts = [int(r["t"]) for r in rows if isinstance(r.get("t"), (int, float))]
+    if len(ts) < 2:
+        return {"chunks": len(rows), "maxGapMs": None, "minPerSwitch": None}
+    gaps = [b - a for a, b in zip(ts, ts[1:]) if b >= a]
+    per_sw = []
+    for sw in switch_rows or []:
+        a, b = sw.get("t0"), sw.get("t1")
+        if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+            per_sw.append(sum(1 for t in ts if a <= t <= b))
+    span_min = max(1e-6, (ts[-1] - ts[0]) / 60000.0)
+    return {
+        "chunks": len(rows),
+        "bytes": sum(int(r.get("bytes") or 0) for r in rows),
+        "spanMin": r(span_min, 2),
+        "chunksPerMin": r(len(rows) / span_min, 1),
+        "maxGapMs": max(gaps) if gaps else None,
+        "gapOver500Count": sum(1 for g in gaps if g > 500),
+        "minPerSwitch": min(per_sw) if per_sw else None,
+        "perSwitch": per_sw,
+    }
+
+
 def analyze_media():
     """B 层：出口偏差。只记录，不参与健康判定。"""
     if len(media) < 10:
@@ -367,6 +445,8 @@ def main():
     a = ap.parse_args()
 
     rows, last_sec = load(a.window, a.end)
+    switch_rows = _load_aux(SWITCH_LOG)
+    frame_rows = _load_aux(SS_FRAME_LOG)
     now = datetime.datetime.now()
     doc = {
         "meta": {
@@ -381,7 +461,8 @@ def main():
             "devCapMsAssumed": DEV_CAP_MS,
             "principle": "A层(tick/ring/prog)=判定; B层(status/media)=仅记录出口偏差",
         },
-        "A_tick": {}, "A_ring": {}, "A_prog": None, "B_status": None,
+        "A_tick": {}, "A_ring": {}, "A_prog": None,
+        "A_switch": None, "A_ssFrame": None, "B_status": None,
     }
     for dev, series in sorted(tick_by_dev.items()):
         res = analyze_tick(dev, series)
@@ -392,6 +473,8 @@ def main():
         if res:
             doc["A_ring"][dev] = res
     doc["A_prog"] = analyze_prog()
+    doc["A_switch"] = analyze_switch(switch_rows, a.window)
+    doc["A_ssFrame"] = analyze_ss_frames(frame_rows, switch_rows)
     doc["B_status"] = analyze_media()
 
     out = a.out or os.path.join(DEFAULT_OUT_DIR, "base_%s.json" % now.strftime("%Y%m%d_%H%M"))
@@ -418,6 +501,16 @@ def main():
     if pp:
         print("  推进速率=%s 曲中样本=%s 回退=%d" %
               (pp["advanceRate"], pp["curvedSamples"], pp["backwardsCount"]))
+    sw = doc["A_switch"]
+    if sw:
+        print("== A层 切歌 ==")
+        print("  次数=%d 成功=%d 失败=%d 最长确认=%sms" %
+              (sw["count"], sw["changed"], sw["failed"], sw["maxSettleMs"]))
+    fr = doc["A_ssFrame"]
+    if fr:
+        print("== A层 sendspin 音频帧 ==")
+        print("  帧数=%s 最大间隔=%sms 超500ms次数=%s 每次切歌最少帧=%s" %
+              (fr["chunks"], fr["maxGapMs"], fr["gapOver500Count"], fr["minPerSwitch"]))
     print("== B层 status（仅供参考）==")
     bs = doc["B_status"]
     if bs:

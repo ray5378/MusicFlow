@@ -277,6 +277,61 @@ def main():
     finally:
         iv.DELTA_P50_MIN_US = old_lo
 
+    print("== 10. 多拓扑切歌/音频帧判据（5 种拓扑共用）==")
+    # CI 现在跑 mixed / ap-only / ap1-only / ap2-only / ss-only 五种组型，
+    # 每种都必须切歌 >=5 次；纯 sendspin 无桥 tick，靠 A_ssFrame 判。
+    # 这里用 fixture 的 prog 数值 + 合成证据钉死判据，不需要真机。
+    sw_ok = {"count": 5, "changed": 5, "failed": 0,
+             "maxSettleMs": 3200, "minFramesPerSwitch": 40}
+    fr_ok = {"chunks": 800, "maxGapMs": 60, "minPerSwitch": 40}
+    multi = copy.deepcopy(good)
+    multi["A_switch"] = copy.deepcopy(sw_ok)
+    multi["A_ssFrame"] = copy.deepcopy(fr_ok)
+
+    def inv_fails(sample, **kw):
+        args = dict(min_ticks=20, topo="mixed", expect_tick_devices=2,
+                    require_switch=True)
+        args.update(kw)
+        return {r[2] for r in iv.judge(sample, **args) if r[0] == "FAIL"}
+
+    c.check("混合组：切歌5次+帧正常无 FAIL", not inv_fails(multi),
+            str(inv_fails(multi)))
+    few = copy.deepcopy(multi); few["A_switch"]["count"] = 4
+    c.check("只切歌4次必须 FAIL（A_switch.count）",
+            "A_switch.count" in inv_fails(few), str(inv_fails(few)))
+    failed_sw = copy.deepcopy(multi); failed_sw["A_switch"]["failed"] = 1
+    c.check("有一次切歌没真正换曲必须 FAIL",
+            "A_switch.failed" in inv_fails(failed_sw), str(inv_fails(failed_sw)))
+    slow = copy.deepcopy(multi); slow["A_switch"]["maxSettleMs"] = 26000
+    c.check("切歌确认超过 25s 必须 FAIL",
+            "A_switch.maxSettleMs" in inv_fails(slow), str(inv_fails(slow)))
+    c.check("开了 --require-switch 却没有切歌证据必须 FAIL",
+            "A_switch.missing" in inv_fails(good), str(inv_fails(good)))
+    c.check("显式不要求切歌时老样本不误报",
+            not inv_fails(good, require_switch=False),
+            str(inv_fails(good, require_switch=False)))
+
+    ss = {"A_tick": {}, "A_prog": copy.deepcopy(good["A_prog"]),
+          "A_switch": copy.deepcopy(sw_ok), "A_ssFrame": copy.deepcopy(fr_ok)}
+    ss_fails = inv_fails(ss, min_ticks=0, topo="sendspin", expect_tick_devices=0)
+    c.check("纯 sendspin：无 tick 但帧正常判 PASS", not ss_fails, str(ss_fails))
+    no_fr = copy.deepcopy(ss); no_fr["A_ssFrame"] = None
+    c.check("纯 sendspin：没有帧证据必须 FAIL（不能静默 PASS）",
+            "A_ssFrame.missing" in inv_fails(no_fr, min_ticks=0, topo="sendspin",
+                                             expect_tick_devices=0),
+            str(inv_fails(no_fr, min_ticks=0, topo="sendspin", expect_tick_devices=0)))
+    gap = copy.deepcopy(ss); gap["A_ssFrame"]["maxGapMs"] = 800
+    c.check("音频帧出现 800ms 静音缺口必须 FAIL",
+            "A_ssFrame.maxGapMs" in inv_fails(gap, min_ticks=0, topo="sendspin",
+                                              expect_tick_devices=0))
+    few_fr = copy.deepcopy(ss); few_fr["A_ssFrame"]["chunks"] = 20
+    c.check("音频帧不足 200 帧必须 FAIL",
+            "A_ssFrame.chunks" in inv_fails(few_fr, min_ticks=0, topo="sendspin",
+                                            expect_tick_devices=0))
+    c.check("切歌5次常量未被改软", iv.SWITCH_MIN == 5, "got=%s" % iv.SWITCH_MIN)
+    c.check("帧间隔 500ms 常量未被改软",
+            iv.SS_FRAME_GAP_MAX_MS == 500, "got=%s" % iv.SS_FRAME_GAP_MAX_MS)
+
     return c.summary()
 
 

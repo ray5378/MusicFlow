@@ -1,12 +1,24 @@
 #!/usr/bin/env bash
 # ============================================================================
-# GitHub Actions 里的「模拟播放 → 基线不变量体检」全流程（ubuntu-latest）
+# GitHub Actions 里的「多拓扑混合群组 → 切歌 → 基线不变量体检」（ubuntu-latest）
 #
-# 为什么这里模拟 AirPlay 而不是 sendspin：
-#   基准文档的 A 层指标（ev:"tick" / ring-diag / deltaUs / inQueueMs）
-#   全部由 backend/src/services/airplay/bridgeSession.ts 在**服务端**计算，
-#   接收端只需要完成 RAOP 握手并持续收 UDP 音频；sendspin 模拟端根本
-#   不产生这些字段，拿它判基线只会得到空样本。
+# 为什么这里要模拟真实接收端：
+#   基准文档的 A 层指标分两种真值：
+#     * 含 AirPlay 成员的组 → backend/src/services/airplay/bridgeSession.ts 产出
+#       tick / ring-diag（deltaUs / inQueueMs），需要真实 RAOP 握手 + UDP 收流；
+#     * 纯 sendspin 组 → 不经过桥，根本没有 tick。等价真值是服务端推出来的
+#       音频帧，由 sendspin_frame_probe.py 用 aiosendspin 拨入播放器逐帧采。
+#   因此两种接收端都必须起，缺一种就有一种拓扑永远采不到 A 层证据。
+#
+# 五种拓扑（MF_TOPO）：
+#   mixed     = airplay1 + airplay2 + sendspin  （混合组，v4.9.3 方向 A 强制走桥）
+#   ap-only   = airplay1 + airplay2             （纯 AirPlay 组）
+#   ap1-only  = airplay1                        （单 AirPlay 成员）
+#   ap2-only  = airplay2                        （单 AirPlay 成员，验证设备身份不串）
+#   ss-only   = sendspin                        （纯 sendspin 组，无桥 tick）
+#
+# 每种拓扑都：建组 → 起播 10 首 → 切歌 5 次（每次确认 songId 真变了）→
+# 全程采样（tick/ring/prog + sendspin 帧 + 切歌证据）→ 分拓扑判读。
 #
 # 产物：<MF_WORKDIR>/cap.json + 判读 exit code + <MF_WORKDIR>/logs/
 # 只读现网无关：容器名固定 musicflow，但跑在 runner 自己的 docker 里。
@@ -18,22 +30,41 @@ IMAGE=${MF_IMAGE:?MF_IMAGE 必填，例如 ghcr.io/ray5378/musicflow:4.15.8}
 MINUTES=${MF_MINUTES:-8}
 PORT=${MF_PORT:-46400}
 BASE="http://127.0.0.1:${PORT}"
+TOPO=${MF_TOPO:-mixed}
+SWITCH_COUNT=${MF_SWITCH_COUNT:-5}
+SWITCH_INTERVAL=${MF_SWITCH_INTERVAL:-25}
 CI_USER=ci-probe
 CI_PASS=ci-probe
 CONTAINER=musicflow
 mkdir -p "$WORK/data" "$WORK/music" "$WORK/logs"
 REPO=${GITHUB_WORKSPACE:-$(pwd)}
+: > "$WORK/aux.pids"
+: > "$WORK/switch_log.jsonl"
+: > "$WORK/sendspin_frames.jsonl"
 
 say() { printf '\n=== %s ===\n' "$*"; }
 die() { printf '::error::%s\n' "$*" >&2; exit 2; }
+
+case "$TOPO" in
+  mixed)    AP_NAMES=(MF-CI-AP1 MF-CI-AP2); SS_NAMES=(MF-CI-SPIN1); TICK_EXPECT=2; TICK_TOPO=mixed ;;
+  ap-only)  AP_NAMES=(MF-CI-AP1 MF-CI-AP2); SS_NAMES=();             TICK_EXPECT=2; TICK_TOPO=airplay ;;
+  ap1-only) AP_NAMES=(MF-CI-AP1);            SS_NAMES=();             TICK_EXPECT=1; TICK_TOPO=airplay ;;
+  ap2-only) AP_NAMES=(MF-CI-AP2);            SS_NAMES=();             TICK_EXPECT=1; TICK_TOPO=airplay ;;
+  ss-only)  AP_NAMES=();                     SS_NAMES=(MF-CI-SPIN1); TICK_EXPECT=0; TICK_TOPO=sendspin ;;
+  *) die "未知 MF_TOPO=$TOPO（可选 mixed/ap-only/ap1-only/ap2-only/ss-only）" ;;
+esac
+say "拓扑 $TOPO：airplay=${#AP_NAMES[@]} sendspin=${#SS_NAMES[@]} tickExpect=$TICK_EXPECT"
 
 cleanup() {
   local rc=$?
   say "清理（保留证据到 $WORK）"
   docker logs "$CONTAINER" > "$WORK/logs/container.log" 2>&1 || true
+  [ -f "$WORK/sampler.pid" ] && kill "$(cat "$WORK/sampler.pid")" >/dev/null 2>&1 || true
+  if [ -f "$WORK/aux.pids" ]; then
+    while read -r p; do [ -n "$p" ] && kill "$p" >/dev/null 2>&1 || true; done < "$WORK/aux.pids"
+  fi
+  sudo pkill -x shairport-sync >/dev/null 2>&1 || true
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-  [ -f "$WORK/shairport.pid" ] && kill "$(cat "$WORK/shairport.pid")" >/dev/null 2>&1 || true
-  [ -f "$WORK/dd.pid" ] && kill "$(cat "$WORK/dd.pid")" >/dev/null 2>&1 || true
   exit "$rc"
 }
 trap cleanup EXIT
@@ -41,7 +72,6 @@ trap cleanup EXIT
 api() {
   # api METHOD PATH [BODY]。必须显式 -X：curl 只有带 -d 时才自动 POST，
   # 无 body 的 POST（如 /sources/:id/scan）会被当 GET → 404。
-  # 同时保留错误响应体，CI 里 curl -f 只报 22 看不出是认证还是服务失败。
   local method=$1 path=$2 body=${3:-} out code
   local args=(-sS --max-time 25 -u "${CI_USER}:${CI_PASS}" -X "$method"
               -H 'Content-Type: application/json' -w '\n%{http_code}')
@@ -56,69 +86,104 @@ api() {
   printf '%s' "$out"
 }
 
-# 递归找 JSON 里符合条件的值，避免依赖接口的包装层级（可能是裸数组 / {data:[]}）。
-json_pick() {
-  python3 -c '
+# 递归找 /peers 里 name 含指定串、peerId 带指定前缀的设备。
+# shairport 的 mDNS name 是 "MF-CI-AP1@xx:xx"，sendspin 是 client_name，
+# 而 peerId 分别是 airplay:<mac> / sendspin:<clientId> —— 两者不能混用。
+find_peer() {
+  local want=$1 prefix=$2
+  api GET /peers 2>/dev/null | python3 -c '
 import json,sys
-mode,needle=sys.argv[1],sys.argv[2]
-o=json.load(sys.stdin)
+want,prefix=sys.argv[1].lower(),sys.argv[2]
+try: d=json.load(sys.stdin)
+except Exception: raise SystemExit
 out=[]
 def walk(x):
     if isinstance(x,dict):
-        for k,v in x.items():
-            if mode=="key" and k==needle and isinstance(v,str): out.append(v)
-            walk(v)
+        pid=x.get("peerId") or x.get("id") or ""
+        nm=str(x.get("name") or "")
+        if isinstance(pid,str) and pid.startswith(prefix) and want in nm.lower():
+            out.append(pid)
+        for v in x.values(): walk(v)
     elif isinstance(x,list):
         for v in x: walk(v)
-    elif isinstance(x,str) and mode=="prefix" and x.startswith(needle): out.append(x)
-walk(o)
+walk(d)
 for v in dict.fromkeys(out): print(v)
-' "$1" "$2"
+' "$want" "$prefix" | head -1
 }
 
-say "0/7 环境：shairport-sync + avahi + ffmpeg"
+status_song() {
+  # 切歌判据必须看「歌曲真的换了」，不能只看 POST /next 返回 200。
+  api GET "/peers/group%3A${GID}/status" 2>/dev/null | python3 -c '
+import json,sys
+try: d=json.load(sys.stdin)
+except Exception: print(""); raise SystemExit
+m=d.get("media") or {}
+# group.media 在换曲窗口可能为 null（基准文档已知缺陷），退回 duration：
+# CI 的 10 首测试音时长各不相同（46~55s），duration 变化同样是「真换曲」证据。
+print(m.get("songId") or m.get("id") or m.get("title") or d.get("duration") or "")
+' 2>/dev/null || true
+}
+
+frame_count() {
+  wc -l < "$WORK/sendspin_frames.jsonl" 2>/dev/null | tr -d ' ' || echo 0
+}
+
+say "0/8 环境：shairport-sync + avahi + ffmpeg + aiosendspin"
 sudo apt-get update -qq >/dev/null
-sudo apt-get install -y -qq shairport-sync avahi-daemon avahi-utils ffmpeg jq >/dev/null
+sudo apt-get install -y -qq shairport-sync avahi-daemon avahi-utils ffmpeg jq python3-venv >/dev/null
 shairport-sync -h > "$WORK/logs/shairport-help.txt" 2>&1 || true
-grep -qi pipe "$WORK/logs/shairport-help.txt" || die "shairport-sync 未编译 pipe 输出后端（见 help 日志）"
-grep -qi avahi "$WORK/logs/shairport-help.txt" || die "shairport-sync 未编译 avahi mDNS 后端（见 help 日志）"
-# apt 安装会顺手拉起系统自带的 shairport-sync（占 5000 端口 + 广播另一个名字），
-# 必须先停掉，否则我们的实例启动即 fatal: could not establish a service on port 5000。
+if [ "${#AP_NAMES[@]}" -gt 0 ]; then
+  grep -qi pipe "$WORK/logs/shairport-help.txt" || die "shairport-sync 未编译 pipe 输出后端"
+  grep -qi avahi "$WORK/logs/shairport-help.txt" || die "shairport-sync 未编译 avahi mDNS 后端"
+fi
+# apt 会顺手拉起系统自带的 shairport-sync（占 5000 端口 + 广播另一个名字），先停掉。
 sudo systemctl stop shairport-sync >/dev/null 2>&1 || true
 sudo systemctl disable shairport-sync >/dev/null 2>&1 || true
-pkill -x shairport-sync >/dev/null 2>&1 || true
+sudo pkill -x shairport-sync >/dev/null 2>&1 || true
 sudo avahi-daemon -D >/dev/null 2>&1 || sudo service avahi-daemon start >/dev/null 2>&1 || true
 avahi-browse -at >/dev/null 2>&1 || true
 
-# FIFO 必须有读者，否则 shairport 会阻塞在写端。
-rm -f "$WORK/ap.pipe"; mkfifo "$WORK/ap.pipe"
-(dd if="$WORK/ap.pipe" of=/dev/null bs=4096 >/dev/null 2>&1 & echo $! > "$WORK/dd.pid")
-cat > "$WORK/shairport.conf" <<EOF
+# 每个 AirPlay 接收端独立 FIFO（必须有读者，否则 shairport 阻塞在写端）+ 独立 RAOP 端口。
+for i in "${!AP_NAMES[@]}"; do
+  idx=$((i + 1)); name=${AP_NAMES[$i]}; fifo="$WORK/ap${idx}.pipe"
+  rm -f "$fifo"; mkfifo "$fifo"
+  (dd if="$fifo" of=/dev/null bs=4096 >/dev/null 2>&1 & echo $! >> "$WORK/aux.pids")
+  cat > "$WORK/shairport${idx}.conf" <<EOF
 general =
 {
-  name = "MF-CI-Receiver";
+  name = "${name}";
   output_backend = "pipe";
   mdns_backend = "avahi";
   regtype = "_raop._tcp";
-  port = 5100;
+  port = $((5100 + i));
   interpolation = "basic";
 };
 pipe =
 {
-  name = "${WORK}/ap.pipe";
+  name = "${fifo}";
 };
 EOF
-sudo shairport-sync -vvv -c "$WORK/shairport.conf" > "$WORK/logs/shairport.log" 2>&1 &
-echo $! > "$WORK/shairport.pid"
-sleep 3
-kill -0 "$(cat "$WORK/shairport.pid")" 2>/dev/null || {
-  cat "$WORK/logs/shairport.log" >&2
-  die "shairport-sync 启动失败"
-}
-say "接收端已广播 _raop._tcp: MF-CI-Receiver"
+  sudo shairport-sync -vvv -c "$WORK/shairport${idx}.conf" \
+    > "$WORK/logs/shairport${idx}.log" 2>&1 &
+  echo $! >> "$WORK/aux.pids"
+done
 
-say "1/7 启动被测镜像（空库）"
-# 容器内进程 uid 与 runner 用户不一定一致，给空库目录开放写权限。
+# 纯 sendspin / 混合组都要拨入播放器。注意 9.x 才带 Noise 加密握手，
+# 6.x 前加密时代版本连不上合规服务端（docs/archive/sendspin/sendspin-sim-player.md）。
+if [ "${#SS_NAMES[@]}" -gt 0 ]; then
+  python3 -m venv "$WORK/venv" >/dev/null
+  "$WORK/venv/bin/pip" install -q 'aiosendspin==9.1.1' >/dev/null
+  for name in "${SS_NAMES[@]}"; do
+    MF_SS_NAME="$name" MF_SS_FRAME_OUT="$WORK/sendspin_frames.jsonl" \
+      "$WORK/venv/bin/python" "$REPO/backend/scripts/baseline/sendspin_frame_probe.py" \
+      > "$WORK/logs/sendspin-${name}.log" 2>&1 &
+    echo $! >> "$WORK/aux.pids"
+  done
+fi
+sleep 3
+say "接收端已广播：airplay=[${AP_NAMES[*]:-}] sendspin=[${SS_NAMES[*]:-}]"
+
+say "1/8 启动被测镜像（空库）"
 chmod -R a+rwX "$WORK/data" "$WORK/music"
 docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
 docker run -d --name "$CONTAINER" --network host \
@@ -132,9 +197,9 @@ for i in $(seq 1 90); do
   [ "$i" -eq 90 ] && { docker logs "$CONTAINER" --tail 80 >&2; die "容器 90s 内未响应 /ping"; }
 done
 
-say "2/7 建测试用户（admin 首次登录带 must_change_password，不用它）"
+say "2/8 建测试用户（admin 首次登录带 must_change_password，不用它）"
 docker stop "$CONTAINER" >/dev/null
-# 容器写出的 db 文件属主是容器内 uid，runner 用户可能只有读权限。
+# 容器写出的 db 属主是容器内 uid，runner 用户可能只有读权限。
 sudo python3 - "$WORK/data/musicflow.db" "$CI_USER" "$CI_PASS" <<'PY'
 import hashlib, sqlite3, sys, uuid
 db, user, pw = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -154,93 +219,100 @@ for i in $(seq 1 60); do
   [ "$i" -eq 60 ] && die "测试用户认证 60s 内未通过"
 done
 
-say "3/7 启用 AirPlay 接收插件并等待模拟设备上线"
+say "3/8 启用接收插件并等待设备上线"
 PLUGINS=$(api GET /plugins) || die "GET /plugins 失败"
 # /v1/plugins 返回的 id 是 DB 行 id（UUID），name 才是 airplay-renderer 这类稳定标识。
-PID=$(printf '%s' "$PLUGINS" | python3 -c '
+plugin_id() {
+  printf '%s' "$PLUGINS" | python3 -c '
 import json,sys
-d=json.load(sys.stdin)
+d=json.load(sys.stdin); key=sys.argv[1].lower()
 rows=d if isinstance(d,list) else (d.get("plugins") or [])
 for p in rows:
-    if "airplay" in str(p.get("name","")).lower():
-        print(p.get("id") or p.get("name")); break
-')
-[ -n "$PID" ] || die "插件列表里找不到 airplay"
-# 启用接口会顺带启动接收服务；即便它返回错误，DB 里的 enabled 也可能已落库。
-# 真正的判据是下面「设备是否上线」，不要把中间步骤的 5xx 当死因。
-api PUT /plugins/"$PID" '{"enabled":true}' >/dev/null || \
-  echo "警告：启用 $PID 返回错误，继续等设备上线（以 peer 是否出现为准）"
-
-# ★ 纯 AirPlay 桥组的 PCM 源是 sendspin 组泵：sendspin 服务没起 ⇒ 泵 playMedia
-# 抛「sendspin 服务未运行」⇒ 桥 prepare 后立刻 stop ⇒ cast FAILED ⇒ 采样 0 tick。
+    if key in str(p.get("name","")).lower(): print(p.get("id") or p.get("name")); break
+' "$1"
+}
+APID=$(plugin_id airplay)
+if [ -n "$APID" ]; then api PUT /plugins/"$APID" '{"enabled":true}' >/dev/null || \
+  echo "警告：启用 airplay 插件返回错误，继续等设备上线（以 peer 为准）"; fi
+# 纯 AirPlay 桥组的 PCM 源是 sendspin 组泵：sendspin 服务没起 ⇒ 桥 prepare 后立刻 stop。
 # 空库里该插件默认不启用，必须显式 toggle（toggle 才会 startSendspinService）。
-SPID=$(printf '%s' "$PLUGINS" | python3 -c '
+SPID=$(plugin_id sendspin)
+if [ -n "$SPID" ]; then
+  SEN=$(printf '%s' "$PLUGINS" | python3 -c '
 import json,sys
-d=json.load(sys.stdin)
-rows=d if isinstance(d,list) else (d.get("plugins") or [])
+d=json.load(sys.stdin); rows=d if isinstance(d,list) else (d.get("plugins") or [])
 for p in rows:
-    if "sendspin" in str(p.get("name","")).lower():
-        print(p.get("id") or p.get("name")); break
-')
-SEN=$(printf '%s' "$PLUGINS" | python3 -c '
-import json,sys
-d=json.load(sys.stdin)
-rows=d if isinstance(d,list) else (d.get("plugins") or [])
-for p in rows:
-    if "sendspin" in str(p.get("name","")).lower():
-        print(int(bool(p.get("enabled")))); break
+    if "sendspin" in str(p.get("name","")).lower(): print(int(bool(p.get("enabled")))); break
 ' || echo 0)
-if [ -n "$SPID" ] && [ "$SEN" != "1" ]; then
-  api PUT /plugins/"$SPID"/toggle '{}' >/dev/null || die "启用 sendspin 服务失败"
-  sleep 3
-  docker logs "$CONTAINER" 2>&1 | grep -aiq 'sendspin' || \
-    echo "警告：3s 内日志未见 sendspin 启动记录，继续（以 tick 为准）"
+  [ "$SEN" = "1" ] || { api PUT /plugins/"$SPID"/toggle '{}' >/dev/null || die "启用 sendspin 服务失败"; sleep 3; }
 fi
-PEER=""
-for i in $(seq 1 90); do
-  PEER=$(api GET /peers 2>/dev/null | json_pick prefix 'airplay:' | head -1 || true)
-  [ -n "$PEER" ] && break
-  sleep 1
-done
-[ -n "$PEER" ] || { docker logs "$CONTAINER" --tail 60 >&2; die "90s 内未发现 shairport 模拟设备"; }
-echo "peer=$PEER"
 
-say "4/7 本地媒体源 + 3 分钟测试音"
-ffmpeg -hide_banner -loglevel error -f lavfi -i 'sine=frequency=440:duration=180' \
-  -ar 48000 -ac 2 -c:a flac -y "$WORK/music/ci_tone.flac" >/dev/null
-api POST /sources "{\"name\":\"mf-ci\",\"type\":\"local\",\"config\":{\"path\":\"/local/music\"}}" \
+PEERS=(); AP_MACS=()
+for name in "${AP_NAMES[@]}"; do
+  peer=""
+  for i in $(seq 1 90); do
+    peer=$(find_peer "$name" "airplay:" || true)
+    [ -n "$peer" ] && break
+    sleep 1
+  done
+  [ -n "$peer" ] || { docker logs "$CONTAINER" --tail 80 >&2; tail -60 "$WORK/logs/shairport1.log" >&2; die "90s 内未发现 $name"; }
+  PEERS+=("$peer"); AP_MACS+=("${peer#airplay:}")
+  echo "$name -> $peer"
+done
+for name in "${SS_NAMES[@]}"; do
+  peer=""
+  for i in $(seq 1 90); do
+    peer=$(find_peer "$name" "sendspin:" || true)
+    [ -n "$peer" ] && break
+    sleep 1
+  done
+  [ -n "$peer" ] || { tail -60 "$WORK/logs/sendspin-${name}.log" >&2; die "90s 内未发现 $name"; }
+  PEERS+=("$peer")
+  echo "$name -> $peer"
+done
+[ "${#PEERS[@]}" -gt 0 ] || die "拓扑 $TOPO 没有任何成员 peer"
+
+say "4/8 本地媒体源 + 10 首（切歌 5 次后仍有余量）"
+# 不同频率 + 不同时长：切歌后 songId / dur 双口径都能看出真的换了。
+for i in $(seq 1 10); do
+  freq=$((380 + i * 45)); dur=$((45 + i))
+  ffmpeg -hide_banner -loglevel error -f lavfi -i "sine=frequency=${freq}:duration=${dur}" \
+    -ar 48000 -ac 2 -c:a flac -y "$WORK/music/ci_tone_${i}.flac" >/dev/null
+done
+api POST /sources "{\"name\":\"mf-ci-${TOPO}\",\"type\":\"local\",\"config\":{\"path\":\"/local/music\"}}" \
   > "$WORK/logs/source-create.json" || die "创建 media source 失败"
-cat "$WORK/logs/source-create.json"
 api GET /sources > "$WORK/logs/sources-list.json" || die "列出 media source 失败"
-# 不信任 create 响应的 id：一律按 name 从列表反查（历史上这里取错过 id 导致 scan 404）。
 SRC=$(python3 -c '
 import json,sys
 d=json.load(open(sys.argv[1],encoding="utf-8"))
 rows=d if isinstance(d,list) else (d.get("sources") or [])
 for s in rows:
-    if s.get("name")=="mf-ci": print(s["id"]); break
-' "$WORK/logs/sources-list.json")
-[ -n "$SRC" ] || die "sources 列表里找不到 mf-ci：$(head -c 300 "$WORK/logs/sources-list.json")"
-echo "source id=$SRC"
+    if s.get("name")=="mf-ci-"+sys.argv[2]: print(s["id"]); break
+' "$WORK/logs/sources-list.json" "$TOPO")
+[ -n "$SRC" ] || die "sources 列表里找不到 mf-ci-${TOPO}"
 api POST /sources/"$SRC"/scan >/dev/null || die "触发扫描失败"
-SONG=""
+SONGS=""
 for i in $(seq 1 60); do
-  if api GET '/songs?limit=3' > "$WORK/logs/songs.json" 2>/dev/null; then
-    SONG=$(python3 -c '
+  if api GET '/songs?limit=20' > "$WORK/logs/songs.json" 2>/dev/null; then
+    SONGS=$(python3 -c '
 import json,sys
 d=json.load(open(sys.argv[1],encoding="utf-8"))
 rows=d if isinstance(d,list) else (d.get("songs") or d.get("items") or [])
-print(rows[0]["id"] if rows else "")
+print(" ".join(str(x["id"]) for x in rows[:10]))
 ' "$WORK/logs/songs.json" 2>/dev/null || true)
   fi
-  [ -n "$SONG" ] && break
+  [ -n "$SONGS" ] && break
   sleep 1
 done
-[ -n "$SONG" ] || die "扫描 60s 后仍无歌曲：$(head -c 300 "$WORK/logs/songs.json" 2>/dev/null || echo no-file)"
-echo "source=$SRC song=$SONG"
+[ -n "$SONGS" ] || die "扫描 60s 后仍无歌曲"
+read -r -a SONG_ARR <<< "$SONGS"
+[ "${#SONG_ARR[@]}" -ge 6 ] || die "歌曲数 ${#SONG_ARR[@]} < 6，撑不起 5 次切歌"
+echo "source=$SRC songs=${#SONG_ARR[@]}"
 
-say "5/7 建组并起播（采样器按组 /status 取进度）"
-GROUP_JSON=$(api POST /groups "{\"name\":\"mf-ci\",\"memberIds\":[\"$PEER\"]}") || die "建组失败"
+say "5/8 建组并起播（10 首全入队）"
+BODY=$(python3 -c 'import json,sys; print(json.dumps({"name":"mf-ci-"+sys.argv[1],"memberIds":sys.argv[2:]}))' \
+       "$TOPO" "${PEERS[@]}")
+GROUP_JSON=$(api POST /groups "$BODY") || die "建组失败"
 printf '%s' "$GROUP_JSON" > "$WORK/logs/group-create.json"
 GID=$(python3 -c '
 import json,sys
@@ -249,39 +321,96 @@ g=d.get("group") if isinstance(d,dict) else d
 print((g or {}).get("id") or "")
 ' "$WORK/logs/group-create.json")
 [ -n "$GID" ] || die "建组响应里没有 id: $GROUP_JSON"
-api POST "/peers/group%3A${GID}/queue/play" \
-  "{\"items\":[{\"songId\":\"$SONG\",\"title\":\"CI Tone\",\"mime\":\"audio/flac\"}],\"startIndex\":0}" \
+ITEMS=$(python3 -c '
+import json,sys
+print(json.dumps([{"songId":s,"title":"CI Tone "+str(i+1),"mime":"audio/flac"} for i,s in enumerate(sys.argv[1:])]))
+' "${SONG_ARR[@]}")
+api POST "/peers/group%3A${GID}/queue/play" "{\"items\":${ITEMS},\"startIndex\":0}" \
   >/dev/null || die "起播失败"
 
-say "6/7 采样 ${MINUTES} 分钟（tick/ring/prog）"
-# 先确认真的起流：cast 失败时 8 分钟采样只会得到空样本，白等且难诊断。
-TICK_READY=0
-for i in $(seq 1 45); do
-  if docker logs "$CONTAINER" 2>&1 | grep -aq '"ev":"tick"'; then TICK_READY=1; break; fi
-  sleep 2
-done
-if [ "$TICK_READY" -ne 1 ]; then
-  echo "::error::起播后 90s 内无 ev:tick，桥接未起流；容器日志尾部见下"
-  docker logs "$CONTAINER" 2>&1 | tail -120 >&2
-  tail -80 "$WORK/logs/shairport.log" >&2
-  die "bridge 未产出 tick"
+say "6/8 等起流稳态（含桥拓扑看 tick，纯 sendspin 看帧）"
+if [ "$TICK_TOPO" = "sendspin" ]; then
+  for i in $(seq 1 90); do
+    n=$(frame_count); [ "${n:-0}" -ge 20 ] && break
+    sleep 2
+  done
+  n=$(frame_count); [ "${n:-0}" -ge 20 ] || {
+    docker logs "$CONTAINER" --tail 100 >&2; tail -60 "$WORK/logs/sendspin-${SS_NAMES[0]}.log" >&2
+    die "起播后 180s 内 sendspin 帧不足 20（推流未启动）"; }
+else
+  TICK_READY=0
+  for i in $(seq 1 45); do
+    if docker logs "$CONTAINER" 2>&1 | grep -aq '"ev":"tick"'; then TICK_READY=1; break; fi
+    sleep 2
+  done
+  if [ "$TICK_READY" -ne 1 ]; then
+    echo "::error::起播后 90s 内无 ev:tick，桥接未起流"
+    docker logs "$CONTAINER" 2>&1 | tail -120 >&2
+    for f in "$WORK"/logs/shairport*.log; do tail -40 "$f" >&2; done
+    die "bridge 未产出 tick"
+  fi
 fi
-# 先让桥接跑到稳态（首包 lead + anchor 落定），再开始计数。
 sleep 12
+
+say "7/8 采样 ${MINUTES} 分钟 + 切歌 ${SWITCH_COUNT} 次（每次确认 songId 真变化）"
 export MF_USER="$CI_USER" MF_PASS="$CI_PASS" MF_GROUP_ID="$GID" \
-       MF_DEVICES="${PEER#airplay:}" MF_OUTDIR="$WORK" \
+       MF_DEVICES="$(IFS=,; echo "${AP_MACS[*]:-}")" MF_OUTDIR="$WORK" \
        MF_CONTAINER="$CONTAINER" MF_BASE_URL="$BASE"
 timeout "$((MINUTES * 60 + 30))" python3 \
-  "$REPO/docs/examples/baseline_sampler.example.py" > "$WORK/logs/sampler.log" 2>&1 || true
-# json.dumps 默认输出 `"type": "tick"`（冒号后有空格），不能用无空格 pattern 计数。
-TICKS=$(grep -ac '"type": *"tick"' "$WORK/base.jsonl" 2>/dev/null || echo 0)
-echo "采样 tick 行数=$TICKS"
-[ "$TICKS" -ge 20 ] || { tail -40 "$WORK/logs/container.log" >&2; die "tick 不足 20 条：桥接没跑起来"; }
+  "$REPO/docs/examples/baseline_sampler.example.py" > "$WORK/logs/sampler.log" 2>&1 &
+echo $! > "$WORK/sampler.pid"
 
-say "7/7 汇总 + 不变量判读"
-export MF_WATCH_DIR="$WORK"
+for k in $(seq 1 "$SWITCH_COUNT"); do
+  before=$(status_song)
+  t0=$(date +%s%3N); fb=$(frame_count)
+  api POST "/peers/group%3A${GID}/next" '{}' >/dev/null || die "第 $k 次 next 调用失败"
+  after="$before"; changed=false; settle=-1
+  for j in $(seq 1 50); do
+    after=$(status_song)
+    if [ -n "$after" ] && [ "$after" != "$before" ]; then
+      changed=true; settle=$(( $(date +%s%3N) - t0 )); break
+    fi
+    sleep 0.5
+  done
+  t1=$(date +%s%3N); fa=$(frame_count)
+  python3 - "$WORK/switch_log.jsonl" "$t0" "$t1" "$k" "$before" "$after" \
+    "$changed" "$settle" "$fb" "$fa" <<'PY'
+import json,sys
+p,*a=sys.argv[1:]
+rec={"at":int(a[0]),"t0":int(a[0]),"t1":int(a[1]),"index":int(a[2]),
+     "before":a[3],"after":a[4],"changed":a[5]=="true",
+     "settleMs":int(a[6]),"framesBefore":int(a[7] or 0),"framesAfter":int(a[8] or 0)}
+with open(p,"a",encoding="utf-8") as f: f.write(json.dumps(rec)+"\n")
+PY
+  echo "切歌 $k: $before -> $after changed=$changed settle=${settle}ms"
+  [ "$changed" = "true" ] || { echo "::error::第 $k 次切歌 25s 内 songId 未变化"; }
+  [ "$k" -lt "$SWITCH_COUNT" ] && sleep "$SWITCH_INTERVAL"
+done
+CHANGED=$(python3 -c '
+import json
+n=0
+for l in open(sys.argv[1],encoding="utf-8"):
+    try: n+=bool(json.loads(l).get("changed"))
+    except Exception: pass
+print(n)
+' "$WORK/switch_log.jsonl")
+echo "成功切歌 $CHANGED / $SWITCH_COUNT"
+[ "$CHANGED" -ge "$SWITCH_COUNT" ] || die "切歌成功数不足（$CHANGED < $SWITCH_COUNT）"
+
+wait "$(cat "$WORK/sampler.pid")" 2>/dev/null || true
+TICKS=$(grep -ac '"type": *"tick"' "$WORK/base.jsonl" 2>/dev/null || echo 0)
+echo "采样 tick 行数=$TICKS  sendspin 帧行数=$(frame_count)"
+[ "$TICK_TOPO" = "sendspin" ] || [ "$TICKS" -ge 20 ] || die "tick 不足 20 条"
+[ "$TICK_TOPO" != "sendspin" ] || [ "$(frame_count)" -ge 100 ] || die "sendspin 帧不足 100"
+
+say "8/8 汇总 + 分拓扑不变量判读"
+export MF_WATCH_DIR="$WORK" MF_SWITCH_LOG="$WORK/switch_log.jsonl" \
+       MF_SS_FRAME_LOG="$WORK/sendspin_frames.jsonl"
 python3 "$REPO/backend/scripts/baseline/baseline_cap.py" \
-  --window "$MINUTES" --label "ci-sim-$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)" \
+  --window "$MINUTES" --label "ci-sim-${TOPO}-$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)" \
   --out "$WORK/cap.json" || die "baseline_cap 失败"
+EXTRA=()
+[ "$TICK_EXPECT" -gt 0 ] && EXTRA+=(--expect-tick-devices "$TICK_EXPECT")
+[ "$TICK_TOPO" = "sendspin" ] && EXTRA+=(--min-ticks 0)
 python3 "$REPO/backend/scripts/baseline/invariant_guard.py" \
-  --input "$WORK/cap.json" --min-ticks 20
+  --input "$WORK/cap.json" --topo "$TICK_TOPO" --require-switch "${EXTRA[@]}"
