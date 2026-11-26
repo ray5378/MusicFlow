@@ -25,11 +25,14 @@ GitHub 托管 runner 没有设备、也进不了内网，**采不出 A 层数据
 用法：python3 backend/scripts/baseline/selftest.py [-v]
 """
 import argparse
+import contextlib
 import copy
 import importlib.util
+import io
 import json
 import os
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIX = os.path.join(HERE, "fixtures")
@@ -573,6 +576,151 @@ def main():
             bool(gap) and gap["audibleGapEvidence"] is True,
             "got=%s totals=%s" % ((gap or {}).get("audibleGapEvidence"),
                                   (gap or {}).get("totals")))
+
+    print("== 16. 长跑分桶趋势判据（longrun_trend）==")
+    # 长跑特有盲区：全局 p95 会被占多数的正常样本稀释，前段健康、后段劣化
+    # 在短跑判据里可能整体通过。这一节钉住「分桶斜率」判据的行为与阈值。
+    spec = importlib.util.spec_from_file_location(
+        "longrun_trend", os.path.join(HERE, "longrun_trend.py"))
+    lt = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(lt)
+
+    pins_lt = {
+        "BUCKET_SEC": 300, "MIN_BUCKETS": 3,
+        "TICK_PER_BUCKET_RATIO": 0.6, "DELTA_P50_DRIFT_MAX_US": 400_000,
+        "INQ_P50_RISE_MAX_MS": 800, "REALIGN_PER_MIN_MAX": 30,
+        "SS_FRAME_PER_BUCKET_RATIO": 0.6,
+        "RSS_GROWTH_MAX_PCT": 100, "FD_GROWTH_MAX": 200,
+    }
+    drift_pins = {k: [getattr(lt, k, None), v] for k, v in pins_lt.items()
+                  if getattr(lt, k, None) != v}
+    c.check("长跑阈值常量指纹未被放宽（9 项）", not drift_pins, "diff=%s" % drift_pins)
+
+    TPM = 30  # 每设备 tick/min，与真机一致
+
+    def gen_ticks(minutes=30, devs=("DEVICE_A", "DEVICE_B"), tpm=TPM,
+                  inq=None, delta=None, realign=None, inserted=None,
+                  silence=None, drop=None):
+        rows, step = [], 60.0 / tpm
+        for dev in devs:
+            for i in range(int(minutes * tpm)):
+                t = i * step
+                mi = int(t // 60)
+                if drop and drop(dev, mi, i):
+                    continue
+                rec = {"dev": dev, "gen": 1, "samples": 1, "state": "live",
+                       "inQueueMs": 2550.0, "deltaUs": 2_060_000.0,
+                       "realigned": 0, "silenceChunks": 0, "insertedFrames": 0,
+                       "newgenSkipFrames": 0, "late": 0, "lossMiss": 0, "lossStale": 0,
+                       "_wall": 1_700_000_000_000 + int(t * 1000)}
+                if inq:
+                    rec["inQueueMs"] = inq(dev, mi, i)
+                if delta:
+                    rec["deltaUs"] = delta(dev, mi, i)
+                if realign:
+                    rec["realigned"] = realign(dev, mi, i)
+                if inserted:
+                    rec["insertedFrames"] = inserted(dev, mi, i)
+                if silence:
+                    rec["silenceChunks"] = silence(dev, mi, i)
+                rows.append((t, rec))
+        return rows
+
+    def write_lt(ticks, ss_times=None, res=None):
+        d = tempfile.mkdtemp(prefix="mf-lt-")
+        bp = os.path.join(d, "base.jsonl")
+        with open(bp, "w", encoding="utf-8") as f:
+            for _t, rec in ticks:
+                f.write(json.dumps({"type": "tick", "data": rec}) + "\n")
+        sp = rp = ""
+        if ss_times:
+            sp = os.path.join(d, "ss.jsonl")
+            with open(sp, "w", encoding="utf-8") as f:
+                for t in ss_times:
+                    f.write(json.dumps({"t": int(t * 1000), "ts_us": 0,
+                                        "bytes": 960}) + "\n")
+        if res:
+            rp = os.path.join(d, "res.jsonl")
+            with open(rp, "w", encoding="utf-8") as f:
+                for r in res:
+                    f.write(json.dumps(r) + "\n")
+        return bp, sp, rp
+
+    def run_lt(bp, sp="", rp="", topo="airplay"):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = lt.main(["--input", bp, "--ss-input", sp, "--resource", rp,
+                          "--topo", topo])
+        return rc, buf.getvalue()
+
+    def tail(out):
+        lines = [ln for ln in out.strip().splitlines() if ln.strip()]
+        return lines[-1] if lines else "(no output)"
+
+    rc, out = run_lt(*write_lt(gen_ticks()))
+    c.check("30min 正常长跑样本判 PASS", rc == 0 and "VERDICT PASS" in out, tail(out))
+
+    # ① 后段缓冲持续上涨：全局 p95 可能仍绿，必须靠桶间斜率抓
+    rc, out = run_lt(*write_lt(gen_ticks(
+        inq=lambda d, mi, i: 2550 + max(0, mi - 20) * 150)))
+    c.check("后段缓冲持续上涨必须 FAIL（inqRise）",
+            rc == 1 and "FAIL - A_longrun.DEVICE_A.inqRise" in out, tail(out))
+
+    # ② 补帧起始落在桶边界上也要抓到（prev 跨桶保留的意义）
+    rc, out = run_lt(*write_lt(gen_ticks(
+        inserted=lambda d, mi, i: 2108 if mi >= 22 else 0)))
+    c.check("桶边界起始的补帧必须 FAIL 且能定位桶号（20~25min 桶）",
+            rc == 1 and "FAIL - A_longrun.DEVICE_A.insertedInBucket" in out
+            and "(4, 2108)" in out, tail(out))
+
+    # ③ 补静音
+    rc, out = run_lt(*write_lt(gen_ticks(
+        silence=lambda d, mi, i: 3 if mi >= 8 else 0)))
+    c.check("桶内补静音必须 FAIL", rc == 1 and "silenceInBucket" in out, tail(out))
+
+    # ④ 提前量整体搬移：500ms 漂移超过 400ms 上限
+    rc, out = run_lt(*write_lt(gen_ticks(
+        delta=lambda d, mi, i: 2_060_000 if mi < 25 else 1_560_000)))
+    c.check("桶间 deltaUs.p50 漂移必须 FAIL（deltaP50Drift）",
+            rc == 1 and "deltaP50Drift" in out, tail(out))
+
+    # ⑤ 采样断流（设备假死 / 采集掉线）
+    rc, out = run_lt(*write_lt(gen_ticks(
+        drop=lambda d, mi, i: 10 <= mi < 15 and i % 10 != 0)))
+    c.check("某桶 tick 稀疏必须 FAIL（tickPerBucket）",
+            rc == 1 and "tickPerBucket" in out, tail(out))
+
+    # ⑥ 局部对齐器空转：30/min 阈值按桶算，不能被全局均值稀释
+    rc, out = run_lt(*write_lt(gen_ticks(
+        realign=lambda d, mi, i: 0 if mi < 12 else
+        (4 * (i - 12 * TPM) if mi < 14 else 8 * TPM))))
+    c.check("桶内对齐器空转必须 FAIL（realignPerBucket）",
+            rc == 1 and "realignPerBucket" in out, tail(out))
+
+    # ⑦ sendspin 帧率衰减（纯帧通路的长会话劣化）
+    ss_decay = ([float(t) for t in range(0, 900)] +
+                [900.0 + t * 4 for t in range(0, 225)])
+    rc, out = run_lt(*write_lt([], ss_times=ss_decay), topo="sendspin")
+    c.check("sendspin 后段帧率衰减必须 FAIL", rc == 1 and "ssFrame" in out, tail(out))
+
+    # ⑧ 纯 sendspin 无 tick 是设计如此，不能判红
+    ss_flat = [t * 0.25 for t in range(0, 7200)]
+    rc, out = run_lt(*write_lt([], ss_times=ss_flat), topo="sendspin")
+    c.check("纯 sendspin 跳过 tick 判据且帧正常 PASS",
+            rc == 0 and "A_longrun.tick.skipped" in out, tail(out))
+
+    # ⑨ RSS 翻倍只 WARN：长跑没有自己的基线前不设 FAIL，避免误报打断夜间
+    res = [{"t": 1_700_000_000_000 + i * 30_000,
+            "rssKb": 300_000 if i < 30 else 700_000,
+            "fd": 60 if i < 30 else 70} for i in range(60)]
+    rc, out = run_lt(*write_lt(gen_ticks(), res=res))
+    c.check("RSS 翻倍只 WARN 不 FAIL", rc == 0 and "WARN - A_longrun.resource.rss" in out,
+            tail(out))
+
+    # ⑩ 样本太短不能给假绿
+    rc, out = run_lt(*write_lt(gen_ticks(minutes=8)))
+    c.check("桶数 < 3 必须 FAIL（不足以看趋势）",
+            rc == 1 and "A_longrun.DEVICE_A.buckets" in out, tail(out))
 
     return c.summary()
 

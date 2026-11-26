@@ -168,6 +168,7 @@ jobs:
             backend/scripts/baseline/baseline_cap.py \
             backend/scripts/baseline/baseline_guard.py \
             backend/scripts/baseline/invariant_guard.py \
+            backend/scripts/baseline/longrun_trend.py \
             backend/scripts/baseline/summary_md.py \
             backend/scripts/baseline/selftest.py \
             backend/scripts/baseline/sendspin_frame_probe.py \

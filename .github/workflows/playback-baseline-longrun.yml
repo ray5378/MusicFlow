@@ -1,0 +1,141 @@
+name: Playback Baseline Longrun
+
+# 长跑（nightly）：托管 runner 上跑 2 种拓扑的 30 分钟版。
+#
+# 只补短跑抓不到的两类问题，不重复短跑已有的覆盖：
+#   1. **缓慢劣化** —— 前 20 分钟健康、后 10 分钟缓冲持续上涨 / 提前量整体搬移。
+#      全局 p50/p95 会被占多数的正常样本稀释，必须按 5 分钟分桶看斜率，
+#      由 backend/scripts/baseline/longrun_trend.py 判。
+#   2. **长会话** —— 桥会话反复重建 25 次、sendspin 连续推流 30 分钟、
+#      容器 RSS/FD 是否单调增长（resource.jsonl）。
+#
+# 与 playback-baseline.yml 完全独立：
+#   - 不参与 tag 发版门禁，失败不影响 Release，也不动任何镜像
+#   - 独立 concurrency，不占发版体检的并发槽
+#   - 只跑 mixed + ss-only：AP 单体拓扑的短跑已覆盖，长跑的价值在混合桥与纯帧通路
+#
+# 为什么定 30 分钟（而不是 15 或 60）：
+#   - 趋势判据要 ≥3 个桶才不是噪声，5 分钟一桶 → 30 分钟给 5~6 桶，斜率可信
+#   - 25 次切歌，桥重建次数是 8 分钟版的 5 倍，gen 累加暴露面同步放大
+#   - hosted runner 是 2C/7G，跑满 1 小时 docker 自身稳定性下降、误报率上升
+#   - 仓库是 public，Actions 不计费；时长上限应由「判据可信度」决定而非成本
+#
+# 判定口径见 docs/播放基线-基准值与判读-20261126.md「长跑」一节。
+
+on:
+  schedule:
+    # 每天 UTC 19:00 = 次日 03:00 CST：避开真机白天播放，也错开发版高峰
+    - cron: "0 19 * * *"
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "采样分钟数（标签/回看窗口；真实时长由切歌次数决定）"
+        default: "30"
+        required: false
+      switch_count:
+        description: "切歌次数（每次间隔 60s）"
+        default: "25"
+        required: false
+      image_tag:
+        description: "镜像 tag（默认 main，测即将发布的内容）"
+        default: "main"
+        required: false
+
+concurrency:
+  group: playback-baseline-longrun
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  longrun:
+    name: longrun ${{ matrix.topo }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        topo: [mixed, ss-only]
+    steps:
+      - uses: actions/checkout@v4
+
+      # aiosendspin 9.x 要求 Python >=3.12
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Resolve image
+        id: image
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.image_tag || 'main' }}
+        run: |
+          set -euo pipefail
+          echo "${GH_TOKEN}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          REPO="ghcr.io/${GITHUB_REPOSITORY_OWNER}/musicflow"
+          IMAGE="${REPO}:${TAG}"
+          # nightly 默认测 :main（即将发布的内容），提前发现回归；不可用时退回 :latest
+          if ! docker manifest inspect "$IMAGE" >/dev/null 2>&1; then
+            echo "::warning::${IMAGE} 不可用，回退 latest"
+            IMAGE="${REPO}:latest"
+            docker manifest inspect "$IMAGE" >/dev/null 2>&1 || {
+              echo "::error::既没有 :${TAG} 也没有 :latest"; exit 2; }
+          fi
+          echo "image=${IMAGE}" | tee -a "$GITHUB_OUTPUT"
+          # 等镜像就绪：main 分支构建可能正在推（最多 10 分钟）
+          for i in $(seq 1 24); do
+            if docker manifest inspect "$IMAGE" >/dev/null 2>&1; then exit 0; fi
+            sleep 25
+          done
+          echo "::error::10 分钟内镜像未就绪"; exit 2
+
+      - name: Run longrun playback and judge
+        env:
+          MF_IMAGE: ${{ steps.image.outputs.image }}
+          MF_TOPO: ${{ matrix.topo }}
+          MF_MINUTES: ${{ inputs.minutes || '30' }}
+          MF_SWITCH_COUNT: ${{ inputs.switch_count || '25' }}
+          MF_SWITCH_INTERVAL: "60"
+          MF_STEADY_SEC: "90"
+          MF_WORKDIR: ${{ runner.temp }}/mf-ci-long-${{ matrix.topo }}
+        run: |
+          set -o pipefail
+          bash backend/scripts/baseline/ci_sim_playback.sh 2>&1 | tee /tmp/mf_longrun.log
+
+      - name: Write job summary
+        if: always()
+        run: |
+          {
+            echo "### 长跑基线体检 — \`${{ matrix.topo }}\` / ${{
+              inputs.minutes || '30' }}min"
+            echo ""
+            echo "镜像：\`${{ steps.image.outputs.image }}\`"
+            echo ""
+            echo "<details><summary>判读全文</summary>"
+            echo ""
+            echo '```'
+            tail -100 /tmp/mf_longrun.log 2>/dev/null || echo "(无输出)"
+            echo '```'
+            echo ""
+            echo "</details>"
+            echo ""
+            echo "> 本 workflow 不参与发版门禁：失败只表示长跑趋势异常，不影响 Release 与镜像。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload longrun evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline-longrun-${{ matrix.topo }}-${{ github.run_number }}
+          path: |
+            ${{ runner.temp }}/mf-ci-long-${{ matrix.topo }}/cap.json
+            ${{ runner.temp }}/mf-ci-long-${{ matrix.topo }}/base.jsonl
+            ${{ runner.temp }}/mf-ci-long-${{ matrix.topo }}/switch_log.jsonl
+            ${{ runner.temp }}/mf-ci-long-${{ matrix.topo }}/sendspin_frames.jsonl
+            ${{ runner.temp }}/mf-ci-long-${{ matrix.topo }}/resource.jsonl
+            ${{ runner.temp }}/mf-ci-long-${{ matrix.topo }}/logs/
+            /tmp/mf_longrun.log
+          if-no-files-found: warn
+          retention-days: 14

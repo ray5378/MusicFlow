@@ -36,6 +36,9 @@ SWITCH_COUNT=${MF_SWITCH_COUNT:-5}
 # 稳态段 60s ≈ 30 条 tick（2s/条），满足 guard 的 samplesSteady>=15。
 STEADY_SEC=${MF_STEADY_SEC:-90}
 SWITCH_INTERVAL=${MF_SWITCH_INTERVAL:-60}   # 5 次 = 300s，8 分钟采样仍留余量
+# 长跑（nightly）才有意义：短跑里容器 RSS/FD 还没稳定，采了也是噪声。
+RESOURCE_SAMPLE=0
+[ "$MINUTES" -ge 20 ] && RESOURCE_SAMPLE=1
 CI_USER=ci-probe
 CI_PASS=ci-probe
 CONTAINER=musicflow
@@ -391,9 +394,35 @@ say "7/8 采样 ${MINUTES} 分钟 + 切歌 ${SWITCH_COUNT} 次（每次确认 so
 export MF_USER="$CI_USER" MF_PASS="$CI_PASS" MF_GROUP_ID="$GID" \
        MF_DEVICES="$(IFS=,; echo "${AP_MACS[*]:-}")" MF_OUTDIR="$WORK" \
        MF_CONTAINER="$CONTAINER" MF_BASE_URL="$BASE"
-timeout "$((MINUTES * 60 + 30))" python3 \
+# 采样预算 = 稳态 + 全部切歌间隔 + 余量。不要用 MINUTES*60 硬顶：
+# 长跑里 MINUTES 只是标签/回看窗口，采样该在最后一次切歌确认后收尾，
+# 否则 wait 会空转到 timeout 白等几分钟。
+SAMPLER_BUDGET=$(( STEADY_SEC + SWITCH_COUNT * SWITCH_INTERVAL + 120 ))
+timeout "$SAMPLER_BUDGET" python3 \
   "$REPO/docs/examples/baseline_sampler.example.py" > "$WORK/logs/sampler.log" 2>&1 &
 echo $! > "$WORK/sampler.pid"
+
+# 容器资源采样：长跑专用。只写文件不做断言，阈值判读交给 longrun_trend.py。
+# 全部失败都吞掉——docker stats / exec 偶发超时不该让体检脚本 die。
+RES_PID=""
+if [ "$RESOURCE_SAMPLE" -eq 1 ]; then
+  (
+    while :; do
+      now=$(date +%s%3N)
+      rss=$(docker exec "$CONTAINER" grep -E '^VmRSS' /proc/1/status 2>/dev/null \
+              | awk '{print $2}' || true)
+      fd=$(docker exec "$CONTAINER" sh -c 'ls /proc/1/fd 2>/dev/null | wc -l' || true)
+      mem=$(docker stats --no-stream --format '{{.MemUsage}}' "$CONTAINER" 2>/dev/null || true)
+      printf '{"t":%s,"rssKb":%s,"fd":%s,"mem":"%s"}\n' \
+        "$now" "${rss:-0}" "${fd:-0}" "${mem}" >> "$WORK/resource.jsonl"
+      sleep 30
+    done
+  ) &
+  RES_PID=$!
+  echo "$RES_PID" >> "$WORK/aux.pids"
+  say "资源采样已启动（30s/次 → resource.jsonl）"
+fi
+
 say "稳态采样 ${STEADY_SEC}s（这段才参与绝对阈值判读）"
 sleep "$STEADY_SEC"
 
@@ -438,6 +467,11 @@ print(n)
 echo "成功切歌 $CHANGED / $SWITCH_COUNT"
 [ "$CHANGED" -ge "$SWITCH_COUNT" ] || die "切歌成功数不足（$CHANGED < $SWITCH_COUNT）"
 
+# 先停资源采样再等 sampler，避免资源循环一直挂到 timeout。
+if [ -n "$RES_PID" ]; then
+  kill "$RES_PID" 2>/dev/null || true
+  wait "$RES_PID" 2>/dev/null || true
+fi
 wait "$(cat "$WORK/sampler.pid")" 2>/dev/null || true
 TICKS=$(grep -ac '"type": *"tick"' "$WORK/base.jsonl" 2>/dev/null || echo 0)
 echo "采样 tick 行数=$TICKS  sendspin 帧行数=$(frame_count)"
@@ -466,3 +500,14 @@ EXTRA=()
 [ "$TICK_TOPO" = "sendspin" ] && EXTRA+=(--min-ticks 0)
 python3 "$REPO/backend/scripts/baseline/invariant_guard.py" \
   --input "$WORK/cap.json" --topo "$TICK_TOPO" --require-switch "${EXTRA[@]}"
+
+# 长跑增量判据：全局分位数抓不到「前段健康、后段劣化」，这里按 5 分钟分桶看斜率。
+# 非零退出即 job 失败（set -e），与短跑判据同等对待。
+if [ "$RESOURCE_SAMPLE" -eq 1 ]; then
+  say "9/9 长跑趋势判读（分桶斜率 + 资源增长）"
+  python3 "$REPO/backend/scripts/baseline/longrun_trend.py" \
+    --input "$WORK/base.jsonl" \
+    --ss-input "$WORK/sendspin_frames.jsonl" \
+    --resource "$WORK/resource.jsonl" \
+    --topo "$TICK_TOPO"
+fi
