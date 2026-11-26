@@ -46,8 +46,8 @@ jobs:
   test:
     name: 全量测试门禁 (vitest, 非阻塞/失败回滚)
     runs-on: ubuntu-latest
-    # vitest maxWorkers=8(2026-11-27 CI 实验,见 vitest.config.ts),上一档 4 worker
-    # 在 GitHub 实测 365s;20 分钟是给慢 runner 的裕量。
+    # vitest maxWorkers=4(2026-11-27 定稿,见 vitest.config.ts),GitHub 实测 4 worker
+    # 365s、8 worker 295s(build 单项快但 ci 变慢,整体墙钟无收益);20 分钟是慢 runner 裕量。
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4

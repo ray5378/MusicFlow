@@ -527,8 +527,8 @@ jobs:
   test:
     name: 类型检查 + 全量测试
     runs-on: ubuntu-latest
-    # 与 build.yml 保持一致:vitest maxWorkers=8(2026-11-27 CI 实验,见 vitest.config.ts),
-    # 上一档 4 worker 在 GitHub 实测 339s;20 分钟是给慢 runner 的裕量。
+    # 与 build.yml 保持一致:vitest maxWorkers=4(2026-11-27 定稿,见 vitest.config.ts),
+    # GitHub 实测 4 worker 339s、8 worker 357s(8 反而更慢);20 分钟是慢 runner 裕量。
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
