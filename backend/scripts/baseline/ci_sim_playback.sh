@@ -255,6 +255,29 @@ for name in "${SS_NAMES[@]}"; do
       > "$WORK/logs/sendspin-${name}.log" 2>&1 &
   echo $! >> "$WORK/aux.pids"
 done
+# aiosendspin 9.x 的 client/hello 不报对象键 supported_pair_methods，
+# 服务端 openWindow() 判不到可用方法 → "pairing hold ... 空激活挂起"。
+# 用 admin REST 显式 start + code 补上这一步（探针已 set_static_pin + 开窗口，
+# PAKE 由 SDK 自己应答）。adminMiddleware 已过：建测试用户时 is_admin=1。
+if [ "${#SS_NAMES[@]}" -gt 0 ]; then
+  CID=""
+  for i in $(seq 1 60); do
+    CID=$(grep -aoE 'client_id=[A-Za-z0-9_-]+' "$WORK/logs/sendspin-${SS_NAMES[0]}.log" 2>/dev/null \
+          | head -1 | cut -d= -f2 || true)
+    [ -n "$CID" ] && break
+    sleep 1
+  done
+  [ -n "$CID" ] || { tail -40 "$WORK/logs/sendspin-${SS_NAMES[0]}.log" >&2; die "探针未打印 client_id"; }
+  echo "sendspin client_id=$CID"
+  api POST /v1/sendspin/pairing/start \
+    "{\"clientId\":\"$CID\",\"method\":\"static_pin\",\"format\":\"digits\"}" >/dev/null || \
+    echo "警告：pairing/start 返回错误"
+  sleep 2
+  api POST /v1/sendspin/pairing/code \
+    "{\"clientId\":\"$CID\",\"code\":\"12345678\"}" >/dev/null || \
+    echo "警告：pairing/code 返回错误"
+  sleep 5
+fi
 
 PEERS=(); AP_MACS=()
 for name in "${AP_NAMES[@]}"; do
