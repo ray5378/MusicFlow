@@ -21,6 +21,7 @@ import { probeLocalSourceOk, parseSongPath, evictProbeOk } from "../../utils/loc
 import { loadSmbConfig, smbReadFile } from "./smbClient.js";
 import { mintSmbStreamUrl } from "./smbStream.js";
 import { existsSync } from "node:fs";
+import { stat as statAsync } from "node:fs/promises";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("RESOLVE-AUDIO");
@@ -196,8 +197,12 @@ export async function resolvePlayableRow(
   // stat 不过时**不在这里判死** —— 落回既有链路（可能是挂载瞬时丢失，或组内 web 兄弟可播）。
   const localParsed = parseSongPath((row as any).path || "");
   if (localParsed && localParsed.type === "l") {
+    // 异步 stat(2026-11-26):本函数在 sendspin 泵进程内被「曲末预取下一首」调用,
+    // 同步 `existsSync` 跨挂载点可阻塞 0.6~3.5s,直接把泵的事件循环冻住 ⇒ 曲中静音。
+    // 语义不变:stat 通过就是硬事实可播(不查任何缓存),不过则落回既有探测链。
     try {
-      if (existsSync(localParsed.filePath)) return done(row, "local-stat-ok");
+      await statAsync(localParsed.filePath);
+      return done(row, "local-stat-ok");
     } catch { /* stat 异常 → 落回既有探测链 */ }
   }
 

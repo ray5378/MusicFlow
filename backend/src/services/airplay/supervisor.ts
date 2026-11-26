@@ -101,7 +101,7 @@ class AirplaySupervisor extends RendererHostSupervisor<
           return;
         }
         if (ev.t === "bridgeStats") {
-          bridgeHealth.record(ev.deviceId, ev.inQueueMs, ev.backlogMs);
+          bridgeHealth.record(ev.deviceId, ev.inQueueMs, ev.backlogMs, ev.deviceLeadMs);
           // [S8 校准闭环]测量 → 判定 → 微调:有首包测量且已锚定才判。
           // anchorCalib 纯函数(>500ms 显著 + 测量实例绑定 + 10s 迟滞),执行走 control 的
           // bridgeNudgeDelayDevice(动态 import,避免 airplay 内部循环依赖)。
@@ -140,11 +140,21 @@ class AirplaySupervisor extends RendererHostSupervisor<
           // [S8 任务 2]载荷扩展:逐设备 holdDepth(设备持有深度)—— 逐设备投递窗口
           // ceil = max(now+2s+ahead, now+holdDepth+500ms)。sendspin 侧 childMain
           // "bridgeHealth" rpc 落地(7ba87e0d 之前 minInQueueMs 版本无接收端,转发被丢)。
+          // [方案A 2026-11-26]再扩 `deviceLeadMs`:设备侧「已收未播」。泵侧曲末续静音
+          // 量 = extraDrain −(backlog + deviceLead),不带上这一半会把「设备还能播十几秒」
+          // 判成「马上播空」而灌出可闻静音(单机 8s / 群组 30s,真机实证)。
           const min = bridgeHealth.min();
           const backlogs = bridgeHealth.backlogs();
+          const deviceLeads = bridgeHealth.deviceLeads?.() ?? {};
           if (Number.isFinite(min) || Object.keys(backlogs).length > 0) {
             void import("../sendspin/supervisor.js")
-              .then((m) => m.sendspinSupervisor.rpc("bridgeHealth", { minInQueueMs: min, backlogMs: backlogs }))
+              .then((m) =>
+                m.sendspinSupervisor.rpc("bridgeHealth", {
+                  minInQueueMs: min,
+                  backlogMs: backlogs,
+                  deviceLeadMs: deviceLeads,
+                }),
+              )
               .catch(() => {
                 /* sendspin 子进程未起（无播放）：丢弃即可，下一次 tick 再来 */
               });

@@ -1361,7 +1361,7 @@ export class BridgeSession {
         if (!ev.connected) log.warn(`bridge session 断开: device=${this.deviceId} reason=${ev.reason ?? "-"}`);
       },
       onBoundary: (gen, reason) => this.onBoundary(gen, reason),
-      onStall: () => this.onLinkStall(),
+      onStall: (ev) => this.onLinkStall(ev),
       onHeartbeat: (gen, seq, paused) => this.onBridgeHeartbeat(paused === true),
       onOverflow: (ms) => this.onReceiveOverflow(ms),
       log: (...args: unknown[]) => log.info(args.map((a) => String(a)).join(" ")),
@@ -1934,9 +1934,33 @@ export class BridgeSession {
     })}`);
   }
 
-  private onLinkStall(): void {
+  /** 断帧处理:分两级(2026-11-26,对齐 MA sendspin_bridge)。
+   *
+   *  非致命(默认 2s 无帧):**什么都不做** —— 不断流、不 flush、不清锚点。
+   *  MA 的 `_on_audio_chunk` 是纯回调,上游暂时缺数据时设备继续播已缓冲内容
+   *  (`MAX_DEVICE_BUFFER_SECONDS = 8.0`);它只有 CLI 进程真的退出才判
+   *  `transport_lost`。此前这里一命中就 flush + 清锚点 ⇒ `pull()` 立即返回 null
+   *  ⇒ producer 结束 ⇒ `scheduleRaopReconnect("stream ended")` ⇒ 整条 RAOP 会话
+   *  重建,把上游几百毫秒抖动放大成 2~5s 真静音(每首歌一次)。
+   *
+   *  致命(默认 15s 无帧):泵进程真卡死 / 组已销毁,保持链路只会一直播静音
+   *  ⇒ 走原来的断流路径,让新的泵实例重新锚定。
+   *
+   *  `commandedLeadUs` 打印出来是为了区分「上游没帧」与「锚点被推太远」:
+   *  前者 lead 正常、后者 lead 异常放大(越界推流会让投递窗口一帧都没有)。 */
+  private onLinkStall(ev: { fatal: boolean; silentMs: number }): void {
     if (this.closed || !this.aligner) return;
-    log.warn(`[airplay-bridge] link stall: device=${this.deviceId} 停推流,等待发送侧重连(无残留播放)`);
+    if (!ev.fatal) {
+      log.warn(
+        `[airplay-bridge] link stall(等待,不断流): device=${this.deviceId}` +
+          ` silentMs=${ev.silentMs} cmdLeadUs=${this.commandedLeadUs ?? "-"} gen=${this.generation}`,
+      );
+      return;
+    }
+    log.warn(
+      `[airplay-bridge] link stall fatal: device=${this.deviceId} silentMs=${ev.silentMs}` +
+        ` 判链路死亡,断流重连`,
+    );
     this.streamAborted = true;
     this.player?.flush();
     this.aligner = null;
@@ -2748,6 +2772,9 @@ export class BridgeSession {
         firstFrameTsUs: this.firstFrameTsUs === null ? null : Number(this.firstFrameTsUs),
         isAp2: this.ap2Session !== null,
         lateTotal: this.player?.bridgeLateCount ?? 0,
+        // 设备已收未播(= 内容前沿相对 A′ 的超前量,§10.5)。排空/未锚期 deltaUs 可为负
+        // (frontier 已落后墙钟),归 0 让下游「余量」判据不会被负值反噬。
+        deviceLeadMs: Math.max(0, Math.round(deltaUs / 1000)),
       });
       const nowMs = Date.now();
 
@@ -3357,6 +3384,12 @@ type BridgeStatsSink = (row: {
    *  shift 估计输入(上行链:本 sink → childMain bridgeStats → 主进程 supervisor →
    *  sendspin bridgeHealth rpc → server.bridgeLateTotal → 守卫三级分级)。 */
   lateTotal: number;
+  /** [方案A 2026-11-26] 设备侧「已收未播」时长(ms)= 本 tick 的 `deltaUs/1000`(≤0 归 0)。
+   *  上行链与 backlogMs 同路(→ supervisor bridgeHealth → sendspin server)。
+   *  为什么必须单独一列:曲末泵停投后,桥还能撑多久 = **垫子(backlogMs)+ 已收未播
+   *  (本列)**;只报垫子会把「设备还能播十几秒真实音频」误判成「马上要播空」,
+   *  泵据此灌静音 ⇒ 静音被设备完整播出(真机 2026-11-26 每首 8~30s 可闻静音)。 */
+  deviceLeadMs: number;
 }) => void;
 let bridgeStatsSink: BridgeStatsSink | null = null;
 

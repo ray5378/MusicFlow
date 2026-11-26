@@ -58,7 +58,6 @@ import {
   BRIDGE_REBASE_SHIFT_MAX_US,
   BRIDGE_SELFHEAL_RETIME_SHIFT_MAX_US,
   BRIDGE_RAOP_FRAME_US,
-  BRIDGE_TRACK_KEEP_QUEUE_ENABLED,
   BRIDGE_TRANSPORT_RECOVERY_GUARD_MS,
 } from "./constants.js";
 import { selfhealBus } from "./selfhealBus.js";
@@ -79,13 +78,6 @@ import type { PairingCoordinator } from "./pairServer.js";
 import type { BridgeBoundaryReason } from "../airplay/bridgeChannel.js";
 import type { BridgeSocketSpec } from "./bridgeAttach.js";
 import { BRIDGE_PCM_BYTES_PER_SEC, BRIDGE_QUEUE_HARD_CAP_MS, bridgeSyncGroupTimelineEnabled } from "../airplay/rates.js";
-
-/** keepTail 的旧尾最小可投存量（µs）：低于此值就当旧尾「太薄」，降级 bulk 重建缓冲。
- *
- *  240 实测（2026-11-19 12:29–12:55）：设备侧一次网络波动把缓冲抽干后，连续 6 次换代
- *  的 `keptFrames` 只有 8634~16546（0.20~0.38s），`inQueueMs` 全程 0~175 —— 因为
- *  keepTail 只看「预取就绪」，不看旧尾还剩多少，于是低缓冲被一代代继承，永不恢复。 */
-const BRIDGE_KEEP_TAIL_MIN_US = 1_000_000;
 
 /** 桥投递句柄(sendspin 侧对一座桥的最小接口)。
  *  BridgeMember 满足该接口;单测用桩实现(纯内存)。 */
@@ -271,6 +263,18 @@ export class SendspinServer {
     this.bridgeLateTotal.clear();
     for (const [id, n] of Object.entries(lateTotal)) {
       if (Number.isFinite(n) && n >= 0) this.bridgeLateTotal.set(id, n);
+    }
+  }
+
+  /** [方案A 2026-11-26]逐设备「已收未播」(ms,airplay bridgeSession tick 的 deltaUs)。
+   *  与 `bridgeBacklogMs` 同链上行,合起来 = 「泵一停投桥还能撑多久」的完整口径。
+   *  消费点 = 曲末排空的续静音量(见 streamEngine `bridgeHoldMs`)。整体替换语义同上。 */
+  readonly bridgeDeviceLeadMs = new Map<string, number>();
+
+  setBridgeDeviceLead(deviceLeadMs: Record<string, number>): void {
+    this.bridgeDeviceLeadMs.clear();
+    for (const [id, ms] of Object.entries(deviceLeadMs)) {
+      if (Number.isFinite(ms) && ms >= 0) this.bridgeDeviceLeadMs.set(id, ms);
     }
   }
 
@@ -807,6 +811,15 @@ export class SendspinGroup {
   /** 显示口径里已加回的桥 lead(ms)。按曲粘住:曲末桥会话收尾瞬间 hasBridges() 会翻 false,
    *  若跟着翻 0,显示位置当场掉 2.05s(实测 243→241)。 */
   displayLeadMs = 0;
+  /** [D1 2026-11-26] 最近一次观测到桥句柄存在的时刻(ms)。
+   *  曲末桥会话收尾的瞬间 `hasBridges()`(= bridges.size>0)会翻 false:
+   *  **群组桥有多个句柄**(HiVi+iEAST)同时归零概率低,天然躲过;
+   *  **单机桥只有 1 个** ⇒ 每首曲末 `continuityGates()` 与 `anchorLead` 双双
+   *  掉到非桥分支:放弃接续锚点(⇒ 换代清队列,桥侧 stale reason=seek 作废
+   *  ~3.5s 内容 = 可听静默缺口)+ lead 从 2.5s 掉回 2.05s 重新立锚。
+   *  240 实测(2026-11-26 19:35~19:45 solo 段):每首曲末一次,群组段 0 次。
+   *  粘住窗口内一律按「仍有桥」判定,与群组多句柄语义对齐。 */
+  bridgeSeenAtMs: number | null = null;
   /** 可听进度是否已越过上报下界:未越过(静默预填充/seek 重建中)时 pollCore 报 buffering,
    *  客户端据 playbackState!=PLAYING 停止本地插值,修复「切歌进度前进~2s 又跳回 0」循环。 */
   audibleStarted = false;
@@ -1056,16 +1069,6 @@ export class SendspinGroup {
     return this.bridgeContentEpoch;
   }
 
-  /** 最近一次 `pushBridgePrefetch` 实际写入 ring 的帧数（2026-11-19 供给侧加固）。
-   *
-   *  该函数在 `bridges.size === 0 || pcm.length === 0` 时会**早退**，但仍返回
-   *  `nextEpoch`；上层据此把「预取就绪」传给 `notifyBridgeGeneration(prefetched=true)`，
-   *  于是 `keepTail` 保留旧尾却**不做 bulk 回填**。240 实测该路径下
-   *  `bridge-prefetch-drop frames=0` + `keptFrames=7250`（0.16s）⇒ 旧尾耗尽即断粮
-   *  （inQueue 3.3s → 0、late 涨到 27928、卡顿 4 分钟）。
-   *  记下真实写入量，供 keepTail 判定。 */
-  private lastPrefetchFrames = 0;
-
   /** 全组桥待发队列的**最小值**(ms)。低缓冲自愈用它判断「系统是不是真的没料」:
    *  桥在追发时队列会被迅速吃掉,最先空的那座就是瓶颈。
    */
@@ -1081,17 +1084,15 @@ export class SendspinGroup {
 
   /** streamEngine 重锚钩子(§4.3 唯一落点,Phase 3 由 GroupPump 重锚分支调用):
    *  把新流代次推给全部桥 —— 桥清旧代次队列并发 BOUNDARY。
-   *  `prefetched`(S1 2026-11-01):边界内容已由 `pushBridgePrefetch` 按连续 ts 预先
-   *  写进本代次 ring(桥队列里有新曲开头)⇒ 本次 track 边界**不加垫片**(S3)。
-   *  只有真的预取就绪才传 true;其余(false/undefined)行为与本改造前逐字节一致。
    *  `continuity`(P2/P3 2026-11-02):本次边界是**自然换歌接续** —— 新曲首帧锚在
    *  上一曲的时间线尾上,时间轴连续。此时桥侧必须「什么都不发生」(见下方分支):
    *  不换代、不发 BOUNDARY、不清水位、不加垫片,旧曲尚未投递的尾巴由 250ms 补投
-   *  定时器继续投完,新曲首帧紧接着追加 ⇒ 两端都不丢,也没有静默等待。 */
+   *  定时器继续投完,新曲首帧紧接着追加 ⇒ 两端都不丢,也没有静默等待。
+   *  (2026-11-26:下一首预解码整条删除 ⇒ 原第三参 `prefetched` 一并消失。)
+   */
   notifyBridgeGeneration(
     generation: number,
     reason: BridgeBoundaryReason,
-    prefetched?: boolean,
     continuity?: boolean,
   ): void {
     // 换代时刻（补偿应用窗口基准，见 bridgeGenEpochMs 注释）
@@ -1153,71 +1154,16 @@ export class SendspinGroup {
     //    streamEngine 重锚分支 reason="seek"/"rehost" 都会走到这里),高于
     //    任何新水位,单靠水位会把旧内容误投给桥 → 桥以旧时间线立锚。
     //  - 水位清零(缺失/0n 哨兵 = 本代次尚未投递):下一 tick 从当前窗口重算。
-    const prevEpoch = this.bridgeContentEpoch;
     this.bridgeContentEpoch++;
-    // ★ S1/S2(2026-11-01,2026-11-02 补完):**预取交接的 track 边界不是「断点」**。
-    //   新曲内容由预取帧从「上一曲内容尾」连续接上,而旧曲尚未投递的尾巴(旧代次帧)
-    //   还排在 ring 里 —— 一次换代就把它们全过滤掉 = 曲尾被砍(真机
-    //   `staleFrames=250618`)。故把**紧邻的上一代次**帧重打成新代次,并**保留水位**
-    //   (ts ≤ 水位的帧已经投过,重投会在桥队列里重复)。
-    //   只重打 prevEpoch 一代:更老的代次帧若一并复活,会把若干首歌之前的内容
-    //   重新插进投递窗口(ring 按追加顺序扫,旧帧排在当前帧之前但 ts 可能更大)。
-    // 供给侧加固（2026-11-19）：`prefetched=true` 只表示泵侧有预取交接点，**不保证**
-    // 帧真的写进了 ring（`pushBridgePrefetch` 可能早退）。没有本代次新料时若仍 keep，
-    // 旧尾耗尽后就断粮（240 实测 keptFrames=7250 → inQueue 0 → late 27928）。
-    // 这种情况降级为 bulk 回填：宁可多灌 ~6s，也不留空窗。
-    let keepTail = reason === "track" && prefetched === true && BRIDGE_TRACK_KEEP_QUEUE_ENABLED;
-    if (keepTail && this.lastPrefetchFrames <= 0) {
-      keepTail = false;
-      this.server.log(
-        "warn",
-        `bridge-keep-degraded group=${this.name} gen=${generation} 预取未落 ring ⇒ 降级 bulk 回填`,
-      );
-    }
-    // 旧尾存量校验（2026-11-19）：keepTail 会把旧曲尾连同水位一起带进新代次，但**不做
-    // bulk 回填**。若旧尾本身只剩几百毫秒，换代后缓冲就被永久继承在低位 —— 240 实测
-    // 设备侧网络波动抽干缓冲后，连续 6 次换代 keptFrames 只有 0.20~0.38s、inQueueMs
-    // 一直 0~175，直到重启容器才恢复。这里改为：旧尾不足 1 秒就降级 bulk，让换代
-    // 重建 ~6s 缓冲（换代本就有交界，多灌料不引入额外停顿）。
-    if (keepTail) {
-      const ring = this.ringFor(this.encoderKey("pcm", 100));
-      let minOldUs = Number.MAX_SAFE_INTEGER;
-      for (const deviceId of this.bridges.keys()) {
-        const wm = this.bridgeWatermarks.get(deviceId) ?? 0n;
-        let sum = 0n;
-        for (const e of ring) {
-          if (e.ep !== prevEpoch) continue;
-          if (wm !== 0n && e.tsUs <= wm) continue; // 已投过的不算
-          sum += BigInt(e.durUs);
-        }
-        const us = Number(sum);
-        if (us < minOldUs) minOldUs = us;
-      }
-      if (minOldUs < BRIDGE_KEEP_TAIL_MIN_US) {
-        keepTail = false;
-        this.server.log(
-          "warn",
-          `bridge-keep-thin group=${this.name} gen=${generation} oldTailUs=${minOldUs} < ${BRIDGE_KEEP_TAIL_MIN_US} ⇒ 降级 bulk 重建缓冲`,
-        );
-      }
-    }
-    if (keepTail) {
-      for (const ring of this.recentByGroup.values()) {
-        for (const e of ring) if (e.ep === prevEpoch) e.ep = this.bridgeContentEpoch;
-      }
-      // 垫片=0 ⇒ 旧基准作废后按新窗口重算;队列里已有旧曲尾,不需要再 bulk 灌。
-      this.bridgeShiftAtDelivery.clear();
-      this.bridgeBulkPending.clear();
-      this.server.log("info", `bridge-track-keep group=${this.name} reStampedEpoch=${this.bridgeContentEpoch} (旧曲尾保留投递)`);
-    } else {
-      this.bridgeWatermarks.clear();
-      this.bridgeShiftAtDelivery.clear(); // [Fix D.1] 新代次 = 新基准
-      // 开局 bulk 待投登记:换代瞬间 ring 里新代帧还是空的(首帧未产出),不能就地投;
-      // 登记 pending,由 bridgePushTick 在「本代新料 ≥ BRIDGE_BACKFILL_MAX_US」时触发
-      // 一次性批量投递(bulkBackfillBridge),把接收侧 inQueue 拉到 ~6s 后由 tick 1x 续杯。
-      this.bridgeBulkPending.clear();
-      for (const deviceId of this.bridges.keys()) this.bridgeBulkPending.add(deviceId);
-    }
+    this.bridgeWatermarks.clear();
+    this.bridgeShiftAtDelivery.clear(); // [Fix D.1] 新代次 = 新基准
+    // 开局 bulk 待投登记:换代瞬间 ring 里新代帧还是空的(首帧未产出),不能就地投;
+    // 登记 pending,由 bridgePushTick 在「本代新料 ≥ BRIDGE_BACKFILL_MAX_US」时触发
+    // 一次性批量投递(bulkBackfillBridge),把接收侧 inQueue 拉到 ~6s 后由 tick 1x 续杯。
+    // (2026-11-26:删掉「保住上一代曲尾」的 keepTail 分支 —— 它只服务预取交接,
+    //  预取已删;无预取时保队尾会让旧尾耗尽后直接断粮,故恒走 bulk 重建。)
+    this.bridgeBulkPending.clear();
+    for (const deviceId of this.bridges.keys()) this.bridgeBulkPending.add(deviceId);
     // 切歌垫片(A 方案,对齐 MA set_timing 动态 lead):内容代次切换时全组统一晚 Δ
     // 起播,给桥的重锚定留窗口 —— 否则 esp32 先播、桥内对齐器裁掉新曲开头(切歌吞音)。
     //  - reason=track 且本次路由冷启(句柄重建,RAOP 握手+设备缓冲)⇒ 冷 lead;
@@ -1225,20 +1171,8 @@ export class SendspinGroup {
     //  - 生效 = 冷/暖动态自动挡(v4.9.1 起组值手动口已删;垫片与混合组锚点 lead 是
     //    两道独立防线,分工见 pendingTrackLeadUs 注释)。
     const coldBoundary = reason === "track" && !this.bridgeWarmAttach;
-    // S3(2026-11-01):**预取就绪的 track 边界不加垫片**。S1 已把新曲前 3s 按
-    // 「沿当前组游标的连续 ts」写进下一代 ring ⇒ 边界时桥队列里有货,垫片原本的
-    // 作用(用新曲开头 Δ 秒换取 Δ 秒队列深度)不再需要;继续加 pad 反而会把预取
-    // 帧整体推后,与 S2 保留的旧曲余料在 ring 上形成 Δ 空洞。
-    // 冷建会话(句柄重建/RAOP 握手)没有预取可用 ⇒ 恒走 cold pad(既有语义)。
-    // 回退:MF_BRIDGE_NEXT_TRACK_PREFETCH 关闭时 prefetched 恒 undefined ⇒ 回到
-    // 暖/冷动态挡(800ms / 2.5s),与本改造前逐字节一致。
-    const padUs = reason === "track" && prefetched === true
-      ? 0n
-      : BigInt(coldBoundary ? BRIDGE_TRACK_LEAD_COLD_US : BRIDGE_TRACK_LEAD_WARM_US);
+    const padUs = BigInt(coldBoundary ? BRIDGE_TRACK_LEAD_COLD_US : BRIDGE_TRACK_LEAD_WARM_US);
     this.pendingTrackLeadUs = padUs;
-    if (reason === "track" && prefetched === true) {
-      this.server.log("info", `bridge-track-pad group=${this.name} padUs=0 reason=prefetched`);
-    }
     // 换代投递损失统计起点（纯观测）。放在 keep/else 两分支之后统一记录，
     // 这样无论走保留旧尾还是 bulk 重建，都能量到"这一代开头亏了多少"。
     {
@@ -1427,90 +1361,6 @@ export class SendspinGroup {
     this.bridgeGapFillTailUs = target;
     this.bridgeGapFillMs += Math.round(Number(target - tail) / 1000);
     this.bridgeGapFillChunks += n;
-  }
-
-  /** S1(2026-11-01):下一首预解码 PCM 写入 ring(下一代次 ep)。
-   *
-   *  与 `pushBridgeOnlySilence` 同一范式 —— **只写 ring,绝不写成员**:不调
-   *  `pushFrame`(那会走 members / deliveredByGroup / deliveredPeak / 时间线累计),
-   *  也不碰 `pendingTrackLeadUs` / `group.current`。真正投递仍由 bridgePushTick
-   *  按可听域窗口完成。
-   *
-   *  为什么必须写到**下一代次**(`bridgeContentEpoch + 1`,不 ++epoch):
-   *  下一代次帧在 `notifyBridgeGeneration` 之前被投递侧按 ep 过滤掉(旧曲还没播完);
-   *  notify 时 epoch 恰好 ++ 到这个值,预取帧**立即**成为可投内容 ⇒ 边界处桥队列
-   *  不再断粮。若此处就 ++epoch,旧曲剩余帧(旧 ep)会被瞬间作废(边界前半秒丢音)。
-   *
-   *  @param pcm       s16le 前的 Float32 交错样本(48k/2ch,与 pushFrame 输入同域)。
-   *  @param startTsUs 首帧起点(内容域,不含垫片;由 streamEngine 按「当前组游标 +
-   *                   本曲剩余时长」算出 ⇒ 与旧曲末帧在 ring 上连续)。
-   *  @returns `nextEpoch` = 预取帧所属代次(采纳前校验用);`endTsUs` = 末帧之后的
-   *           时间点(诊断/日志用)。
-   */
-  async pushBridgePrefetch(
-    pcm: Float32Array,
-    startTsUs: bigint,
-  ): Promise<{ nextEpoch: number; endTsUs: bigint }> {
-    // 预取就绪 = 下一首内容马上进 ring,空窗续静音没有意义(继续写会与预取帧同 ts 重叠)。
-    this.endBridgeAutoTrackGap("prefetch");
-    const nextEpoch = this.bridgeContentEpoch + 1;
-    let ts = startTsUs;
-    if (this.bridges.size === 0 || pcm.length === 0) {
-      // 早退 = 帧根本没进 ring。上层仍会拿到 nextEpoch 并当作「预取就绪」，
-      // 必须让 keepTail 知道这件事（否则保留旧尾却不回填 ⇒ 断粮）。
-      this.lastPrefetchFrames = 0;
-      this.server.log(
-        "warn",
-        `bridge-prefetch-skip group=${this.name} bridges=${this.bridges.size} pcm=${pcm.length} (预取未落 ring)`,
-      );
-      return { nextEpoch, endTsUs: startTsUs };
-    }
-    const ring = this.ringFor(this.encoderKey("pcm", 100));
-    // 25ms 一片,与 pushLoop 喂料粒度同源(帧长 = 组桥唯一的排程单位)。
-    const perFrame = Math.floor((SAMPLE_RATE * CHANNELS * 25) / 1000);
-    for (let off = 0; off < pcm.length; off += perFrame) {
-      const n = Math.min(perFrame, pcm.length - off);
-      // s16le:与 PCM 编码器输出同口径(交错、小端)。逐样本钳制防削波溢出。
-      const buf = Buffer.allocUnsafe(n * 2);
-      for (let k = 0; k < n; k++) {
-        const v = pcm[off + k] ?? 0;
-        const clamped = v > 1 ? 1 : v < -1 ? -1 : v;
-        buf.writeInt16LE(clamped < 0 ? Math.round(clamped * 32768) : Math.round(clamped * 32767), k * 2);
-      }
-      // durUs 用**单声道样本数**口径(与 pushFrame 的 ring durUs 同源):n 是交错样本。
-      const durUs = Math.round((n / CHANNELS * 1_000_000) / SAMPLE_RATE);
-      ring.push({ tsUs: ts, durUs, data: buf, ep: nextEpoch });
-      ts += BigInt(durUs);
-    }
-    this.lastPrefetchFrames = ring.length > 0 ? Math.ceil(pcm.length / perFrame) : 0;
-    this.ensureBridgePushTimer();
-    return { nextEpoch, endTsUs: ts };
-  }
-
-  /** S1:采纳预取时把该代次的预取帧从 ring 移除。
-   *
-   *  为什么必须移除:ring 的不变量是「追加顺序 = ts 递增」(投递侧 `ts > hiEff ⇒
-   *  break`、pruneRecent 从头部淘汰都依赖它)。预取帧的 ts 是**未来**的,而旧曲
-   *  的尾帧在它们之后才追加 ⇒ 顺序被破坏;若不清理,投递侧扫到预取帧就 break,
-   *  之后追加的**正片帧**(ts 更小、落在窗口内)永远扫不到 = 边界后彻底断粮。
-   *
-   *  采纳后正片会从同一 ts 重新产出**同样的内容**(见 GroupPump.commitPrefetch 的
-   *  handoff),所以移除不丢内容;已经投递出去的帧留在桥队列里(水位按 ts 去重)。
-   *  @returns 移除帧数(诊断用)。 */
-  dropBridgePrefetchFrames(epoch: number): number {
-    const ring = this.recentByGroup.get(this.encoderKey("pcm", 100));
-    if (!ring) return 0;
-    let removed = 0;
-    for (let i = ring.length - 1; i >= 0; i--) {
-      if (ring[i].ep === epoch) {
-        ring.splice(i, 1);
-        removed++;
-      }
-    }
-    if (removed > 0) {
-      this.server.log("info", `bridge-prefetch-drop group=${this.name} epoch=${epoch} frames=${removed}`);
-    }
-    return removed;
   }
 
   // ---- 桥投递可听域窗口化(§6.2):补投定时器是唯一投递写者(timer-only

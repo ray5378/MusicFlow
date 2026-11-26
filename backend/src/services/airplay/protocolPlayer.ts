@@ -32,6 +32,7 @@ import {
   stopAirPlay,
 } from "./control.js";
 import type { BridgeSocketSpec } from "../sendspin/bridgeAttach.js";
+import { toDecisecond } from "../../utils/progressPrecision.js";
 
 export function createAirPlayProtocolPlayer(deviceId: string): ProtocolPlayer {
   const playerId = `airplay:${deviceId}`;
@@ -207,6 +208,12 @@ export function createAirPlayBridgePlayer(deviceId: string): ProtocolPlayer {
 }
 
 /** 统一入口：桥开关开 → 桥播放器；`MUSICFLOW_AIRPLAY_BRIDGE=0` 只作整体回滚。 */
+/** [D4 2026-11-26] 该设备当前是否由**单机桥**承载(泵在,但路由表可能瞬时缺失)。
+ *  供 /status 判断"桥路由返回 null"到底是桥真的不在,还是收尾瞬态。 */
+export function isSoloBridgeDevice(deviceId: string): boolean {
+  return soloBridgeRoutes.has(deviceId);
+}
+
 export function createAirPlayPlayerForDevice(deviceId: string): ProtocolPlayer {
   return isAirplayBridgeEnabled() ? createAirPlayBridgePlayer(deviceId) : createAirPlayProtocolPlayer(deviceId);
 }
@@ -275,7 +282,12 @@ export async function getBridgePeerStatus(deviceId: string): Promise<{
       : (st.playing ? PlaybackState.PLAYING : PlaybackState.IDLE);
     return {
       state,
-      position: Math.floor((st.positionMs || 0) / 1000),
+      // [D2 2026-11-26] 与群组同口径:取 displayPositionMs(可听位置 + 粘住的桥 lead),
+      //   不再是判定用的 positionMs。此前 group 走 display、airplay 走 position,
+      //   同一台泵两种口径 ⇒ 单独选中 AirPlay 设备时进度/歌词恒定慢 2.05s
+      //   (HA 卡片 _updateLyric 直接用这个 position 选行)。
+      // [D3] 精度统一 0.1s(见 utils/progressPrecision.ts 注释)。
+      position: toDecisecond(((st as any).displayPositionMs ?? st.positionMs ?? 0)),
       duration: Math.floor((st.durationMs || 0) / 1000),
       ...(media ? { media } : {}),
     };

@@ -145,11 +145,27 @@ export function probeLocalSourceOk(song: { id: string; path?: string | null }): 
         return true;
       })();
     }
-    return import("fs").then((fs) => {
-      if (fs.existsSync(parsed.filePath)) return true;
-      localFailCache.set(song.id, Date.now());
-      return false;
-    }).catch(() => true);
+    // 本地 l: 分支:必须用**异步 stat**(2026-11-26 曲中静音根因)。
+    // sendspin 泵进程曲末预取下一首时,经 resolvePreferredSong 对组内每个候选走到
+    // 这里;15 万首跨挂载点冷 stat 实测 0.6~3.5s(最坏 14.4s)。此前用同步
+    // `existsSync` —— Node 单线程被硬阻塞,250ms 投递定时器与 bridge-servo 的 tick
+    // 一起饿死,桥侧判 stall 后断流重连 ⇒ 每首歌一次 2~5s 真静音。
+    // MA 的 sendspin_bridge 把数据面(纯回调)与决策面彻底分开、音频进程内不允许
+    // 出现阻塞调用;此处对齐:stat 交 libuv 线程池,await 期间泵循环照常跑。
+    return import("node:fs/promises")
+      .then(async (fsp) => {
+        try {
+          await fsp.stat(parsed.filePath);
+          return true;
+        } catch (e) {
+          // 只有「确实不存在」才写负缓存。挂载瞬时抖动(EIO/ESTALE/超时)不记死,
+          // 否则 5 分钟内把就在盘上的歌判死(同 resolveAudio ★0 同源教训)。
+          const code = (e as NodeJS.ErrnoException)?.code;
+          if (code === "ENOENT" || code === "ENOTDIR") localFailCache.set(song.id, Date.now());
+          return false;
+        }
+      })
+      .catch(() => true);
   } catch {
     return Promise.resolve(true);
   }

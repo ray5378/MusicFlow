@@ -14,6 +14,11 @@ export interface BridgeHealthRow {
   /** [S8 复核④]如实命名:入向 ring 积压(ms,同 inQueueMs 口径)—— sendspin 逐设备
    *  投递窗口(ceil = max(now+2s, now+backlog+500ms))的数据源。 */
   backlogMs: number;
+  /** [方案A 2026-11-26]设备侧「已收未播」时长(ms),= bridgeSession tick 的 `deltaUs/1000`
+   *  (见 bridgeSession 顶部 §10.5:`deltaUs` 才是「设备提前拿到多久的音频」)。
+   *  `backlogMs` 只覆盖「尚未写进 RAOP 的垫子」,不含已发出但设备还没播完的那段;
+   *  两者相加才是「泵一停投,桥还能撑多久」的完整口径 —— 曲末续静音量的判据用它。 */
+  deviceLeadMs: number;
   at: number;
 }
 
@@ -27,20 +32,26 @@ const STALE_MS = 6_000;
  *  streamEngine 读到的 min() 恒为 Infinity）。挂全局对象是唯一可靠的跨模块共享。 */
 const GKEY = "__mf_bridgeHealth_v1";
 type Health = {
-  record(deviceId: string, inQueueMs: number, backlogMs?: number): void;
+  record(deviceId: string, inQueueMs: number, backlogMs?: number, deviceLeadMs?: number): void;
   min(): number;
   /** [S8 任务 2]全部有效设备的积压快照(key=deviceId)—— 转发 sendspin 用。 */
   backlogs(): Record<string, number>;
+  /** [方案A 2026-11-26]全部有效设备的「已收未播」快照(key=deviceId)—— 与 backlogs
+   *  同链上行,泵侧据此算「桥链路真实余量」。 */
+  deviceLeads(): Record<string, number>;
   reset(): void;
 };
 const existing = (globalThis as unknown as Record<string, Health | undefined>)[GKEY];
 export const bridgeHealth: Health = existing ?? {
-  record(deviceId: string, inQueueMs: number, backlogMs?: number): void {
+  record(deviceId: string, inQueueMs: number, backlogMs?: number, deviceLeadMs?: number): void {
     if (!Number.isFinite(inQueueMs)) return;
     const prev = rows.get(deviceId);
     rows.set(deviceId, {
       inQueueMs,
       backlogMs: Number.isFinite(backlogMs) ? (backlogMs as number) : (prev?.backlogMs ?? 0),
+      deviceLeadMs: Number.isFinite(deviceLeadMs)
+        ? (deviceLeadMs as number)
+        : (prev?.deviceLeadMs ?? 0),
       at: Date.now(),
     });
   },
@@ -62,6 +73,16 @@ export const bridgeHealth: Health = existing ?? {
     for (const [id, v] of rows.entries()) {
       if (now - v.at > STALE_MS) continue;
       out[id] = v.backlogMs;
+    }
+    return out;
+  },
+
+  deviceLeads(): Record<string, number> {
+    const now = Date.now();
+    const out: Record<string, number> = {};
+    for (const [id, v] of rows.entries()) {
+      if (now - v.at > STALE_MS) continue;
+      out[id] = v.deviceLeadMs;
     }
     return out;
   },

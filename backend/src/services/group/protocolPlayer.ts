@@ -21,6 +21,7 @@ import { sendspinGroupName } from "../sendspin/playerCore.js";
 import { PlaybackState, type PlayerState, type ProtocolPlayer, type QueueItem } from "../player/types.js";
 import { createLogger } from "../../utils/logger.js";
 import { randomBytes } from "node:crypto";
+import { toDecisecond } from "../../utils/progressPrecision.js";
 
 // ---- Phase 3/5:活跃桥路由(§5.1 路由快照 + §5.5 owner token)----
 // groupId → 已成功 bridgePrepare 的设备/token(流内不切路由;seek 重建不重 prepare,
@@ -939,7 +940,8 @@ export async function getGroupStatus(groupId: string): Promise<{
     const gv = front?.groups.get(gname) as any;
     return {
       state: st.paused ? "PAUSED" : st.playing ? ((st as any).buffering ? "BUFFERING" : "PLAYING") : "STOPPED",
-      position: Math.max(0, Math.floor(((st as any).displayPositionMs ?? st.positionMs) / 1000)),
+      // [D3 2026-11-26] 0.1s 精度(原 Math.floor 整秒会让消费端每 2s 校准回拽 ≤1s)。
+      position: Math.max(0, toDecisecond((st as any).displayPositionMs ?? st.positionMs)),
       duration: Math.floor(st.durationMs / 1000),
       // 实时组在则回实时(刚调过),否则回持久库值(重启后 / ug 组尚未创建)。
       volume: typeof gv?.volume === "number" ? gv.volume : persistedVolume,
@@ -961,7 +963,7 @@ export async function getGroupStatus(groupId: string): Promise<{
       const gst = await sendspinGroupPoll(gname).catch(() => ({ playing: false, paused: false, positionMs: 0, durationMs: 0, buffering: false }));
       return {
         state: gst.paused ? "PAUSED" : gst.playing ? ((gst as any).buffering ? "BUFFERING" : "PLAYING") : "STOPPED",
-        position: Math.max(0, Math.floor(((gst as any).displayPositionMs ?? gst.positionMs) / 1000)),
+        position: Math.max(0, toDecisecond((gst as any).displayPositionMs ?? gst.positionMs)),
         duration: Math.floor(gst.durationMs / 1000),
         volume: persistedVolume,
         muted: false,

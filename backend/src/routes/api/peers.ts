@@ -89,6 +89,15 @@ function slimQueueForStartup(q: any): any {
   };
 }
 
+/**
+ * [D4 2026-11-26] 桥 peer 的最近一次成功派生状态(`/status` 兜底用)。
+ * 只认 10s 内:曲末换代 / 泵重建的空窗在秒级,超窗即认"桥真的不在了"。
+ */
+const lastBridgePeerStatus = new Map<
+  string,
+  { state: string; position: number; duration: number; media?: unknown; at: number }
+>();
+
 export function registerPeers(app: Hono): void {
 app.get("/v1/peers", (c) => {
   const user = c.get("user");
@@ -213,6 +222,37 @@ app.post("/v1/peers/:peerId/local-status", async (c) => {
 // offset/size 分页:items 只含当前页,total 为完整队列长度(currentIndex 恒为绝对下标)。
 // 缺省 offset/size 返回全量(向后兼容)。
 
+/** 队列 currentIndex 项 → 对外 media 形状。
+ *  group / sendspin 成员的 /status 与 /queue 视图共用:泵侧 current 缺失时按主进程权威
+ *  队列兜底(airplay 分支 2026-11-10 起已用同一手法,这里把口径统一出来)。
+ *  durationGuardSec:对外 duration。给了就做一致性校验 —— 队列已 advance 而泵还在放
+ *  上一首时(换代窗口)宁可留空,也不要错配封面/歌词。 */
+function mediaFromQueueCurrent(snap: any, durationGuardSec?: number): any {
+  const items = Array.isArray(snap?.items) ? snap.items : [];
+  const idx = typeof snap?.currentIndex === "number" ? snap.currentIndex : -1;
+  const cur = idx >= 0 && idx < items.length ? (items[idx] as any) : undefined;
+  if (!cur?.songId) return undefined;
+  if (typeof durationGuardSec === "number" && durationGuardSec > 0 &&
+      typeof cur.duration === "number" && cur.duration > 0 &&
+      Math.abs(cur.duration - durationGuardSec) > 1) {
+    return undefined;
+  }
+  return { songId: cur.songId, title: cur.title, artist: cur.artist, album: cur.album, coverArt: cur.coverArt };
+}
+
+/** sendspin 成员的「宿主队列」快照:泵播放时队列挂在泵组名下 ——
+ *  单设备=裸 clientId,用户组=`group:<gid>`(成员表含 `sendspin:<bareId>`)。
+ *  直接查裸 id 在群组场景恒空 ⇒ status/queue 的 media 与 currentMedia 全丢
+ *  (2026-11-26 240 实证:group 与 ESP32 在 PLAYING 态 100% 无 songId)。 */
+function sendspinMemberQueueSnap(peerId: string): any {
+  const bare = peerId.slice("sendspin:".length);
+  try {
+    const host = gm.list().find((g: any) => (g.memberIds || []).includes(`sendspin:${bare}`));
+    if (host) return pm.getQueueSnapshot(`group:${host.id}`);
+  } catch { /* 组管理器不可用:回退裸 id */ }
+  return pm.getQueueSnapshot(peerId);
+}
+
 app.get("/v1/peers/:peerId/queue", (c) => {
   const peerId = decodePeerId(c);
   const snap = pm.getQueueSnapshot(peerId);
@@ -232,16 +272,14 @@ app.get("/v1/peers/:peerId/queue", (c) => {
   // ★ AirPlay 桥播放时 lastCast 恒空(音频走 sendspin 单机伪组泵,从未写会话表)⇒
   //   队列视图没有「当前曲」。用队列 current 兜底,否则客户端只看到一条空队列
   //   正在播(2026-11-10 240 现场:流转成功但界面显示未播放)。
-  if (parsed?.kind === "airplay" && !currentMedia) {
-    const cur = items[snap.currentIndex ?? 0] as any;
-    if (cur?.songId) {
-      currentMedia = {
-        songId: cur.songId,
-        title: cur.title,
-        artist: cur.artist,
-        album: cur.album,
-        coverArt: cur.coverArt,
-      } as any;
+  //   2026-11-26 扩展:group 与 sendspin 成员同样必须兜底 —— fork 模式泵侧 current
+  //   镜像为空时,group / ESP32 的 currentMedia 恒 null(240 实证 PLAYING 态 100%
+  //   无 songId);sendspin 成员查的是「宿主组」队列(泵组名 ug:<gid>)。
+  if (!currentMedia && parsed) {
+    if (parsed.kind === "airplay" || parsed.kind === "group") {
+      currentMedia = mediaFromQueueCurrent(snap);
+    } else if (parsed.kind === "sendspin") {
+      currentMedia = mediaFromQueueCurrent(sendspinMemberQueueSnap(peerId));
     }
   }
   // 可听显示延迟:上一首还可听时,队列视图的 currentMedia 也必须是旧曲(4.11.12)。
@@ -1206,6 +1244,12 @@ app.get("/v1/peers/:peerId/status", async (c) => {
   if (parsed.kind === "group") {
     try {
       const status = await getGroupStatus(parsed.id);
+      // media 兜底(2026-11-26):泵侧镜像 current 为空时按组队列 currentIndex 补。
+      // 只补 media,不动 state/position/duration —— 那三项由泵时间线权威给出。
+      if (!(status as any).media?.songId) {
+        const fb = mediaFromQueueCurrent(pm.getQueueSnapshot(peerId), status.duration);
+        if (fb) (status as any).media = fb;
+      }
       const evt = getEventManager().getEventState(getGroupLeaderDeviceId(parsed.id) || "");
       if (evt) {
         if (evt.state) status.state = evt.state;
@@ -1242,11 +1286,26 @@ app.get("/v1/peers/:peerId/status", async (c) => {
     //   STOPPED 且 media 为空,客户端显示「未播放」。
     //   非桥路径返回 null ⇒ 与改动前完全一致。
     const bridgeSt = await getBridgePeerStatus(parsed.id);
+    // [D4 2026-11-26] 桥路由瞬时返回 null(曲末换代 / 泵重建 / 收尾空窗)时**不能**
+    //   静默回落到设备会话视图:getAirPlayPeerStatus 走 RAOP 的 relTime,是与泵
+    //   完全不同的另一条时间轴(240 实测 232s vs 真实 223s),回落当场跳 2~3s,
+    //   且 state 会退化成 IDLE/STOPPED(HA 卡片据此清空正在播放的 UI)。
+    //   改为复用最近一次成功派生的桥状态(≤10s);超窗才认回落 —— 宁可少刷新一次,
+    //   也不要让两条时间轴互相打架。
     if (bridgeSt) {
       st.state = bridgeSt.state;
       st.position = bridgeSt.position;
       st.duration = bridgeSt.duration;
       if (bridgeSt.media) st.media = bridgeSt.media;
+      lastBridgePeerStatus.set(parsed.id, { ...bridgeSt, at: Date.now() });
+    } else {
+      const cached = lastBridgePeerStatus.get(parsed.id);
+      if (cached && Date.now() - cached.at <= 10_000) {
+        st.state = cached.state;
+        st.position = cached.position;
+        st.duration = cached.duration;
+        if (cached.media) st.media = cached.media;
+      }
     }
     if (st.state === "PAUSED") st.state = "PAUSED_PLAYBACK";
     else if (st.state === "IDLE") st.state = "STOPPED";
@@ -1282,7 +1341,10 @@ app.get("/v1/peers/:peerId/status", async (c) => {
         volume: vol.volume,
         muted: vol.muted,
         // 当前曲:各端靠 media.songId 变化刷新歌词/封面,缺了切歌后还挂第一首。
-        media: hold ? hold.media : srv?.currentMedia(parsed.id),
+        // 2026-11-26 兜底:群组播放时泵组名是 ug:<gid>,裸 clientId 查 currentMedia 恒空
+        // ⇒ ESP32 的 songId/封面全丢;空时按宿主组队列 currentIndex 补(duration 校验)。
+        media: hold ? hold.media
+          : (srv?.currentMedia(parsed.id) ?? mediaFromQueueCurrent(sendspinMemberQueueSnap(peerId), st.duration)),
       });
     } catch (e: any) { return c.json(apiInternalError(e), 500); }
   }

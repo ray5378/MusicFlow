@@ -101,8 +101,25 @@ export const BRIDGE_QUEUE_HARD_CAP_MS = 16_000;
 export const BRIDGE_RECEIVE_OVERFLOW_MS = 16_000;
 /** 心跳间隔(发送端;接收端 2s 无帧判 stalled,间隔须显著小于该值)。 */
 export const BRIDGE_HEARTBEAT_INTERVAL_MS = 1_000;
-/** 接收端 stall 判定:2s 未收到任何帧(§4.2)。 */
+/** 接收端「疑似断帧」判定:2s 未收到任何帧(§4.2)。
+ *
+ *  2026-11-26 起**降级为告警**:命中只记 warn + 通知上层「暂停观察」,不再断流。
+ *  真机取证:泵进程做曲末预取时被跨挂载点同步 stat 硬阻塞(实测 0.6~3.5s),
+ *  bridge-servo 的 tick 一起被饿死 ⇒ 本阈值命中 ⇒ 上层 flush + 重连 ⇒ 每首歌
+ *  一次 2~5s 真静音。短暂断帧时设备仍在播自己缓冲的内容,**不该重建传输**。
+ *  判死改用下面的 `BRIDGE_STALL_FATAL_MS`(对齐 MA sendspin_bridge:只有 CLI
+ *  进程真的不在了才判 transport_lost,而不是「几秒没数据」)。 */
 export const BRIDGE_STALL_NO_FRAME_MS = 2_000;
+
+/** 接收端「链路死亡」判定:超过此值仍无任何帧才断流重连(2026-11-26)。
+ *
+ *  取值依据:已观测最长泵内空档 5.3s(同步 stat 冻结 + servo 追赶),留 3 倍余量
+ *  取 15s。超过 15s 无帧说明泵进程真卡死或组已被销毁 —— 此时保持链路只会让设备
+ *  一直播静音,必须重连让新的泵实例重新锚定。
+ *  对照 MA:其 `MAX_DEVICE_BUFFER_SECONDS = 8.0`,缓冲抽干后也不主动断传输,等
+ *  asyncio 侧 CLI 进程退出事件;我们借同一语义,只把「进程退出」换成「长时间
+ *  无帧」这一可观测代理。 */
+export const BRIDGE_STALL_FATAL_MS = 15_000;
 
 // ---------------------------------------------------------------------------
 // 曲末排空:纯桥组的投递上界(2026-11 真机:换歌 RTP 断流 3~7s)

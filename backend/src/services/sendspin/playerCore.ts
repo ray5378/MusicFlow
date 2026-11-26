@@ -337,12 +337,13 @@ export function playCore(
   //   组过 keep_stream 门禁(成员里没有 legacy)走新路径;legacy 成员在场则退回
   //   `stream/end` 档(门禁在 canKeepStream 内判定)—— 与 MA 对 legacy 客户端行为一致。
   // ★ S1(2026-11-01 真机):纯桥组 members.size===0 ⇒ canKeepStream() 恒 false,
-  //   起播先走 finishPlayback ⇒ 桥收 BOUNDARY{stop} ⇒ RAOP FLUSH ⇒ 旧曲尾连同刚预解
-  //   的下一首头全被清(实测 staleFrames=250618 / keptFrames=0),S1 与 S2 双双失效。
-  //   本曲已有**当前代次可采纳**的预取时改走 clearPlayback(只发 BOUNDARY{track},
-  //   队列由 S2 保留),边界内容由预取帧按连续 ts 接续、旧曲尾自然播完。
-  const keepQueueForPrefetch = pump.hasPendingPrefetch(item.songId);
-  if (g.canKeepStream() || keepQueueForPrefetch) {
+  //   起播先走 finishPlayback ⇒ 桥收 BOUNDARY{stop} ⇒ RAOP FLUSH。
+  //   [2026-11-26 删除下一首预取] 旧实现靠「本曲预取已就绪 ⇒ 改走 clearPlayback
+  //   保队列」避开这次 FLUSH。真机取证(240):该捷径 39 次里 34 次触发
+  //   `bridge-start-seek reason=new-session-first-delivery`(丢 15 万帧 ≈3.5s)
+  //   + FLUSH + 百余次 realign,净亏;而「接续」272 次、`covered` 排空 8 次
+  //   全部零触发。故整条预取路径已删,这里回到只按 canKeepStream() 判定。
+  if (g.canKeepStream()) {
     g.clearPlayback();
   } else {
     // MA legacy 档(keep_stream=False):只发 `stream/end` 收尾旧流,**不报 stopped**
@@ -404,9 +405,9 @@ export function stopCore(srv: SendspinServer | null, clientId: string, keepCurre
   if (srv) {
     const p = pumpFor(srv, srv.group(clientId));
     p.stop();
-    // S1:真实停止(不是 playCore 的「stop → 换歌」中间态)⇒ 预取一并取消,
-    // 否则预解码的下一首 ffmpeg 会留在后台空转(见 GroupPump.cancelNextTrackPrefetch)。
-    // 可选调用:单测的最小泵桩只实现 pause/stop/resume,没有这个方法。
+    // 真实停止(不是 playCore 的「stop → 换歌」中间态)⇒ 跨曲状态一并作废
+    // (下一首提示 / 接续锚点记账)。可选调用:单测的最小泵桩只实现
+    // pause/stop/resume,没有这个方法。
     p.cancelNextTrackPrefetch?.();
   }
   if (!keepCurrent) {
@@ -484,7 +485,6 @@ export function playGroupCore(
   const continuity = !interrupted && pump.continuityReady(item.songId, seekPositionMs);
   pump.stop(); // 打断上一首,避免重叠推流
   if (seekPositionMs != null) pump.armSeek(seekPositionMs);
-  const keepQueueForPrefetch = pump.hasPendingPrefetch(item.songId);
   // ★ 接续时**什么边界消息都不能发**:
   //  - `clearPlayback` 会 BOUNDARY{track}(airplay 侧虽保留队列仍会重锚);
   //  - `finishPlayback` 会 BOUNDARY{stop} → RAOP FLUSH,截断旧曲尾。
@@ -494,14 +494,12 @@ export function playGroupCore(
     g.close({ keepBridgeDelivery: true });
   } else {
     // 关旧编码器清残留分段(与 playCore 同因:无声事故)—— 两种路径都要。
-    // ★ S1(2026-11-02 修正):有可采纳预取时 ring 里存着**新曲开头的预取帧**,
-    //   它与旧曲尚未投出的尾帧都属于同一条跨曲时间线 —— 必须 keep。旧实现这里
-    //   无差别 `close()` 清 ring(随后 pushLoop 起手的 resetPushMeter 又清一次),
-    //   预取帧被一并丢掉 ⇒ 边界后仍静默 3.8s(真机 pad-insert 实测),S1 白做。
-    g.close({ keepBridgeDelivery: keepQueueForPrefetch });
-    // ★ S1:纯桥组 canKeepStream() 恒 false,有可采纳预取时改走 clearPlayback,
-    //   避免 BOUNDARY{stop} → RAOP FLUSH 清掉旧曲尾(同 playCore 段落说明)。
-    if (g.canKeepStream() || keepQueueForPrefetch) {
+    // [2026-11-26 删除下一首预取] 旧实现只在「有可采纳预取」时 keepBridgeDelivery
+    // 以保住 ring 里的下曲首帧;预取路径已删,这里无条件下清(与连续时间线的
+    // `continuity` 分支互斥:走这条就说明不接续,旧曲尾本就要丢)。
+    g.close({ keepBridgeDelivery: false });
+    // 纯桥组 canKeepStream() 恒 false ⇒ 走 legacy 档。
+    if (g.canKeepStream()) {
       g.clearPlayback();
     } else {
       // MA legacy 档:只发 `stream/end` 收尾旧流,**不报 stopped**(同 playCore)。
@@ -514,7 +512,7 @@ export function playGroupCore(
   }
   log.info(
     `[Sendspin][continuity] group=${groupName} song=${item.songId} interrupted=${interrupted} ` +
-      `continuity=${continuity} keepPrefetch=${keepQueueForPrefetch}`,
+      `continuity=${continuity}`,
   );
   // 发布位置:入参是**内容毫秒**,泵时间轴是输出流毫秒(倍速已压缩音频)⇒ 除以 rate。
   g.positionMs = seekPositionMs != null ? Math.max(0, Math.round(seekPositionMs / rate)) : 0;
@@ -559,7 +557,7 @@ export function stopGroupCore(srv: SendspinServer | null, groupName: string): vo
   const g = srv.group(groupName);
   const p = pumpFor(srv, g);
   p.stop();
-  // S1:组真实停止 ⇒ 取消下一首预取(同 stopCore;playGroupCore 的 stop→换歌中间态不动)。
+  // 组真实停止 ⇒ 跨曲状态作废(同 stopCore;playGroupCore 的 stop→换歌中间态不动)。
   // 可选调用:单测的最小泵桩没有该方法。
   p.cancelNextTrackPrefetch?.();
   clearGroupBridges(g);

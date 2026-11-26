@@ -61,10 +61,12 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
           actualSendAtUs: row.actualSendAtUs,
           commandedAnchorUs: row.commandedAnchorUs,
           firstPacketLeadUs: row.firstPacketLeadUs,
-        firstFrameTsUs: row.firstFrameTsUs,
-        isAp2: row.isAp2,
-        lateTotal: row.lateTotal,
-      });
+          firstFrameTsUs: row.firstFrameTsUs,
+          isAp2: row.isAp2,
+          lateTotal: row.lateTotal,
+          // [方案A 2026-11-26] 设备已收未播 —— 泵侧曲末续静音量的必需分量。
+          deviceLeadMs: row.deviceLeadMs,
+        });
       } catch {
         /* 上报失败不影响推流 */
       }

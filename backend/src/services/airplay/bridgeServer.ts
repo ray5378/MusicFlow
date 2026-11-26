@@ -30,7 +30,7 @@ import {
   FRAME_TYPE,
   type BridgeFrame,
 } from "./bridgeChannel.js";
-import { PROTOCOL_CAPS, BRIDGE_RECEIVE_OVERFLOW_MS, BRIDGE_STALL_NO_FRAME_MS, SENDSPIN_RATE, type BridgeProtocol } from "./rates.js";
+import { PROTOCOL_CAPS, BRIDGE_RECEIVE_OVERFLOW_MS, BRIDGE_STALL_NO_FRAME_MS, BRIDGE_STALL_FATAL_MS, SENDSPIN_RATE, type BridgeProtocol } from "./rates.js";
 import { PolyphaseResampler, floatToPcmS16, pcmS16ToFloat } from "./resampler.js";
 
 export interface BridgeServerOpts {
@@ -39,8 +39,11 @@ export interface BridgeServerOpts {
   protocol: BridgeProtocol;
   /** 落盘模式输出文件(s16le,重采样后速率);缺省不落盘。 */
   dumpPath?: string;
-  /** stall 判定阈值(默认 2000ms,§4.2)。 */
+  /** 「疑似断帧」告警阈值(默认 2000ms,§4.2):只告警,**不断流**。 */
   stallAfterMs?: number;
+  /** 「链路死亡」阈值(默认 15000ms):超过才通知上层断流重连。
+   *  两级分离的来由见 rates.ts `BRIDGE_STALL_NO_FRAME_MS` 注释(2026-11-26 曲中静音)。 */
+  stallFatalMs?: number;
   /** stall 轮询周期(默认 500ms)。 */
   checkIntervalMs?: number;
   /** CONFIG 握手超时(默认 5000ms):超时未发 CONFIG 断连。 */
@@ -71,7 +74,9 @@ export interface BridgeServerHandlers {
   /** paused = HEARTBEAT flags bit1(§5.4 组泵暂停指示;Phase 5)。 */
   onHeartbeat?: (generation: number, sequence: number, paused?: boolean) => void;
   onSession?: (ev: BridgeSessionEvent) => void;
-  onStall?: () => void;
+  /** 断帧通知:`fatal=false` 只是「暂停观察」,实现方**不得**断流;
+   *  `fatal=true` 表示超过 `stallFatalMs` 仍无帧,才允许 flush + 重连。 */
+  onStall?: (ev: { fatal: boolean; silentMs: number }) => void;
   onOverflow?: (backlogMs: number) => void;
   log?: (...args: unknown[]) => void;
 }
@@ -95,6 +100,8 @@ interface BridgeSession {
   configOk: boolean;
   lastFrameUs: bigint;
   stallActive: boolean;
+  /** 已上报致命 stall(防每轮轮询重复通知);收帧后复位。 */
+  stallFatal: boolean;
   configTimer: NodeJS.Timeout | null;
   lastSeq: number;
   lastSeqGen: number;
@@ -200,6 +207,7 @@ export class BridgeServer {
       configOk: false,
       lastFrameUs: nowUs(),
       stallActive: false,
+      stallFatal: false,
       configTimer: null,
       lastSeq: 0,
       lastSeqGen: 0,
@@ -230,6 +238,7 @@ export class BridgeServer {
     this.stats_.bytesReceived += FRAME_HEADER_SIZE + frame.payload.byteLength;
     session.lastFrameUs = nowUs();
     session.stallActive = false;
+    session.stallFatal = false;
 
     if (!session.configOk) {
       if (frame.type !== FRAME_TYPE.CONFIG) {
@@ -357,16 +366,33 @@ export class BridgeServer {
     return 0; // 落盘不积压
   }
 
+  /** 两级断帧检测(2026-11-26,对齐 MA「断帧 != 传输死亡」)。
+   *
+   *  一级 `stallAfterMs`(2s):只告警 + 通知 `fatal:false`。此刻设备侧缓冲还够播,
+   *  上游通常马上补帧 —— 断流重连反而制造 2~5s 真空。
+   *  二级 `stallFatalMs`(15s):真的死了,通知 `fatal:true` 让上层重建会话。
+   *  收帧即复位两级标志(handleFrame),所以「抖动→恢复→再抖」每次都重新计时。 */
   private checkStalls(): void {
-    const thresholdUs = BigInt(this.opts.stallAfterMs ?? BRIDGE_STALL_NO_FRAME_MS) * 1000n;
+    const warnUs = BigInt(this.opts.stallAfterMs ?? BRIDGE_STALL_NO_FRAME_MS) * 1000n;
+    const fatalUs = BigInt(this.opts.stallFatalMs ?? BRIDGE_STALL_FATAL_MS) * 1000n;
     const now = nowUs();
     for (const s of this.sessions) {
-      if (!s.configOk || s.stallActive) continue;
-      if (now - s.lastFrameUs > thresholdUs) {
+      if (!s.configOk || s.stallFatal) continue;
+      const silentUs = now - s.lastFrameUs;
+      if (silentUs <= warnUs) {
+        s.stallActive = false;
+        continue;
+      }
+      if (!s.stallActive) {
         s.stallActive = true;
         this.stats_.stalls++;
-        this.log(`stall: no frame for ${this.opts.stallAfterMs ?? BRIDGE_STALL_NO_FRAME_MS}ms`);
-        this.handlers.onStall?.();
+        this.log(`stall: no frame for ${Number(warnUs / 1000n)}ms(保持链路,等数据回来)`);
+        this.handlers.onStall?.({ fatal: false, silentMs: Number(silentUs / 1000n) });
+      }
+      if (silentUs > fatalUs) {
+        s.stallFatal = true;
+        this.log(`stall fatal: no frame for ${Number(silentUs / 1000n)}ms ⇒ 判链路死亡`);
+        this.handlers.onStall?.({ fatal: true, silentMs: Number(silentUs / 1000n) });
       }
     }
   }

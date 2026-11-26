@@ -459,6 +459,11 @@ export class SendspinChildController extends ChildRpcHost<SendspinChildToParent,
         // 的 shift 估计输入。缺省空对象 = 无数据,守卫按「无增量」处理(不乱估)。
         const lt = (p as { lateTotal?: Record<string, number> }).lateTotal;
         if (lt && typeof lt === "object") srv?.setBridgeLateTotal(lt);
+        // [方案A 2026-11-26] 设备侧「已收未播」,与 backlogMs 同链上行。泵侧曲末
+        // 续静音量 = extraDrain −(backlog + deviceLead) ⇒ 只有真会播空才补,
+        // 否则一帧不补(旧行为无条件补满 ⇒ 每首 8~30s 可闻静音)。
+        const dl = (p as { deviceLeadMs?: Record<string, number> }).deviceLeadMs;
+        if (dl && typeof dl === "object") srv?.setBridgeDeviceLead(dl);
         return null;
       }
       case "applyCfg": {
