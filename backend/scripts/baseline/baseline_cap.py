@@ -37,6 +37,9 @@ CONTAINER = os.environ.get("MF_CONTAINER", "musicflow")      # 容器名（指�
 IMAGE = os.environ.get("MF_IMAGE", "ray5378/musicflow:latest")  # 镜像名（指纹用）
 # 设备名义容量（AirPlay 接收端缓冲上限, ms）。手册 C-6b / 实测 inQMs 溢出判据用此值。
 DEV_CAP_MS = 4163
+# 切歌后「暂态」窗口 ms：混合组锚点 lead 5s + 预填充 ~10s 的覆盖。
+# 窗口内的水位/阶跃不算稳态病态，但仍必须有 tick / 音频帧证明链路活着。
+SWITCH_WINDOW_MS = int(os.environ.get("MF_SWITCH_WINDOW_MS", "15000"))
 
 tick_by_dev = defaultdict(list)      # dev -> [(sec, data)]
 ring_by_dev = defaultdict(list)      # dev -> [(sec, data)]
@@ -195,7 +198,8 @@ def delta_of(series, field):
     return tot
 
 
-def analyze_tick(dev, series):
+def _tick_metrics(series):
+    """一段 tick 的原始统计（稳态段 / 切歌段共用同一套口径）。"""
     if len(series) < 10:
         return None
     series = sorted(series, key=lambda x: x[0])
@@ -252,6 +256,40 @@ def analyze_tick(dev, series):
     # 用户最关心的「有没有可听缺口」一票否决项
     out["audibleGapEvidence"] = bool(out["totals"]["silenceChunks"]) or bool(
         out["deltaUs"]["negPct"] and out["deltaUs"]["negPct"] > 1.0)
+    return out
+
+
+def analyze_tick(dev, series, switch_rows=None):
+    """稳态判据 + 切歌暂态分段证据。
+
+    ★ 为什么必须分段：v4.15.8 正常态在**切歌窗口**同样会出现
+    inQueueMs 拉高、deltaUs 下降、realigned 阶跃（混合组锚点 lead 5s +
+    预填充 ~10s）。把 5 次切歌的暂态混进全局 p95，正常版本也会被判红 ——
+    这不是「放宽阈值」，而是把两种物理状态分开：稳态用原绝对阈值判死，
+    切歌窗口只要求桥仍在出 tick（能恢复），不拿稳态水位要求它。
+    """
+    series = sorted(series, key=lambda x: x[0])
+    if len(series) < 10:
+        return None
+    windows = [(int(sw["t0"]), int(sw["t0"]) + SWITCH_WINDOW_MS)
+               for sw in (switch_rows or [])
+               if isinstance(sw.get("t0"), (int, float))]
+    steady, trans = series, []
+    if windows:
+        def in_window(item):
+            w = (item[1] or {}).get("_wall") if isinstance(item[1], dict) else None
+            return isinstance(w, (int, float)) and any(a <= w <= b for a, b in windows)
+        steady = [x for x in series if not in_window(x)]
+        trans = [x for x in series if in_window(x)]
+    out = _tick_metrics(steady)
+    if out is None:
+        return None
+    out["samplesTotal"] = len(series)
+    out["samplesSteady"] = len(steady)
+    if trans:
+        tm = _tick_metrics(trans)
+        if tm:
+            out["switchWindow"] = tm
     return out
 
 
@@ -359,14 +397,27 @@ def analyze_switch(rows, window_min):
 
 
 def analyze_ss_frames(rows, switch_rows):
-    """sendspin 音频帧真值。纯 sendspin 组没有桥 tick，这一层替代 A_tick。"""
+    """sendspin 音频帧真值。纯 sendspin 组没有桥 tick，这一层替代 A_tick。
+
+    和 tick 一样按切歌窗口分段：切歌等待期的帧间隔不参与 maxGapMs 判据，
+    但仍要求每个切歌窗口确实收到帧（perSwitch），否则就是「切完没声」。
+    """
     if not rows:
         return None
     rows = sorted(rows, key=lambda x: x.get("t", 0))
     ts = [int(r["t"]) for r in rows if isinstance(r.get("t"), (int, float))]
+    windows = [(int(sw["t0"]), int(sw["t0"]) + SWITCH_WINDOW_MS)
+               for sw in (switch_rows or [])
+               if isinstance(sw.get("t0"), (int, float))]
+
+    def in_window(t):
+        return any(a <= t <= b for a, b in windows)
+
     if len(ts) < 2:
         return {"chunks": len(rows), "maxGapMs": None, "minPerSwitch": None}
-    gaps = [b - a for a, b in zip(ts, ts[1:]) if b >= a]
+    # 只比较同一相位内的相邻帧：跨切歌边界的大间隔是设计好的等待，不是静音缺口。
+    gaps = [b - a for a, b in zip(ts, ts[1:])
+            if b >= a and not in_window(a) and not in_window(b)]
     per_sw = []
     for sw in switch_rows or []:
         a, b = sw.get("t0"), sw.get("t1")
@@ -375,6 +426,8 @@ def analyze_ss_frames(rows, switch_rows):
     span_min = max(1e-6, (ts[-1] - ts[0]) / 60000.0)
     return {
         "chunks": len(rows),
+        "steadyChunks": sum(1 for t in ts if not in_window(t)),
+        "switchWindowChunks": sum(1 for t in ts if in_window(t)),
         "bytes": sum(int(r.get("bytes") or 0) for r in rows),
         "spanMin": r(span_min, 2),
         "chunksPerMin": r(len(rows) / span_min, 1),
@@ -465,7 +518,7 @@ def main():
         "A_switch": None, "A_ssFrame": None, "B_status": None,
     }
     for dev, series in sorted(tick_by_dev.items()):
-        res = analyze_tick(dev, series)
+        res = analyze_tick(dev, series, switch_rows)
         if res:
             doc["A_tick"][dev] = res
     for dev, series in sorted(ring_by_dev.items()):

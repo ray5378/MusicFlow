@@ -265,11 +265,32 @@ done
 for name in "${SS_NAMES[@]}"; do
   peer=""
   for i in $(seq 1 90); do
-    peer=$(find_peer "$name" "sendspin:" || true)
+    # sendspin peerId 是 clientId 派生 hash，name 来自 client/hello；SDK 的
+    # client_name 未必映射成它（实测连上后按 name 找不到）。CI 里只有一台
+    # 拨入播放器，取第一个 available 的 sendspin peer 即可（采样器同口径）。
+    peer=$(api GET /peers 2>/dev/null | python3 -c '
+import json,sys
+try: d=json.load(sys.stdin)
+except Exception: raise SystemExit
+def walk(x):
+    if isinstance(x,dict):
+        pid=x.get("peerId") or x.get("id") or ""
+        if isinstance(pid,str) and pid.startswith("sendspin:") and x.get("available", True):
+            return pid
+        for v in x.values():
+            r=walk(v)
+            if r: return r
+    elif isinstance(x,list):
+        for v in x:
+            r=walk(v)
+            if r: return r
+    return None
+print(walk(d) or "")
+' 2>/dev/null || true)
     [ -n "$peer" ] && break
     sleep 1
   done
-  [ -n "$peer" ] || { tail -60 "$WORK/logs/sendspin-${name}.log" >&2; die "90s 内未发现 $name"; }
+  [ -n "$peer" ] || { api GET /peers >&2 || true; tail -60 "$WORK/logs/sendspin-${name}.log" >&2; die "90s 内未发现可用 sendspin peer（$name）"; }
   PEERS+=("$peer")
   echo "$name -> $peer"
 done

@@ -104,6 +104,13 @@ def judge(data, min_ticks=20, topo="airplay", expect_tick_devices=0,
                     dev, "inQueueMs.overCapPct", "%.2f%% max=%.2f%%" % (over, INQ_OVER_CAP_PCT_MAX)))
         out.append(("PASS" if realign <= REALIGN_PER_MIN_MAX else "FAIL",
                     dev, "realigned/min", "%.2f max=%.2f" % (realign, REALIGN_PER_MIN_MAX)))
+        # 切歌窗口只用「桥还在出 tick」判活性，不拿稳态水位要求它
+        # （5s lead + 10s 预填充期间 inQ 必然高、realign 必然阶跃）。
+        swin = d.get("switchWindow")
+        if swin is not None:
+            nsw = int(_num(swin.get("samples")))
+            out.append(("PASS" if nsw >= 3 else "FAIL", dev, "A_tick.switchWindow.samples",
+                        "samples=%d min=3" % nsw))
 
     prog = data.get("A_prog") or {}
     rate = prog.get("advanceRate")

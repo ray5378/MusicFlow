@@ -332,6 +332,33 @@ def main():
     c.check("帧间隔 500ms 常量未被改软",
             iv.SS_FRAME_GAP_MAX_MS == 500, "got=%s" % iv.SS_FRAME_GAP_MAX_MS)
 
+    print("== 11. 切歌暂态 / 稳态分段 ==")
+    # 4.15.8 正常态在切歌窗口也会 realign 阶跃 + inQ 拉高（lead 5s + 预填充 10s）。
+    # 分段后顶层指标只代表稳态，暂态只判「桥还活着」，避免正常版本被自己的切歌判红。
+    seg = copy.deepcopy(good)
+    seg["A_switch"] = copy.deepcopy(sw_ok)
+    bad_window = copy.deepcopy(good["A_tick"][sorted(good_devs)[0]])
+    bad_window.update({"samples": 40,
+                       "deltaUs": {"negPct": 6.0, "p50": -100000},
+                       "inQueueMs": {"p95": 5900, "overCapPct": 20.0},
+                       "perMin": {"realigned": 80.0}})
+    for dev in seg["A_tick"]:
+        seg["A_tick"][dev]["switchWindow"] = copy.deepcopy(bad_window)
+    seg_fails = inv_fails(seg, require_switch=False)
+    c.check("切歌窗口的坏水位不污染稳态判定", not seg_fails, str(seg_fails))
+    dead = copy.deepcopy(seg)
+    for dev in dead["A_tick"]:
+        dead["A_tick"][dev]["switchWindow"]["samples"] = 0
+    dead_fails = inv_fails(dead, require_switch=False)
+    c.check("切歌窗口完全无 tick（桥死了）必须 FAIL",
+            any("switchWindow.samples" in m for m in dead_fails), str(dead_fails))
+    spec_cap = importlib.util.spec_from_file_location(
+        "baseline_cap", os.path.join(HERE, "baseline_cap.py"))
+    capmod = importlib.util.module_from_spec(spec_cap)
+    spec_cap.loader.exec_module(capmod)
+    c.check("切歌暂态窗口常量 15000ms 未被改软",
+            capmod.SWITCH_WINDOW_MS == 15000, "got=%s" % capmod.SWITCH_WINDOW_MS)
+
     return c.summary()
 
 

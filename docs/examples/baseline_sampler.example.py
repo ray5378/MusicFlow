@@ -287,6 +287,10 @@ def main():
                 try:
                     d = json.loads(line[line.find("{"):])
                     d["_t"] = ts
+                    # 墙钟 ms：切歌证据 switch_log.jsonl 用 epoch ms，
+                    # baseline_cap 靠它把「切歌暂态」从稳态阈值判据里剥离。
+                    # _t 只有 HH:MM:SS，跨日/换曲窗口对不齐。
+                    d["_wall"] = int(time.time() * 1000)
                     jf.write(json.dumps({"type": "tick", "data": d}, ensure_ascii=False) + "\n")
                 except Exception:
                     pass
