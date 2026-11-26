@@ -141,7 +141,8 @@ jobs:
             ${{ runner.temp }}/mf-ci-sim-${{ matrix.topo }}/base.jsonl
             ${{ runner.temp }}/mf-ci-sim-${{ matrix.topo }}/switch_log.jsonl
             ${{ runner.temp }}/mf-ci-sim-${{ matrix.topo }}/sendspin_frames.jsonl
-            ${{ runner.temp }}/mf-ci-sim-${{ matrix.topo }}/logs/
+            ${{ runner.temp }}/mf-ci-sim-${{ matrix.topo }}/playback_side.json
+            ${{ runner.temp }}/mf-ci-sim-${{ matrix.topo }}/logs/playback_side.log
             /tmp/mf_sim_run.log
           if-no-files-found: warn
           retention-days: 30
@@ -172,10 +173,13 @@ jobs:
             backend/scripts/baseline/summary_md.py \
             backend/scripts/baseline/selftest.py \
             backend/scripts/baseline/sendspin_frame_probe.py \
+            backend/scripts/baseline/playback_side_guard.py \
             docs/examples/baseline_sampler.example.py
           echo "OK: py_compile 全部通过"
 
       # 核心：判读逻辑/阈值/退出码/多拓扑切歌与帧判据的回归断言。
+      # 含播放侧硬判据（servo 冻结 / start-seek 洪水 / 曲末非零间隙 /
+      # 灌静音 / fatal stall / 预取复活）的正反样本，失败即阻塞 push/PR。
       - name: Judge selftest (baseline invariants)
         run: |
           set -o pipefail

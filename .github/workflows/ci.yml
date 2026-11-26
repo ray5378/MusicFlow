@@ -386,11 +386,11 @@ jobs:
       - name: 校验运行身份契约(默认身份/compose 无 PUID-PGID)
         run: node backend/scripts/check-runtime-identity.mjs
 
-  # 群组维度(2026-10-26 新增):G1–G18 全部是**静默失效**类契约 —— 断了不报错,只表现为
+  # 群组维度(2026-10-26 新增):G1–G19 全部是**静默失效**类契约 —— 断了不报错,只表现为
   # 「成员删不掉」「两台机器各放各的」「延迟调了没反应 / 偏一倍」「整组飘音」「一首坏源整组循环」。
   # 与 airplay-*-guard 同构:零依赖 node 脚本,只读源码文本(先剥注释),不启动服务、不连设备。
   group-invariants-guard:
-    name: "群组不变量守卫(G1–G19:成员前缀/DLNA 禁入/起播即落位/单泵/延迟补偿口径/预取完整性六闸)"
+    name: "群组不变量守卫(G1–G19:成员前缀/DLNA 禁入/起播即落位/单泵/延迟补偿口径/取源预取完整性六闸)"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

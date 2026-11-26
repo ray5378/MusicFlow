@@ -501,6 +501,20 @@ EXTRA=()
 python3 "$REPO/backend/scripts/baseline/invariant_guard.py" \
   --input "$WORK/cap.json" --topo "$TICK_TOPO" --require-switch "${EXTRA[@]}"
 
+# 播放侧硬判据（v4.15.11 补）：A 层水位/帧可以全绿而听感有曲末空洞
+# （泵提前收工 ⇒ 新会话首投 seek 丢帧）。判据回到服务端自己打的事件：
+# servo 间隔 / start-seek / flush / endUs==base 零间隙 / 灌静音 / fatal stall / 预取复活。
+# docker logs 默认无时间戳，这里用 -t 只捞关键行；3 小时长跑也只有几千行。
+SIDE_MODE=short
+[ "$RESOURCE_SAMPLE" -eq 1 ] && SIDE_MODE=long
+docker logs -t "$CONTAINER" 2>&1 \
+  | grep -aE 'bridge-servo|bridge-start-seek|bridge-flush|RAOP FLUSH|warm=false|bridge-drain-fill|silenceChunks|stall|曲末排空跳过|timeline anchored: base=|next-prefetch|bridge-prefetch|bridge-track-keep' \
+  > "$WORK/logs/playback_side.log" || true
+say "播放侧硬判据（$SIDE_MODE，关键日志 $(wc -l < "$WORK/logs/playback_side.log" 2>/dev/null || echo 0) 行）"
+python3 "$REPO/backend/scripts/baseline/playback_side_guard.py" \
+  --input "$WORK/logs/playback_side.log" --mode "$SIDE_MODE" \
+  --out "$WORK/playback_side.json" || die "播放侧硬判据 FAIL"
+
 # 长跑增量判据：全局分位数抓不到「前段健康、后段劣化」，这里按 5 分钟分桶看斜率。
 # 非零退出即 job 失败（set -e），与短跑判据同等对待。
 if [ "$RESOURCE_SAMPLE" -eq 1 ]; then

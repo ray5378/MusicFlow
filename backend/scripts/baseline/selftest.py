@@ -20,6 +20,8 @@ GitHub 托管 runner 没有设备、也进不了内网，**采不出 A 层数据
   5. 设备失配不可假绿  —— strict 模式下基准里没有的设备必须 FAIL（CI 发版体检用）
   9. CI 模拟播放判据  —— invariant_guard.py 用绝对阈值（不依赖真机基准），
                           正样本 PASS / v4.15.9 反样本 FAIL / 阈值被放宽后失去牙齿
+ 11. 播放侧硬判据      —— playback_side_guard.py 从服务端事件判泵冻结/首投 seek/
+                          曲末非零间隙/灌静音/fatal stall/预取复活，逐个反样本必红
 
 退出码：0=全部通过；1=有断言失败
 用法：python3 backend/scripts/baseline/selftest.py [-v]
@@ -721,6 +723,122 @@ def main():
     rc, out = run_lt(*write_lt(gen_ticks(minutes=8)))
     c.check("桶数 < 3 必须 FAIL（不足以看趋势）",
             rc == 1 and "A_longrun.DEVICE_A.buckets" in out, tail(out))
+
+    # ------------------------------------------------------------------
+    # 11. 播放侧硬判据（v4.15.11）：A 层水位全绿也可能有曲末空洞，
+    #     判据必须直接从服务端事件取，且每条反样本都能把对应指标判红。
+    def ps_metrics(res, level="FAIL"):
+        """播放侧 guard 返回 (level, metric, detail) 三元组，取第 2 位。"""
+        return sorted({r[1] for r in res if r[0] == level})
+
+    print("== 11. 播放侧硬判据 ==")
+    import datetime
+    import importlib.util as _ilu
+    _spec = _ilu.spec_from_file_location(
+        "playback_side_guard", os.path.join(HERE, "playback_side_guard.py"))
+    psg = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(psg)
+
+    def _iso(ep):
+        return datetime.datetime.fromtimestamp(
+            ep, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+    def ps_lines(n=40, gap_at=-1, seeks=(), flushes=0, cold=1,
+                 join_delta=0, bad_fill=False, silence=False,
+                 prefetch=False, fatal=False, skip_drain=False):
+        """构造带 UTC 时间戳的容器关键行；默认一份完全健康的样本。"""
+        out, t0 = [], 1_795_700_000.0
+        for i in range(n):
+            ep = t0 + i * 2.0
+            if i == gap_at:                       # 该点相对上一条跳 6s
+                ep = t0 + (i - 1) * 2.0 + 6.0
+            out.append("%s [sendspin] bridge-servo dev=D cursorVsNow=5800ms" % _iso(ep))
+        for i in range(cold):
+            out.append("%s [airplay-bridge] warm=false start=0s" % _iso(t0 + 1))
+        for reason in seeks:
+            out.append("%s [sendspin] bridge-start-seek dev=D reason=%s" %
+                       (_iso(t0 + 2), reason))
+        for i in range(flushes):
+            out.append("%s [airplay] RAOP FLUSH dev=D" % _iso(t0 + 3 + i))
+        if join_delta is not None:
+            out.append("%s [sendspin] sendspin 曲末排空跳过:接续下一首 continuity=1 next=abcdef12 endUs=477000000000" % _iso(t0 + 4))
+            out.append("%s [sendspin] sendspin timeline anchored: base=%d contig=477000000000 continuity=true" %
+                       (_iso(t0 + 5), 477000000000 + join_delta))
+        if bad_fill:
+            out.append("%s [sendspin] sendspin 曲末排空:桥续静音跳过 ev=bridge-drain-fill-skip reason=other bridges=1" % _iso(t0 + 6))
+        if silence:
+            out.append('%s [airplay-bridge] {"ev":"tick","silenceChunks":3}' % _iso(t0 + 7))
+        if prefetch:
+            out.append("%s [sendspin] next-prefetch song=abcdef12" % _iso(t0 + 8))
+        if fatal:
+            out.append("%s [airplay-supervisor] link stall dev=D fatal" % _iso(t0 + 9))
+        if skip_drain:
+            out.append("%s [sendspin] sendspin 曲末排空跳过:下一首预取已就绪 next=abcdef12 startTsUs=477000000000" % _iso(t0 + 10))
+        return out
+
+    healthy = ps_lines()
+    r_healthy = psg.judge(healthy)
+    c.check("播放侧：健康样本全 PASS", not ps_metrics(r_healthy), str(ps_metrics(r_healthy)))
+
+    r_frozen = psg.judge(ps_lines(gap_at=10))
+    c.check("泵冻结 6s 必须 FAIL（servo.maxGapMs）",
+            "servo.maxGapMs" in ps_metrics(r_frozen), str(ps_metrics(r_frozen)))
+
+    r_seek = psg.judge(ps_lines(seeks=[psg.COLD_START_REASON] * 4))
+    c.check("切歌中 start-seek 洪水必须 FAIL（>1 次）",
+            "startSeek.count" in ps_metrics(r_seek), str(ps_metrics(r_seek)))
+
+    r_reason = psg.judge(ps_lines(seeks=["prefetch-handoff"]))
+    c.check("非冷启动 reason 的 start-seek 必须 FAIL",
+            "startSeek.reason" in ps_metrics(r_reason), str(ps_metrics(r_reason)))
+
+    r_flush = psg.judge(ps_lines(flushes=4))
+    c.check("FLUSH 超过冷启动次数必须 FAIL",
+            "bridgeFlush.count" in ps_metrics(r_flush), str(ps_metrics(r_flush)))
+    # 真机冷启动一次 warm=false + 一次首投 seek ⇒ 两次 FLUSH 都合法，不能判红。
+    r_cold2 = psg.judge(ps_lines(flushes=2, cold=1, seeks=[psg.COLD_START_REASON]))
+    c.check("冷启动起播+首投 seek 两次 FLUSH 必须 PASS",
+            not ps_metrics(r_cold2), str(ps_metrics(r_cold2)))
+    r_flush_excess = psg.judge(ps_lines(flushes=3, cold=1, seeks=[psg.COLD_START_REASON]))
+    c.check("冷启动两次合法 FLUSH 之外的第三次必须 FAIL",
+            "bridgeFlush.count" in ps_metrics(r_flush_excess), str(ps_metrics(r_flush_excess)))
+
+    r_gap = psg.judge(ps_lines(join_delta=300_000))
+    c.check("曲末接续 Δ=300000us 必须 FAIL（零间隙）",
+            "trackJoin.zeroGap" in ps_metrics(r_gap), str(ps_metrics(r_gap)))
+
+    r_nojoin = psg.judge(ps_lines(join_delta=None))
+    c.check("无接续证据必须留 WARN 覆盖缺口（不冒充 PASS）",
+            any(r[0] == "WARN" and r[1] == "trackJoin.coverage" for r in r_nojoin),
+            str(r_nojoin))
+
+    r_fill = psg.judge(ps_lines(bad_fill=True, silence=True))
+    c.check("非 covered 灌静音 + silenceChunks>0 必须 FAIL",
+            "audibleGap.count" in ps_metrics(r_fill), str(ps_metrics(r_fill)))
+
+    r_pre = psg.judge(ps_lines(prefetch=True))
+    c.check("预取链复活必须 FAIL（v4.15.11 已整链删除）",
+            "prefetch.removed" in ps_metrics(r_pre), str(ps_metrics(r_pre)))
+
+    r_stall = psg.judge(ps_lines(fatal=True))
+    c.check("fatal stall 必须 FAIL（非致命告警不判）",
+            "stall.fatal" in ps_metrics(r_stall), str(ps_metrics(r_stall)))
+
+    r_skip = psg.judge(ps_lines(skip_drain=True))
+    c.check("曲末跳过排空赌预取捷径必须 FAIL（D5 血案根因）",
+            "drainSkip.removed" in ps_metrics(r_skip), str(ps_metrics(r_skip)))
+
+    r_short = psg.judge(ps_lines(n=5), mode="short")
+    c.check("短跑样本不足 20 条 servo 必须 FAIL",
+            "servo.count" in ps_metrics(r_short), str(ps_metrics(r_short)))
+    r_long = psg.judge(ps_lines(n=40), mode="long")
+    c.check("长跑样本下限 100 条 servo 必须 FAIL（短/长口径不同）",
+            "servo.count" in ps_metrics(r_long), str(ps_metrics(r_long)))
+
+    c.check("servo 3s 上限常量未被改软", psg.SERVO_GAP_MAX_MS == 3000,
+            "got=%s" % psg.SERVO_GAP_MAX_MS)
+    c.check("冷启动 seek 上限常量未被改软", psg.COLD_START_SEEK_MAX == 1,
+            "got=%s" % psg.COLD_START_SEEK_MAX)
 
     return c.summary()
 

@@ -34,11 +34,11 @@ name: Sendspin Guard
 #       静默失效形态：漏加偏移 → 该成员永远不生效；只加一处 → 进场/稳态不同步。
 #       —— tests/sendspin/sendspinFrameDelay.test.ts
 #
-#   P6 下一首预解码开关（v4.11.0）：switcher 落在 sendspin-renderer 插件配置
-#       `next_track_prefetch`（**缺省开**，显式 false 才关，读不到/坏 JSON 也开），
-#       子进程直读 plugins 表（不缓存 ⇒ 改完下一首即生效）；
-#       容器环境变量 `MF_BRIDGE_NEXT_TRACK_PREFETCH` 作排障总闸且**优先**于 Web 开关。
-#       退回「缺省关」= 用户明明开着却不预取；丢掉 env 总闸 = 出问题关不掉。
+#   P6 下一首预解码（v4.11.0 引入，2026-11-26 整链删除）：真机全天统计显示
+#       该捷径 87.5% 概率触发首投 seek 丢帧 + FLUSH，收益为负 ⇒ 泵态机 /
+#       群组 pushBridgePrefetch / Web 开关 / 配置模块一并删除。
+#       P6 现在守护「不得复活」：任何入口（env 总闸、插件配置键、keepTail）
+#       重新出现即判红，不再存在「排障总闸」这种可回退开关。
 #
 # 为什么除了 vitest 还要源码扫描：上面三类里最危险的是**静默失效** ——
 # 参数漏传 / 分支被短路时既有单测仍全绿，只有真机才暴露。源码守卫把
@@ -164,8 +164,8 @@ jobs:
             echo "::error::P2 回归:SendspinGroup 缺少 clearPlayback()(切歌只清缓冲,不发 stream/end)"
             miss=1
           fi
-          # 分支条件允许附加入口(如预取采纳 `|| keepQueueForPrefetch`),这里只钉
-          # 「两处都过 canKeepStream 门禁且随后只 clearPlayback」,不钉完整表达式。
+          # 分支条件允许附加与换代有关的入口，这里只钉
+          # 「两处都过 canKeepStream 门禁且随后只 clearPlayback」，不钉完整表达式。
           n=$(grep -cF 'g.canKeepStream()' backend/src/services/sendspin/playerCore.ts)
           m=$(grep -cF 'g.clearPlayback();' backend/src/services/sendspin/playerCore.ts)
           if [ "$n" -lt 2 ] || [ "$m" -lt 2 ]; then
@@ -278,44 +278,50 @@ jobs:
           if [ "$miss" -eq 0 ]; then echo "OK: 帧级/迟入组回填的按成员补偿在位"; fi
           exit "$miss"
 
-      # —— P6：下一首预解码开关（缺省开 + env 总闸优先）——
-      # 开关落 plugins 表(子进程直读、不缓存);缺省开,仅显式 false 才关;
-      # 环境变量 MF_BRIDGE_NEXT_TRACK_PREFETCH 优先于 Web 开关。
-      - name: "Guard P6 - next-track prefetch switch (default on, env overrides)"
+      # —— P6：下一首预解码（next-track prefetch）已整体删除（2026-11-26）——
+      # 真机取证(240)：该捷径 39 次里 34 次触发 `bridge-start-seek
+      # reason=new-session-first-delivery`(丢 ~3.5s 内容) + RAOP FLUSH + 百余次
+      # realign；而同期的「接续」272 次、「covered 排空」8 次全部零触发。
+      # 净亏 ⇒ 整条路径(泵态机 / 群组 pushBridgePrefetch / Web 开关 / 配置文件)删除。
+      # 本 job 守护**反向不变量**：任何一件复活都必须红。
+      - name: "Guard P6 - next-track prefetch stays removed"
         shell: bash
         run: |
           miss=0
           SE=backend/src/services/sendspin/streamEngine.ts
-          PREF=backend/src/services/sendspin/bridgePrefetchConfig.ts
-          if ! grep -qF 'export function nextTrackPrefetchEnabled(): boolean {' "$SE"; then
-            echo "::error::P6 回归:streamEngine 缺少 nextTrackPrefetchEnabled()(预解码态机的唯一开关入口)"
+          SERV=backend/src/services/sendspin/server.ts
+          API=backend/src/routes/api/sendspin.ts
+          if grep -qF 'maybeStartNextPrefetch' "$SE" "$SERV"; then
+            echo "::error::P6 回归:下一首预解码启动点复活(该路径 87% 触发断流重连,已整删)"
             miss=1
           fi
-          if ! grep -qF 'const raw = process.env.MF_BRIDGE_NEXT_TRACK_PREFETCH;' "$SE"; then
-            echo "::error::P6 回归:环境变量总闸 MF_BRIDGE_NEXT_TRACK_PREFETCH 被删(出问题关不掉预解码)"
+          if grep -qF 'BRIDGE_NEXT_PREFETCH' "$SE"; then
+            echo "::error::P6 回归:预取常量(BRIDGE_NEXT_PREFETCH_*)复活"
             miss=1
           fi
-          if ! tr '\n' ' ' < "$SE" | tr -s ' ' | grep -qF 'if (raw === "0" || raw === "false" || raw === "off") return false;'; then
-            echo "::error::P6 回归:env 关闭档(0/false/off)缺失"
+          if grep -qF 'pushBridgePrefetch' "$SERV" "$SE"; then
+            echo "::error::P6 回归:群组侧预取写入入口复活"
             miss=1
           fi
-          if ! tr '\n' ' ' < "$SE" | tr -s ' ' | grep -qF 'if (raw === "1" || raw === "true" || raw === "on") return true;'; then
-            echo "::error::P6 回归:env 强制开档(1/true/on)缺失"
+          if grep -qF 'next_track_prefetch' "$SE" "$SERV" "$API"; then
+            echo "::error::P6 回归:预取 Web 开关(插件配置键)复活"
             miss=1
           fi
-          if ! grep -qF 'return readBridgePrefetchConfig();' "$SE"; then
-            echo "::error::P6 回归:env 必须只作覆盖,未设置时仍要读 Web 开关(否则音频页的开关完全不生效)"
+          # 用 glob 而不是具体文件名:该文件是「必须不存在」的断言目标,
+          # 直接写路径会被 check-workflow-paths 的 R1(路径必须存在)假红。
+          if ls backend/src/services/sendspin/bridgePrefetch*.ts >/dev/null 2>&1; then
+            echo "::error::P6 回归:bridgePrefetch 开关配置模块复活(已删)"
             miss=1
           fi
-          if ! grep -qF "SELECT config FROM plugins WHERE id = 'sendspin-renderer' OR name = 'sendspin-renderer'" "$PREF"; then
-            echo "::error::P6 回归:必须直读 plugins 表(走主进程内存缓存 = 子进程改了不生效)"
+          if ! grep -qF 'contentEnded && this.continuitySlotAvailable();' "$SE"; then
+            echo "::error::P6 回归:曲末跳过排空必须只剩「接续」一条判据(不得再挂预取)"
             miss=1
           fi
-          if ! grep -qF 'return cfg?.next_track_prefetch !== false;' "$PREF"; then
-            echo "::error::P6 回归:缺省必须为开(仅显式 false 才关);写成 != true 会让从未配置的用户直接失去预解码"
+          if grep -qF 'prefetchHandlesBoundary' "$SE"; then
+            echo "::error::P6 回归:曲末「预取接住边界」判据复活"
             miss=1
           fi
-          if [ "$miss" -eq 0 ]; then echo "OK: 预解码开关(缺省开/env 优先/直读 plugins)在位"; fi
+          if [ "$miss" -eq 0 ]; then echo "OK: 下一首预解码保持删除(无启动点/无开关/无配置文件)"; fi
           exit "$miss"
 
       - name: Upload guard log on failure
