@@ -50,14 +50,15 @@ export default defineConfig({
     // 跑完在进程退出阶段段错误(exit 139);forks 每个文件独立子进程,无此问题。
     fileParallelism: true,
     pool: "forks",
-    // 8 worker 并行(2026-11-27 GitHub CI 同口径实验): forks 池「每个测试文件跑在独立 fork
-    // 子进程」的进程级隔离保持不变(避免 singleFork 下 sendspin 服务单例 / ffmpeg / 沙箱
-    // 等模块级全局跨文件残留),只是派发到 8 个子进程。历史实测(230 nproc=8,同一份 674
-    // 文件全集,均 674/674 PASS 无死锁):1→1151s / 2→602s / 4→332s;
-    // GitHub ubuntu-latest 上 maxWorkers=4 的 ci/build test job 分别 339s / 365s。
-    // 本档 8 worker 直接在 CI 上测墙钟,若更慢或 OOM 则退回 4 并在此记录实测数据。
-    // 旧结论「多 worker 派发死锁」是早期 Vitest 遗留,当前 5.0.3 已证实稳定。
-    maxWorkers: 8,
+    // 4 worker 并行(2026-11-27 定稿): forks 池「每个测试文件跑在独立 fork 子进程」的
+    // 进程级隔离保持不变(避免 singleFork 下 sendspin 服务单例 / ffmpeg / 沙箱等模块级
+    // 全局跨文件残留),只是派发到 4 个子进程。同一份 674 文件全集实测(均 674/674 PASS、
+    // 无死锁):230(nproc=8) 本地 1→1151s / 2→602s / 4→332s;
+    // GitHub ubuntu-latest 上 ci/build test job:4 worker 339s/365s,
+    // 8 worker 357s/295s(ci 反而慢 5%、build 快 19%,方向相反;并行墙钟仅 365→357s
+    // = 2% 属噪声)。GitHub runner CPU 配额少,8 worker 超订阅的调度开销抵消收益,
+    // 故定档 4。旧结论「多 worker 派发死锁」是早期 Vitest 遗留,当前 5.0.3 已证实稳定。
+    maxWorkers: 4,
     minWorkers: 1,
     poolOptions: {
       forks: { singleFork: false },
