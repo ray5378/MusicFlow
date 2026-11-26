@@ -66,7 +66,7 @@ def on_audio(ts_us: int, data: bytes, fmt) -> None:
               (stats["chunks"], stats["bytes"], ts_us, fmt), flush=True)
 
 
-async def main() -> None:
+async def make_client(ident):
     store = InMemoryClientPairingStore()
     cfg = await store.get_pairing_config()
     # MusicFlow 无配对记录、对未配对 Sentinel 会话直接给 playback；
@@ -76,9 +76,6 @@ async def main() -> None:
     ))
     if STATIC_PIN:
         await store.set_static_pin(STATIC_PIN)
-    ident = Identity.generate()
-    print("[ss-probe] name=%s client_id=%s out=%s" % (NAME, ident.peer_id, OUT or "-"),
-          flush=True)
     support = ClientHelloPlayerSupport(
         supported_formats=[
             SupportedAudioFormat(codec=AudioCodec.FLAC, channels=2,
@@ -98,8 +95,32 @@ async def main() -> None:
         pairing_support=PairingSupport() if STATIC_PIN else None,
     )
     client.add_audio_chunk_listener(on_audio)
-    await client.connect(URL)
-    print("[ss-probe] CONNECTED+ADMITTED", flush=True)
+    return client
+
+
+async def main() -> None:
+    ident = Identity.generate()
+    print("[ss-probe] name=%s client_id=%s out=%s" % (NAME, ident.peer_id, OUT or "-"),
+          flush=True)
+    # 插件 toggle 后服务才监听 :38927，冷启动 + 容器重启都要覆盖；
+    # 失败必须重建 client（aiohttp session 用坏后不能复用）。
+    client = None
+    for attempt in range(1, 31):
+        c = await make_client(ident)
+        try:
+            await c.connect(URL)
+            client = c
+            print("[ss-probe] CONNECTED+ADMITTED attempt=%d" % attempt, flush=True)
+            break
+        except Exception as e:
+            print("[ss-probe] connect %d/30 failed: %s" % (attempt, e), flush=True)
+            try:
+                await c.disconnect()
+            except Exception:
+                pass
+            await asyncio.sleep(2)
+    if client is None:
+        raise SystemExit("sendspin service unreachable at %s after 60s" % URL)
     try:
         while True:
             await asyncio.sleep(10)

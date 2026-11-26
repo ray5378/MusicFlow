@@ -170,18 +170,14 @@ done
 
 # 纯 sendspin / 混合组都要拨入播放器。注意 9.x 才带 Noise 加密握手，
 # 6.x 前加密时代版本连不上合规服务端（docs/archive/sendspin/sendspin-sim-player.md）。
+# 这里只装依赖，**不能在这里启动探针**：sendspin 服务要等容器起来 + 插件
+# toggle 之后才监听 :38927（历史上先起探针 → ClientConnectorError → 0 帧）。
 if [ "${#SS_NAMES[@]}" -gt 0 ]; then
   python3 -m venv "$WORK/venv" >/dev/null
   "$WORK/venv/bin/pip" install -q 'aiosendspin==9.1.1' >/dev/null
-  for name in "${SS_NAMES[@]}"; do
-    MF_SS_NAME="$name" MF_SS_FRAME_OUT="$WORK/sendspin_frames.jsonl" \
-      "$WORK/venv/bin/python" "$REPO/backend/scripts/baseline/sendspin_frame_probe.py" \
-      > "$WORK/logs/sendspin-${name}.log" 2>&1 &
-    echo $! >> "$WORK/aux.pids"
-  done
 fi
 sleep 3
-say "接收端已广播：airplay=[${AP_NAMES[*]:-}] sendspin=[${SS_NAMES[*]:-}]"
+say "环境就绪：airplay=[${AP_NAMES[*]:-}] sendspin=[${SS_NAMES[*]:-}]（探针待插件启动后再拨入）"
 
 say "1/8 启动被测镜像（空库）"
 chmod -R a+rwX "$WORK/data" "$WORK/music"
@@ -246,6 +242,13 @@ for p in rows:
 ' || echo 0)
   [ "$SEN" = "1" ] || { api PUT /plugins/"$SPID"/toggle '{}' >/dev/null || die "启用 sendspin 服务失败"; sleep 3; }
 fi
+# 服务已监听后再拨入。探针自身带 30 次/2s 重连，覆盖插件冷启动时间。
+for name in "${SS_NAMES[@]}"; do
+  MF_SS_NAME="$name" MF_SS_FRAME_OUT="$WORK/sendspin_frames.jsonl" \
+    "$WORK/venv/bin/python" "$REPO/backend/scripts/baseline/sendspin_frame_probe.py" \
+    > "$WORK/logs/sendspin-${name}.log" 2>&1 &
+  echo $! >> "$WORK/aux.pids"
+done
 
 PEERS=(); AP_MACS=()
 for name in "${AP_NAMES[@]}"; do
@@ -388,7 +391,7 @@ PY
   [ "$k" -lt "$SWITCH_COUNT" ] && sleep "$SWITCH_INTERVAL"
 done
 CHANGED=$(python3 -c '
-import json
+import json,sys
 n=0
 for l in open(sys.argv[1],encoding="utf-8"):
     try: n+=bool(json.loads(l).get("changed"))
