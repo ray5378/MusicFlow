@@ -260,6 +260,10 @@ def main():
             any("deltaUs.negPct" in l for l in iv_bad_lines)
             and any("inQueueMs.p95" in l for l in iv_bad_lines),
             "fails=%s" % [l.strip() for l in iv_bad_lines][:6])
+    c.check("模拟判据：反样本命中补帧型缺口与 ring 预算塌陷（新增判据有牙齿）",
+            any("A_tick.insertedFrames" in l for l in iv_bad_lines)
+            and any("A_ring.budgetMs.p50" in l for l in iv_bad_lines),
+            "fails=%s" % [l.strip() for l in iv_bad_lines][:10])
     p_iv_missing = subprocess.run(
         [sys.executable, inv_path, "--input", os.path.join(FIX, "no_such.json")],
         capture_output=True, text=True, timeout=60, env=env)
@@ -395,6 +399,85 @@ def main():
     c.check("切歌后 5s 观察窗常量未被改软",
             capmod.SWITCH_FRAME_TAIL_MS == 5000,
             "got=%s" % capmod.SWITCH_FRAME_TAIL_MS)
+
+    print("== 13. 补齐 A 层判据：补帧/丢包/存活/设备水位 ==")
+    pins13 = {
+        "SILENCE_CHUNKS_MAX": 0, "INSERTED_FRAMES_MAX": 0,
+        "NEWGEN_SKIP_MAX": 0, "LATE_PER_MIN_MAX": 30.0,
+        "LOSS_PER_MIN_MAX": 0.05, "LIVE_PCT_MIN": 99.0,
+        "RING_SAMPLES_MIN": 10, "RING_BUDGET_P50_MIN_MS": 200,
+        "RING_BUFFERED_ZERO_MIN_PCT": 50.0, "RING_DROP_OLD_MAX_PER_MIN": 0.1,
+    }
+    for k, v in pins13.items():
+        c.check("补齐常量 %s 未被改软" % k, getattr(iv, k) == v,
+                "got=%s" % getattr(iv, k))
+
+    sample13 = copy.deepcopy(good)
+
+    def full_fails(sample):
+        return {r[2] for r in iv.judge(sample, min_ticks=0, topo="mixed",
+                                       expect_tick_devices=2) if r[0] == "FAIL"}
+
+    c.check("正常样本含 ring/补帧/丢包判据仍全 PASS",
+            not full_fails(sample13), str(full_fails(sample13)))
+
+    ins = copy.deepcopy(sample13)
+    for d in ins["A_tick"]:
+        ins["A_tick"][d]["totals"]["insertedFrames"] = 2108
+    c.check("补帧 2108（4.15.9 形态）必须 FAIL",
+            any("insertedFrames" in m for m in full_fails(ins)), str(full_fails(ins)))
+
+    sil = copy.deepcopy(sample13)
+    for d in sil["A_tick"]:
+        sil["A_tick"][d]["totals"]["silenceChunks"] = 3
+    c.check("补静音块必须 FAIL",
+            any("silenceChunks" in m for m in full_fails(sil)), str(full_fails(sil)))
+
+    loss = copy.deepcopy(sample13)
+    for d in loss["A_tick"]:
+        loss["A_tick"][d]["perMin"]["lossMiss"] = 0.9
+        loss["A_tick"][d]["perMin"]["lossStale"] = 0.9
+    lf = full_fails(loss)
+    c.check("lossMiss/lossStale 暴涨必须 FAIL",
+            any("lossMiss" in m for m in lf) and any("lossStale" in m for m in lf),
+            str(lf))
+
+    dead = copy.deepcopy(sample13)
+    for d in dead["A_tick"]:
+        dead["A_tick"][d]["state"]["live"] = 95.0
+    c.check("设备 live<99% 必须 FAIL",
+            any("live%" in m for m in full_fails(dead)), str(full_fails(dead)))
+
+    ringbad = copy.deepcopy(sample13)
+    for d in ringbad["A_ring"]:
+        ringbad["A_ring"][d]["bufferedZeroPct"] = 0.0
+        ringbad["A_ring"][d]["budgetMs"]["p50"] = 105
+    rf = full_fails(ringbad)
+    c.check("ring 预算塌陷+bufferedZero 归零必须 FAIL",
+            any("bufferedZeroPct" in m for m in rf)
+            and any("budgetMs.p50" in m for m in rf), str(rf))
+
+    nor = copy.deepcopy(sample13)
+    nor.pop("A_ring", None)
+    c.check("含 AirPlay 拓扑缺 ring 数据必须 FAIL",
+            "A_ring.missing" in full_fails(nor), str(full_fails(nor)))
+
+    ss13 = copy.deepcopy(sample13)
+    ss13.pop("A_ring", None)
+    # sendspin 拓扑没有 ring 也没有 tick，必须靠帧证据判；补一个正常帧段，
+    # 否则 A_ssFrame.missing 会盖住本条要验证的「无 ring 不算 FAIL」。
+    ss13["A_ssFrame"] = {"chunks": 800, "maxGapMs": 60, "minPerSwitch": 40}
+    ss13_fails = {r[2] for r in iv.judge(ss13, min_ticks=0, topo="sendspin",
+                                         expect_tick_devices=0) if r[0] == "FAIL"}
+    c.check("纯 sendspin 无 ring 不算 FAIL", not ss13_fails, str(ss13_fails))
+
+    ng = copy.deepcopy(sample13)
+    for d in ng["A_tick"]:
+        ng["A_tick"][d]["totals"]["newgenSkipFrames"] = 100
+    ng_res = iv.judge(ng, min_ticks=0, topo="mixed", expect_tick_devices=2)
+    c.check("换代跳帧记 WARN 但不误判 FAIL",
+            any(r[0] == "WARN" and r[2] == "A_tick.newgenSkipFrames" for r in ng_res)
+            and not [r for r in ng_res if r[0] == "FAIL"], str(ng_res))
 
     return c.summary()
 

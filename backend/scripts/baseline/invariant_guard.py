@@ -54,6 +54,22 @@ SS_FRAME_MIN = 200
 SS_FRAME_GAP_MAX_MS = 500
 SS_FRAME_MIN_PER_SWITCH = 20
 
+# 补齐审计（2026-11-26）：baseline_cap 早已汇总这些 A 层字段，旧判读器完全没用。
+# 阈值依据 = v4.15.8 正常 fixture 与 v4.15.9_bad 反样本之间 1~3 个数量级的
+# 实测间隔，WARN 级与真机 baseline_guard.py 同源。第十轮正常 CI 样本里
+# 这些字段全为 0（ring bufferedZeroPct=95.83~100），故不会误报正常版。
+SILENCE_CHUNKS_MAX = 0
+INSERTED_FRAMES_MAX = 0             # 正常 0；v4.15.9 2108/设备（补帧型可听缺口）
+NEWGEN_SKIP_MAX = 0                 # 换代跳帧：真机守卫是 WARN 级，不能判 FAIL
+LATE_PER_MIN_MAX = 30.0             # 正常 CI 0 / 真机 ~1；抓 late 暴涨型回归
+LOSS_PER_MIN_MAX = 0.05             # 真机守卫 WARN 阈值；v4.15.9 lossMiss/Stale 0.82~1.02
+LIVE_PCT_MIN = 99.0                 # 真机守卫 FAIL 阈值
+RING_SAMPLES_MIN = 10
+RING_INQ_P50_MAX_MS = DEVICE_QUEUE_CAP_MS
+RING_BUDGET_P50_MIN_MS = 200        # 正常 450~475；v4.15.9 105（预算塌陷）
+RING_BUFFERED_ZERO_MIN_PCT = 50.0   # 正常 95.83~100；v4.15.9 0
+RING_DROP_OLD_MAX_PER_MIN = 0.1
+
 
 def _num(v, default=0.0):
     try:
@@ -107,6 +123,29 @@ def judge(data, min_ticks=20, topo="airplay", expect_tick_devices=0,
                     dev, "inQueueMs.overCapPct", "%.2f%% max=%.2f%%" % (over, INQ_OVER_CAP_PCT_MAX)))
         out.append(("PASS" if realign <= REALIGN_PER_MIN_MAX else "FAIL",
                     dev, "realigned/min", "%.2f max=%.2f" % (realign, REALIGN_PER_MIN_MAX)))
+        # 补齐：可听缺口的另一种形态。v4.15.9 反样本 silenceChunks=0 但
+        # insertedFrames=2108，只判 deltaUs 会漏掉「补帧型」缺口。
+        tot = d.get("totals") or {}
+        sc = _num(tot.get("silenceChunks"))
+        ins = _num(tot.get("insertedFrames"))
+        ng = _num(tot.get("newgenSkipFrames"))
+        out.append(("PASS" if sc <= SILENCE_CHUNKS_MAX else "FAIL", dev,
+                    "A_tick.silenceChunks", "%.0f max=%d" % (sc, SILENCE_CHUNKS_MAX)))
+        out.append(("PASS" if ins <= INSERTED_FRAMES_MAX else "FAIL", dev,
+                    "A_tick.insertedFrames", "%.0f max=%d" % (ins, INSERTED_FRAMES_MAX)))
+        # 换代跳帧沿用真机守卫的 WARN 级：换代时确实会出现，判 FAIL 会误报。
+        out.append(("PASS" if ng <= NEWGEN_SKIP_MAX else "WARN", dev,
+                    "A_tick.newgenSkipFrames", "%.0f max=%d" % (ng, NEWGEN_SKIP_MAX)))
+        late = _num(pm.get("late"))
+        out.append(("PASS" if late <= LATE_PER_MIN_MAX else "FAIL", dev,
+                    "A_tick.late/min", "%.3f max=%.1f" % (late, LATE_PER_MIN_MAX)))
+        for k in ("lossMiss", "lossStale"):
+            lv = _num(pm.get(k))
+            out.append(("PASS" if lv <= LOSS_PER_MIN_MAX else "FAIL", dev,
+                        "A_tick.%s/min" % k, "%.3f max=%.3f" % (lv, LOSS_PER_MIN_MAX)))
+        live = _num((d.get("state") or {}).get("live"))
+        out.append(("PASS" if live >= LIVE_PCT_MIN else "FAIL", dev,
+                    "A_tick.live%", "%.2f min=%.1f" % (live, LIVE_PCT_MIN)))
         # 切歌窗口只用「桥还在出 tick」判活性，不拿稳态水位要求它
         # （5s lead + 10s 预填充期间 inQ 必然高、realign 必然阶跃）。
         n_steady = int(_num(d.get("samplesSteady"), -1))
@@ -118,6 +157,33 @@ def judge(data, min_ticks=20, topo="airplay", expect_tick_devices=0,
             nsw = int(_num(swin.get("samples")))
             out.append(("PASS" if nsw >= 3 else "FAIL", dev, "A_tick.switchWindow.samples",
                         "samples=%d min=3" % nsw))
+
+    # 补齐：A_ring 是设备侧真实水位，cap 一直在产，旧判读器完全没用。
+    # 纯 sendspin 组不建 RAOP 会话 ⇒ 没有设备 ring，显式跳过防误报。
+    rings = data.get("A_ring") or {}
+    if topo == "sendspin":
+        out.append(("PASS", "-", "A_ring.skipped",
+                    "pure-sendspin: no AirPlay device ring"))
+    elif not rings:
+        out.append(("FAIL", "-", "A_ring.missing", "no device ring samples"))
+    else:
+        for dev, g in sorted(rings.items()):
+            n_ring = int(_num(g.get("samples")))
+            out.append(("PASS" if n_ring >= RING_SAMPLES_MIN else "FAIL", dev,
+                        "A_ring.samples", "samples=%d min=%d" % (n_ring, RING_SAMPLES_MIN)))
+            rq = _num((g.get("inQMs") or {}).get("p50"))
+            out.append(("PASS" if rq <= RING_INQ_P50_MAX_MS else "FAIL", dev,
+                        "A_ring.inQMs.p50", "%.0fms cap=%dms" % (rq, RING_INQ_P50_MAX_MS)))
+            bud = _num((g.get("budgetMs") or {}).get("p50"))
+            out.append(("PASS" if bud >= RING_BUDGET_P50_MIN_MS else "FAIL", dev,
+                        "A_ring.budgetMs.p50", "%.0fms min=%dms" % (bud, RING_BUDGET_P50_MIN_MS)))
+            bz = _num(g.get("bufferedZeroPct"))
+            out.append(("PASS" if bz >= RING_BUFFERED_ZERO_MIN_PCT else "FAIL", dev,
+                        "A_ring.bufferedZeroPct",
+                        "%.2f%% min=%.1f%%" % (bz, RING_BUFFERED_ZERO_MIN_PCT)))
+            drop = _num((g.get("perMin") or {}).get("dropOld"))
+            out.append(("PASS" if drop <= RING_DROP_OLD_MAX_PER_MIN else "FAIL", dev,
+                        "A_ring.dropOld/min", "%.3f max=%.3f" % (drop, RING_DROP_OLD_MAX_PER_MIN)))
 
     prog = data.get("A_prog") or {}
     rate = prog.get("advanceRate")
@@ -195,12 +261,14 @@ def main(argv=None):
                 expect_tick_devices=a.expect_tick_devices,
                 require_switch=a.require_switch)
     fails = [r for r in res if r[0] == "FAIL"]
+    warns = [r for r in res if r[0] == "WARN"]
     if not a.quiet:
         print("== CI 模拟播放不变量判读 ==")
         print("  样本=%s" % os.path.basename(a.input))
         for level, dev, metric, detail in res:
             print("  %s  %-22s %-24s %s" % (level, dev[-12:], metric, detail))
-    print("VERDICT %s  FAIL=%d/%d" % ("FAIL" if fails else "PASS", len(fails), len(res)))
+    print("VERDICT %s  FAIL=%d/%d  WARN=%d" %
+          ("FAIL" if fails else "PASS", len(fails), len(res), len(warns)))
     return 1 if fails else 0
 
 
