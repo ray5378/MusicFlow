@@ -243,12 +243,13 @@ describe("getGroupStatus:位置与设备侧真相同源(不二次扣 lead)", () 
     expect(st.position).toBe(195);
   });
 
-  it("⑥ 极小位置仍钳 0,绝不为负", async () => {
+  it("⑥ 极小位置按 0.1s 精度上报,绝不为负", async () => {
     await startBridgePlayback();
     h.leads["ap1"] = 2050;
     h.state.groupPoll = { playing: true, paused: false, positionMs: 800, durationMs: 100_000 };
     const st = await getGroupStatus("g1");
-    expect(st.position).toBe(0);
+    // [D3 2026-11-26] 800ms 在新口径下是 0.8s(原 floor 整秒报 0);钳 0 只兜负数。
+    expect(st.position).toBe(0.8);
   });
 
   it("⑦ 源码不得再对 positionMs 做 lead 二次扣减", () => {

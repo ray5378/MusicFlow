@@ -204,6 +204,10 @@ async function runPump(opts: {
   bridgeCount?: number;
   /** 桩 pushBridgeOnlySilence 的返回值(缺省 = 按 25ms 切片数);设 0 = 方法在但桥集合空。 */
   fillReturns?: number;
+  /** [方案A] 注入桥透传水位:每座桥的 backlogMs / deviceLeadMs(缺省不注入 ⇒
+   *  泵侧没有可信水位,回落到标定常量 BRIDGE_END_DRAIN_MARGIN_MS)。 */
+  backlogMs?: number;
+  deviceLeadMs?: number;
 }) {
   const envBackup = {
     speed: process.env.SENDSPIN_PUSH_SPEED,
@@ -258,6 +262,13 @@ async function runPump(opts: {
   const server: any = {
     log: (level: string, msg: string) => recs.push({ at: Date.now(), level, msg }),
   };
+  // [方案A 2026-11-26] 桥水位透传桩:泵侧 bridgeHoldMs() 从这两张 map 取 min(backlog+lead)。
+  // 不注入 ⇒ 两张 map 都不存在 ⇒ 泵回落到标定常量(改动前的行为面)。
+  if (opts.backlogMs !== undefined || opts.deviceLeadMs !== undefined) {
+    const ids = Array.from({ length: bridgeCount }, (_, i) => `dev${i + 1}`);
+    server.bridgeBacklogMs = new Map(ids.map((id) => [id, opts.backlogMs ?? 0]));
+    server.bridgeDeviceLeadMs = new Map(ids.map((id) => [id, opts.deviceLeadMs ?? 0]));
+  }
   const pump = new GroupPump(server, g as any);
   try {
     await pump.play(`song-fill-${opts.withFillMethod}`);
@@ -307,7 +318,9 @@ describe("排空循环:开关 ON ⇒ 逐步续静音,总量 == 排空时长", ()
   //   造小数尾巴的可靠办法:**用 speed 除出循环小数**(纯桥组的 drainMs 会被
   //   min(…, 8000) 收口成整数 8000,8000/6 = 1333.333… 恒带尾巴,与墙钟抖动无关)。
   it("小数排空需求(speed=6 ⇒ 1333.33…ms)⇒ 不抛 BigInt 错、durUs 全整数、总量守恒", async () => {
-    const out = await runPump({ withFillMethod: true, speed: 6 });
+    // [方案A] 必须注入「水位盖不住排空」才走补料分支(默认场景设备侧有真实音频 ⇒
+    //   reason=covered 不补,见下一条用例)。给一个超过内容总长的 backlog ⇒ 剩余=0。
+    const out = await runPump({ withFillMethod: true, speed: 6, backlogMs: 100_000 });
     expect(out.speed).toBe(6);
 
     // ① 不抛异常、pushLoop 正常走完
@@ -336,40 +349,22 @@ describe("排空循环:开关 ON ⇒ 逐步续静音,总量 == 排空时长", ()
     expect(Math.abs(durMs - Math.round(totalMs))).toBeLessThanOrEqual(1);
   }, 30_000);
 
-  it("纯桥组 + 开关缺省 ON ⇒ 每步补一段、总量 == 排空时长(±1 片),每首一行日志", async () => {
+  it("纯桥组 + 存量盖得住排空 ⇒ **一帧都不补**(reason=covered),排空本身照旧", async () => {
+    // [方案A 2026-11-26] 这是**修复后的预期路径**,也是真机每首曲末的实际形态:
+    //   设备侧还有远超排空时长的真实音频(2026-11-24 起泵前瞻放宽到 30s),
+    //   此时补静音只会排在内容尾之后被原样播出 ⇒ 可闻静音。
     const out = await runPump({ withFillMethod: true });
-    expect(out.waitMs).toBeGreaterThan(0);
-
-    // 每步一次(200ms/步):至少一次调用,且每段 durUs 与步长严格对应
-    expect(out.fills.length).toBeGreaterThan(0);
-    for (const f of out.fills) {
-      expect(f.durUs).toBeGreaterThan(0);
-      expect(f.durUs % 1_000).toBe(0); // 由 sleep 毫秒数换算而来
-    }
-    const totalUs = out.fills.reduce((s, f) => s + f.durUs, 0);
-    // ★ 总量必须等于实际排空时长,不能多补
-    expect(Math.abs(totalUs - out.waitMs * 1000)).toBeLessThanOrEqual(SLICE_US);
-
-    // 时间戳逐段首尾相接(每段起点 = 起点 + 已补总量)
-    let expectTs = out.fills[0].tsUs;
-    for (const f of out.fills) {
-      expect(f.tsUs).toBe(expectTs);
-      expectTs += BigInt(f.durUs);
-    }
-
-    // 日志:每首歌**一行**,字段固定便于 grep
-    expect(out.fillLog, "开关 ON 时必须打一行桥续静音日志").toBeTruthy();
-    expect(out.fillLog!.msg).toContain("sendspin 曲末排空:桥续静音");
-    expect(out.fillLog!.msg).toContain("dev=dev1"); // 桩挂 1 个桥
-    expect(out.fillLog!.msg).toContain("bridges=1"); // 桥挂没挂,一行可见(G1)
-    expect(out.fillLog!.msg).toMatch(/durMs=\d+ chunks=\d+ song=/);
-    const durMs = Number(/durMs=(\d+)/.exec(out.fillLog!.msg)![1]);
-    const chunks = Number(/chunks=(\d+)/.exec(out.fillLog!.msg)![1]);
-    expect(Math.abs(durMs * 1000 - totalUs)).toBeLessThanOrEqual(SLICE_US);
-    expect(chunks).toBe(out.fills.reduce((s, f) => s + f.chunks, 0));
-    // 每首歌**恰好一行**:补料行 1 条、跳过行 0 条(每步不打)
-    expect(out.fillLineCount).toBe(1);
-    expect(out.skipLineCount).toBe(0);
+    expect(out.waitMs).toBeGreaterThan(0); // 排空照旧发生(只管补料,不改排空量)
+    expect(out.fills).toHaveLength(0); // ★ 一帧不补
+    expect(out.fillLog).toBeUndefined();
+    expect(out.skipLineCount).toBe(1); // 每首恰好一行 skip,不许静默
+    expect(out.skipLog!.msg).toContain("ev=bridge-drain-fill-skip");
+    expect(out.skipLog!.msg).toContain("reason=covered");
+    // 可观测:一行里必须能看出「桥能撑多久 / 设备还剩多久 / 本来要等多久」
+    expect(out.skipLog!.msg).toMatch(/holdMs=\d+/);
+    expect(out.skipLog!.msg).toMatch(/remainMs=\d+/);
+    expect(out.skipLog!.msg).toMatch(/drainMs=\d+/);
+    expect(out.skipLog!.msg).toContain("bridges=1");
   }, 30_000);
 
   it("开关解析:缺省 ON;=0/false/off 关闭;其它值 ON(缓存按取值,切换即生效)", () => {
@@ -386,6 +381,32 @@ describe("排空循环:开关 ON ⇒ 逐步续静音,总量 == 排空时长", ()
     delete process.env.MF_BRIDGE_DRAIN_SILENCE;
     expect(bridgeDrainSilenceEnabled()).toBe(true);
   });
+
+  it("存量只盖住一部分 ⇒ 只补**缺口**,不补满排空时长(方案A 核心)", async () => {
+    // 先跑一次不注入(covered)拿到实测「设备剩余 / 排空需求」,再按其中间值注入水位 ——
+    //   contentMs 由注入音源长度+起播时钟决定,不能凭空写死。
+    const probe = await runPump({ withFillMethod: true });
+    expect(probe.skipLog, "无水位时应走 covered").toBeTruthy();
+    const remainMs = Number(/remainMs=(\d+)/.exec(probe.skipLog!.msg)![1]);
+    const drainRawMs = Number(/drainMs=(\d+)/.exec(probe.skipLog!.msg)![1]) * probe.speed;
+    const contentMs = remainMs + 2_500; // 无注入时 holdFloor = MARGIN
+    const hold = Math.max(0, contentMs - Math.round(drainRawMs / 2)); // 剩余 ≈ 排空需求的一半
+
+    const out = await runPump({ withFillMethod: true, backlogMs: hold });
+    expect(out.fills.length).toBeGreaterThan(0);
+    const totalMs = out.fills.reduce((s, f) => s + f.durUs, 0) / 1000;
+    expect(totalMs).toBeGreaterThan(0);
+    // 缺口严格小于「排空时长」——补满就是修复前的错误行为
+    expect(totalMs).toBeLessThan(out.waitMs * 0.9);
+    expect(out.fillLog).toBeTruthy();
+    const needMs = Number(/needMs=(\d+)/.exec(out.fillLog!.msg)![1]);
+    const drainMs = Number(/drainMs=(\d+)/.exec(out.fillLog!.msg)![1]);
+    const holdMs = Number(/holdMs=(\d+)/.exec(out.fillLog!.msg)![1]);
+    expect(holdMs).toBeGreaterThan(2_500); // 水位确实透传到泵侧(高于标定余量)
+    expect(needMs).toBeGreaterThan(0);
+    expect(needMs).toBeLessThan(drainMs);
+    expect(Math.abs(needMs - totalMs)).toBeLessThanOrEqual(1);
+  }, 40_000);
 
   it("开关 MF_BRIDGE_DRAIN_SILENCE=0 ⇒ 不补料,但**必须**打出 skipped 行 reason=disabled", async () => {
     const off = await runPump({ withFillMethod: true, silenceEnv: "0" });
@@ -411,18 +432,20 @@ describe("排空循环:开关 ON ⇒ 逐步续静音,总量 == 排空时长", ()
   }, 30_000);
 
   it("方法在但桥集合为空(真机失效同型)⇒ skipped 行 reason=no-bridge,带 bridges/members/gid", async () => {
-    // 真机现场:方法在原型上、开关 ON,但 group.bridges.size === 0 ⇒ 内部直接 return 0
+    // 真机现场:方法在原型上、开关 ON,但 group.bridges.size === 0 ⇒ 内部直接 return 0。
+    // [方案A] 补料分支现在还要求「存量盖不住排空」才会被走到 ⇒ 注入一个超大水位置空剩余。
     const out = await runPump({
       withFillMethod: true,
       fillReturns: 0,
       hasBridges: false,
-      bridgeCount: 0,
+      bridgeCount: 1,
+      backlogMs: 100_000,
     });
     expect(out.fills.length).toBeGreaterThan(0); // 每步都调了
     expect(out.fillLog).toBeUndefined(); // 但一片也没补上
     expect(out.skipLineCount).toBe(1); // ★ 一行都不能少
     expect(out.skipLog!.msg).toContain("reason=no-bridge");
-    expect(out.skipLog!.msg).toContain("bridges=0");
+    expect(out.skipLog!.msg).toContain("bridges=1");
     expect(out.skipLog!.msg).toContain("members=0");
     expect(out.skipLog!.msg).toContain("gid=g");
     expect(out.skipLog!.msg).toContain("song=song-fill-true");

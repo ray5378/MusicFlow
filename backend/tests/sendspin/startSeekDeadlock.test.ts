@@ -467,7 +467,7 @@ describe("start-seek 死锁修复(P0)", () => {
     const { g, srv } = groupWith(["dev-a"]);
     const epoch0 = (g as any).bridgeContentEpoch;
     (g as any).bridgeTimelineOffsetUs = -6_700_000n;
-    (g as any).notifyBridgeGeneration(101, "track", undefined, true);
+    (g as any).notifyBridgeGeneration(101, "track", true);
     expect(srv.logs.some((l) => l.includes("bridge-continuity-degraded"))).toBe(true);
     expect((g as any).bridgeContentEpoch).toBe(epoch0 + 1); // 走了完整换代
   });
@@ -476,7 +476,7 @@ describe("start-seek 死锁修复(P0)", () => {
     const { g, srv } = groupWith(["dev-a"]);
     const epoch0 = (g as any).bridgeContentEpoch;
     (g as any).bridgeTimelineOffsetUs = 0n;
-    (g as any).notifyBridgeGeneration(102, "track", undefined, true);
+    (g as any).notifyBridgeGeneration(102, "track", true);
     expect(srv.logs.some((l) => l.includes("continuity=1 keep"))).toBe(true);
     expect(srv.logs.some((l) => l.includes("bridge-continuity-degraded"))).toBe(false);
     expect((g as any).bridgeContentEpoch).toBe(epoch0); // 不换代

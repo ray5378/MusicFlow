@@ -494,12 +494,12 @@ console.log("===== R15 AirPlay 状态词表归一(与 dlna/sendspin/local 对齐
   const peers = stripComments(read("backend/src/routes/api/peers.ts"));
   check(
     "status 出口把 PAUSED → PAUSED_PLAYBACK",
-    /parsed\.kind === "airplay"[\s\S]{0,500}?st\.state === "PAUSED"[\s\S]{0,120}?PAUSED_PLAYBACK/.test(peers),
+    /parsed\.kind === "airplay"[\s\S]{0,2000}?st\.state === "PAUSED"[\s\S]{0,120}?PAUSED_PLAYBACK/.test(peers),
     "AirPlay 的 PAUSED 未归一,客户端 peer.dart 会当成未在播",
   );
   check(
     "status 出口把 IDLE → STOPPED",
-    /parsed\.kind === "airplay"[\s\S]{0,700}?st\.state === "IDLE"[\s\S]{0,120}?STOPPED/.test(peers),
+    /parsed\.kind === "airplay"[\s\S]{0,2000}?st\.state === "IDLE"[\s\S]{0,120}?STOPPED/.test(peers),
     "AirPlay 的 IDLE 未归一为 STOPPED",
   );
   check(

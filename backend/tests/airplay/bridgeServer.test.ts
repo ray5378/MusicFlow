@@ -219,6 +219,39 @@ describe("bridgeServer:帧分发与背压事件(§4.2/§4.4)", () => {
     client.destroy();
   });
 
+  // 2026-11-26:断帧两级化(曲中静音根治,对齐 MA「断帧 != 传输死亡」)。
+  // 一级只告警让上层「保持链路」,二级才判死。此处把顺序与「致命只报一次」钉死,
+  // 防止实现被改回「2s 即 flush 重连」——那会把上游几百毫秒抖动放大成秒级静音。
+  it("★ 两级 stall:先 fatal=false 告警,超 fatal 阈值才 fatal=true(且只报一次)", async () => {
+    const evs: { fatal: boolean; silentMs: number }[] = [];
+    const server = new BridgeServer(
+      {
+        deviceId: "dev-1", token: "tok-1", protocol: "raop",
+        stallAfterMs: 120, stallFatalMs: 600, checkIntervalMs: 40,
+      },
+      { onStall: (ev) => { evs.push(ev); } },
+    );
+    servers.push(server);
+    await server.listen(socketPath());
+
+    const client = await connectClient(server.listeningOn!);
+    client.write(encodeConfig(CFG));
+
+    await until(() => evs.length >= 1, "一级 stall 告警", 3000);
+    expect(evs[0].fatal).toBe(false); // 先到的一定是「保持链路」那一级
+
+    await until(() => evs.some((e) => e.fatal), "二级 fatal stall", 3000);
+    const fatalEv = evs.find((e) => e.fatal)!;
+    expect(fatalEv.silentMs).toBeGreaterThanOrEqual(600);
+    expect(evs[0].silentMs).toBeLessThan(fatalEv.silentMs); // 单调递增
+
+    const fatalCount = evs.filter((e) => e.fatal).length;
+    await new Promise((r) => setTimeout(r, 250));
+    expect(evs.filter((e) => e.fatal).length).toBe(fatalCount); // 不重复通知
+    expect(server.stats().stalls).toBeGreaterThanOrEqual(1);
+    client.destroy();
+  });
+
   it("close 后清理 socket 文件;stats 快照正确", async () => {
     const server = new BridgeServer({ deviceId: "dev-1", token: "tok-1", protocol: "raop" }, {});
     const p = socketPath();

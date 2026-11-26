@@ -29,6 +29,22 @@ describe("bridgeHealth 共享状态", () => {
     bridgeHealth.record("a", Number.NaN);
     expect(bridgeHealth.min()).toBe(Number.POSITIVE_INFINITY);
   });
+
+  // [方案A 2026-11-26] deviceLeadMs 与 backlogMs 同链上行,泵侧 bridgeHoldMs() 取
+  // min(backlog+lead)。这里钉住「记录 / 快照 / 陈旧剔除」三段行为。
+  it("deviceLeadMs 随 record 落表,并在快照里与 backlogMs 对齐", () => {
+    bridgeHealth.record("a", 5200, 2500, 2060);
+    bridgeHealth.record("b", 300, 120, 400);
+    expect(bridgeHealth.deviceLeads()).toEqual({ a: 2060, b: 400 });
+    expect(bridgeHealth.backlogs()).toEqual({ a: 2500, b: 120 });
+  });
+
+  it("deviceLeadMs 缺省时保留上一条(与 backlogMs 同规则),不同步为 0", () => {
+    bridgeHealth.record("a", 5200, 2500, 2060);
+    bridgeHealth.record("a", 5300); // 只更新 inQueueMs
+    expect(bridgeHealth.deviceLeads().a).toBe(2060);
+    expect(bridgeHealth.backlogs().a).toBe(2500);
+  });
 });
 
 describe("推送链路（子进程侧）", () => {
@@ -45,6 +61,10 @@ describe("推送链路（子进程侧）", () => {
     expect(s).toContain("backlogMs: bridgeInQ");
     expect(s).toContain("firstPacketLeadUs: this.firstPacketLeadUs");
     expect(s).toContain("isAp2: this.ap2Session !== null");
+    // [方案A 2026-11-26] 设备已收未播(= tick 的 deltaUs)必须随 tick 上行:
+    // 泵侧续静音量 = 排空 −(backlog + deviceLead),缺这一列就会把「设备还有十几秒
+    // 真实音频」判成「马上播空」而灌出可闻静音(单机 8s / 群组 30s,真机实证)。
+    expect(s).toContain("deviceLeadMs: Math.max(0, Math.round(deltaUs / 1000))");
   });
 
   it("childMain 在构造函数内接线（send 在作用域内）", () => {
@@ -55,6 +75,8 @@ describe("推送链路（子进程侧）", () => {
     expect(s).toContain("actualSendAtUs: row.actualSendAtUs");
     expect(s).toContain("backlogMs: row.backlogMs");
     expect(s).toContain("isAp2: row.isAp2");
+    // [方案A 2026-11-26] 上行载荷必须把 deviceLeadMs 透传出去(否则泵侧永远收不到)。
+    expect(s).toContain("deviceLeadMs: row.deviceLeadMs");
   });
 
   it("事件类型与 supervisor 分支就位", () => {
@@ -63,7 +85,7 @@ describe("推送链路（子进程侧）", () => {
     expect(ipc).toContain('{ t: "bridgeStats"; deviceId: string; inQueueMs: number; backlogMs: number; actualSendAtUs: number | null');
     const sup = read("supervisor.ts");
     expect(sup).toContain('ev.t === "bridgeStats"');
-    expect(sup).toContain("bridgeHealth.record(ev.deviceId, ev.inQueueMs, ev.backlogMs)");
+    expect(sup).toContain("bridgeHealth.record(ev.deviceId, ev.inQueueMs, ev.backlogMs, ev.deviceLeadMs)");
     expect(sup).toContain("!ev.isAp2");
     // [2026-11-24] S8 校准闭环已**停用并整块移除**：其测量口径错误
     // （firstPacketLeadUs 在 forceNow 形态置 0，而实际命令提前量为 cold 预热值）

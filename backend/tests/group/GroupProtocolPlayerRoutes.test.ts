@@ -755,7 +755,7 @@ describe("状态派生(pollState / getGroupStatus)", () => {
     };
     h.state.groupPoll = { playing: true, paused: false, positionMs: 33_500, durationMs: 120_000 };
     let st = await getGroupStatus("g1");
-    expect(st).toMatchObject({ state: "PLAYING", position: 33, duration: 120, volume: 42, muted: true });
+    expect(st).toMatchObject({ state: "PLAYING", position: 33.5, duration: 120, volume: 42, muted: true }); // [D3] 0.1s 精度
     expect(st.media).toEqual({ title: "x" });
 
     h.state.groupPoll = { playing: false, paused: true, positionMs: 1000, durationMs: 120_000 };
@@ -792,7 +792,8 @@ describe("状态派生(pollState / getGroupStatus)", () => {
     h.state.front = { clients: new Map([["sp1", { ready: true }]]), groups: new Map() };
     const st = await getGroupStatus("g1");
     expect(st.state).toBe("PLAYING");
-    expect(st.position).toBe(33);
+    // [D3 2026-11-26] 组泵 33_500ms 在 0.1s 精度下是 33.5。
+    expect(st.position).toBe(33.5);
     expect(st.volume).toBe(20); // 持久音量(泵侧实时未就绪)
   });
 
@@ -804,7 +805,8 @@ describe("状态派生(pollState / getGroupStatus)", () => {
     h.state.front = { clients: new Map([["sp1", { ready: true }]]), groups: new Map() };
     const st = await getGroupStatus("g1");
     expect(st.state).toBe("PLAYING");
-    expect(st.position).toBe(33); // 组泵口径,不是设备会话的 5s
+    // [D3 2026-11-26] 组泵 33_500ms 在 0.1s 精度下是 33.5。
+    expect(st.position).toBe(33.5); // 组泵口径,不是设备会话的 5s
     expect(st.volume).toBe(20); // 持久组音量
   });
 

@@ -92,10 +92,10 @@ check("R2a bridgeLeadContentSec 不得回流(二次扣 lead ⇒ 进度恒落后 
   !gpLines.some((l) => l.includes("bridgeLeadContentSec")),
   "回流即复发「歌没播完 UI 到不了终点 / seek 少 2s」——扣减已收口在 audiblePositionMs 一处");
 check("R2b 共享组泵分支 position 取显示位置并钳 0",
-  gpLines.some((l) => l.includes("position: Math.max(0, Math.floor(((st as any).displayPositionMs ?? st.positionMs) / 1000))")),
+  gpLines.some((l) => l.includes("position: Math.max(0, toDecisecond((st as any).displayPositionMs ?? st.positionMs))")),
   "st 分支必须 displayPositionMs ?? positionMs(且 Math.max(0, …)),不再减 lead");
 check("R2c 组轮询分支 position 取显示位置并钳 0",
-  gpLines.some((l) => l.includes("position: Math.max(0, Math.floor(((gst as any).displayPositionMs ?? gst.positionMs) / 1000))")),
+  gpLines.some((l) => l.includes("position: Math.max(0, toDecisecond((gst as any).displayPositionMs ?? gst.positionMs))")),
   "gst 分支必须 displayPositionMs ?? positionMs(且 Math.max(0, …)),不再减 lead");
 check("R2d 两条 sendspin 分支口径一致(不得只剩一条带 displayPositionMs)",
   gpLines.filter((l) => l.includes("displayPositionMs ?? ")).length >= 2,

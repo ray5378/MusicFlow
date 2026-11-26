@@ -901,8 +901,9 @@ console.log("===== G14 可听前 BUFFERING 瞬态(audibleStarted ⇒ pollCore.bu
   );
   const se14 = code(STREAM_ENGINE);
   check(
-    "streamEngine 必须在 play/预取采纳/seek/rehost 四处复位 audibleStarted(漏一处 ⇒ 该路径回跳回归)",
-    count(se14, "audibleStarted = false") === 4,
+    // [2026-11-26] 预取采纳分支(commitPrefetch)已删除 ⇒ 复位点回到 play/seek/rehost 三处
+    "streamEngine 必须在 play/seek/rehost 三处复位 audibleStarted(漏一处 ⇒ 该路径回跳回归)",
+    count(se14, "audibleStarted = false") === 3,
     "复位点缺失 ⇒ 对应路径切歌/seek 后进度回跳循环回归",
   );
   check(
@@ -1182,7 +1183,7 @@ console.log("===== G19 切歌等待后端自适应(手动口已删+分档lead+�
   // [2026-11-24] warm 参数允许为变量：现按「本进程是否已起播过」真分档
   // （首次 cold / 后续 warm）。此前恒传 BRIDGE_LEAD_TIERED ⇒ 冷档从未生效。
   const tieredExpr = "bridgeStartLeadUs([{warm:";
-  const hasBridgesGuard = se.includes("const hasBridges = this.group.hasBridges?.() === true;")
+  const hasBridgesGuard = se.includes("const hasBridges = this.bridgePresentSticky();")
     && se.includes("const isPureBridge =");
   const tieredOk = seOne.includes(tieredExpr) && hasBridgesGuard
     && se.includes("Math.min(aheadUs, ANCHOR_SAFE_LEAD_US)")
@@ -1201,8 +1202,9 @@ console.log("===== G19 切歌等待后端自适应(手动口已删+分档lead+�
     && se.includes("contigUs = this.continuityFromUs > deliverFloorUs ? this.continuityFromUs : deliverFloorUs")
     && se.includes("const continuity =")
     && se.includes("this.continuityGates(hasBridges, isPureBridge)");
-  const skipDrain = se.includes("const continuityDrainSkip = contentEnded && !this.prefetch && this.continuitySlotAvailable();")
-    && /contentEnded \&\& !this\.prefetch \&\& !continuityDrainSkip/.test(se);
+  // [2026-11-26] 下一首预取整条删除 ⇒ 跳过排空只剩「接续」一条判据(不再有 !this.prefetch)。
+  const skipDrain = /const continuityDrainSkip =\s*\n?\s*contentEnded && this\.continuitySlotAvailable\(\);/.test(se)
+    && /contentEnded \&\& !continuityDrainSkip/.test(se);
   check(
     "接续判定齐备(纯桥/混合开关 + 窗口 + seek=0 不算 seek)",
     gates,
@@ -1220,12 +1222,14 @@ console.log("===== G19 切歌等待后端自适应(手动口已删+分档lead+�
   );
 
   // --- d) 接续不发边界、不换代、不清 ring;预取路径保留旧曲尾 ---
+  // [2026-11-26] keepTail(把上一代曲尾重打代次带进新代次)只服务预取交接,已整删;
+  //   无预取时保队尾会在旧尾耗尽后直接断粮,故换代恒走「清水位 + bulk 回填」。
   const srvOk = srv.includes('continuity=1 keep=queue,epoch,watermarks')
-    && srv.includes("keepTail")
-    && srv.includes("BRIDGE_TRACK_KEEP_QUEUE_ENABLED")
-    && srv.includes("keepBridgeDelivery");
+    && srv.includes("keepBridgeDelivery")
+    && !srv.includes("keepTail")
+    && srv.includes("this.bridgeBulkPending.clear();");
   check(
-    "接续边界不发 BOUNDARY/不换代/不清 ring;预取换歌保留旧曲尾并保留水位",
+    "接续边界不发 BOUNDARY/不换代/不清 ring;非接续换代恒走 bulk 回填(不留残尾)",
     srvOk,
     `齐备=${srvOk} ⇒ 发 stop = airplay 侧 FLUSH 旧曲尾;清 ring = 新曲首帧无时间基准`,
   );

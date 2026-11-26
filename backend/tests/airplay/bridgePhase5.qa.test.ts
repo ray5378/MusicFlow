@@ -185,13 +185,38 @@ describe("代次与热复用收口(§Phase 5 BLK-02/R1)", () => {
 // ---------------------------------------------------------------------------
 
 describe("链路 stall(§5.2 sendspin 子进程崩溃)", () => {
-  it("★ stall → 立刻停推流 + 复位锚点(不写静音,等 BOUNDARY{rehost} 重锚)", () => {
+  // 2026-11-26 契约变更(曲中静音根治,对齐 MA sendspin_bridge):
+  //   帧级 2s 无帧只是「上游暂缺」,设备仍在播自己的缓冲 ⇒ **不得断流**;
+  //   只有超过 BRIDGE_STALL_FATAL_MS(15s)才判链路死亡、走原来的 flush + 重锚。
+  //   此前 2s 就 flush ⇒ pull() 返回 null ⇒ producer 结束 ⇒ 整条 RAOP 会话重建,
+  //   把上游几百毫秒抖动放大成 2~5s 真静音(真机 240 每首歌一次)。
+
+  it("★ 非致命 stall(2s 无帧)→ 保持链路:不 flush、不清锚点、按原时间线续上", () => {
     const s = mkLifecycleSession();
     const player = fakePlayer();
     injectConnected(s, player);
     feed(s, 4_000_000_000n, 20);
     expect((s as any).aligner).not.toBeNull();
-    (s as any).onLinkStall();
+    const anchorBefore = (s as any).anchors;
+    (s as any).onLinkStall({ fatal: false, silentMs: 2_100 });
+    expect(player.flush).not.toHaveBeenCalled();
+    expect((s as any).aligner).not.toBeNull();
+    expect((s as any).streamAborted).toBe(false);
+    expect((s as any).anchors).toBe(anchorBefore); // 锚点一字未动
+    expect(s.snapshot().anchored).toBe(true);
+    // 数据回来:沿用原锚点与 aligner,不产生新代次
+    feed(s, 4_020_000_000n, 21);
+    expect((s as any).aligner).not.toBeNull();
+    expect((s as any).anchors).toBe(anchorBefore);
+  });
+
+  it("★ 致命 stall(15s 无帧)→ 停推流 + 复位锚点(不写静音,等 BOUNDARY{rehost} 重锚)", () => {
+    const s = mkLifecycleSession();
+    const player = fakePlayer();
+    injectConnected(s, player);
+    feed(s, 4_000_000_000n, 20);
+    expect((s as any).aligner).not.toBeNull();
+    (s as any).onLinkStall({ fatal: true, silentMs: 15_200 });
     expect(player.flush).toHaveBeenCalledTimes(1);
     expect((s as any).aligner).toBeNull();
     expect((s as any).streamAborted).toBe(true);
