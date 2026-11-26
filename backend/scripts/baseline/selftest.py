@@ -49,7 +49,7 @@ PINS = {
 
 # 坏样本必须命中的判据类别（少一类就说明某条判据被删或失效）
 BAD_MUST_HIT = ("deltaUs.negPct", "deltaUs.p50", "inQueueMs.p95",
-                "inQueueMs.overCapPct", "realigned/min")
+                "inQueueMs.overCapPct", "realigned/min", "insertedFrames")
 
 
 def load_guard():
@@ -271,6 +271,11 @@ def main():
             p_iv_missing.returncode == 2, "rc=%s" % p_iv_missing.returncode)
     c.check("模拟判据：容量常量 4163ms 未被改软",
             iv.DEVICE_QUEUE_CAP_MS == 4163, "got=%s" % iv.DEVICE_QUEUE_CAP_MS)
+    # 2026-11-26 对齐真机口径收紧；放宽回设备容量会让 3925~4163ms 的劣化漏判。
+    c.check("模拟判据：inQ p95 上限为真机口径 3925ms（不再等于设备容量）",
+            iv.INQ_P95_MAX_MS == 3925, "got=%s" % iv.INQ_P95_MAX_MS)
+    c.check("模拟判据：deltaUs p50 下限收紧为 1200000us",
+            iv.DELTA_P50_MIN_US == 1_200_000, "got=%s" % iv.DELTA_P50_MIN_US)
     old_lo = iv.DELTA_P50_MIN_US
     try:
         iv.DELTA_P50_MIN_US = -10 ** 9
@@ -539,6 +544,35 @@ def main():
     c.check("交错判据边界 flips>2*(gens-1) 未被放宽",
             cap._stream_health([(i, {"gen": [1, 2, 3][i // 10]}) for i in range(30)])["interleaved"] is False
             and cap._stream_health([(i, {"gen": [1, 2][i % 2]}) for i in range(30)])["interleaved"] is True)
+
+    print("== 15. 可听缺口证据必须覆盖补帧型（insertedFrames）==")
+    # v4.15.9 的真实形态是 silenceChunks=0 + insertedFrames=2108：
+    # 如果 audibleGapEvidence 只看 silence/negPct，这台设备会被报成「无证据」。
+    def mk_ticks(ins_last):
+        rows = []
+        for i in range(24):
+            rows.append((i * 2, {
+                "dev": "DEVICE_T", "gen": 1, "state": "live", "clock": "local-rtp-ntp",
+                "queueMs": 100, "inQueueMs": 2500, "maxQueueMs": 150,
+                "late": 0, "lossReq": 0, "lossResent": 0, "lossMiss": 0,
+                "lossFuture": 0, "lossDedup": 0, "lossStale": 0,
+                "realigned": 1, "samples": 1, "deltaUs": 2060000,
+                "driftUs": 0, "timingAgeMs": 10,
+                "silenceChunks": 0,
+                "insertedFrames": (ins_last if i == 23 else 0),
+                "newgenSkipFrames": 0, "skippedFrames": 0, "droppedFrames": 0,
+            }))
+        return rows
+
+    clean = capmod.analyze_tick("DEVICE_T", mk_ticks(0))
+    gap = capmod.analyze_tick("DEVICE_T", mk_ticks(2108))
+    c.check("正常 tick 的 audibleGapEvidence 必须为 False",
+            bool(clean) and clean["audibleGapEvidence"] is False,
+            "got=%s" % (clean or {}).get("audibleGapEvidence"))
+    c.check("insertedFrames=2108 必须被 audibleGapEvidence 捕获",
+            bool(gap) and gap["audibleGapEvidence"] is True,
+            "got=%s totals=%s" % ((gap or {}).get("audibleGapEvidence"),
+                                  (gap or {}).get("totals")))
 
     return c.summary()
 

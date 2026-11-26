@@ -34,10 +34,13 @@ import sys
 
 # 与 docs/播放基线-基准值与判读-20261126.md §4 同源；改动需同步文档 + selftest。
 DEVICE_QUEUE_CAP_MS = 4163
-DELTA_P50_MIN_US = 500_000
+# 2026-11-26 收紧：CI 模拟端实测 deltaUs p50≈2061ms（与真机 iEAST 2060.8ms 几乎一致），
+# 原 500ms 下限允许提前量塌到 600ms 仍判绿；真机口径是 base-800ms≈1261ms，故取 1200ms。
+DELTA_P50_MIN_US = 1_200_000
 DELTA_P50_MAX_US = 4_000_000
 DELTA_NEG_PCT_MAX = 1.0
-INQ_P95_MAX_MS = DEVICE_QUEUE_CAP_MS
+# 真机口径 = base_p95(2725ms) + 1200ms = 3925ms。原值直接取设备容量 4163ms，宽了 238ms。
+INQ_P95_MAX_MS = 3925
 INQ_OVER_CAP_PCT_MAX = 5.0
 REALIGN_PER_MIN_MAX = 30.0
 ADVANCE_RATE_MIN = 0.98

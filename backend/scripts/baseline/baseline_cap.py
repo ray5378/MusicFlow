@@ -289,8 +289,12 @@ def _tick_metrics(series):
             "insertedFrames": r(delta_of(series, "insertedFrames"), 0),
         },
     }
-    # 用户最关心的「有没有可听缺口」一票否决项
+    # 用户最关心的「有没有可听缺口」一票否决项。
+    # ★ insertedFrames 必须计入：v4.15.9 的真实形态是 silenceChunks=0 +
+    #   insertedFrames=2108/设备（补帧型缺口）。只判 silence 会让这类缺口
+    #   被报成「无可听缺口证据」，等于把最有力的铁证丢掉。
     out["audibleGapEvidence"] = bool(out["totals"]["silenceChunks"]) or bool(
+        out["totals"]["insertedFrames"]) or bool(
         out["deltaUs"]["negPct"] and out["deltaUs"]["negPct"] > 1.0)
     return out
 

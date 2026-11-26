@@ -96,6 +96,13 @@ def judge(base, cur, strict_devices=False):
         sc = num((c.get("totals") or {}).get("silenceChunks"))
         if sc:
             out.append(("FAIL", dev, "silenceChunks", sc, 0, "出现补静音块 = 已发生可听缺口"))
+        # 补帧型可听缺口：v4.15.9 实测 silenceChunks=0 但 insertedFrames=2108/设备，
+        # 只判 silence 会把这种「靠插入帧填洞」的缺口漏成无证据。
+        # 口径 = cap.totals 的窗口增量（原始 tick 里该字段是单调累计值，正常也不为 0）。
+        ins = num((c.get("totals") or {}).get("insertedFrames"))
+        if ins:
+            out.append(("FAIL", dev, "insertedFrames", ins, 0,
+                        "补帧型可听缺口（静音记录可能为 0，靠插入帧填洞）"))
         ng = num((c.get("totals") or {}).get("newgenSkipFrames"))
         if ng:
             out.append(("WARN", dev, "newgenSkipFrames", ng, 0, "换代跳帧"))
