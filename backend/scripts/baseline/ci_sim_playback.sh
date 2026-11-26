@@ -269,11 +269,12 @@ if [ "${#SS_NAMES[@]}" -gt 0 ]; then
   done
   [ -n "$CID" ] || { tail -40 "$WORK/logs/sendspin-${SS_NAMES[0]}.log" >&2; die "探针未打印 client_id"; }
   echo "sendspin client_id=$CID"
-  api POST /v1/sendspin/pairing/start \
+  # api() 已自带 /rest/api/v1 前缀，这里不能再写 /v1（否则 404）。
+  api POST /sendspin/pairing/start \
     "{\"clientId\":\"$CID\",\"method\":\"static_pin\",\"format\":\"digits\"}" >/dev/null || \
     echo "警告：pairing/start 返回错误"
   sleep 2
-  api POST /v1/sendspin/pairing/code \
+  api POST /sendspin/pairing/code \
     "{\"clientId\":\"$CID\",\"code\":\"12345678\"}" >/dev/null || \
     echo "警告：pairing/code 返回错误"
   sleep 5
