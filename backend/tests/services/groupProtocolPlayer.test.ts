@@ -570,12 +570,14 @@ describe("getGroupStatus:音量权威 = GroupManager 持久值", () => {
     expect(st).toEqual({ state: "STOPPED", position: 0, duration: 0, volume: 7, muted: false, updatedAt: expect.any(Number) });
   });
 
-  it("leader 是 sendspin:组 pump 在播 → PLAYING,秒值向下取整,音量取实时组值", async () => {
+  it("leader 是 sendspin:组 pump 在播 → PLAYING,对外进度 0.1s 精度,音量取实时组值", async () => {
     mkGroup("g1", ["sendspin:c1"]);
     front([["c1", { ready: true }]], [["ug:g1", { volume: 33, muted: true, current: { title: "T" } }]]);
     H.groupPollImpl = async () => ({ playing: true, positionMs: 12345, durationMs: 200000 });
     const st = await getGroupStatus("g1");
-    expect(st).toEqual({ state: "PLAYING", position: 12, duration: 200, volume: 33, muted: true, media: { title: "T" }, updatedAt: expect.any(Number) });
+    // D3(2026-11-26):对外进度统一 0.1s(utils/progressPrecision.ts toDecisecond),
+    // 12345ms ⇒ 12.3s;此前 Math.floor 给 12,每次校准把本地时钟往回拽 ≤1s。
+    expect(st).toEqual({ state: "PLAYING", position: 12.3, duration: 200, volume: 33, muted: true, media: { title: "T" }, updatedAt: expect.any(Number) });
   });
 
   it("【v4.8.1】leader 是 sendspin:可听前 buffering → 状态串 BUFFERING(停插值防回跳)", async () => {
