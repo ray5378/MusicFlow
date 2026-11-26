@@ -271,16 +271,24 @@ def analyze_tick(dev, series, switch_rows=None):
     series = sorted(series, key=lambda x: x[0])
     if len(series) < 10:
         return None
-    windows = [(int(sw["t0"]), int(sw["t0"]) + SWITCH_WINDOW_MS)
-               for sw in (switch_rows or [])
-               if isinstance(sw.get("t0"), (int, float))]
+    starts = [int(sw["t0"]) for sw in (switch_rows or [])
+              if isinstance(sw.get("t0"), (int, float))]
+    has_wall = any(isinstance((item[1] or {}).get("_wall"), (int, float))
+                   for item in series if isinstance(item[1], dict))
     steady, trans = series, []
-    if windows:
-        def in_window(item):
+    if starts and has_wall:
+        # ★ 稳态判据段 = 第一次切歌之前（再留 5s 边界）。
+        # 不要用「每次切歌后固定 15s」：混合组锚点 lead 5s + 预填充 ~10s，
+        # 加上桥重建/重锚，恢复拖尾可跨到下一首；把未恢复期算进稳态
+        # 会让 v4.15.8 正常版在切歌测试里自己报红。切歌之后整段只判活性。
+        steady_end = min(starts) - 5000
+
+        def is_steady(item):
             w = (item[1] or {}).get("_wall") if isinstance(item[1], dict) else None
-            return isinstance(w, (int, float)) and any(a <= w <= b for a, b in windows)
-        steady = [x for x in series if not in_window(x)]
-        trans = [x for x in series if in_window(x)]
+            return isinstance(w, (int, float)) and w <= steady_end
+
+        steady = [x for x in series if is_steady(x)]
+        trans = [x for x in series if not is_steady(x)]
     out = _tick_metrics(steady)
     if out is None:
         return None
@@ -406,12 +414,13 @@ def analyze_ss_frames(rows, switch_rows):
         return None
     rows = sorted(rows, key=lambda x: x.get("t", 0))
     ts = [int(r["t"]) for r in rows if isinstance(r.get("t"), (int, float))]
-    windows = [(int(sw["t0"]), int(sw["t0"]) + SWITCH_WINDOW_MS)
-               for sw in (switch_rows or [])
-               if isinstance(sw.get("t0"), (int, float))]
+    starts = [int(sw["t0"]) for sw in (switch_rows or [])
+              if isinstance(sw.get("t0"), (int, float))]
+    # 与 tick 同口径：首曲切歌之前才算稳态，切歌后全程只记活性。
+    steady_end = (min(starts) - 5000) if starts else None
 
     def in_window(t):
-        return any(a <= t <= b for a, b in windows)
+        return steady_end is not None and t > steady_end
 
     if len(ts) < 2:
         return {"chunks": len(rows), "maxGapMs": None, "minPerSwitch": None}

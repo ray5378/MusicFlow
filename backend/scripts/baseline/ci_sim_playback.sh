@@ -32,7 +32,10 @@ PORT=${MF_PORT:-46400}
 BASE="http://127.0.0.1:${PORT}"
 TOPO=${MF_TOPO:-mixed}
 SWITCH_COUNT=${MF_SWITCH_COUNT:-5}
-SWITCH_INTERVAL=${MF_SWITCH_INTERVAL:-25}
+# 先跑一段无切歌稳态（A 层绝对阈值判据只用这段），再开始切歌功能验证。
+# 稳态段 60s ≈ 30 条 tick（2s/条），满足 guard 的 samplesSteady>=15。
+STEADY_SEC=${MF_STEADY_SEC:-60}
+SWITCH_INTERVAL=${MF_SWITCH_INTERVAL:-60}   # 5 次 = 300s，8 分钟采样仍留余量
 CI_USER=ci-probe
 CI_PASS=ci-probe
 CONTAINER=musicflow
@@ -290,7 +293,7 @@ print(walk(d) or "")
     [ -n "$peer" ] && break
     sleep 1
   done
-  [ -n "$peer" ] || { api GET /peers >&2 || true; tail -60 "$WORK/logs/sendspin-${name}.log" >&2; die "90s 内未发现可用 sendspin peer（$name）"; }
+  [ -n "$peer" ] || { api GET /peers >&2 || true; docker logs "$CONTAINER" --tail 160 >&2 || true; tail -60 "$WORK/logs/sendspin-${name}.log" >&2; die "90s 内未发现可用 sendspin peer（$name）"; }
   PEERS+=("$peer")
   echo "$name -> $peer"
 done
@@ -384,6 +387,8 @@ export MF_USER="$CI_USER" MF_PASS="$CI_PASS" MF_GROUP_ID="$GID" \
 timeout "$((MINUTES * 60 + 30))" python3 \
   "$REPO/docs/examples/baseline_sampler.example.py" > "$WORK/logs/sampler.log" 2>&1 &
 echo $! > "$WORK/sampler.pid"
+say "稳态采样 ${STEADY_SEC}s（这段才参与绝对阈值判读）"
+sleep "$STEADY_SEC"
 
 for k in $(seq 1 "$SWITCH_COUNT"); do
   before=$(status_song)
@@ -434,6 +439,17 @@ export MF_WATCH_DIR="$WORK" MF_SWITCH_LOG="$WORK/switch_log.jsonl" \
 python3 "$REPO/backend/scripts/baseline/baseline_cap.py" \
   --window "$MINUTES" --label "ci-sim-${TOPO}-$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)" \
   --out "$WORK/cap.json" || die "baseline_cap 失败"
+python3 - "$WORK/cap.json" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1],encoding="utf-8"))
+for dev,v in (d.get("A_tick") or {}).items():
+    print("SEGMENT tick dev=%s total=%s steady=%s switchPhase=%s" %
+          (dev, v.get("samplesTotal"), v.get("samplesSteady"),
+           (v.get("switchWindow") or {}).get("samples")))
+f=d.get("A_ssFrame") or {}
+print("SEGMENT ss total=%s steady=%s switchPhase=%s" %
+      (f.get("chunks"), f.get("steadyChunks"), f.get("switchWindowChunks")))
+PY
 EXTRA=()
 [ "$TICK_EXPECT" -gt 0 ] && EXTRA+=(--expect-tick-devices "$TICK_EXPECT")
 [ "$TICK_TOPO" = "sendspin" ] && EXTRA+=(--min-ticks 0)

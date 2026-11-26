@@ -352,6 +352,12 @@ def main():
     dead_fails = inv_fails(dead, require_switch=False)
     c.check("切歌窗口完全无 tick（桥死了）必须 FAIL",
             any("switchWindow.samples" in m for m in dead_fails), str(dead_fails))
+    thin = copy.deepcopy(seg)
+    for dev in thin["A_tick"]:
+        thin["A_tick"][dev]["samplesSteady"] = 3
+    thin_fails = inv_fails(thin, require_switch=False)
+    c.check("稳态段样本不足 15 条必须 FAIL（不能拿切歌暂态凑数）",
+            any("samplesSteady" in m for m in thin_fails), str(thin_fails))
     spec_cap = importlib.util.spec_from_file_location(
         "baseline_cap", os.path.join(HERE, "baseline_cap.py"))
     capmod = importlib.util.module_from_spec(spec_cap)
