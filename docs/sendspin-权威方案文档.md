@@ -464,6 +464,12 @@ await sleep(dueMs - Date.now());   // 自校正，±0.5ms 振荡
 - **（v4.14.30 补充，原文保留）置位点是三处**：pushLoop、曲末排空、**暂停恢复重锚**（重锚**不**复位、但要置位，理由见 group 文档 §4.6）。
 - **（v4.14.30）出声即事件**：首越下界那一帧把 `audibleStarted` 经 IPC `audibleStarted` 事件上报主进程；主进程立刻 `releaseDisplayHold("audible-started")` 并按 `floorMs` 广播状态 —— 封面/进度不再等 400ms 观察器 + fork RPC（旧路径实测迟 1~2s，且第一眼是「02 秒」）。
 - **（v4.14.30/31）显示口径单独派生**：`displayPositionMs = min(dur, framePos − depth + displayLeadMs)` 再过物理上界「内容起点 + 已流逝墙钟 × 倍速」；`displayLeadMs` 按曲粘住（桥组 2.05s）。**判定仍只看 `positionMs`** —— 两者混用会同时制造「曲末提前切歌」和「新曲 02 秒」。
+
+**hold 期间 state 必须同源（v4.15.10，2026-11-27）**：`/v1/peers/:id/status` 的 sendspin
+出口按 `holding ? "PLAYING" : <泵状态>` 取值。曲末交接时泵已切到新曲，`playbackState` 是
+`IDLE`/`BUFFERING`，而 hold 显示的是旧曲进度 —— 照搬泵状态会让客户端「显示暂停 + 进度
+冻结」，等 hold 结束一次跳几秒（240 实测《淘汰》4:16 冻住 → 4:22）。hold
+的前提是旧曲还在响（传输操作会清 hold），此时报 PLAYING 才与听感一致。
 - **（v4.14.30）状态推送**：本进程的组此前不发 `state_changed`，现在由主进程 `QueueController.broadcastState` 在每轮 `pollAllDevices`（5s）采样后转发，出声瞬间另推一次；ws 消费方（App / HA）据此不必再纯靠轮询。
 
 ## 2.9 推流循环落后时**必须让出宏任务**

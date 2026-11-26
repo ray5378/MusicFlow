@@ -2408,6 +2408,13 @@ late 累积    ≈ 22/秒（约占发包 18%）    ← producer 阻塞（欠料�
 `hard-timeout` / 「设备已进入新曲」兜底各 0 次；切歌瞬间 ws 推送即 `pos=0`；
 5 首连播 0.5s 采样回退 0、冻结 0、速率 0.997~0.998。
 
+**hold 期间的对外状态必须同源（v4.15.10，2026-11-27）**：桥组曲末交接时泵已换代，
+`/v1/peers/:id/status` 与 ws 推送里的 `state` 会是 `IDLE`/`STOPPED`，而 `displayHold`
+正把进度按住旧曲（旧曲 tail 仍在响）。只覆盖 position/duration 不覆盖 state，客户端会
+显示「暂停 + 旧曲进度」并冻结进度条，hold 结束后一次跳几秒（240 实测《淘汰》4:16 → 4:22）。
+故所有 hold 覆盖点必须同时给 `state = "PLAYING"`；守卫见
+`backend/tests/player/displayHoldStateConsistency.test.ts`。
+
 **判据边界（仍是旧结论）**：桥的 `[airplay-bridge] tick` 依旧是内容同步的权威判据；
 本节新增的只是「什么时候把封面/进度切过去」，不参与任何同步决策。
 

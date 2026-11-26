@@ -462,6 +462,22 @@ DLNA 设备区块仍然渲染在群组页左侧（`index.vue:51-123`，`data-laz
   3. `hard-timeout`：硬顶到点。
 - 放开瞬间补推一次状态。`audible-started` 这条**不再补采样** —— 采样读数是 1~2s 后的位置，会把刚广播的精确 0 覆盖掉。
 
+**二·补、对外状态必须与显示进度同源（v4.15.10，2026-11-27）**
+
+hold 持有期间，**但凡某个出口把 `position/duration` 换成旧曲，就必须把 `state` 一并改成
+`PLAYING`**。理由：`state` 取自泵/设备，而曲末交接窗口泵已换代，poll 出来是 `IDLE` /
+`BUFFERING` / `STOPPED`；hold 的前提恰恰是「旧曲 tail 还在响」（任何非音量传输操作都会
+`clearDisplayHold`，见 `QueueController` 入口 `op !== "volume"` 分支），此刻音频确实在播。
+
+只换进度不换 state ⇒ 客户端拿到「暂停 + 旧曲进度」这个自相矛盾的组合：显示暂停、进度因
+非 playing 停止外推而**冻结**，hold 结束后一次性跳到真实位置（240 实测《淘汰》：4:16 冻住 →
+约 7 秒后 4:22，听感完全正常）。
+
+覆盖点共 7 处，新增出口必须同步：`services/ws/index.ts` 的 `sendSnapshot` 与 `onState`、
+`routes/api/peers.ts` 的 dlna / 组长 / airplay 桥 / sendspin 四个出口、
+`routes/api/dlna.ts` 的 status。守卫 `backend/tests/player/displayHoldStateConsistency.test.ts`
+按「凡窗口内出现 hold.position 必须同时出现 PLAYING」静态钉住，漏改直接红。
+
 **三、出声事件链路（v4.14.30）**
 
 ```
