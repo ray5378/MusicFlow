@@ -24,11 +24,13 @@ CI 里由 baseline_cap.py 汇总成 A_ssFrame（帧数 / 最大帧间隔 / 每�
     python3 backend/scripts/baseline/sendspin_frame_probe.py [ws_url] [static_pin]
 """
 import asyncio
+import base64
 import json
 import logging
 import os
 import sys
 import time
+import urllib.request
 from dataclasses import replace
 
 from aiosendspin.client.client import SendspinClient
@@ -44,6 +46,29 @@ OUT = os.environ.get("MF_SS_FRAME_OUT", "")   # 空 = 只当普通模拟播放�
 STATIC_PIN = sys.argv[2] if len(sys.argv) > 2 else ""
 if len(sys.argv) > 1:
     URL = sys.argv[1]
+API_BASE = os.environ.get("MF_BASE_URL", "http://127.0.0.1:46400")
+API_USER = os.environ.get("MF_USER", "")
+API_PASS = os.environ.get("MF_PASS", "")
+
+
+def approve_self(client_id):
+    """CI 测试设备预批准：服务端 needsPairingActivation() 看 pairingStore.isApproved，
+    已批准就跳过 PAKE 直接激活注册 peer。9.x SDK 的配对 wire 与本仓服务端
+    不兼容（pin_mismatch），但 approved 标记不需要设备在线（setApproved 纯内存写），
+    所以连接前就能批准。生产环境不注入 MF_USER，这段自动 no-op。"""
+    if not API_USER:
+        print("[ss-probe] no admin creds; self-approve skipped", flush=True)
+        return
+    try:
+        auth = base64.b64encode(("%s:%s" % (API_USER, API_PASS)).encode()).decode()
+        body = json.dumps({"clientId": client_id, "approved": True}).encode()
+        req = urllib.request.Request(
+            API_BASE + "/rest/api/v1/sendspin/approve", data=body, method="POST",
+            headers={"Content-Type": "application/json", "Authorization": "Basic " + auth})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            print("[ss-probe] self-approved rc=%d" % resp.status, flush=True)
+    except Exception as e:
+        print("[ss-probe] self-approve failed: %s" % e, flush=True)
 
 logging.basicConfig(
     level=getattr(logging, os.environ.get("SIM_LOG", "WARNING")),
@@ -102,6 +127,7 @@ async def main() -> None:
     ident = Identity.generate()
     print("[ss-probe] name=%s client_id=%s out=%s" % (NAME, ident.peer_id, OUT or "-"),
           flush=True)
+    approve_self(ident.peer_id)
     # 插件 toggle 后服务才监听 :38927，冷启动 + 容器重启都要覆盖；
     # 失败必须重建 client（aiohttp session 用坏后不能复用）。
     client = None
