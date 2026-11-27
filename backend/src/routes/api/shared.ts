@@ -504,6 +504,18 @@ export function localShuffleInfo(snap: any) {
   };
 }
 
+/** 桥状态兜底：桥播放（单机桥 / 群组桥成员）时 RAOP 会话表为空或 relTime 恒 0，
+ *  真实进度/当前曲在泵派生的桥状态里。动态 import：protocolPlayer 与 group/sendspin
+ *  之间有加载环（同 peers.ts 的用法）。 */
+async function readAirPlayBridgeStatus(deviceId: string) {
+  try {
+    const { getBridgePeerStatus } = await import("../../services/airplay/protocolPlayer.js");
+    return await getBridgePeerStatus(deviceId);
+  } catch {
+    return null;
+  }
+}
+
 export async function readPeerPositionSeconds(peerId: string): Promise<number | null> {
   const parsed = parsePeerId(peerId);
   if (!parsed) return null;
@@ -518,7 +530,12 @@ export async function readPeerPositionSeconds(peerId: string): Promise<number | 
     }
     if (parsed.kind === "airplay") {
       const st = getAirPlayPeerStatus(parsed.id);
-      return typeof st?.position === "number" && Number.isFinite(st.position) ? st.position : null;
+      const pos = typeof st?.position === "number" && Number.isFinite(st.position) ? st.position : null;
+      // 桥播放时 RAOP 恒 0（v4.15.15/v4.15.16 真机 A/B 确认）：只读 RAOP 会把 8s 的源
+      // 读成 0s ⇒ 流转目标从 0 起播。与 /status 同源，兜底到泵派生位置。
+      if (pos !== null && pos > 0) return pos;
+      const bridge = await readAirPlayBridgeStatus(parsed.id);
+      return typeof bridge?.position === "number" && Number.isFinite(bridge.position) ? bridge.position : pos;
     }
     if (parsed.kind === "sendspin") {
       const st = await getQueueController().getPlayerState(parsed.id);
@@ -546,7 +563,14 @@ export async function readPeerCurrentSongId(peerId: string): Promise<string | nu
     let st: any = null;
     if (parsed.kind === "dlna") st = await getDeviceStatus(parsed.id);
     else if (parsed.kind === "group") st = await getGroupStatus(parsed.id);
-    else if (parsed.kind === "airplay") st = getAirPlayPeerStatus(parsed.id);
+    else if (parsed.kind === "airplay") {
+      st = getAirPlayPeerStatus(parsed.id);
+      // 桥播放时 RAOP 没有 media（会话表为空）⇒ 用桥派生的当前曲校正队列下标。
+      if (!(st?.songId ?? st?.media?.songId)) {
+        const bridge = await readAirPlayBridgeStatus(parsed.id);
+        if (bridge?.media?.songId) st = { ...st, media: bridge.media };
+      }
+    }
     else if (parsed.kind === "sendspin") st = await getQueueController().getPlayerState(parsed.id);
     else st = pm.getLocalStatusReport(peerId);
     const sid = st?.songId ?? st?.media?.songId ?? st?.currentMedia?.songId;
