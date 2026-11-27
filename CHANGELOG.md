@@ -2,6 +2,17 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.15.13] - 2026-11-27
+
+### Feature 服务端日志统一重写：等级标志前置、统一分级、文案润色
+
+- **改了什么**：服务端所有显示日志统一成 `[LEVEL] [PREFIX] message` 格式，日志等级标志永远在行首（此前是 `[PREFIX] LEVEL message`）；逐条重新判定日志等级（可恢复降级=`warn`、失败/不可恢复=`error`、常规事件=`info`、明细=`debug`），并对全部日志文案做一致性润色。
+- **收敛裸 console**：`protocolPlayer.ts`、`sendspin/server.ts` 等处原本绕过 logger 直接 `console.warn` 的调用，统一收敛到 `createLogger` 出口；仅保留 4 处必要的底层输出层（logger.ts 本体、sandbox emit、sandboxWorker stdout 桥、sniff 调试）。
+- **判据兼容**：播放侧基线判据与采样器靠日志正文 marker 匹配（如 `timeline anchored`、`曲末排空跳过`），不依赖等级前缀位置；本次润色未改动任何判据 marker 文案。三篇权威文档与 SPEC 里作为判据的旧格式示例已同步为新格式。
+- **守卫**：新增 `backend/scripts/check-log-format.mjs`（L1–L9：行首等级、四级映射、输出层去重、裸 console 白名单、旧格式回流拦截、关键路径无空 catch）。CI 新增 `log-format-guard` job，`check-workflow-paths` 已识别新脚本。
+- **测试**：`utils.test.ts` 补四级行首格式与去重断言；`protocolPlayerUnits.test.ts` 两处断言随日志出口收敛改盯 `log.warn`；`lt1_serverOutboundGaps.test.ts` 同步润色后的文案。全量 619 文件通过。
+- **影响面**：纯日志输出层与文案，不含播放行为/状态机/判据逻辑变更；前端未改。240 需热补丁更新 dist。
+
 ## [4.15.12] - 2026-11-27
 
 ### Fix Web 卡片进度条「往前走时后跳一小格」：轮询回写加 0.5s 单向防抖
