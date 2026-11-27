@@ -13,6 +13,7 @@ import { getDeviceCard } from "@/utils/deviceCard";
 import { seekTargetFromLogical, toLogicalPosition, withTimeOffset } from "@/utils/transcodedSeek";
 import { prefetchEnabled, prefetchNext, resetPrefetch, takePrefetched } from "@/utils/nextPrefetch";
 import { alignSeekSeconds } from "@/utils/seekGranularity";
+import { adoptPolledPosition } from "@/utils/pollPosition";
 import { gt } from "@/locales";
 
 /**
@@ -1597,7 +1598,14 @@ export const usePlayerStore = defineStore("player", () => {
               // 外推到此刻再写入:设备型 peer 的 position 是 2s 前采的样,直接当现在
               // 会让歌词稳定滞后并在每次轮询时回跳。
               const stPlaying = st.isPlaying || s.state === "PLAYING" || s.state === "playing" || s.state === "STARTED";
-              st.currentTime = projectPeerPosition(s, s.position, stPlaying);
+              const projected = projectPeerPosition(s, s.position, stPlaying);
+              // 单向防抖:吞掉「同曲内被 0.1s 上报精度往回拽一小格」的假回退。
+              // 同曲判据用 status 上报的 songId 与本地队列当前曲比对;换歌那一拍
+              // 一律采纳新曲起点。seek 由上方 seekIssued 守卫在前挡住,不走这里。
+              const incomingSongId = s.media && s.media.songId;
+              const localSongId = st.queue[st.index]?.id;
+              const sameSong = !incomingSongId || !localSongId || incomingSongId === localSongId;
+              st.currentTime = adoptPolledPosition(projected, st.currentTime, sameSong);
               castTickAt.set(st.peerId, Date.now());
             }
           }
