@@ -36,6 +36,11 @@ SWITCH_COUNT=${MF_SWITCH_COUNT:-5}
 # 稳态段 60s ≈ 30 条 tick（2s/条），满足 guard 的 samplesSteady>=15。
 STEADY_SEC=${MF_STEADY_SEC:-90}
 SWITCH_INTERVAL=${MF_SWITCH_INTERVAL:-60}   # 5 次 = 300s，8 分钟采样仍留余量
+# 手动 next 切歌永远走不到「自然曲末」，而曲末接续（零间隙）正是 2026-11-26 血案
+# 的现场。切歌阶段结束后单独跑几轮「seek 到曲尾 → 让泵自然收尾」，让
+# `曲末排空跳过:接续下一首` 这条路径真的被覆盖到。
+JOIN_ITERS=${MF_JOIN_ITERS:-3}
+JOIN_GAP_SEC=${MF_JOIN_GAP_SEC:-6}
 # 长跑（nightly）才有意义：短跑里容器 RSS/FD 还没稳定，采了也是噪声。
 RESOURCE_SAMPLE=0
 [ "$MINUTES" -ge 20 ] && RESOURCE_SAMPLE=1
@@ -128,6 +133,16 @@ m=d.get("media") or {}
 # CI 的 10 首测试音时长各不相同（46~55s），duration 变化同样是「真换曲」证据。
 print(m.get("songId") or m.get("id") or m.get("title") or d.get("duration") or "")
 ' 2>/dev/null || true
+}
+
+status_duration() {
+  api GET "/peers/group%3A${GID}/status" 2>/dev/null | python3 -c '
+import json,sys
+try: d=json.load(sys.stdin)
+except Exception: print(0); raise SystemExit
+try: print(int(float(d.get("duration") or 0)))
+except Exception: print(0)
+' 2>/dev/null || echo 0
 }
 
 frame_count() {
@@ -478,6 +493,37 @@ echo "采样 tick 行数=$TICKS  sendspin 帧行数=$(frame_count)"
 [ "$TICK_TOPO" = "sendspin" ] || [ "$TICKS" -ge 20 ] || die "tick 不足 20 条"
 [ "$TICK_TOPO" != "sendspin" ] || [ "$(frame_count)" -ge 100 ] || die "sendspin 帧不足 100"
 
+# A 层采样已经收尾，这里再动播放位置不会污染 cap.json 的稳态/切歌窗口。
+say "7b/8 自然曲末接续 ${JOIN_ITERS} 轮（seek 到曲尾 -${JOIN_GAP_SEC}s，让泵自然收尾）"
+JOINED=0
+for k in $(seq 1 "$JOIN_ITERS"); do
+  DUR=$(status_duration)
+  if [ "${DUR:-0}" -lt $(( JOIN_GAP_SEC + 15 )) ]; then
+    echo "警告：第 $k 轮 duration=${DUR:-0}s 不足以 seek 到曲尾，跳过本轮"
+    continue
+  fi
+  before=$(status_song)
+  TARGET=$(( DUR - JOIN_GAP_SEC ))
+  if ! api POST "/peers/group%3A${GID}/seek" "{\"seconds\":${TARGET}}" >/dev/null; then
+    echo "警告：第 $k 轮 seek 到 ${TARGET}s 失败，跳过本轮"
+    continue
+  fi
+  # 曲尾 ${JOIN_GAP_SEC}s + 接续建锚 + 新曲起播，留 10s 余量
+  sleep $(( JOIN_GAP_SEC + 10 ))
+  after=$(status_song)
+  if [ -n "$after" ] && [ "$after" != "$before" ]; then
+    JOINED=$(( JOINED + 1 ))
+    echo "自然接续 $k: dur=${DUR}s seek->${TARGET}s $before -> $after OK"
+  else
+    echo "::warning::自然接续 $k 未换曲（$before -> $after），本轮零间隙判据拿不到证据"
+  fi
+done
+echo "自然接续成功 $JOINED / $JOIN_ITERS"
+if [ "$JOIN_ITERS" -gt 0 ] && [ "$JOINED" -eq 0 ]; then
+  docker logs "$CONTAINER" --since 10m 2>&1 | grep -aE '曲末排空跳过|接续承诺|timeline anchored' | tail -20 >&2 || true
+  die "自然曲末接续一次都没成功（seek 到曲尾后未换曲）"
+fi
+
 say "8/8 汇总 + 分拓扑不变量判读"
 export MF_WATCH_DIR="$WORK" MF_SWITCH_LOG="$WORK/switch_log.jsonl" \
        MF_SS_FRAME_LOG="$WORK/sendspin_frames.jsonl"
@@ -511,8 +557,12 @@ docker logs -t "$CONTAINER" 2>&1 \
   | grep -aE 'bridge-servo|bridge-start-seek|bridge-flush|RAOP FLUSH|warm=false|bridge-drain-fill|silenceChunks|stall|曲末排空跳过|timeline anchored: base=|next-prefetch|bridge-prefetch|bridge-track-keep' \
   > "$WORK/logs/playback_side.log" || true
 say "播放侧硬判据（$SIDE_MODE，关键日志 $(wc -l < "$WORK/logs/playback_side.log" 2>/dev/null || echo 0) 行）"
+# 最少接续证据：3 轮里要求至少 2 轮真的接上（允许 1 轮因 seek 落点抖动没跑到曲尾）。
+SP_MIN_JOINS=$JOINED
+[ "$JOINED" -gt 2 ] && SP_MIN_JOINS=$(( JOINED - 1 ))
 python3 "$REPO/backend/scripts/baseline/playback_side_guard.py" \
   --input "$WORK/logs/playback_side.log" --mode "$SIDE_MODE" \
+  --topo "$TICK_TOPO" --min-joins "$SP_MIN_JOINS" \
   --out "$WORK/playback_side.json" || die "播放侧硬判据 FAIL"
 
 # 长跑增量判据：全局分位数抓不到「前段健康、后段劣化」，这里按 5 分钟分桶看斜率。

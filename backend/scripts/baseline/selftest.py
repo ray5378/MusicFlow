@@ -745,7 +745,8 @@ def main():
 
     def ps_lines(n=40, gap_at=-1, seeks=(), flushes=0, cold=1,
                  join_delta=0, bad_fill=False, silence=False,
-                 prefetch=False, fatal=False, skip_drain=False):
+                 prefetch=False, fatal=False, skip_drain=False,
+                 same_epoch=False, extra_anchors=0):
         """构造带 UTC 时间戳的容器关键行；默认一份完全健康的样本。"""
         out, t0 = [], 1_795_700_000.0
         for i in range(n):
@@ -755,15 +756,22 @@ def main():
             out.append("%s [sendspin] bridge-servo dev=D cursorVsNow=5800ms" % _iso(ep))
         for i in range(cold):
             out.append("%s [airplay-bridge] warm=false start=0s" % _iso(t0 + 1))
-        for reason in seeks:
-            out.append("%s [sendspin] bridge-start-seek dev=D reason=%s" %
-                       (_iso(t0 + 2), reason))
+        for i, reason in enumerate(seeks):
+            # 判据按「会话 × 设备」判重：默认每次 seek 各属一个新会话（模拟环境
+            # 每次切歌重建会话的形态）；same_epoch=True 表示同会话内重复首投。
+            epoch = 1 if same_epoch else i + 1
+            out.append("%s [sendspin] bridge-start-seek dev=D reason=%s "
+                       "cursorSeedVsNowMs=4000 epoch=%d" %
+                       (_iso(t0 + 2), reason, epoch))
         for i in range(flushes):
             out.append("%s [airplay] RAOP FLUSH dev=D" % _iso(t0 + 3 + i))
         if join_delta is not None:
             out.append("%s [sendspin] sendspin 曲末排空跳过:接续下一首 continuity=1 next=abcdef12 endUs=477000000000" % _iso(t0 + 4))
             out.append("%s [sendspin] sendspin timeline anchored: base=%d contig=477000000000 continuity=true" %
                        (_iso(t0 + 5), 477000000000 + join_delta))
+        for i in range(extra_anchors):
+            out.append("%s [sendspin] sendspin timeline anchored: base=%d contig=- continuity=false" %
+                       (_iso(t0 + 5 + i), 477000000001 + i))
         if bad_fill:
             out.append("%s [sendspin] sendspin 曲末排空:桥续静音跳过 ev=bridge-drain-fill-skip reason=other bridges=1" % _iso(t0 + 6))
         if silence:
@@ -799,7 +807,8 @@ def main():
     r_cold2 = psg.judge(ps_lines(flushes=2, cold=1, seeks=[psg.COLD_START_REASON]))
     c.check("冷启动起播+首投 seek 两次 FLUSH 必须 PASS",
             not ps_metrics(r_cold2), str(ps_metrics(r_cold2)))
-    r_flush_excess = psg.judge(ps_lines(flushes=3, cold=1, seeks=[psg.COLD_START_REASON]))
+    # 每个冷启动会话合法 FLUSH = 2（建会话 + 首投），故 4 次才越界。
+    r_flush_excess = psg.judge(ps_lines(flushes=4, cold=1, seeks=[psg.COLD_START_REASON]))
     c.check("冷启动两次合法 FLUSH 之外的第三次必须 FAIL",
             "bridgeFlush.count" in ps_metrics(r_flush_excess), str(ps_metrics(r_flush_excess)))
 
@@ -835,9 +844,39 @@ def main():
     c.check("长跑样本下限 100 条 servo 必须 FAIL（短/长口径不同）",
             "servo.count" in ps_metrics(r_long), str(ps_metrics(r_long)))
 
+    # 同会话内重复首投（epoch/dev 都相同）⇒ 必须判红
+    r_dup = psg.judge(ps_lines(seeks=[psg.COLD_START_REASON] * 3, same_epoch=True,
+                               extra_anchors=2))
+    c.check("播放侧：同会话重复首投判红", "startSeek.count" in ps_metrics(r_dup),
+            str(ps_metrics(r_dup)))
+
+    # 模拟环境形态：每次切歌重建会话（3 会话 / 3 个曲首锚点，无 warm=false）
+    # ⇒ 不得误报（这正是 v4.15.9~11 十一个 tag job 恒红的形态）
+    r_multi = psg.judge(ps_lines(seeks=[psg.COLD_START_REASON] * 3, cold=0,
+                                 extra_anchors=2, flushes=6))
+    c.check("播放侧：多会话按会话判重不误报", not ps_metrics(r_multi),
+            str(ps_metrics(r_multi)))
+
+    # 会话数 > 曲首锚点数 = 曲中途重建会话（上一首提前收工）⇒ 必须判红
+    r_over = psg.judge(ps_lines(seeks=[psg.COLD_START_REASON] * 4, cold=0,
+                                extra_anchors=1))
+    c.check("播放侧：会话多于曲首锚点判红", "startSeek.count" in ps_metrics(r_over),
+            str(ps_metrics(r_over)))
+
+    # 纯 sendspin 拓扑没有桥 ⇒ servo 判据 SKIP，不能判红
+    r_ss = psg.judge(ps_lines(), topo="sendspin")
+    c.check("播放侧：纯 sendspin 拓扑 servo 判 SKIP 不判红",
+            not ps_metrics(r_ss) and any(r[0] == "SKIP" for r in r_ss),
+            str([(r[0], r[1]) for r in r_ss]))
+
+    # CI 要求接续证据下限：缺证据必须判红，不能让零间隙判据静默退化
+    r_cov = psg.judge(ps_lines(join_delta=None), min_joins=2)
+    c.check("播放侧：接续证据不足判红", "trackJoin.coverage" in ps_metrics(r_cov),
+            str(ps_metrics(r_cov)))
+
     c.check("servo 3s 上限常量未被改软", psg.SERVO_GAP_MAX_MS == 3000,
             "got=%s" % psg.SERVO_GAP_MAX_MS)
-    c.check("冷启动 seek 上限常量未被改软", psg.COLD_START_SEEK_MAX == 1,
+    c.check("每会话首投 seek 上限常量未被改软", psg.COLD_START_SEEK_MAX == 1,
             "got=%s" % psg.COLD_START_SEEK_MAX)
 
     return c.summary()
