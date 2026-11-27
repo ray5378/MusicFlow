@@ -10,7 +10,8 @@ import { albums, deviceQueues, groupQueues, songs } from "../../db/schema.js";
 import { PlayMode, PlayerState, PlaybackState, QueueItem, QueueSnapshot } from "./types.js";
 import { UniversalPlayer } from "./UniversalPlayer.js";
 import { getPlayerController } from "./index.js";
-import { createDlnaProtocolPlayer, getEffectiveBaseUrl, clearCurrentMedia, getDevice, alignDeviceToPosition } from "../dlna/control.js";
+import { getEffectiveBaseUrl, clearCurrentMedia, getDevice, alignDeviceToPosition } from "../dlna/control.js";
+import { createRendererPlayer } from "../pluginAccess.js";
 import { createAirPlayPlayerForDevice } from "../airplay/protocolPlayer.js";
 import { createSendspinProtocolPlayer } from "../sendspin/protocolPlayer.js";
 import { getCachedPlayability } from "../source/online/streamFallback.js";
@@ -472,7 +473,9 @@ export class QueueController extends EventEmitter {
   registerDlnaDevice(deviceId: string, name: string): void {
     if (this.players.has(deviceId)) return;
     const up = new UniversalPlayer(`dlna:${deviceId}`, name);
-    up.attachProtocol(createDlnaProtocolPlayer(deviceId));
+    const proto = createRendererPlayer("dlna", deviceId);
+    if (!proto) { log.debug("[QueueController] DLNA 设备无播放器工厂，跳过注册", { deviceId }); return; }
+    up.attachProtocol(proto);
     this.registerPlayer(deviceId, up, getPlayerController());
     log.info(`[QueueController] registered DLNA device: ${deviceId} (${name})`);
   }
@@ -2774,7 +2777,8 @@ export class QueueController extends EventEmitter {
     }
     for (const deviceId of online) {
       try {
-        const p = createDlnaProtocolPlayer(deviceId);
+        const p = createRendererPlayer("dlna", deviceId);
+        if (!p) continue;
         await p.playMedia(fullItem, baseUrl);
         // cast 后立刻 seek 在部分渲染器(实测 HiVi)会静默失效,用校准 seek:
         // 先等设备稳定 PLAYING,再以 leader 的"实时"位置为目标收敛。

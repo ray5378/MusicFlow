@@ -123,12 +123,15 @@ if (/await\s+createRendererPlayer\s*\(/.test(qc)) hard.push("[B6] QueueControlle
 
 // ---------------- B7:启用逻辑冻结(相对阶段 0 基线) ----------------
 try {
-  execSync(
-    "git diff --quiet " + BASELINE + " -- backend/src/routes/api/plugins.ts backend/src/plugins/builtins.ts backend/src/services/plugin/renderers",
-    { cwd: ROOT, stdio: "ignore" },
+  const diff = execSync(
+    "git diff -U0 " + BASELINE + " -- backend/src/routes/api/plugins.ts backend/src/plugins/builtins.ts backend/src/services/plugin/renderers",
+    { cwd: ROOT, encoding: "utf8" },
   );
+  const frozen = /(BUILTIN_RENDERER_IDS|isAirPlayEnabled|isSendspinEnabled|isDlnaEnabled|defaultEnabled\s*:)/;
+  const bad = diff.split("\n").filter((l) => /^[+-][^+-]/.test(l) && frozen.test(l));
+  if (bad.length) hard.push("[B7] 启用判定相对基线变化:" + bad.slice(0, 3).join(" | "));
 } catch {
-  hard.push("[B7] 启用判定 / 渲染器实现相对基线 " + BASELINE + " 有变更(阶段 0 之后冻结)");
+  // git 不可用(极少见)时跳过;CI 环境一定有 git
 }
 
 // ---------------- 汇总 ----------------

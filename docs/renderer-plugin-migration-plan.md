@@ -54,7 +54,7 @@
 | **3** | 基线快照（§2.6.2） | 用例数（**-1 前 9136 / -1 后 9129，以实测为准**）/ 守卫 37 / M1–M7 实测值写入 §4.2 | 实测与 §4.2 不一致时以实测为准并改表 |
 | **4** | 完成阶段 -1 尾巴：全量测试 → SPEC §1.5 → CHANGELOG → 热补丁 240 → 真机 G1–G8 → 发版 v4.15.15 | tag + Release + digest 核对通过 | 真机 G1–G8 全过，`[ray]` 确认 |
 | **5** | ✅ 阶段 0：契约扩容 + 同步门面（不动 import 图） | `createPlayer?` + `createRendererPlayer` + B1–B7 守卫落地，`QueueController` diff 为空 | `tsc` 0 错 + 37 守卫绿 + 单测 365 passed |
-| **6** | 阶段 1：DLNA 试点 | `QueueController` 不再 import `createDlnaProtocolPlayer` | 定向测试绿 + HiVi 真机四项 + L5 diff 两类改动 |
+| **6** | 🔄 阶段 1：DLNA 试点（代码完成，真机待部署） | `QueueController` 不再 import `createDlnaProtocolPlayer`（命中 0） | 定向 1385 用例绿 + 专项守卫 4 绿；HiVi 真机四项待部署 |
 | **7** | 阶段 2：AirPlay | 同上（AirPlay） | 含已配对 AP2 与未配对回落 AP1 各一次 |
 | **8** | 阶段 3：Sendspin | 同上（Sendspin） | ESP32 真机 + 多房同步 + 群组桥回归 |
 | **9** | 阶段 4：收口 | 边界守卫改硬拦截；M1/M3 达标；文档同步 | B1 命中即非零，且 38 守卫全绿 |
@@ -585,7 +585,7 @@ node scripts/check-renderer-plugin-boundary.mjs   # 白名单移除 QueueControl
 **1.5 回滚**：`git revert <该阶段单提交>`，或把 `:475/:2777` 换回直接调用（1 分钟）。
 
 **1.6 出口判据**
-- [ ] `QueueController.ts` 内 `createDlnaProtocolPlayer` 命中数 = **0**
+- [x] `QueueController.ts` 内 `createDlnaProtocolPlayer` 命中数 = **0** `（✅ 2026-11-27：tsc 0 错；tests/dlna+player+plugins 106 文件/1385 用例全过；专项守卫 4 条全绿；B2 降为 2（airplay+sendspin）。HiVi 真机四项待下次构建部署）`
 - [ ] `tests/dlna` / `tests/player` 用例数不降且全绿
 - [ ] DLNA 真机（HiVi）：起播 / 切歌 / seek / 音量 / 暂停续播 各一次正常
 - [ ] 五拓扑基线中 `mixed` 与 `ap-only` 不受影响（DLNA 不入组，本阶段不应改变任何 tick 数据）

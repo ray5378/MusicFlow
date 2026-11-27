@@ -19,6 +19,7 @@ import {
   castToDevice,
   getEffectiveBaseUrl,
   deviceDisplayName,
+  createDlnaProtocolPlayer,
 } from "../../../services/dlna/control.js";
 import { markStaleDevices } from "../../../services/dlna/discovery.js";
 import { db } from "../../../db/index.js";
@@ -96,6 +97,16 @@ Casts music via DLNA/UPnP to speakers, TVs and other playback devices on the LAN
 
 export const dlnaRendererPlugin: RendererPlugin = {
   manifest: dlnaRendererManifest,
+  /**
+   * 播放器工厂(阶段 1 起,见 renderer-plugin-migration-plan §2.7a):
+   * 必须同步返回;协议不匹配、或设备不在 DLNA 发现缓存中一律返回 null
+   * (归属校验用 DLNA 自身设备表,禁止盲透传);每次调用新建实例,不缓存。
+   */
+  createPlayer(protocol, deviceId: string) {
+    if (protocol !== "dlna") return null;
+    if (!getCachedDevices().some((d) => d.id === deviceId)) return null;
+    return createDlnaProtocolPlayer(deviceId);
+  },
   async discover() {
     return markStaleDevices(getCachedDevices()).map((d) => ({
       id: d.id,

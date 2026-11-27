@@ -82,6 +82,18 @@ vi.mock("../../src/services/dlna/control.js", () => ({
   },
 }));
 
+// 阶段 1:QueueController 经 createRendererPlayer("dlna", id) 取播放器。
+// 测试把门面接回本文件 dlna/control 的假工厂,保持原有断言(注册 / 对齐 / 拒连)。
+vi.mock("../../src/services/pluginAccess.js", () => ({
+  createRendererPlayer: (protocol: string, deviceId: string) => {
+    if (protocol !== "dlna") return null;
+    if (H.badDevices.has(deviceId)) throw new Error(`设备 ${deviceId} 拒连`);
+    const o = mkProto(`dlna:${deviceId}`);
+    o.playMedia = async (item: Any) => { H.log.push(`playMedia:dlna:${deviceId}:${item.songId}`); return { mediaUri: `uri:${deviceId}` }; };
+    return o;
+  },
+}));
+
 // 组:组管理器的读接口 + 组协议 player(扇出)+ 在线成员判据 + 组状态。
 vi.mock("../../src/services/group/index.js", () => ({
   getGroupManager: () => ({
