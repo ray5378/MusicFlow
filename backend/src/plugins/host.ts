@@ -20,6 +20,7 @@ import { makeScopedStorage, type PluginStorage } from "./storage.js";
 import { createComm, type CommTarget } from "./comm.js";
 import { upsertPluginNotice, clearPluginNotice, type PluginNoticeInput } from "./notices.js";
 import { proxyFetch } from "../services/proxy.js";
+import { createLogger } from "../utils/logger.js";
 
 export interface PluginHost {
   pluginId: string;
@@ -106,12 +107,13 @@ export function createPluginHost(
 ): PluginHost {
   const permissions = manifest.permissions || [];
   const storage = makeScopedStorage(manifest.id);
+  const pluginLog = createLogger(`PLUGIN:${manifest.id}`);
   const host: PluginHost = {
     pluginId: manifest.id,
     version: appVersion,
     permissions,
     config: config || {},
-    log: (...args: any[]) => console.log(`[plugin:${manifest.id}]`, ...args),
+    log: (...args: any[]) => pluginLog.info(args.map((a) => String(a)).join(" ")),
     storage,
     http: async (input: any, init?: any) => {
       requirePermission(host, "net");

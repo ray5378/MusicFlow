@@ -33,6 +33,9 @@ import {
   touch,
 } from "./shared.js";
 import { warmPlatformPoolOnBoot } from "../../services/plugin/localPlatformRecommend.js";
+import { createLogger } from "../../utils/logger.js";
+
+const localLog = createLogger("LOCAL-RECOMMEND");
 
 // ==================== stale-while-revalidate(SWR) ====================
 // 原状:TTL(5min)过期后下一个请求阻塞式重调所有外网插件(冷 900ms+,插件慢时更久)。
@@ -63,7 +66,7 @@ function readAggCacheDb(cacheKey: string): { ts: number; channels: any[] } | nul
     if (!parsed || typeof parsed.ts !== "number" || !Array.isArray(parsed.channels)) return null;
     return { ts: parsed.ts, channels: parsed.channels };
   } catch (e: any) {
-    console.warn("[RECOMMEND] 聚合缓存 DB 回灌失败:", e?.message || e);
+    log.warn("聚合缓存回灌失败", { err: e?.message || e });
     return null;
   }
 }
@@ -87,7 +90,7 @@ function writeAggCache(cacheKey: string, entry: { ts: number; channels: any[] })
       .prepare(`DELETE FROM settings WHERE key LIKE ? AND updated_at < ?`)
       .run(AGG_CACHE_PREFIX + "%", new Date(Date.now() - AGG_CACHE_MAX_AGE_MS).toISOString());
   } catch (e: any) {
-    console.warn("[RECOMMEND] 聚合缓存落库失败:", e?.message || e);
+    log.warn("聚合缓存落库失败", { err: e?.message || e });
   }
 }
 
@@ -131,13 +134,13 @@ async function fetchRecommendChannels(
       }));
       for (const ch of channels) allChannels.push(ch);
     } catch (e: any) {
-      console.warn(`[RECOMMEND] ${providerId} recommend() failed:`, e?.message || e);
+      log.warn(`主推荐插件 ${providerId} recommend() 失败`, { err: e?.message || e });
       primaryError = String(e?.message || e);
       // 主推荐插件失败不阻断其他插件
     }
   }
 
-  console.log(`[RECOMMEND] 找到 ${rpList.length} 个 recommendPlaylist 插件:`, rpList.map((p: any) => p.manifest.id).join(","));
+  log.info(`已加载 ${rpList.length} 个推荐歌单插件`, { ids: rpList.map((p: any) => p.manifest.id).join(",") });
 
   // ---- 2. 推荐歌单插件(具备 recommendPlaylist 能力,如榜单插件) ----
   // 并行聚合:各插件的 recommend() 各自看门狗/长耗时预算,互不阻塞。串行会累加
@@ -177,7 +180,7 @@ async function fetchRecommendChannels(
             });
           }
         } catch (e: any) {
-          console.warn(`[RECOMMEND] ${p.manifest.id} recommend() failed:`, e?.message || e);
+          log.warn(`插件 ${p.manifest.id} recommend() 失败`, { err: e?.message || e });
         }
       })()
     );
@@ -227,7 +230,7 @@ function readProviderLastGoodDb(pluginId: string): { ts: number; result: any } |
     if (!parsed || typeof parsed.ts !== "number" || !parsed.result) return null;
     return { ts: parsed.ts, result: parsed.result };
   } catch (e: any) {
-    console.warn("[LOCAL-RECOMMEND] last-good 回灌失败:", e?.message || e);
+    localLog.warn("last-good 回灌失败", { err: e?.message || e });
     return null;
   }
 }
@@ -245,7 +248,7 @@ function writeProviderLastGood(pluginId: string, entry: { ts: number; result: an
       .prepare("DELETE FROM settings WHERE key LIKE ? AND updated_at < ?")
       .run(PROVIDER_LASTGOOD_PREFIX + "%", new Date(Date.now() - PROVIDER_LASTGOOD_MAX_AGE_MS).toISOString());
   } catch (e: any) {
-    console.warn("[LOCAL-RECOMMEND] last-good 落库失败:", e?.message || e);
+    localLog.warn("last-good 落库失败", { err: e?.message || e });
   }
 }
 
@@ -298,7 +301,7 @@ function refreshRecommendCacheInBackground(
     if (channels.length === 0 && (primaryError || opts?.cold === true)) {
       const backoffMs = markFailure();
       const why = primaryError || "聚合结果为空(冷启动不落空缓存)";
-      console.warn(`[RECOMMEND] 后台拉取失败(${Math.round(backoffMs / 1000)}s 指数退避): ${why}`);
+      log.warn(`后台拉取失败，退避 ${Math.round(backoffMs / 1000)}s: ${why}`);
       return;
     }
     recommendColdFailAt.delete(cacheKey);
@@ -306,7 +309,7 @@ function refreshRecommendCacheInBackground(
     log.info(`[RECOMMEND] 后台拉取完成: ${cacheKey}`);
   })().catch((e: any) => {
     const backoffMs = markFailure();
-    console.warn(`[RECOMMEND] 后台拉取失败(${Math.round(backoffMs / 1000)}s 指数退避):`, e?.message || e);
+    log.warn(`后台拉取失败，退避 ${Math.round(backoffMs / 1000)}s`, { err: e?.message || e });
   }).finally(() => {
     recommendRefreshInflight.delete(cacheKey);
   });
@@ -383,7 +386,7 @@ export function startRecommendCacheWarmer(): void {
       try {
         if (!warmRecommendCacheOnce()) nextDelayMs = RECOMMEND_WARMER_COLD_RETRY_MS;
       } catch (e: any) {
-        console.warn("[RECOMMEND] SWR 预热失败:", e?.message || e);
+        log.warn("SWR 预热失败", { err: e?.message || e });
       } finally {
         tick(nextDelayMs); // re-arm(在 finally,异常也不能断链)
       }
@@ -483,7 +486,7 @@ function warmLocalProvidersOnce(): Promise<void> {
     if (cached && Date.now() - cached.ts < ttlSec * 1000) continue; // 仍新鲜,不重复拉
     // 失败仅 warn,不阻塞、不设退避 —— 下一轮仍会重试。
     tasks.push(kickProviderInvoke(pluginId, p).catch((e: any) => {
-      console.warn(`[LOCAL-RECOMMEND] 预热 ${pluginId} 失败:`, e?.message || e);
+      localLog.warn(`插件 ${pluginId} 预热失败`, { err: e?.message || e });
     }));
   }
   return Promise.all(tasks).then(() => undefined);
@@ -510,7 +513,7 @@ export function startLocalProviderWarmer(): void {
     localProviderWarmerTimer = setTimeout(() => {
       warmLocalProvidersOnce()
         .catch((e: any) => {
-          console.warn("[LOCAL-RECOMMEND] 预热轮次失败:", e?.message || e);
+          localLog.warn("预热轮次失败", { err: e?.message || e });
         })
         .finally(() => {
           const ready = warmableLocalProviderCount() > 0;
@@ -636,7 +639,7 @@ app.get("/v1/local-recommend", async (c) => {
           // kickProviderInvoke 与冷分支共用单飞表 → 已有在途调用时直接复用它。
           // 后台刷新为 fire-and-forget:失败仅告警,勿让 rejection 逃逸成未处理拒绝。
           kickProviderInvoke(pluginId, p).catch((e: any) => {
-            console.warn(`[LOCAL-RECOMMEND] ${pluginId} 拉取失败:`, e?.message || e);
+            localLog.warn(`插件 ${pluginId} 拉取失败`, { err: e?.message || e });
           });
           result = cached.result;
         } else if (cacheable) {
@@ -648,7 +651,7 @@ app.get("/v1/local-recommend", async (c) => {
             providerRecommendCache.set(pluginId, lastGood);
             if (Date.now() - lastGood.ts >= ttlSec * 1000) {
               kickProviderInvoke(pluginId, p).catch((e: any) => {
-                console.warn(`[LOCAL-RECOMMEND] ${pluginId} last-good 后台刷新失败:`, e?.message || e);
+                localLog.warn(`插件 ${pluginId} last-good 后台刷新失败`, { err: e?.message || e });
               });
             }
             result = lastGood.result;
@@ -694,7 +697,7 @@ app.get("/v1/local-recommend", async (c) => {
         // provider 本轮未产出(调起失败/拒绝):置 pending,前端据此继续轮询自愈 ——
         // 否则返回 200 + 空频道 + 无 pending,前端会当作「稳态空」而停止重试,分区永久空白。
         pendingAny = true;
-        console.warn(`[LOCAL-RECOMMEND] ${p.manifest.id} recommendLocal() failed:`, e?.message || e);
+        localLog.warn(`插件 ${p.manifest.id} recommendLocal() 失败`, { err: e?.message || e });
       }
     }),
   );

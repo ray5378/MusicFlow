@@ -91,10 +91,10 @@ export function startPluginHotReload(rootOverride?: string): void {
       }
       scheduleReload();
     });
-    watcher.on("error", (e: any) => console.warn("[PLUGIN-HOTRELOAD] watch error:", e?.message || e));
+    watcher.on("error", (e: any) => log.warn("监听插件目录失败", { err: e?.message || e }));
     log.info("[PLUGIN-HOTRELOAD] 已监听 data/plugins 变更");
   } catch (e: any) {
-    console.warn("[PLUGIN-HOTRELOAD] 无法启动监听(将需重启后端以加载新插件):", e?.message || e);
+    log.warn("无法启动插件目录监听，需重启后端才能加载新插件", { err: e?.message || e });
   }
 }
 

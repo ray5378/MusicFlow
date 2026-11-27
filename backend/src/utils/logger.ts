@@ -14,10 +14,12 @@
 //      排障时无需重启容器,切到 debug 即出全链路明细,用完切回 info 即可。
 //   2) **环境变量** LOG_LEVEL(debug|info|warn|error)—— 未设置运行期覆盖时的取值。
 //   3) 默认 info。
-// 输出格式:[PREFIX] LEVEL message key=value key=value ...
+// 输出格式:[LEVEL] [PREFIX] message key=value key=value ...
+// 等级永远在第一段，grep/告警规则可直接按行首过滤；前缀只标识来源。
 // 请求级追踪:debug 行会自动带上当前请求的 `tid=`(见下方 runWithTrace),
 //   一次拖动/一次投屏打出的多条日志可用同一个 tid 串成一条链路。
-// 关键约定(SPEC 第八章):所有 catch 必须打 error 且含关键入参,禁止吞异常。
+// 关键约定(SPEC 第八章):所有 catch 按影响分级——可恢复的降级打 warn,
+// 失败/不可恢复打 error；两种都要带关键入参,禁止吞异常。
 import { AsyncLocalStorage } from "node:async_hooks";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
@@ -98,7 +100,11 @@ export interface Logger {
 export function createLogger(prefix: string): Logger {
   const emit = (level: LogLevel, msg: string, fields?: Record<string, unknown>): void => {
     if (LEVEL_RANK[level] < LEVEL_RANK[getLogLevel()]) return;
-    let line = `[${prefix}] ${level.toUpperCase()} ${msg}${fmtFields(fields)}`;
+    // 兼容旧文案里自带的 [PREFIX]：输出层去重，避免 "[INFO] [P] [P] ..."；
+    // 只剥与 logger 前缀完全相同的标签，子标签(如 [device-state])保留。
+    const tag = `[${prefix}] `;
+    const body = msg.startsWith(tag) ? msg.slice(tag.length) : msg;
+    let line = `[${level.toUpperCase()}] [${prefix}] ${body}${fmtFields(fields)}`;
     // tid 只挂在 debug 行上:info/warn/error 是给人看的关键事件,不该被 trace 噪音污染。
     if (level === "debug") {
       const tid = traceStore.getStore();

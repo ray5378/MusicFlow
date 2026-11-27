@@ -181,8 +181,8 @@ export function reclaimNow(reason: "idle" | "manual" = "manual"): ReclaimReport 
   };
   lastReclaimAt = Date.now();
   lastReclaimReport = report;
-  console.log(
-    `[MEMORY-RECLAIM] ${reason} | caches=[${report.caches.join(",")}] gc=${report.gc} checkpoint=${report.checkpoint} | ` +
+  log.info(
+    `${reason} | caches=[${report.caches.join(",")}] gc=${report.gc} checkpoint=${report.checkpoint} | ` +
     `rss ${memBefore.rssMB}→${report.memAfter.rssMB}MB heapUsed ${memBefore.heapUsedMB}→${report.memAfter.heapUsedMB}MB ` +
     `external ${memBefore.externalMB}→${report.memAfter.externalMB}MB arrayBuffers ${memBefore.arrayBuffersMB}→${report.memAfter.arrayBuffersMB}MB`,
   );

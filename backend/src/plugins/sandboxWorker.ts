@@ -74,7 +74,7 @@ function makeWorkerEnv(permissions: string[]): SandboxHostEnv {
       upsert: (n) => hostCall("notify.upsert", [n]),
       clear: (k) => hostCall("notify.clear", [k]),
     },
-    log: (...args) => console.log("[PLUGIN-WORKER]", ...args),
+    log: (...args) => console.log(`[INFO] [PLUGIN-WORKER] ${args.map((a) => String(a)).join(" ")}`),
     comm: {
       send: (t, m) => { void hostCall("comm.send", [t, m]); },
       broadcast: (m) => { void hostCall("comm.broadcast", [m]); },

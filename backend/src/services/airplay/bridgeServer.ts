@@ -16,6 +16,7 @@
 import { createWriteStream, mkdirSync, unlinkSync, type WriteStream } from "node:fs";
 import net from "node:net";
 import path from "node:path";
+import { createLogger } from "../../utils/logger.js";
 
 import { isStaleFrame } from "./lateFrameGuard.js";
 import { playerIsolationEnabled } from "../playerHost/isolationFlag.js";
@@ -424,6 +425,7 @@ export class BridgeServer {
 
 /** 以环境变量启动 bridge server:MFAB_DEVICE_ID / MFAB_TOKEN / MFAB_SOCKET_PATH /
  *  MFAB_PROTOCOL / MFAB_DUMP_PATH。SIGINT/SIGTERM 优雅退出。 */
+const log = createLogger("bridge-server");
 export async function runBridgeServerMain(env: NodeJS.ProcessEnv = process.env): Promise<void> {
   const deviceId = env.MFAB_DEVICE_ID ?? "";
   const token = env.MFAB_TOKEN ?? "";
@@ -432,14 +434,14 @@ export async function runBridgeServerMain(env: NodeJS.ProcessEnv = process.env):
   const server = new BridgeServer(
     { deviceId, token, protocol, dumpPath: env.MFAB_DUMP_PATH || undefined },
     {
-      log: (...args: unknown[]) => console.log(...args),
-      onSession: (ev) => console.log(`[bridge-server] session ${ev.connected ? "connected" : "disconnected"}${ev.reason ? ` (${ev.reason})` : ""}`),
-      onStall: () => console.log(`[bridge-server] stall detected`),
-      onOverflow: (ms) => console.log(`[bridge-server] overflow ${Math.round(ms)}ms`),
+      log: (...args: unknown[]) => log.info(args.map((a) => String(a)).join(" ")),
+      onSession: (ev) => log.info("会话连接状态变化", { connected: ev.connected, reason: ev.reason || undefined }),
+      onStall: () => log.warn("2s 未收到帧，判定停滞"),
+      onOverflow: (ms) => log.warn("接收缓冲溢出，裁旧保新", { ms: Math.round(ms) }),
     },
   );
   await server.listen(socketPath);
-  console.log(`[bridge-server] ready socket=${socketPath} protocol=${protocol} dump=${env.MFAB_DUMP_PATH ?? "-"}`);
+  log.info("桥服务就绪", { socket: socketPath, protocol, dump: env.MFAB_DUMP_PATH ?? "-" });
   const stop = (): void => {
     void server.close().then(() => process.exit(0));
   };

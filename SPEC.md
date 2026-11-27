@@ -609,15 +609,21 @@ WS 推送: eventing GENA → PlayerController(reportState/去抖) → QueueContr
 
   - 级别：`debug < info < warn < error`，`LOG_LEVEL` 环境变量控制（默认 info）。
 
-  - 结构化：`log.error("任务失败", { pluginId, taskId, err })` → 输出 `[PLUGIN-JOB] ERROR 任务失败 pluginId=x taskId=y err=z`。
+  - 结构化：`log.error("任务失败", { pluginId, taskId, err })` → 输出 `[ERROR] [PLUGIN-JOB] 任务失败 pluginId=x taskId=y err=z`。等级永远在行首，前缀只标识来源；消息里与前缀同名的旧 `[TAG]` 由输出层去重。
 
-  - **强制**：所有 catch 块打 `error` 且**必须包含关键入参**（userId/songId/deviceId/playerId/pluginId/taskId/url 之一或多个），禁止吞异常、禁止仅 `console.error(e)` 无上下文。
+  - **输出格式铁律（v4.15.13+，全后端统一）**：`[LEVEL] [PREFIX] message key=value ...`。等级必须是**第一段**，grep/告警规则可直接按行首 `^\[(DEBUG|INFO|WARN|ERROR)\]` 过滤；前缀第二段只标识来源，不再夹带等级。四级 `debug/info/warn/error` 全部遵守，子进程输出层（沙箱 `emit`、`[PLUGIN-WORKER]` stdout 桥、`[sniff]` 零依赖调试）同样以行首等级开头。旧格式 `[PREFIX] LEVEL message` 已废弃，禁止回流。
+
+  - **强制**：所有 catch 块按影响分级——可恢复降级用 `warn`，失败/不可恢复用 `error`，且**必须包含关键入参**（userId/songId/deviceId/playerId/pluginId/taskId/url 之一或多个），禁止吞异常、禁止仅 `console.error(e)` 无上下文。
+
+  - **裸 console 白名单（仅四处输出层，其余一律 `createLogger`）**：`utils/logger.ts`（统一输出层）、`plugins/sandbox.ts`（按 pluginId 动态建 logger 的 emit）、`plugins/sandboxWorker.ts`（插件 `log()` → 子进程 stdout 桥，协议上不能走主进程 logger）、`services/fetch/sniff.ts`（刻意零依赖、仅 `MF_SNIFF_DEBUG` 下输出）。新增输出层出口须在 `scripts/check-log-format.mjs` 的 `ALLOWED_BARE_CONSOLE` 登记理由，并同步本条。
 
 - **豁免条款（仅限以下场景，必须配注释）**：① 纯解析容错（`JSON.parse` 失败回落默认值）；② 幂等清理（`ALTER TABLE` 迁移失败跳过、socket/资源 close 失败）；③ 高频轮询兜底（设备状态/组状态查询失败走默认值，如 DLNA poll 失败继续轮询）。以上场景允许静默或 `log.debug`，**禁止**在关键业务路径（播放/导入/同步/鉴权）吞异常。
 
+- **回归守卫与测试（v4.15.13+）**：`backend/scripts/check-log-format.mjs`（L1–L9，挂 `ci.yml` 的 `log-format-guard` job）钉住行首等级格式、四级映射、裸 console 白名单、子进程输出层顺序、SPEC 条款、等级常量顺序与「关键路径无空 catch」；`backend/tests/utils/utils.test.ts` 用 `^\[LEVEL\] \[PREFIX\]` 锚定行首格式并测去重与四级映射。改日志格式/等级/输出出口，守卫与单测必须同步更新。
+
 - **日志前缀**（沿用既有标签习惯，新增标签先查重）：`[MEMORY-RECLAIM]`、`[ORPHAN-PRUNE]`、`[PLUGIN-JOB]`、`[PLUGIN-WORKER]`、`[PLUGIN-HOTRELOAD]`、`[SCANNER]`、`[DAILY-RECOMMEND]`、`[LOCAL-RECOMMEND]`、`[DAILY-SCHEDULER]`、`[ARTIST-SCRAPE]`、`[AUTO-SYNC]`、`[REGISTRY]`、`[batch-runner]`（批量子进程完成：`[BATCH] <kind> 完成: 子进程峰值 X MB, 主进程 A MB → B MB`）、`[batch-child]`（子进程引导/异常）、`[batch-job]`（子进程 handler 侧）、`[DLNA]`、`[peer]`、`[group]`、`[QueueController]`、`[SECRET]`、`[FATAL]`、`[SECURITY]`、`[PLAY-HISTORY]`、`[HTTP]`（慢请求）。
 
-- **请求 metrics（v1.13.42+）**：`middleware/metrics.ts` 已挂载全链路——`≥1000ms` 请求打 `[HTTP] WARN 慢请求 {method, route, ms}`；`GET /rest/api/v1/admin/metrics` 返回总请求数/慢请求数/按端点计数（key=路由模板，**禁止用真实 URL 计数**防无界 Map）。
+- **请求 metrics（v1.13.42+）**：`middleware/metrics.ts` 已挂载全链路——`≥1000ms` 请求打 `[WARN] [HTTP] 慢请求 {method, route, ms}`；`GET /rest/api/v1/admin/metrics` 返回总请求数/慢请求数/按端点计数（key=路由模板，**禁止用真实 URL 计数**防无界 Map）。
 
 - **内存观测（v1.13.42+）**：`GET /rest/api/v1/admin/memory-settings` 返回 `rssMB/heapUsedMB/externalMB/arrayBuffersMB/isIdle/isBatchBusy/lastReclaimAt/lastReclaim`；`POST /rest/api/v1/admin/memory/reclaim` 返回回收前后内存快照。发版后先看 `rssMB` 曲线定论（稳定高位=正常；持续上涨=查泄漏）。
 

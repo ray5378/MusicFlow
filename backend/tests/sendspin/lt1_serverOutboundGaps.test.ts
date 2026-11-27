@@ -333,6 +333,6 @@ describe("server:dialPlayer 同目标单飞", () => {
     const got = await srv.dialPlayer("ws://10.0.0.9:8928/sendspin");
     // 契约:并发重拨会形成双连接 → 设备仲裁踢掉一个(another_server 风暴)。
     expect(got).toBe(existing);
-    expect(logsContain(logs, "已在进行中,复用")).toBe(true);
+    expect(logsContain(logs, "已在进行中，复用连接")).toBe(true);
   });
 });

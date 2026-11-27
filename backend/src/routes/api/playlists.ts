@@ -44,6 +44,10 @@ import {
   syncApi,
   touch,
 } from "./shared.js";
+import { createLogger } from "../../utils/logger.js";
+
+const playlistLog = createLogger("PLAYLIST");
+const matchLog = createLogger("AUTO-MATCH");
 
 // ==================== 歌单列表查询的可复用实现 ====================
 // 抽出为「入参即原始 query 字符串 + 当前用户」的纯函数,供路由直接调用 ——
@@ -232,7 +236,7 @@ export function startPlaylistPoolWarmer(): void {
     try {
       warmPlaylistPoolOnce();
     } catch (e: any) {
-      console.warn("[PLAYLIST-POOL] 索引预热失败:", e?.message || e);
+      playlistLog.warn("歌单索引预热失败", { err: e?.message || e });
     }
   }, PLAYLIST_POOL_WARMER_INITIAL_MS);
   playlistPoolTimer?.unref?.();
@@ -578,8 +582,8 @@ app.post("/v1/playlist/:id/auto-match", permMiddleware(PERM.PLAYLIST_IMPORT), as
   // 一轮在线源(连点即 429,正是节流要防的场景)。不传 playerId/contentContext =>
   // 只做匹配、不做服务端补齐,队列由调用方本机自行 diff 追加队尾,语义不变。
   void runPlaylistAutoMatch(id).then((r) => {
-    console.info(
-      `[auto-match] ${id} 完成: total=${r.total} matched=${r.matched}` +
+    matchLog.info(
+      `歌单 ${id} 自动匹配完成 total=${r.total} matched=${r.matched}` +
       ` appended=${r.appended} skipped=${r.skipped || "-"}${r.lockTimeout ? " lockTimeout" : ""}`,
     );
   });

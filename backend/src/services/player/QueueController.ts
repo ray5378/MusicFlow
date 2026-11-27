@@ -1998,7 +1998,7 @@ export class QueueController extends EventEmitter {
       resetDrainPreheat(deviceId);
       void mediaUri;
     } catch (e: any) {
-      console.warn(`[QueueController][playCurrent] ${playerId}: cast FAILED:`, e?.message || e);
+      log.warn(`${playerId} 投送失败`, { err: e?.message || e });
       ctrl.endOptimistic(playerId);
       // 竞态兜底(2026-09-25):起播前的硬限制判据过关、但 cast 期间成员掉光/设备掉线 ⇒
       // 这**不是**「投不出去」,而是「现在没人可投」。必须在这里再问一次同一个判据并挂起:

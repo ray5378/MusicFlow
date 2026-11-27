@@ -137,6 +137,12 @@ name: ci
 #      用户把「设备缓冲深度」改 5s 毫无效果;同倍率幂等回 false ⇒ 重启回灌倍率白断一次流。
 #      动态契约在 pumpRateHotSwitch/pumpRateTrim 单测里,本守卫钉的是「那些用例的前提还在不在」
 #      (min(B,D) / 原子段无 await / case setRate 回布尔 / 显示纯派生),S1–S38 全部做过变异验证。
+#  30. 日志格式 + 分级守卫(scripts/check-log-format.mjs,L1–L9)——全后端日志统一
+#      `[LEVEL] [PREFIX] message`,等级永远是行首第一段,grep/告警才能按 ^\[(WARN|ERROR)\] 过滤;
+#      钉死四级映射、裸 console 四处白名单(统一输出层/沙箱 emit/子进程 stdout 桥/sniff 零依赖)、
+#      子进程输出层顺序、SPEC 条款、等级常量升序,以及关键路径(播放/导入/同步/鉴权)无空 catch。
+#      破坏全是静默的:格式退回旧顺序告警规则失灵、失败被错打成 info、空 catch 吞异常。
+#      动态格式单测在 utils.test.ts(正则锚行首),本守卫钉的是「格式约定本身还在不在」。
 # 镜像发布仍由 build.yml(v* tag)负责,与本 CI 互不影响。
 
 on:
@@ -523,6 +529,16 @@ jobs:
       - uses: actions/checkout@v4
       - name: 校验倍速全链路 38 条不变量(提交点/三道闸/非阻塞/跨进程布尔/档位下传)
         run: node backend/scripts/check-speed-switch.mjs
+
+  log-format-guard:
+    name: "日志格式 + 分级守卫(L1–L9:行首等级/裸 console 白名单/空 catch)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # 零依赖 node 脚本,只读源码文本(先剥注释),不启动服务、不连设备,秒级完成。
+      # 与 utils.test.ts(动态格式单测)互为表里的静态守卫。
+      - name: 校验全后端日志格式与分级 9 条不变量
+        run: node backend/scripts/check-log-format.mjs
 
   test:
     name: 类型检查 + 全量测试

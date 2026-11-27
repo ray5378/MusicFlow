@@ -314,7 +314,7 @@ export async function executeFlow(flowId: string, baseUrl: string): Promise<"sta
   running.add(flowId);
   setTimeout(() => {
     runInternal(flow.id, baseUrl).catch((e: any) => {
-      console.warn(`[flow ${flow.name}] 执行异常:`, e?.message || e);
+      log.error("流程执行失败", { flow: flow.name, err: e?.message || e });
       touchRunStatus(flow.id, "error", e?.message || "执行异常");
     }).finally(() => running.delete(flowId));
   }, 0);
@@ -412,7 +412,7 @@ async function runInternal(flowId: string, baseUrl: string): Promise<void> {
           for (const pid of activeTargets) {
             const parsed = parseOrThrow(pid);
             await qm.playFrom(parsed.id, items, node.startIndex || 0, baseUrl);
-            console.log(`[flow ${flow.name}] 已播放:${nameOf(pid)} → 「${resolved.name}」`);
+            log.debug(`流程 ${flow.name} 已播放 ${nameOf(pid)} → 「${resolved.name}」`);
           }
           break;
         }
@@ -432,7 +432,7 @@ async function runInternal(flowId: string, baseUrl: string): Promise<void> {
             try {
               if (parsed.kind === "dlna") {
                 await setDeviceVolume(parsed.id, value);
-                console.log(`[flow ${flow.name}] 已设置音量:${nameOf(pid)} → ${value}%`);
+                log.debug(`流程 ${flow.name} 已设置音量 ${nameOf(pid)} → ${value}%`);
               } else if (parsed.kind === "group") {
                 await qc.transport(parsed.id, "volume", value);
               }

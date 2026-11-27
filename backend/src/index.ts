@@ -716,7 +716,7 @@ server.listen(port, "0.0.0.0", () => {
       }
       // host 不可解析(sendspin 前端/缓存未命中)→ fail-open,按原路径恢复
       getQueueController().resumeActive(deviceId, baseUrl).catch((e) => {
-        console.warn(`[queue] resume failed for ${deviceId}:`, e?.message || e);
+        log.warn(`队列 ${deviceId} 恢复失败`, { err: e?.message || e });
       });
     }
   }, 10000);
@@ -732,7 +732,7 @@ let shuttingDown = false;
 async function gracefulShutdown(sig: string): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
-  try { console.log(`[boot] ${sig}: stop mDNS + TEARDOWN all airplay sessions`); } catch { /* ignore */ }
+  try { log.info(`收到 ${sig}，停止 mDNS 并 TEARDOWN 全部 AirPlay 会话`); } catch { /* ignore */ }
   try { stopMdnsBroadcast(); } catch { /* ignore */ }
   // ⚠️ v4.10.0 实测修正(2026-10-29 20:54 抓包实证):调 stopAirPlayService() **发不出 TEARDOWN**。
   //    tcpdump tcp/4515 显示重启时只有 ANNOUNCE/SETUP/RECORD,TEARDOWN = 0。原因链:

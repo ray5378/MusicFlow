@@ -11,6 +11,7 @@
 // 按组公共时间戳下发(group.pushFrame)。
 
 import { paceBumpBus } from "./paceBumpBus.js";
+import { createLogger, type LogLevel } from "../../utils/logger.js";
 
 /** 加压准入阈值（ms）：ring 里「当前代次、未投过、未过期」的帧总时长超过此值，
  *  说明内容堆着投不出去 —— 瓶颈在投递而非供给，补无用。
@@ -202,12 +203,11 @@ export interface SendspinServerOptions {
   onClosed?: (conn: SendspinConnection) => void;
 }
 
-export type SendspinLog = (level: "info" | "warn" | "error", msg: string) => void;
+export type SendspinLog = (level: LogLevel, msg: string) => void;
 
-const defaultLog: SendspinLog = (level, msg) => {
-  if (level === "error") console.error(`[sendspin] ${msg}`);
-  else console.log(`[sendspin] ${msg}`);
-};
+// 复用统一 logger：等级前置、运行期 LOG_LEVEL 过滤、结构化字段口径与主进程一致。
+const defaultLogger = createLogger("sendspin");
+const defaultLog: SendspinLog = (level, msg) => defaultLogger[level](msg);
 
 export const DEFAULT_SUITE: NoiseSuite = "25519_ChaChaPoly_SHA256";
 
@@ -470,7 +470,7 @@ export class SendspinServer {
     const singleKey = `dial:${url}`;
     const pending = this.pendingDials.get(singleKey);
     if (pending) {
-      this.log("info", `dial ${url} 已在进行中,复用(避免双连接仲裁)`);
+      this.log("debug", `dial ${url} 已在进行中，复用连接`);
       return pending;
     }
     const task = this.dialPlayerInner(url, timeoutMs).finally(() => {
@@ -3364,7 +3364,7 @@ export class SendspinConnection {
       const st = nextHeartbeatState(this.heartbeatAlive, this.heartbeatMisses);
       if (st.terminate) {
         // 连续 MAX_MISSES 次未回 PONG(≈30s):才摘牌。容忍单次抖动。与文档 §2.9 一致。
-        console.warn(`[sendspin] heartbeat: peer ${this.id}/${this.remoteHost} 连续 ${st.misses} 次未回 PONG, terminate 摘牌`);
+        this.server.log("warn", `heartbeat: 设备 ${this.id}/${this.remoteHost} 连续 ${st.misses} 次未回 PONG，终止连接`);
         try { ws.terminate(); } catch { /* 已死 */ }
         return;
       }

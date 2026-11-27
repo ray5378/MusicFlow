@@ -110,6 +110,12 @@ const CAP_PERMISSIONS: Record<string, string[]> = {
 
 /** 按 capabilities 推导插件需要的权限集合(去重)。 */
 const log = createLogger("auto-match");
+const pluginLogs = new Map<string, ReturnType<typeof createLogger>>();
+function pluginLog(id: string): ReturnType<typeof createLogger> {
+  let l = pluginLogs.get(id);
+  if (!l) { l = createLogger(`PLUGIN:${id}`); pluginLogs.set(id, l); }
+  return l;
+}
 export function derivePermissions(caps: string[] | undefined): string[] {
   const out = new Set<string>();
   for (const c of caps || []) {
@@ -1076,7 +1082,7 @@ export async function discoverExternalPlugins(
           upsert: async (input: any) => { upsertPluginNotice(id, input || {}); return null; },
           clear: async (key: string) => { clearPluginNotice(id, String(key || "")); return null; },
         },
-        log: (...args: any[]) => console.log(`[PLUGIN:${id}]`, ...args),
+        log: (...args: any[]) => pluginLog(id).info(args.map((a) => String(a)).join(" ")),
         comm: {
           send: (targetId: string, message: any) => comm.send(targetId, message),
           broadcast: (message: any) => comm.broadcast(message),

@@ -38,6 +38,33 @@ const MAX_DEFERS = 256;                 // 单次调用内未结算 deferred 上
 // pending 回调(几百首歌的 host 调用结算累积)同步阻塞宿主主线程。剩余 job 由 evalAsync
 // 主循环的下一轮(setImmediate 让行后)继续泵送,功能等价、时序更平滑。
 const MAX_JOBS_PER_PUMP = 64;
+// 沙箱主线程/worker 走原生 ESM 直载，不能 import utils/logger.js（dev 下 .js 不映射 .ts）。
+// 这里内联同款格式与等级过滤：[LEVEL] [PLUGIN:<id>] message key=value。
+type SandboxLogLevel = "DEBUG" | "INFO" | "WARN" | "ERROR";
+const SANDBOX_LEVEL_RANK: Record<SandboxLogLevel, number> = { DEBUG: 10, INFO: 20, WARN: 30, ERROR: 40 };
+type SandboxLog = (level: SandboxLogLevel, msg: string, fields?: Record<string, unknown>) => void;
+const sandboxLogs = new Map<string, SandboxLog>();
+function sandboxLog(id: string): SandboxLog {
+  let l = sandboxLogs.get(id);
+  if (!l) {
+    l = (level, msg, fields) => {
+      const configured = String(process.env.LOG_LEVEL || "info").toUpperCase() as SandboxLogLevel;
+      if (SANDBOX_LEVEL_RANK[level] < (SANDBOX_LEVEL_RANK[configured] ?? 20)) return;
+      let line = `[${level}] [PLUGIN:${id}] ${msg}`;
+      if (fields) {
+        for (const [k, v] of Object.entries(fields)) {
+          if (v === undefined || v === null) continue;
+          line += ` ${k}=${typeof v === "object" ? JSON.stringify(v) : v}`;
+        }
+      }
+      if (level === "ERROR") console.error(line);
+      else if (level === "WARN") console.warn(line);
+      else console.log(line);
+    };
+    sandboxLogs.set(id, l);
+  }
+  return l;
+}
 // longRunning 批量任务采用「软看门狗」:无墙钟硬超时(歌单/封面/歌词数量无限,只要每步
 // 都在等网络/DB 就永不超时);仅在「连续该时长无任何 host 调用完成」时判定 CPU 空转/
 // 死循环并中断(QuickJS interrupt 只在 guest 真正执行 JS 时触发,await 挂起不计时)。
@@ -696,13 +723,13 @@ export class SandboxedPlugin {
   /** 异步上下文 OOM 处理:打日志 → 自愈重建(await 完成后再抛)→ 抛 SANDBOX_MEMORY。
    *   rebuild 失败(如插件 create() 依赖异常状态)时沙箱保持已销毁,后续调用被 assertUsable 拦截。 */
   private async handleOom(method?: string): Promise<never> {
-    console.error(`[PLUGIN:${this.id}]${method ? " " + method + "()" : ""} 内存超限(> ${MEMORY_LIMIT_MB}MB),自动重建沙箱`);
+    sandboxLog(this.id)("WARN",`内存超限(> ${MEMORY_LIMIT_MB}MB)，自动重建沙箱${method ? `（${method}()）` : ""}`);
     this.oomFaulty = true;
     try {
       await this.rebuild();
-      console.warn(`[PLUGIN:${this.id}] 沙箱已重建,后续调用生效`);
+      sandboxLog(this.id)("INFO","沙箱已重建，后续调用生效");
     } catch (e: any) {
-      console.error(`[PLUGIN:${this.id}] 沙箱重建失败,该插件暂不可用: ${e?.message || e}`);
+      sandboxLog(this.id)("ERROR","沙箱重建失败，插件暂不可用", { err: e?.message || e });
     }
     throw new SandboxLimitError("SANDBOX_MEMORY", `沙箱限制:插件 ${this.id} 内存超限(${MEMORY_LIMIT_MB}MB),已自动重建沙箱`, OOM_HINT);
   }
@@ -710,7 +737,7 @@ export class SandboxedPlugin {
   /** 同步上下文 OOM 处理(invokeSync 是同步方法,rebuild 为异步 → fire-and-forget;
    *   重建期间并发调用被 assertUsable 的 rebuilding 标志拦截)。 */
   private handleOomSync(method?: string): never {
-    console.error(`[PLUGIN:${this.id}]${method ? " " + method + "()" : ""} 内存超限(> ${MEMORY_LIMIT_MB}MB),自动重建沙箱`);
+    sandboxLog(this.id)("WARN",`内存超限(> ${MEMORY_LIMIT_MB}MB)，自动重建沙箱${method ? `（${method}()）` : ""}`);
     this.oomFaulty = true;
     void this.rebuild();
     throw new SandboxLimitError("SANDBOX_MEMORY", `沙箱限制:插件 ${this.id} 内存超限(${MEMORY_LIMIT_MB}MB),已自动重建沙箱`, OOM_HINT);
@@ -809,7 +836,7 @@ export class SandboxedPlugin {
           if (perm && !this.hasPerm(perm)) {
             // 权限拒绝要打日志:否则容器日志完全静默,前端只看到 HTTP undefined
             // 之类无从排查的报错(如 plugin.json 缺 permissions 时 host.http 被拒)。
-            console.warn(`[PLUGIN:${this.id}] host.${name} 权限拒绝: ${perm} (permissions=${JSON.stringify(this.env.permissions || [])})`);
+            sandboxLog(this.id)("WARN",`host.${name} 权限拒绝: ${perm}`, { permissions: JSON.stringify(this.env.permissions || []) });
             return { ok: false, error: { message: `[SANDBOX_PERMISSION] 沙箱限制:权限不足(缺少 ${perm})。请确认插件 manifest 已声明所需权限` } };
           }
           return impl(...args);
@@ -827,7 +854,7 @@ export class SandboxedPlugin {
           const msg = String((err && err.message) || err);
           // 任何宿主侧实现抛出都到此兜底:服务端记真实错误便于排查(plugin id + 方法 + 所需权限),
           // 同时给插件一个带 status:0 的透明信封,使其能读出真实原因而非 undefined。
-          console.error(`[PLUGIN:${this.id}] host.${name} 执行异常: ${msg}${perm ? ` (需权限 ${perm})` : ""}`);
+          sandboxLog(this.id)("ERROR",`host.${name} 执行异常`, { err: msg, perm: perm ?? undefined });
           if (deferred.alive) { const h = this.jsToHandle(this.hostErrorEnvelope(msg)); deferred.resolve(h); if (!this.skipHostResultDispose()) this.safeDispose(h); }
         })
         .finally(() => {
@@ -845,7 +872,7 @@ export class SandboxedPlugin {
     const fn = this.ctx.newFunction(name, (...argHandles: QuickJSHandle[]) => {
       const args = argHandles.map((h) => this.ctx.dump(h));
       if (perm && !this.hasPerm(perm)) {
-        console.warn(`[PLUGIN:${this.id}] host.${name} 权限拒绝: ${perm} (permissions=${JSON.stringify(this.env.permissions || [])})`);
+        sandboxLog(this.id)("WARN",`host.${name} 权限拒绝: ${perm}`, { permissions: JSON.stringify(this.env.permissions || []) });
         return this.jsToHandle({ error: `[SANDBOX_PERMISSION] 沙箱限制:权限不足(缺少 ${perm})。请确认插件 manifest 已声明所需权限` });
       }
       try {
@@ -866,11 +893,11 @@ export class SandboxedPlugin {
       try {
         const r = await this.env.http(url, init || {});
         if (r.ok === false && (r.status === 0 || (typeof r.status === "number" && r.status >= 400))) {
-          console.warn(`[PLUGIN:${this.id}] host.http 失败 ${r.status} ${url}${r.error ? " (" + String(r.error) + ")" : ""}`);
+          sandboxLog(this.id)("WARN",`host.http 请求失败 ${r.status} ${url}`, { err: r.error ? String(r.error) : undefined });
         }
         return r;
       } catch (e: any) {
-        console.error(`[PLUGIN:${this.id}] host.http 异常 ${url} -> ${e?.message || e}`);
+        sandboxLog(this.id)("ERROR",`host.http 请求异常 ${url}`, { err: e?.message || e });
         throw e;
       }
     }, "net");
@@ -1321,7 +1348,7 @@ export class SandboxedPlugin {
       if (v && v.ok === true) return v.value;
       const syncErrMsg = (v && v.error && (v.error.message || v.error.name)) || "执行失败";
       if (this.isOomMessage(syncErrMsg)) return this.handleOomSync(method);
-      console.error(`[PLUGIN:${this.id}] ${method}() 失败: ${syncErrMsg}`);
+      sandboxLog(this.id)("ERROR",`${method}() 同步调用失败`, { err: syncErrMsg });
       throw new Error(`插件 ${this.id} ${method}(): ${syncErrMsg}`);
     } finally {
       this.activeCalls.delete(callId);
@@ -1373,11 +1400,11 @@ export class SandboxedPlugin {
         }
         if (isLong) {
           const hint = "批量任务 CPU 空转超限:若插件确在拉取平台/外网数据(网络/DB 调用有进展)则属正常,不应被杀;若为死循环请修复插件";
-          console.error(`[PLUGIN:${this.id}] 调用${method ? " " + method + "()" : ""} CPU 空转超限(> ${cpuIdleLimitMs()}ms 无网络/DB 进展),已中断`);
+          sandboxLog(this.id)("ERROR",`调用${method ? ` ${method}()` : ""} CPU 空转超限，已中断`, { idleMs: cpuIdleLimitMs() });
           throw new SandboxLimitError("SANDBOX_TIMEOUT", `沙箱限制:批量任务 CPU 空转超限(连续 ${(cpuIdleLimitMs() / 1000).toFixed(0)}s 无网络/DB 进展,疑似死循环)`, hint);
         }
         const hint = `该操作可能需拉取平台/外网数据。可在插件 manifest 的 longRunning 中为${method ? ` ${method}()` : "该方法"}声明更长预算(默认 ${INVOKE_TIMEOUT_MS}ms,上限 ${JOB_TIMEOUT_CAP_MS}ms)后更新插件`;
-        console.error(`[PLUGIN:${this.id}] 调用${method ? " " + method + "()" : ""} 执行超时(> ${timeoutMs}ms),已中断`);
+        sandboxLog(this.id)("ERROR",`调用${method ? ` ${method}()` : ""} 执行超时，已中断`, { timeoutMs });
         throw new SandboxLimitError("SANDBOX_TIMEOUT", `沙箱限制:单次调用超时(配额 ${timeoutMs}ms)`, hint);
       }
       let rr: any;
@@ -1388,10 +1415,10 @@ export class SandboxedPlugin {
         // 长任务被 CPU 空转中断(QuickJS interrupt):归为沙箱限制而非插件内部错误。
         if (isLong && call?.killed) {
           const hint = "批量任务 CPU 空转超限:若插件确在拉取平台/外网数据则属正常,不应被杀;若为死循环请修复插件";
-          console.error(`[PLUGIN:${this.id}] 调用${method ? " " + method + "()" : ""} CPU 空转超限,已中断`);
+          sandboxLog(this.id)("ERROR",`调用${method ? ` ${method}()` : ""} CPU 空转超限，已中断`);
           throw new SandboxLimitError("SANDBOX_TIMEOUT", `沙箱限制:批量任务 CPU 空转超限(连续 ${(cpuIdleLimitMs() / 1000).toFixed(0)}s 无网络/DB 进展,疑似死循环)`, hint);
         }
-        console.error(`[PLUGIN:${this.id}]${method ? " " + method + "()" : ""} 内部异常: ${msg}`);
+        sandboxLog(this.id)("ERROR",`${method ? `${method}() ` : ""}内部异常`, { err: msg });
         throw new Error(`插件 ${this.id} 内部错误: ${msg}`);
       }
       const vh: any = this.ctx.unwrapResult(rr as any);
@@ -1402,14 +1429,14 @@ export class SandboxedPlugin {
       // 归为沙箱限制(CPU 空转超限),而非插件内部错误。
       if (isLong && call?.killed) {
         const hint = "批量任务 CPU 空转超限:若插件确在拉取平台/外网数据则属正常,不应被杀;若为死循环请修复插件";
-        console.error(`[PLUGIN:${this.id}] 调用${method ? " " + method + "()" : ""} CPU 空转超限,已中断`);
+        sandboxLog(this.id)("ERROR",`调用${method ? ` ${method}()` : ""} CPU 空转超限，已中断`);
         throw new SandboxLimitError("SANDBOX_TIMEOUT", `沙箱限制:批量任务 CPU 空转超限(连续 ${(cpuIdleLimitMs() / 1000).toFixed(0)}s 无网络/DB 进展,疑似死循环)`, hint);
       }
       // 插件侧抛错:服务端记录完整 message + stack,便于定位真因;前端只收到精简文案。
       const errMsg = (v && v.error && (v.error.message || v.error.name)) || "执行失败";
       if (this.isOomMessage(errMsg)) return this.handleOom(method);
-      if (v && v.error && v.error.stack) console.error(`[PLUGIN:${this.id}]${method ? " " + method + "()" : ""} 失败: ${errMsg}`, v.error.stack);
-      else console.error(`[PLUGIN:${this.id}]${method ? " " + method + "()" : ""} 失败: ${errMsg}`);
+      if (v && v.error && v.error.stack) sandboxLog(this.id)("ERROR",`${method ? `${method}() ` : ""}调用失败: ${errMsg}`, { stack: v.error.stack });
+      else sandboxLog(this.id)("ERROR",`${method ? `${method}() ` : ""}调用失败: ${errMsg}`);
       throw new Error(`插件 ${this.id}: ${errMsg}`);
     } finally {
       try { promiseHandle.dispose(); } catch { /* ignore */ }
@@ -1671,7 +1698,7 @@ export async function loadSandboxedPlugin(
       if (parallelEnabled(env.getConfig())) pacer.registerBatchWorker(id);
       sandbox.attachWorker(worker);
     } catch (e: any) {
-      console.warn(`[PLUGIN:${id}] 批量 worker 初始化失败,longRunning 方法回退主线程执行:`, e?.message || e);
+      sandboxLog(id)("WARN","批量 worker 初始化失败，longRunning 方法回退主线程执行", { err: e?.message || e });
       try { worker?.dispose(); } catch { /* ignore */ }
       worker = null;
     }

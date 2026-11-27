@@ -1,6 +1,9 @@
 // Player 模块单例 + 接线。对照 MA:PlayerController 决策 → QueueController 切歌。
 import { PlayerController } from "./PlayerController.js";
 import { QueueController } from "./QueueController.js";
+import { createLogger } from "../../utils/logger.js";
+
+const log = createLogger("player");
 
 let playerCtrl: PlayerController | null = null;
 let queueCtrl: QueueController | null = null;
@@ -21,7 +24,7 @@ export function wirePlayerQueueControllers(): void {
   const qc = getQueueController();
   pc.onDecision = (decision, playerId) => {
     qc.handleDecision(decision, playerId).catch((e) => {
-      console.warn(`[player] handleDecision ${decision} for ${playerId} failed:`, e);
+      log.warn(`播放决策 ${decision} 处理失败`, { playerId, err: e });
     });
   };
 }

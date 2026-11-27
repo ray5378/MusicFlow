@@ -37,6 +37,10 @@
  * **降级**:`RAW_STREAM_CACHE=0` 关闭本层,回到旧的纯透传(也用于 A/B 对照)。
  */
 
+import { createLogger } from "../../utils/logger.js";
+
+const log = createLogger("rawStreamCache");
+
 const KB = 1024;
 const MB = 1024 * KB;
 
@@ -308,7 +312,7 @@ function warnThrottled(key: string, msg: string): void {
   warnLast.set(key, now);
   if (warnLast.size > 200) warnLast.clear();
   try {
-    console.warn(`[rawStreamCache] ${msg}`);
+    log.warn(msg);
   } catch { /* 日志不可用绝不能影响取流 */ }
 }
 

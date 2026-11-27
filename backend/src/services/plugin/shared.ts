@@ -11,6 +11,9 @@ import { db, sqlite } from "../../db/index.js";
 import { playlists } from "../../db/schema.js";
 import { eq } from "drizzle-orm";
 import { firstEnabledByCapability, getEnabledByCapability, getPluginConfig } from "../../plugins/registry.js";
+import { createLogger } from "../../utils/logger.js";
+
+const log = createLogger("auto-match");
 
 /** 当天日期字符串(YYYY-MM-DD),用于歌单当天幂等标记。 */
 export function todayStr(d = new Date()): string {
@@ -185,9 +188,7 @@ export async function matchPlaylistInBackground(
     // 候选链:首选插件 + 其它已启用且声明 search 的插件(排除本尊,受 maxCandidates 约束)。
     const candidates = await buildMatchCandidates(matcher.manifest.id, config, matcher.impl);
     if (candidates.length > 1) {
-      console.log(
-        `[auto-match] ${playlistId}: 匹配候选链 ${candidates.map((c) => c.providerId).join(" -> ")}`,
-      );
+      log.debug(`歌单 ${playlistId} 匹配候选链: ${candidates.map((c) => c.providerId).join(" -> ")}`);
     }
 
     // P1:匹配进度经 WS 广播(限频 1s),前端可显示「后台匹配中 x/y」而非"卡死"。
@@ -216,8 +217,9 @@ export async function matchPlaylistInBackground(
       error: result.error,
     };
     if (result.total > 0) {
-      console.log(
-        `[auto-match] ${playlistId}: ${result.matched} matched, ${result.noMatch} no-match, ${result.error} errors in ${((Date.now() - started) / 1000).toFixed(1)}s`,
+      log.info(
+        `歌单 ${playlistId} 匹配完成: matched=${result.matched} noMatch=${result.noMatch} ` +
+        `errors=${result.error} elapsed=${((Date.now() - started) / 1000).toFixed(1)}s`,
       );
     }
     return stats;

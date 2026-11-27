@@ -17,6 +17,9 @@ import {
   RENDERER_HEARTBEAT_MS,
   type StateEnvelope,
 } from "./ipcProtocol.js";
+import { createLogger } from "../../utils/logger.js";
+
+const log = createLogger("childHost");
 
 export interface ChildRpcHostOptions<TSend, TSnapshot extends object> {
   /** 回主进程的发送通道(生产为 process.send 包装;测试注入数组收集)。 */
@@ -60,10 +63,11 @@ export class ChildRpcHost<TSend, TSnapshot extends object> {
       lastBeat = now;
       if (lag > 15_000) {
         try {
-          console.error(
-            `[childHost][loop-lag] 事件循环卡了 ${Math.round(lag)}ms 才恢复` +
-            `(mem=${Math.round(process.memoryUsage().heapUsed / 1048576)}MB rss=${Math.round(process.memoryUsage().rss / 1048576)}MB)`,
-          );
+          log.error("loop-lag 事件循环恢复滞后", {
+            lagMs: Math.round(lag),
+            mem: `${Math.round(process.memoryUsage().heapUsed / 1048576)}MB`,
+            rss: `${Math.round(process.memoryUsage().rss / 1048576)}MB`,
+          });
         } catch { /* ignore */ }
       }
       this.emit({ t: "heartbeat", pid: process.pid });

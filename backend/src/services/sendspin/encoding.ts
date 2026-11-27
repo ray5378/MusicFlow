@@ -16,6 +16,9 @@ import { createRequire } from "node:module";
 import { spawn, ChildProcessWithoutNullStreams } from "node:child_process";
 import { recordSendspinDebug } from "./debugLog.js";
 import { resolveFfmpeg } from "../transcode.js";
+import { createLogger } from "../../utils/logger.js";
+
+const log = createLogger("sendspin-flac");
 
 // @discordjs/opus 为 CommonJS,不能用 ESM 具名导入,须经 createRequire 取整。
 const require = createRequire(import.meta.url);
@@ -1080,10 +1083,9 @@ export class LibFlacEncoder implements ChunkEncoder {
     const dCh = Number((declared.readBigUInt64BE(18) >> 41n) & 0x7n) + 1;
     const gCh = Number((got.readBigUInt64BE(18) >> 41n) & 0x7n) + 1;
     if (dBps !== gBps || dSr !== gSr || dCh !== gCh) {
-      console.warn(
-        `[sendspin][flac] ⚠️ STREAMINFO 声明与实流不符! ` +
-        `declared{bps=${dBps},sr=${dSr},ch=${dCh}} actual{bps=${gBps},sr=${gSr},ch=${gCh}} ` +
-        `—— 设备会逐帧拒收导致无声;请修 flacCodecHeaderB64`,
+      log.warn(
+        `STREAMINFO 声明与实流不符: declared{bps=${dBps},sr=${dSr},ch=${dCh}} ` +
+        `actual{bps=${gBps},sr=${gSr},ch=${gCh}} —— 设备会逐帧拒收导致无声，请修 flacCodecHeaderB64`,
       );
     }
   }
@@ -1158,7 +1160,7 @@ export class LibFlacEncoder implements ChunkEncoder {
     if (!this.encId) {
       // 上轮自愈失败留下的死实例:退避窗口过后允许再搏一次(rebuildStream 内含模块重载)。
       if (!(await this.rebuildStream())) {
-        console.warn(`[sendspin][flac] 退避后重建仍失败 @frame=${this.frameCount},继续退避`);
+        log.warn(`退避后重建仍失败，继续退避 frame=${this.frameCount}`);
         this.lastHealAt = Date.now();
         return [];
       }
@@ -1181,7 +1183,7 @@ export class LibFlacEncoder implements ChunkEncoder {
     this.out = [];
     let ok = this.Flac.FLAC__stream_encoder_process_interleaved(this.encId, pcm, samples);
     if (!ok) {
-      console.warn(`[sendspin][flac] libFLAC process_interleaved 失败 @frame=${this.frameCount},原地重建自愈`);
+      log.warn(`libFLAC process_interleaved 失败，原地重建自愈 frame=${this.frameCount}`);
       if (await this.rebuildStream()) {
         this.out = [];
         ok = this.Flac.FLAC__stream_encoder_process_interleaved(this.encId, pcm, samples);
@@ -1189,7 +1191,7 @@ export class LibFlacEncoder implements ChunkEncoder {
     }
     if (!ok && this.reloadModule) {
       // 新流首帧即失败(@frame=0 楔死形态,240 生产实锤):模块级重载(全新 asm.js 堆)最后一搏。
-      console.warn(`[sendspin][flac] 原地重建后仍失败 @frame=${this.frameCount},尝试模块级重载`);
+      log.warn(`原地重建后仍失败，尝试模块级重载 frame=${this.frameCount}`);
       const fresh = this.reloadModule();
       if (fresh) {
         this.Flac = fresh;
@@ -1205,7 +1207,7 @@ export class LibFlacEncoder implements ChunkEncoder {
       this.out = [];
       return out;
     }
-    console.warn(`[sendspin][flac] 自愈失败 @frame=${this.frameCount},编码器退避停用`);
+    log.warn(`FLAC 自愈失败，编码器退避停用 frame=${this.frameCount}`);
     this.unhealthy = true;
     this.lastHealAt = Date.now();
     this.out = [];
@@ -1222,13 +1224,13 @@ export class LibFlacEncoder implements ChunkEncoder {
     if (this.closed || !this.encId) return [];
     this.out = [];
     const ok = this.Flac.FLAC__stream_encoder_finish(this.encId);
-    if (!ok) console.warn("[sendspin][flac] libFLAC finish 返回失败");
+    if (!ok) log.warn("libFLAC finish 返回失败");
     const out = this.out;
     this.out = [];
     // 旧流已终结:统一走 rebuildStream 自愈(原地重建;openStream 失败 = asm.js
     // 堆楔死 → 模块级重载后重试,见 rebuildStream 注释)。
     if (!(await this.rebuildStream())) {
-      console.warn(`[sendspin][flac] flush 后重建编码流失败(含模块重载),本编码器退避停用`);
+      log.warn("flush 后重建编码流失败（含模块重载），本编码器退避停用");
       this.unhealthy = true;
       this.lastHealAt = Date.now();
     }

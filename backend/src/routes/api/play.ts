@@ -19,6 +19,9 @@ import {
   seekPeerToSeconds,
   songsToQueueItems,
 } from "./shared.js";
+import { createLogger } from "../../utils/logger.js";
+
+const log = createLogger("PLAY");
 
 export function registerPlay(app: Hono): void {
 app.post("/v1/play", async (c) => {
@@ -114,7 +117,7 @@ app.post("/v1/play", async (c) => {
       playerId: isCastPeer(parsed) ? parsed.id : peerId,
       contentContext: `playlist:${id}`,
       baseUrl,
-    }).catch((e: any) => console.warn(`[auto-match] ${id} 触发失败: ${e?.message || e}`));
+    }).catch((e: any) => log.warn(`歌单 ${id} 自动匹配触发失败`, { err: e?.message || e }));
   }
   return c.json({
     // 回执里的 peerId 必须是**对外形式**:local 的真实行带着 clientId,直接回显会把它

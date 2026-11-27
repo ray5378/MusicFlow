@@ -1798,7 +1798,7 @@ prev、音量/静音、自然结束自动下一首、停止）+ 组播 6 项（`
 **红线**:只 resolve 不取字节;按「泵存活计数」门控(纯 DLNA 不白探);同曲幂等;
 失败一律静默退回原行为。
 
-**真机判据**(240):`[Sendspin-preheatChild] INFO 子进程预热 ev=child-preheat song=… ok=1`
+**真机判据**(240):`[INFO] [Sendspin-preheatChild] 子进程预热 ev=child-preheat song=… ok=1`
 之后,泵起播的 `[RESOLVE-AUDIO] … (fresh-cache) ms=1`,`gap-fill` 从 2250ms 降到 ~103ms。
 
 **已知限制(v4.10.3 已纠正)**:先前误判为「shuffle 预测偏差」——**不成立**。真机日志

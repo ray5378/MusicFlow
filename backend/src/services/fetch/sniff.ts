@@ -18,7 +18,7 @@ import { closeSync, openSync, readSync, statSync } from "node:fs";
 
 const log = (...args: unknown[]): void => {
   // 本模块保持零依赖（不引 logger，避免与 probe/integrity 的加载顺序纠缠）。
-  if (process.env.MF_SNIFF_DEBUG) console.log("[sniff]", ...args);
+  if (process.env.MF_SNIFF_DEBUG) console.log(`[DEBUG] [sniff] ${args.map((a) => String(a)).join(" ")}`);
 };
 
 /** 嗅探缓冲区大小：足以覆盖 ID3 头后的同步字 / ftyp / fLaC / RIFF。 */

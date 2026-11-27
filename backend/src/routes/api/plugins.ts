@@ -153,7 +153,7 @@ app.put("/v1/plugins/:id/toggle", adminMiddleware, (c) => {
     else void stopAirPlayService();
   }
   if (p.id === "sendspin-renderer" || p.name === "sendspin-renderer") {
-    if (nextEnabled) startSendspinService().catch((e: any) => console.error("[sendspin] toggle start failed", e));
+    if (nextEnabled) startSendspinService().catch((e: any) => actionLog.error("sendspin 服务启动失败", { err: e?.message || e }));
     else void stopSendspinService();
   }
   return c.json({ success: true });

@@ -341,10 +341,11 @@ describe("createSendspinGroupPlayer:组内 sendspin 成员共用一个 pump", ()
     it("冷起播但队列无当前曲 → warn 后放弃,不炸", async () => {
       h.groupPumpActive.mockResolvedValue(false);
       h.snapshot = { currentIndex: -1, items: [] };
-      const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
       await createSendspinGroupPlayer(GID).resume();
-      expect(spy).toHaveBeenCalledTimes(1);
-      expect(String(spy.mock.calls[0][0])).toContain("无当前曲");
+      // 冷起播告警统一走 createLogger("Sendspin").warn（行首 [WARN] 由输出层加），
+      // 不再裸 console.warn；等级前缀格式由 utils.test.ts + check-log-format 守卫负责。
+      expect(h.warn).toHaveBeenCalledTimes(1);
+      expect(String(h.warn.mock.calls[0][0])).toContain("无当前曲");
       expect(h.groupPlay).not.toHaveBeenCalled();
     });
 
@@ -466,12 +467,12 @@ describe("createSendspinProxyPlayer(fork 模式:命令 RPC → 子进程)", () =
     expect(h.rpc.mock.calls.some((c) => c[0] === "playMedia")).toBe(true);
   });
 
-  it("冷起播但队列空 → console.warn 后放弃", async () => {
+  it("冷起播但队列空 → warn 后放弃", async () => {
     rpcFor({ pumpActive: false });
     h.snapshot = { currentIndex: -1, items: [] };
-    const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
     await createSendspinProtocolPlayer("c1").resume();
-    expect(String(spy.mock.calls[0][0])).toContain("[Sendspin]");
+    expect(h.warn).toHaveBeenCalledTimes(1);
+    expect(String(h.warn.mock.calls[0][0])).toContain("无当前曲");
   });
 
   it("seek 正常:RPC 前后各留一条边界日志", async () => {

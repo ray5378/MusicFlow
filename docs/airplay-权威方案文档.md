@@ -2495,7 +2495,7 @@ if (opts.coldPreheat === false && wantLeadUs <= floorLeadUs && leadUs < warmUs) 
   （`anchoredOnce=false`）就走 cold 3s，这一行不参与。
 - ✅ **已实证（2026-11-24 18:51:49 部署后，240 现场）**：`anchor-content` 全量分布
   `cold lead=3000 ×13 / cold lead=2199 ×1 / warm lead=2050 ×8（补丁前）/ warm lead=2500 ×2（补丁后）`；
-  原始日志两条：`[AirPlay] INFO [anchor-content] dev=warm contentVsNowMs=4742 minSafeMs=2050 finalLeadMs=2500 picked=shared`
+  原始日志两条：`[INFO] [AirPlay] [anchor-content] dev=warm contentVsNowMs=4742 minSafeMs=2050 finalLeadMs=2500 picked=shared`
   （另一条 `contentVsNowMs=4741` 同类）。补丁前同形态为 `finalLeadMs=2050` ⇒ 保底确实抬高 450ms。
 - ⚠️ 口径精确化：**不是「每次起播必 cold」** —— **新建桥会话**的起播走 cold 3s；**同一会话的
   reseed/切歌**走 warm 并已吃到 2.5s 保底。实测 cold:warm = 14:10。

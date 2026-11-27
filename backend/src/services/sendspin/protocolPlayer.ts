@@ -143,7 +143,7 @@ export function createSendspinGroupPlayer(
       await coldStartResume(
         createSendspinGroupPlayer(userGroupId, defaultBridge),
         userGroupId,
-        (msg) => console.warn(`[Sendspin] ${msg}`),
+        (msg) => log.warn(msg),
         defaultBridge,
       );
     },
@@ -383,7 +383,7 @@ function createSendspinProxyPlayer(clientId: string): ProtocolPlayer {
       await coldStartResume(
         createSendspinProxyPlayer(clientId),
         clientId,
-        (msg) => console.warn(`[Sendspin] ${msg}`),
+        (msg) => log.warn(msg),
       );
     },
     async seek(seconds: number) {

@@ -25,18 +25,32 @@ describe("createLogger", () => {
     const out = capture();
     const log = createLogger("TEST-PREFIX");
     log.info("启动完成", { deviceCount: 3 });
-    expect(out[0]).toContain("[TEST-PREFIX]");
-    expect(out[0]).toContain("INFO");
-    expect(out[0]).toContain("deviceCount=3");
+    expect(out[0]).toMatch(/^\[INFO\] \[TEST-PREFIX\] 启动完成 deviceCount=3$/);
   });
 
   it("error 输出到 console.error 且含 err 字段", () => {
     const out = capture();
     const log = createLogger("TEST-ERR");
     log.error("任务失败", { taskId: "t-1", err: "boom" });
-    expect(out[0]).toContain("ERROR");
-    expect(out[0]).toContain("taskId=t-1");
-    expect(out[0]).toContain("err=boom");
+    expect(out[0]).toMatch(/^\[ERROR\] \[TEST-ERR\] 任务失败 taskId=t-1 err=boom$/);
+  });
+
+  it("warn/debug 同样以等级标志开头（四级格式统一）", () => {
+    process.env.LOG_LEVEL = "debug";
+    const out = capture();
+    const log = createLogger("TEST-LV");
+    log.warn("降级处理");
+    log.debug("明细");
+    expect(out[0]).toMatch(/^\[WARN\] \[TEST-LV\] 降级处理$/);
+    expect(out[1]).toMatch(/^\[DEBUG\] \[TEST-LV\] 明细$/);
+  });
+
+  it("旧文案自带同名 [PREFIX] 时输出层去重，不会双前缀", () => {
+    const out = capture();
+    const log = createLogger("TEST-DEDUP");
+    log.info("[TEST-DEDUP] 迁移中的旧文案", { n: 1 });
+    expect(out[0]).toMatch(/^\[INFO\] \[TEST-DEDUP\] 迁移中的旧文案 n=1$/);
+    expect(out[0]).not.toContain("[TEST-DEDUP] [TEST-DEDUP]");
   });
 
   it("LOG_LEVEL=error 时过滤 info/warn", () => {
