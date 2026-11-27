@@ -58,7 +58,7 @@
   ⚠️ **2026-09-21 订正**：原文写「6+ 条」—— 实际 `routes/api/index.ts` 内 `parsed.kind ===` 分支约 **34** 处
   （如 `:3857-3881`），规模比原文大一个量级。
 5. **重复工具**：`stripPlayerPrefix` 与 `parsePeerId` 职责重叠，待清理（未开始）。
-6. **旁路**：`/v1/dlna/cast`、client-cast stream-url、插件 renderer 的 `control(action)` 第三套控制面待收敛（未开始）。
+6. **旁路**：`/v1/dlna/cast`、client-cast stream-url、插件 renderer 的 `control(action)` 第三套控制面。**2026-11-27 收口**：三个 renderer 插件（DLNA / AirPlay / Sendspin）已统一经同步工厂 `createPlayer(protocol, deviceId)` 提供 `ProtocolPlayer`，核心只经 `services/pluginAccess.ts` 的 `createRendererPlayer()` 获取；`castToRenderer` / `controlRenderer` 已于 v4.15.15 删除，播放只走 `QueueController` + `ProtocolPlayer`。`/v1/dlna/cast` 与插件 `control()` 仅作控制面保留。
 7. **UI 缺位** → **播放器页已新增「客户端」模块**（按 `platform !== "web"` 列出本机实例）；
   **「Web 播放器」模块已按方案收敛移除**（见 §7.1）。
 

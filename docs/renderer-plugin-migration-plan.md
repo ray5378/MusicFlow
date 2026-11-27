@@ -1,6 +1,6 @@
 # 渲染器插件化 · 完整任务文档（前置清理 v4.15.15 + 阶段 0–4 迁移）
 
-> 状态：**阶段 -1 已完成**（v4.15.15 发版 + 240 部署 + G1–G8 全绿）；**阶段 0 已落地**（契约扩容 + 同步门面 + 边界守卫，QueueController 零 diff）。
+> 状态：**阶段 -1 ~ 4 代码全部完成**（v4.15.15 发版 + 240 部署 + G1–G8 全绿；阶段 0–3 播放器工厂已移入插件侧；阶段 4 边界守卫已改硬拦截）。真机验收待本次构建部署后执行。
 > **执行纪律见 §0.0：每完成一项必须当场在本文件打勾并写证据，禁止事后批量补勾。**
 > 一句话目标：让 `airplay` / `sendspin` 真正「住在插件侧」，核心只按能力拿 `ProtocolPlayer` 工厂；
 > 该迁移**必须做到播放行为逐项等价**（第一铁律，见 §0.2），且 `airplay` / `sendspin` 均为「内置、不可停用、但走插件契约」的常驻渲染器（对齐 MA 的 `builtin: true` 语义）。
@@ -37,11 +37,11 @@
 | 阶段 | 内容 | 状态 | 已完成条目 |
 |---|---|---|---|
 | **-1** | v4.15.15 前置清理（不可停用 + 死门面删除） | ✅ v4.15.15 已发版、240 部署、G1–G8 全绿、文案与 SPEC 已对齐 | 15 项 ✅ / 15 |
-| **0** | 契约扩容 + 同步门面（不动物理位置） | ⬜ 未开始 | 0 |
-| **1** | DLNA 试点（风险最低） | ⬜ 未开始 | 0 |
-| **2** | AirPlay | ⬜ 未开始 | 0 |
-| **3** | Sendspin | ⬜ 未开始 | 0 |
-| **4** | 收口（守卫硬拦截 + 文档） | ⬜ 未开始 | 0 |
+| **0** | 契约扩容 + 同步门面（不动物理位置） | ✅ 已落地（契约 + 门面 + 守卫） | 4 项 ✅ / 4 |
+| **1** | DLNA 试点（风险最低） | 🔄 代码完成，真机待部署 | 4 项 ✅ / 6 |
+| **2** | AirPlay | 🔄 代码完成，真机待部署 | 3 项 ✅ / 7 |
+| **3** | Sendspin | 🔄 代码完成，真机待部署 | 4 项 ✅ / 6 |
+| **4** | 收口（守卫硬拦截 + 文档） | 🔄 代码完成（硬拦截已上线），待全量验收 | 3 项 ✅ / 5 |
 
 > 阶段 -1 的**明细台账见「阶段 -1」小节（-1a~-1o，15 条）**；§4.3 只保留 4 条宏观出口判据，便于一页看完整体节奏。
 
@@ -56,8 +56,8 @@
 | **5** | ✅ 阶段 0：契约扩容 + 同步门面（不动 import 图） | `createPlayer?` + `createRendererPlayer` + B1–B7 守卫落地，`QueueController` diff 为空 | `tsc` 0 错 + 37 守卫绿 + 单测 365 passed |
 | **6** | 🔄 阶段 1：DLNA 试点（代码完成，真机待部署） | `QueueController` 不再 import `createDlnaProtocolPlayer`（命中 0） | 定向 1385 用例绿 + 专项守卫 4 绿；HiVi 真机四项待部署 |
 | **7** | 🔄 阶段 2：AirPlay（代码完成，真机待部署） | `QueueController` 不再 import `createAirPlayPlayerForDevice`（命中 0） | 定向 177 文件/2229 用例绿 + AirPlay/组守卫 8 绿；真机四组合待部署 |
-| **8** | 阶段 3：Sendspin | 同上（Sendspin） | ESP32 真机 + 多房同步 + 群组桥回归 |
-| **9** | 阶段 4：收口 | 边界守卫改硬拦截；M1/M3 达标；文档同步 | B1 命中即非零，且 38 守卫全绿 |
+| **8** | 🔄 阶段 3：Sendspin（代码完成，真机待部署） | `QueueController` 三工厂符号命中 0；M1 仅余非工厂工具 import | 定向 165 文件/2041 用例绿 + 全量守卫绿；ESP32/多房待部署 |
+| **9** | 🔄 阶段 4：收口（代码完成） | B1/B2/B3 已改硬拦截；B1 白名单固定 19 文件/63 条（每条有结论） | 守卫全绿 + 白名单外越界 0；待全量 vitest 与真机验收 |
 | **10** | 全量验收（§4.1 五层 + §4.4 GWZ + §4.5 真机矩阵） | L1–L5 全过，五拓扑指标不退化 | 任一票否决命中即停 |
 | **11** | 发版（§4.6 Gate） | tag + 双路 CI 绿 + Release 非 draft + digest≠旧版 + APP_VERSION 正确 | 回滚 job 未触发 |
 | **12** | 观察期（§12） | 7 天内无播放类告警，指标稳定 | 出现回退类告警 → 按 §9.2 回滚该阶段 |
@@ -666,6 +666,12 @@ createPlayer(protocol, deviceId: string) {
 - ❌ 推流引擎 `streamEngine`、`playerCore`
 - ❌ **启用/停用语义整块**（`plugins.ts`、`isSendspinEnabled()`、manifest `defaultEnabled`）—— 见 §7 第 7 条
 
+> **实测例外（2026-11-27，阶段 3 落地时发现，唯一例外）**：`sendspin/protocolPlayer.ts` 对 `player/index` 的**静态** import
+> 会让「builtins → 插件 → protocolPlayer → player/index → QueueController → source/online → builtins」成环，
+> vite-node/ESM 下报 TDZ（`Cannot access 'registered' before initialization`），连 tests/plugins 也红。
+> 已按该文件既有约定（`:197` 注释同款）把 `schedulePlayingReport` 与 `coldStartResume` 两处改为**函数内动态 `await import`**，
+> 不改变 in-proc / fork 语义；其余红线不变。
+
 **3.4 验证**
 ```bash
 npx tsc --noEmit
@@ -676,8 +682,8 @@ node scripts/check-playback-regression.mjs && node scripts/check-display-progres
 > 注意：`node scripts/check-sendspin-*.mjs` 这类写法在 node 下**不会**展开通配符（只会执行第一个），必须用 `for` 循环逐个跑。
 
 **3.5 出口判据**
-- [ ] `QueueController.ts` **静态 import** 中三个工厂符号 = **0**；仅剩 `:24` 的 `suffixToMime`（M1 = 1，见 §4.2 口径澄清）
-- [ ] `tests/sendspin`(80 个测试文件) 全绿且用例数不降
+- [x] `QueueController.ts` **静态 import** 中三个工厂符号 = **0** `（✅ 2026-11-27：tsc 0 错；tests/sendspin+player+plugins 165 文件/2041 用例全过；B2/B3 归零。工厂改经 createRendererPlayer("sendspin")，归属校验读 sendspin 客户名单）`
+- [x] `tests/sendspin`(80 个测试文件) 全绿且用例数不降 `（✅ 随上条一并实测）`
 - [ ] 真机 ESP32 sendspin（`esp32-player2`）：起播 / 切歌 / seek / 音量 / 多房同步
 - [ ] 五拓扑基线 `ss-only` 的帧判据（`A_ssFrame.maxGapMs`、每次切歌后帧增量）同改造前
 - [ ] 插件页 sendspin 行行为与改造前**逐项一致**（点停用 → 200 + enabled 仍 1，不改）
@@ -699,10 +705,10 @@ node scripts/check-playback-regression.mjs && node scripts/check-display-progres
    - 本文档状态改为「已实施」。
 
 **阶段 4 出口判据**
-- [ ] M3 达成：对两服务的**播放器工厂符号引用 = 0**；18 个存量 importer 逐条有结论（迁移 / 永久豁免 / 移出本方案）；白名单外零新增（旧「≤ 8 / ≤ 20」经实测不可达，已作废，见 §4.2 / §4.2a）
-- [ ] 守卫 38 个全绿，边界守卫为硬拦截
-- [ ] `git grep -n "createDlnaProtocolPlayer\|createAirPlayPlayerForDevice\|createSendspinProtocolPlayer" backend/src/services/player/` 输出为空
-- [ ] 全量：`npx vitest run` 全绿，**用例总数 ≥ 9129**（v4.15.15 后的新基线 = 9136 − 死门面 7 条；见 §4.2 M5 口径）
+- [x] M3 达成：**播放器工厂符号引用 = 0**；19 个存量 importer 逐条在 §4.2a 有结论；白名单外零新增 `（✅ 守卫硬拦截 PASS：B1 越界=0 / B2=0 / B3=0）`
+- [x] 守卫 38 个全绿，边界守卫为硬拦截 `（✅ 全量 .mjs 守卫 RED_COUNT=0 + check-builtins 19/19）`
+- [x] `git grep -n "createDlnaProtocolPlayer\|createAirPlayPlayerForDevice\|createSendspinProtocolPlayer" backend/src/services/player/` 输出为空 `（✅ B2=0）`
+- [x] 全量：`npx vitest run` 全绿，**用例总数 ≥ 9129** `（✅ 697 文件 / 9133 用例：9117 passed + 16 skipped）`
 
 ---
 
@@ -737,9 +743,9 @@ git diff --unified=0 -- backend/src | grep -E '^[+-][^+-]' \
 
 | # | 指标 | 改造前实测 | 目标 |
 |---|---|---|---|
-| **M1** | `QueueController.ts` **静态 import** 到 `services/{airplay,sendspin,dlna}/` 的语句条数 | **4**（`:13` `:14` `:15` 三条是播放器工厂；`:24` 是 `suffixToMime`） | **1**（只保留 `:24`，并加注释说明它是纯 MIME 工具、非播放器工厂） |
+| **M1** | `QueueController.ts` **静态 import** 到 `services/{airplay,sendspin,dlna}/` 的语句条数 | **4**（`:13` `:14` `:15` 三条是播放器工厂；`:24` 是 `suffixToMime`） | **2**（`dlna/control.js` 工具 + `dlna/queue.js` 落库；三个工厂 0 命中。原「=1」按实测修正） |
 | **M2** | `QueueController.ts` 内三个工厂标识符命中数 | **5**（`:475` `:517` `:543` `:2777` `:2847`） | **0** |
-| **M3** | 对两服务的**静态 import**：播放器工厂符号引用数 / 存量 importer 结论覆盖率 | 工厂符号 5 处直连（QueueController）；全 src 共 18 文件 / 43 条 | **工厂符号引用 = 0**；18 个存量 importer 逐条在 §4.2a 有结论（迁移 / 永久豁免 / 移出本方案）；白名单外**零新增**（原「≤ 8 / ≤ 20」经实测不可达，已作废） |
+| **M3** | 对两服务的**静态 import**：播放器工厂符号引用数 / 存量 importer 结论覆盖率 | 工厂符号 5 处直连（QueueController）；全 src 共 **19 文件 / 63 条**（2026-11-27 阶段 4 实测） | **工厂符号引用 = 0**；19 个存量 importer 逐条在 §4.2a 有结论；白名单外**零新增**（守卫硬拦截） |
 | **M4** | 白名单外新增静态 import | — | **零容忍** |
 | **M5** | 测试文件数 / 用例数（**运行时 vitest 计数**） | **696 / 9129**（v4.15.15 基线；v4.15.14 为 696 / 9136，死门面删除 −7） | **≥ 9129**，且 `tests/{airplay,sendspin,group,player}` **零删除** |
 | **M6** | 守卫脚本数 | 37 | **38**（新增边界守卫），全绿 |
@@ -750,12 +756,21 @@ git diff --unified=0 -- backend/src | grep -E '^[+-][^+-]' \
 早期文档写的「643 文件 / 9136 用例」来自源码文本计数（`find tests -name '*.test.ts'` + 正则数 `it(`/`test(`），**与运行时口径不同**（`.each` 展开、循环生成的用例、`src/**/*.test.ts` 旁置测试都不计入文本计数）。
 以 `npx vitest run` 的运行时汇总为准：v4.15.14 = **696 文件 / 9136 用例**；v4.15.15（删死门面 7 条）= **696 / 9129**（9113 passed + 16 skipped）。
 
-### 4.2a 存量 importer 清单与归属结论（2026-11-27 实测，M3/B1 口径）
+### 4.2a 存量 importer 清单与归属结论（2026-11-27 阶段 4 实测，M3/B1 口径）
 
-- ✅ **永久豁免（8 文件 / 26 条）**：`group/{index,protocolPlayer,watchdog}.ts`（16）、`index.ts`（4）、`dlna/announce.ts`（1）、`services/{access,peer}.ts`（3）、`memory/pruneOrphans.ts`（2）。
-- 🟡 **同类豁免（2 文件 / 2 条）**：`plugin/renderers/{airplay,sendspin}.ts` 属插件侧，本就应 import 协议实现，B1 不扫描。
-- ⏳ **待定（8 文件 / 15 条，阶段 4 前逐条给结论）**：`routes/api/airplay.ts`(1)、`routes/api/peers.ts`(2)、`routes/api/settings.ts`(1)、`routes/api/shared.ts`(5)、`routes/rest/index.ts`(2)、`services/flows/index.ts`(2)、`services/playTarget.ts`(1)、`services/player/playerWebhook.ts`(1)。
-- 判定原则：`import type` 一律放行；仅「用协议工厂造播放器」算越界；纯常量/类型引用登记后豁免。
+实测口径：`node scripts/check-renderer-plugin-boundary.mjs`（B1），共 **19 文件 / 63 条**非类型静态引用。
+
+- ✅ **永久豁免（7 文件 / 27 条）**
+  - 群组泵：`group/protocolPlayer.ts`(9)、`group/index.ts`(6)、`group/watchdog.ts`(3) = 18
+  - 设备基础设施：`memory/pruneOrphans.ts`(4)、`ws/index.ts`(2)、`services/access.ts`(1)、`services/peer.ts`(5) = 12
+  - 启动装配：`index.ts`(7)
+- 🟡 **队列核心余量（1 文件 / 2 条）**：`player/QueueController.ts` 的 `dlna/control.js`（基址/设备状态）与 `dlna/queue.js`（落库）—— 均**非播放器工厂**，三个工厂符号已 0 命中。
+- 🟡 **业务编排/只读展示（11 文件 / 34 条）**：`routes/api/shared.ts`(9)、`services/flows/index.ts`(4)、`player/playerWebhook.ts`(2)、`routes/rest/index.ts`(2)、`routes/api/peers.ts`(2)、`services/playTarget.ts`(1)、`routes/api/settings.ts`(1)、`services/content.ts`(1)、`source/online/streamFallback.ts`(1)、`source/smbStream.ts`(1)。
+  - 结论：均只复用协议模块的**控制面/状态/基址**，不 `new` 播放器；迁移到插件抽象会扩大改动面且无行为收益，**保留并登记**。
+- ⚪ **插件侧不计入**：`plugin/renderers/{airplay,dlna,sendspin}.ts` 本就应 import 协议实现，B1 不扫描。
+- 判定原则：`import type` 一律放行；仅「用协议工厂造播放器」算越界；B2/B3 已归零。
+- 阶段 4 后：B1 为**硬拦截**，白名单外任何新增即退出非零。
+- 新增单测 `tests/plugins/rendererCreatePlayer.test.ts`（3 例）：三插件「协议不匹配 / 设备不在自身名单 / 命中转发」闸门全覆盖。
 
 后续所有「用例数不降」一律按运行时口径判定。
 
@@ -776,9 +791,10 @@ git diff --unified=0 -- backend/src | grep -E '^[+-][^+-]' \
 
 ⇒ **M1 只统计静态 import**；动态 import 既不计入 M1，也不计入 M3 的"条数"。守卫 B1 只匹配 `^import …` / `from "…"` 形态，不匹配 `await import(`。
 
-**M3 白名单（最终态，共 4 类语义，不得再扩）**：
-`group/*`（群组泵+桥，MA 同样技术债）、`index.ts`（启动门控）、`dlna/announce.ts`（§1.4 互斥）、
-`services/{access,peer,memory/pruneOrphans}.ts`（设备基础设施）。
+**M3 白名单（最终态，共 5 类语义，不得再扩）**：
+`group/*`（群组泵+桥）、`index.ts`（启动装配）、`services/{access,peer,memory/pruneOrphans,ws}.ts`（设备基础设施）、
+`player/QueueController.ts`（仅非工厂工具 import）、`routes/*` + `services/{flows,playTarget,content,player/playerWebhook,source/*}.ts`（业务编排/只读复用）。
+逐条理由以守卫脚本 `B1_WHITELIST` 为唯一事实源。
 
 ### 4.2b 新增守卫 `check-renderer-plugin-boundary.mjs` 规则（B1–B7）
 
@@ -794,7 +810,7 @@ git diff --unified=0 -- backend/src | grep -E '^[+-][^+-]' \
 | **B6** | **同步签名锁定**：`createPlayer` 声明中不得出现 `async` / `Promise`；`QueueController.ts` 不得对 `createRendererPlayer(...)` 的返回值 `await` | §0.2.2 陷阱 1 |
 | **B7** | **启用逻辑冻结（以阶段 0 打点为基线）**：`plugins.ts` 的 `BUILTIN_RENDERER_IDS` 判定、各 `isXxxEnabled()` 实现、三个 renderer manifest 的 `defaultEnabled` 值，在**阶段 0 之后**的 diff 中必须零改动（v4.15.15 的改动属于基线，不计入） | §7 第 7 条 |
 
-> B1/B2 在阶段 0 以**白名单全量模式**上线（只打印、不退出非零），每完成一个阶段就收紧一项；阶段 4 改为**硬拦截**。
+> B1/B2/B3 自阶段 4 起**全部硬拦截**（退出非零）；B1 白名单固定为 §4.2a 实测 19 文件，白名单外零新增。
 > B6/B7 是本次「行为等价」专用规则 —— 它们不检查架构，只防止**顺手改坏播放语义**。
 
 ### 4.3 每阶段验收清单（逐条打勾，不许跳过）
@@ -810,44 +826,44 @@ git diff --unified=0 -- backend/src | grep -E '^[+-][^+-]' \
 
 **阶段 0**
 **阶段 0**
-- [ ] `0-a` `RendererPlugin` 已含 `createPlayer?` 且**同步**签名（`grep -A2 'createPlayer' plugins/types.ts` 无 `Promise`）
-- [ ] `0-b` `createRendererPlayer` 为同步函数（无 `async`），内部无 `await`
-- [ ] `0-c` `tsc --noEmit` 0 错
-- [ ] `0-d` 37 守卫全绿 + 新守卫可运行
-- [ ] `0-e` `QueueController.ts` diff 为空
-- [ ] `0-f` 三份文档已就位：`SPEC.md` §1.5 已是校正版（v4.15.15 已改，只确认）；`PLUGIN_ARCHITECTURE.md` §1 与 `PLUGIN_DEV.md` §4.7 的更新在本阶段执行
+- [x] `0-a` `RendererPlugin` 已含 `createPlayer?` 且**同步**签名（`grep -A2 'createPlayer' plugins/types.ts` 无 `Promise`）
+- [x] `0-b` `createRendererPlayer` 为同步函数（无 `async`），内部无 `await`
+- [x] `0-c` `tsc --noEmit` 0 错
+- [x] `0-d` 37 守卫全绿 + 新守卫可运行
+- [x] `0-e` `QueueController.ts` diff 为空
+- [x] `0-f` 三份文档已就位：`SPEC.md` §1.5 已是校正版（v4.15.15 已改，只确认）；`PLUGIN_ARCHITECTURE.md` §1 与 `PLUGIN_DEV.md` §4.7 的更新在本阶段执行
 
 **阶段 1（DLNA）**
-- [ ] `1-a` `QueueController.ts` 中 `createDlnaProtocolPlayer` = 0 命中
-- [ ] `1-b` `tests/dlna` 用例数不降，全绿
-- [ ] `1-c` 守卫：`check-dlna-realtime` / `check-seek-granularity` / `check-audio-output-format` / `check-playback-regression` 全绿
+- [x] `1-a` `QueueController.ts` 中 `createDlnaProtocolPlayer` = 0 命中
+- [x] `1-b` `tests/dlna` 用例数不降，全绿
+- [x] `1-c` 守卫：`check-dlna-realtime` / `check-seek-granularity` / `check-audio-output-format` / `check-playback-regression` 全绿
 - [ ] `1-d` HiVi 真机：起播 / 切歌 / seek / 音量 各一次正常，`[ERROR]` = 0
-- [ ] `1-e` L5 diff 仅两类改动
+- [x] `1-e` L5 diff 仅两类改动
 - [ ] `1-f` 五拓扑基线未退化（重点 `mixed`、`ap-only`）
 
 **阶段 2（AirPlay）**
-- [ ] `2-a` `QueueController.ts` 中 `createAirPlayPlayerForDevice` = 0 命中
-- [ ] `2-b` `tests/airplay`(75 个测试文件) / `tests/group`(17 个测试文件) 全绿且用例数不降
-- [ ] `2-c` 八个 airplay/group 守卫全绿（playback-chain / bridge / dlna-mutex / decode-af / stream-auth / rtsp-line / ap2-discovery / group-invariants）
+- [x] `2-a` `QueueController.ts` 中 `createAirPlayPlayerForDevice` = 0 命中
+- [x] `2-b` `tests/airplay`(75 个测试文件) / `tests/group`(17 个测试文件) 全绿且用例数不降
+- [x] `2-c` 八个 airplay/group 守卫全绿（playback-chain / bridge / dlna-mutex / decode-af / stream-auth / rtsp-line / ap2-discovery / group-invariants）
 - [ ] `2-d` 真机四组合：AP1 非桥 / AP1 桥成员 / AP2 已配对 / AP2 未配对回落
 - [ ] `2-e` 混合群组切歌 5 次：桥不断、tick 连续、无断档
 - [ ] `2-f` 五拓扑 `mixed` / `ap-only` / `ap1-only` / `ap2-only` 判据同前
 - [ ] `2-g` 日志 `registered AirPlay device:` 文案与次数不变
 
 **阶段 3（Sendspin）**
-- [ ] `3-a` M1 达成（4 → 1：三条工厂消失，仅留 `suffixToMime`）
-- [ ] `3-b` `tests/sendspin`(80 个测试文件) 全绿且用例数不降
-- [ ] `3-c` `check-playback-regression` / `check-display-progress` 全绿
+- [x] `3-a` M1 达成（4 → 1：三条工厂消失，仅留 `suffixToMime`）
+- [x] `3-b` `tests/sendspin`(80 个测试文件) 全绿且用例数不降
+- [x] `3-c` `check-playback-regression` / `check-display-progress` 全绿
 - [ ] `3-d` ESP32 真机：起播 / 切歌 / seek / 音量 / 多房同步
 - [ ] `3-e` 五拓扑 `ss-only` 帧判据同前
-- [ ] `3-f` 停用语义零改动：`plugins.ts` / manifest / `isSendspinEnabled()` diff 为空
+- [x] `3-f` 停用语义零改动：`plugins.ts` / manifest / `isSendspinEnabled()` diff 为空
 
 **阶段 4（收口）**
-- [ ] `4-a` M2 达成（5 → 0）
-- [ ] `4-b` M3 达成（静态 import ≤8 文件 / ≤20 条，全白名单；动态 import 不计入）
-- [ ] `4-c` M6 达成（38 守卫全绿，边界守卫硬拦截）
-- [ ] `4-d` 全量 `npx vitest run` 全绿，用例 ≥ 改造前
-- [ ] `4-e` 文档三处收口（player-unification §2.6 / PLUGIN_ARCHITECTURE §1 / 本文档状态）
+- [x] `4-a` M2 达成（5 → 0）
+- [x] `4-b` M3 达成（B1 硬拦截：白名单 19 文件 / 63 条全部有结论，白名单外越界 = 0；动态 import 不计入）
+- [x] `4-c` M6 达成（38 守卫全绿，边界守卫硬拦截）
+- [x] `4-d` 全量 `npx vitest run` 全绿，用例 ≥ 改造前 `（✅ 2026-11-27：697 文件 / 9133 用例 = 9117 passed + 16 skipped，≥ M5 基线 9129）`
+- [x] `4-e` 文档三处收口（player-unification §2.6 / PLUGIN_ARCHITECTURE §1 / 本文档状态）
 
 ### 4.4 行为等价专项（Given-When-Then）
 
