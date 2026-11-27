@@ -8,6 +8,7 @@ import md5 from "md5";
 import { db, initDatabase, encryptPassword } from "../../src/db/index.js";
 import { users, artists, albums, songs, playlists, playlistSongs, playHistory, mediaSources } from "../../src/db/schema.js";
 import { eq } from "drizzle-orm";
+import { setSetting } from "../../src/services/settings.js";
 import { authMiddleware } from "../../src/middleware/auth.js";
 import { restRoutes } from "../../src/routes/rest/index.js";
 
@@ -31,6 +32,11 @@ const sr = (r: any) => r?.body?.["subsonic-response"] ?? null;
 beforeAll(() => {
   if (!process.env.APP_VERSION) process.env.APP_VERSION = "1.0.0";
   initDatabase();
+  // 单测不触网：测试进程会经 online/index 的副作用注册内置 lyricProvider，
+  // getLyricsBySongId 的在线按需（默认开）会真实请求 QQ/网易云等平台，单请求 10s
+  // 超时 → 本用例单跑 17s+、全量并发下突破 vitest 20s 上限。关掉后断言「无歌词」
+  // 才与用例意图一致，且耗时降至毫秒级。
+  setSetting("lyrics.onDemand", "false");
   db.insert(users).values({ id: "u1", username: "alice", password: "", salt: "salt", subsonicSalt: "subsalt", passEnc: encryptPassword(PLAIN), isAdmin: 1, isActive: 1, email: "a@b.c" }).run();
   db.insert(artists).values({ id: "ar1", name: "Test Artist" }).run();
   db.insert(albums).values({ id: "al1", name: "Test Album", artistId: "ar1", artist: "Test Artist", year: 2020, genre: "Rock" }).run();

@@ -629,7 +629,7 @@ console.log("===== R18 流转接续:起播即落位 + 建会话硬预算(HiVi �
   );
 }
 
-console.log("===== R19 插件默认开启 + 启停零残留(2026-10-21 用户拍板) =====");
+console.log("===== R19 插件默认开启 + 内置渲染器不可停用(2026-11-27 用户拍板) =====");
 {
   const plugin = stripComments(read("backend/src/services/plugin/renderers/airplay.ts"));
   check(
@@ -647,22 +647,28 @@ console.log("===== R19 插件默认开启 + 启停零残留(2026-10-21 用户拍
     /unregisterAirPlayDevices\(\)/.test(ap) && /stopAirPlayDiscovery\(\)/.test(ap),
     "停用插件后仍残留设备注册或 mDNS 监听",
   );
-  // 「默认开启」只改初始值,绝不能变成「不可关闭」:插件页的手动开关必须继续存在,
-  // 且 PUT /v1/plugins/:id/toggle 仍要联动 start/stopAirPlayService。
+  // 2026-11-27 用户裁决推翻 2026-10-21 的「可手动关闭」:内置渲染器(airplay / dlna /
+  // sendspin)一律不可停用 —— toggle 必须幂等置 1,且不得再联动任何服务停机(停了 DB
+  // 与运行时状态会失配,且桥接/直连都依赖常驻服务)。core 行为插件的开关不受影响。
   const pluginsRoute = stripComments(read("backend/src/routes/api/plugins.ts"));
   check(
-    "插件开关仍联动 AirPlay 服务(默认开启 ≠ 不可手动关闭)",
-    /airplay-renderer/.test(pluginsRoute)
-      && /startAirPlayService\(\)/.test(pluginsRoute)
-      && /stopAirPlayService\(\)/.test(pluginsRoute),
-    "toggle 路由丢失了 AirPlay 启停联动:默认开启后将无法真正关闭",
+    "toggle 按内置渲染器 id 集合幂等置 1(不可停用)",
+    /BUILTIN_RENDERER_IDS\.has\(/.test(pluginsRoute)
+      && /builtinRenderer \? 1 :/.test(pluginsRoute),
+    "toggle 丢失了「内置渲染器一律置 1」的判定:渲染器又能被停用了",
   );
   check(
-    "存在「关 → 停在播会话 / 开 → 起监听」的回归用例",
-    /airplay-renderer:关 → 停在播会话;开 → 起监听/.test(
-      read("backend/tests/routes/lt2_pluginsRouteBranches.test.ts"),
-    ),
-    "插件开关的回归用例被删,手动关闭能力失去测试保护",
+    "toggle 不得再联动内置渲染器停机(void stopXxxService 必须消失)",
+    // 端口变更热更新里的 `await stopSendspinService()` 是重启监听,不是停用,
+    // 故只钉停用联动的固定写法 `void stopXxxService()`(原实现两处都是 void)。
+    !/void stopAirPlayService\(\)/.test(pluginsRoute)
+      && !/void stopSendspinService\(\)/.test(pluginsRoute),
+    "toggle 重新引入了服务停机联动:停用语义已被用户裁决移除",
+  );
+  check(
+    "存在「内置渲染器关不掉」的回归用例",
+    /内置渲染器不可停用/.test(read("backend/tests/routes/lt2_pluginsRouteBranches.test.ts")),
+    "插件开关的回归用例被删,不可停用能力失去测试保护",
   );
 }
 

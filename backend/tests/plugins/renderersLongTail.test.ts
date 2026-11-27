@@ -1,19 +1,16 @@
 // ==================== plugins/renderers 编排层长尾 ====================
 // 既有 renderersPlugin.test.ts 测的是 dlna/airplay 适配器本身;这里测的是
 // plugins/renderers.ts 的**编排**(遍历已启用 renderer 插件 + 健康记录 + 错误收口):
-//   - discoverRenderers:某插件 discover 抛错 → recordFailure 并跳过,不拖垮其它插件;
-//   - castToRenderer:底层 cast 抛错 → recordFailure 后重抛;
-//   - controlRenderer:插件未实现 control → 抛「不支持控制操作」。
+//   - discoverRenderers:某插件 discover 抛错 → recordFailure 并跳过,不拖垮其它插件。
+//
+// castToRenderer / controlRenderer 已于 v4.15.15 删除(生产零调用,且属被淘汰的
+// 「把 URL 交给设备」模型);对应用例一并移除,cast/control 仍保留在 RendererPlugin 契约上。
 import "./_env.js";
 
 import { describe, it, expect, afterEach } from "vitest";
 import { sqlite } from "../../src/db/index.js";
 import { registerPlugin, unregisterPlugin } from "../../src/plugins/registry.js";
-import {
-  discoverRenderers,
-  castToRenderer,
-  controlRenderer,
-} from "../../src/plugins/renderers.js";
+import { discoverRenderers } from "../../src/plugins/renderers.js";
 
 const U = Math.random().toString(36).slice(2, 8);
 const pid = (s: string) => `lt4rend-${s}-${U}`;
@@ -73,37 +70,5 @@ describe("discoverRenderers", () => {
     await expect(discoverRenderers()).resolves.toEqual(
       expect.not.arrayContaining([expect.objectContaining({ pluginId: id })]),
     );
-  });
-});
-
-describe("castToRenderer", () => {
-  it("底层 cast 抛错 → 记录失败后原样重抛", async () => {
-    const id = pid("castfail");
-    enable(id, { cast: async () => { throw new Error("SOAP 500"); } });
-    registered.push(id);
-    await expect(castToRenderer(id, "d1", "s1")).rejects.toThrow("SOAP 500");
-    const health = sqlite
-      .prepare("SELECT failures FROM plugin_health WHERE plugin_id = ?").get(id) as any;
-    expect(health?.failures).toBeGreaterThanOrEqual(1);
-  });
-
-  it("插件未注册/未实现 cast → 抛「未找到可用的渲染器插件」", async () => {
-    await expect(castToRenderer(pid("ghost"), "d1", "s1")).rejects.toThrow(/未找到可用的渲染器插件/);
-  });
-});
-
-describe("controlRenderer", () => {
-  it("插件未实现 control → 抛「不支持控制操作」", async () => {
-    const id = pid("noctrl");
-    enable(id, { discover: async () => [] });
-    registered.push(id);
-    await expect(controlRenderer(id, "d1", "play")).rejects.toThrow(/不支持控制操作/);
-  });
-
-  it("实现了 control → 转发并返回结果", async () => {
-    const id = pid("ctrl");
-    enable(id, { control: async (_h: any, _d: string, action: string) => `did:${action}` });
-    registered.push(id);
-    await expect(controlRenderer(id, "d1", "pause")).resolves.toBe("did:pause");
   });
 });

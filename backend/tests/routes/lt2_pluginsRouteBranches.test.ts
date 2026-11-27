@@ -3,7 +3,7 @@ import "../plugins/_env.js";
 
 // `routes/api/plugins.ts` 残余未覆盖行补测(全部是**服务编排 / 外部依赖失败**分支):
 //   113-118 sendspin 端口热更新(仅当新端口合法且与现值不同 → 停旧起新)
-//   146-148 / 150-152 toggle airplay/sendspin 内置插件时的服务生命周期联动
+//   146-153 toggle 内置渲染器:幂等置 1(不可停用)、不联动服务启停
 //   164-167 删除外置插件:处置沙箱
 //   188     renderer 设备发现失败 → 502
 //   212-213 / 217-218 插件市场:已安装态合并 + 拉市场失败 → 502
@@ -162,29 +162,34 @@ describe("PUT /v1/plugins/:id (sendspin 端口热更新)", () => {
   });
 });
 
-describe("PUT /v1/plugins/:id/toggle (内置服务联动)", () => {
-  it("airplay-renderer:关 → 停在播会话;开 → 起监听", async () => {
+describe("PUT /v1/plugins/:id/toggle (内置渲染器不可停用)", () => {
+  it("airplay-renderer:一律置 1,不调 stop/start 服务", async () => {
     putPlugin("airplay-renderer", "airplay-renderer", 1, "{}");
     const off = await call("PUT", "/v1/plugins/airplay-renderer/toggle");
     expect(off.body.success).toBe(true);
-    expect(leaf.stopAirPlayService).toHaveBeenCalledTimes(1);
+    // 关不掉:DB 仍是 1,且服务启停零调用
+    const row = db.select().from(plugins).where(eq(plugins.id, "airplay-renderer")).get() as any;
+    expect(row.enabled).toBe(1);
+    expect(leaf.stopAirPlayService).not.toHaveBeenCalled();
     expect(leaf.startAirPlayService).not.toHaveBeenCalled();
 
-    // 置为已关闭后再切一次 → 起服务
+    // DB 被外部改成 0 后再点一次 → 幂等拉回 1,仍不重启服务
     db.update(plugins).set({ enabled: 0 }).where(eq(plugins.id, "airplay-renderer")).run();
-    const on = await call("PUT", "/v1/plugins/airplay-renderer/toggle");
-    expect(on.body.success).toBe(true);
-    expect(leaf.startAirPlayService).toHaveBeenCalledTimes(1);
+    const again = await call("PUT", "/v1/plugins/airplay-renderer/toggle");
+    expect(again.body.success).toBe(true);
+    const row2 = db.select().from(plugins).where(eq(plugins.id, "airplay-renderer")).get() as any;
+    expect(row2.enabled).toBe(1);
+    expect(leaf.startAirPlayService).not.toHaveBeenCalled();
+    expect(leaf.stopAirPlayService).not.toHaveBeenCalled();
   });
 
-  it("sendspin-renderer:关 → 停服务;开 → 起服务", async () => {
+  it("sendspin-renderer:同样关不掉,服务启停零调用", async () => {
     putPlugin("sendspin-renderer", "sendspin-renderer", 1, "{}");
     await call("PUT", "/v1/plugins/sendspin-renderer/toggle");
-    expect(leaf.stopSendspinService).toHaveBeenCalledTimes(1);
-
-    db.update(plugins).set({ enabled: 0 }).where(eq(plugins.id, "sendspin-renderer")).run();
-    await call("PUT", "/v1/plugins/sendspin-renderer/toggle");
-    expect(leaf.startSendspinService).toHaveBeenCalled();
+    const row = db.select().from(plugins).where(eq(plugins.id, "sendspin-renderer")).get() as any;
+    expect(row.enabled).toBe(1);
+    expect(leaf.stopSendspinService).not.toHaveBeenCalled();
+    expect(leaf.startSendspinService).not.toHaveBeenCalled();
   });
 });
 

@@ -41,3 +41,24 @@ fs.mkdirSync(dir, { recursive: true });
 process.env.DATA_DIR = dir;
 const { initDatabase } = await import("../src/db/index.js");
 initDatabase();
+
+// ---- 出网守卫(2026-11-27)----
+// 背景:内置 tagProvider 的在线能力会在测试进程里被注册,任何未做隔离的用例
+// (如 getLyricsBySongId 的在线按需)都会真实请求 QQ/网易云等平台,单请求超时 10s,
+// 全量并发下突破 vitest 默认 20s → 偶发红;在能出网的机器上还可能真的返回歌词,
+// 让「期望为空」的断言直接失败。单测默认只允许访问本机地址。
+// 确需外网的用例:在该测试文件顶部 `process.env.MF_TEST_ALLOW_NET = "1";`(最晚在 setup 前)。
+if (!process.env.MF_TEST_ALLOW_NET) {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: any, init?: any) => {
+    const raw = typeof input === "string" ? input : (input?.url ?? String(input));
+    let host = "";
+    try { host = new URL(raw).hostname; } catch { /* 非 URL(data:/相对路径等):交给原实现 */ }
+    const isLocal = host === "" || host === "localhost" || host === "127.0.0.1" ||
+      host === "::1" || host === "[::1]" || host === "0.0.0.0";
+    if (!isLocal) {
+      throw new Error(`[test-net-guard] 测试禁止访问外部网络: ${raw}（确需外网请设置 MF_TEST_ALLOW_NET=1）`);
+    }
+    return realFetch(input as any, init);
+  }) as typeof fetch;
+}

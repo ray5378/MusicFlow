@@ -41,7 +41,7 @@ Casts music to AirPlay speakers, TVs and other devices on the LAN as a renderer.
 ### How it works
 - \`discoverRenderers()\` discovers devices over mDNS: \`_raop._tcp\` provides the RAOP (AP1) instance; a device is only treated as AP2-capable when it also advertises \`_airplay._tcp\` and that record reports \`protovers >= 1.1\` (both services must be present plus the version gate — either check alone is fooled by older devices);
 - On playback, the AirPlay bridge consumes the group pump's PCM and delivers it to each member with that member's own protocol: paired AP2-capable devices use AP2 realtime, everything else falls back to AP1. Music casting always goes through the bridge; the plugin no longer opens its own RAOP session;
-- \`controlRenderer()\` forwards play / pause / stop / volume / seek;
+- Transport control (play / pause / stop / volume / seek) is handled by the AirPlay control module and the unified queue controller;
 - Queue handling is shared with DLNA through the unified \`QueueController\` (persistent queue, auto-advance, resume after restart).
 
 ### Group playback
@@ -79,7 +79,7 @@ Casts music to AirPlay speakers, TVs and other devices on the LAN as a renderer.
 - \`discoverRenderers()\` 通过 mDNS 发现设备:\`_raop._tcp\` 给出 RAOP(AP1)实例;只有**同时**广播 \`_airplay._tcp\` 且该记录 \`protovers ≥ 1.1\` 才判定为 AP2 能力设备(两个服务同时在册 + 版本门槛,单看任一条都会被老设备骗过);
 - 起播时由 **AirPlay 桥**消费组泵 PCM 并按**每个成员各自的协议**投递:已配对且支持 AP2 → AP2 realtime;其余一律回落 AP1。音乐投放一律走桥,插件不再自建 RAOP 会话;
 - AP1:建立 RTSP 会话(RSA 密钥交换),把加密后的音频分块推给设备;AP2:用配对派生的密钥加密 RTSP 信令与音频包,经 RTP/UDP 发送;
-- \`controlRenderer()\` 转发播放 / 暂停 / 停止 / 音量 / 进度 等控制指令;
+- 播放 / 暂停 / 停止 / 音量 / 进度 等控制指令由 AirPlay 控制模块与统一队列控制器处理;
 - 与 DLNA 共用统一队列控制器(\`QueueController\`),支持持久化队列、自动切歌、重启恢复。
 
 ### 群组播放

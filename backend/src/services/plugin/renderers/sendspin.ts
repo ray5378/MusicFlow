@@ -28,9 +28,9 @@ export const sendspinRendererManifest: PluginManifest = {
   type: "renderer",
   description: "将 MusicFlow 作为 Sendspin Server,让 Xbox/Android 音箱等 Sendspin 客户端直接播放曲库",
   capabilities: ["renderer"],
-  // 默认关闭:Sendspin 服务端需要常驻监听 38927 端口 + mDNS 广播(CPU/端口开销),
-  // 与 AirPlay 同样按需开启;关闭时零常驻资源。
-  defaultEnabled: false,
+  // 默认开启(2026-11-27 用户裁决:内置渲染器一律不可停用):桥接投递与直连播放
+  // 都依赖它,新装实例必须开箱可用;常驻监听 38927 端口 + mDNS 广播。
+  defaultEnabled: true,
   configSchema: [
     {
       key: "port",

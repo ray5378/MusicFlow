@@ -8,10 +8,11 @@
 // as a separate plugin implementing the same RendererPlugin interface — no core
 // change required.
 //
-// NOTE: the proven /v1/dlna/cast endpoint still calls castToDevice() directly
-// (it needs the request-derived LAN base URL for the stream). castToRenderer()
-// in plugins/renderers.ts exposes the same capability through the unified host
-// layer for future callers / alternate renderers.
+// NOTE: the proven /v1/dlna/cast endpoint calls castToDevice() directly (it
+// needs the request-derived LAN base URL for the stream). The unified
+// `castToRenderer()` dispatcher was removed in v4.15.15 - playback must go
+// through QueueController + ProtocolPlayer, never through a "hand the URL to
+// the device" path (that bypasses progress / hold / delay handling).
 
 import {
   getCachedDevices,
@@ -84,8 +85,8 @@ Casts music via DLNA/UPnP to speakers, TVs and other playback devices on the LAN
 
 ### 处理逻辑
 1. \`discoverRenderers()\` 通过 SSDP 多播在局域网发现 DLNA 设备，随设备上下线自动增删（Web/HA 里离线设备不显示，重上线自动找回）；
-2. 投屏时 \`castToRenderer()\` 把音频流地址 + 曲目元数据用 SOAP 控制指令发给设备，由设备自行拉流播放；
-3. \`controlRenderer()\` 转发播放 / 暂停 / 音量 / 进度等控制指令；
+2. 投屏时把音频流地址 + 曲目元数据用 SOAP 控制指令发给设备，由设备自行拉流播放；
+3. 播放 / 暂停 / 音量 / 进度等控制指令经 DLNA SOAP 转发；
 4. 后端持有每台设备的持久化队列（\`device_queues\`），后端重启或浏览器断开后设备仍可继续播放，重启后可恢复续播。
 
 ### 说明

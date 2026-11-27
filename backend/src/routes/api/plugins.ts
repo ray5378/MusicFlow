@@ -2,6 +2,7 @@
 import type { Hono } from "hono";
 import { forgetExternalPlugin } from "../../plugins/discovery.js";
 import {
+  BUILTIN_RENDERER_IDS,
   BusinessErrorCode,
   MAX_PROBE_BATCH,
   addRegistry,
@@ -37,10 +38,6 @@ import {
   plugins,
   registerBatchWorker,
   removeRegistry,
-  startAirPlayService,
-  startSendspinService,
-  stopAirPlayService,
-  stopSendspinService,
   unregisterBatchWorker,
   unregisterPlugin,
   uuidv4,
@@ -144,18 +141,14 @@ app.put("/v1/plugins/:id/toggle", adminMiddleware, (c) => {
       if (conflict) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, conflict), apiErrorStatus(BusinessErrorCode.INVALID_PARAM));
     }
   }
-  const nextEnabled = p.enabled ? 0 : 1;
+  // 内置渲染器一律不可停用(2026-11-27 用户裁决):toggle 幂等置 1 后立即返回,
+  // 不联动任何服务启停。停用语义整体移除 —— 此前关掉 airplay/sendspin 会真的停
+  // 服务,且 DB 与运行时状态容易失配(改配置的 PUT 会把 enabled 写回 1 却不重启)。
+  // 服务启动只由 index.ts 启动门控掌握;core 行为插件(同曲多源组/播放优选)的
+  // 状态开关不受影响,仍可整体停用。
+  const builtinRenderer = BUILTIN_RENDERER_IDS.has(p.id) || BUILTIN_RENDERER_IDS.has(p.name);
+  const nextEnabled = builtinRenderer ? 1 : (p.enabled ? 0 : 1);
   db.update(plugins).set({ enabled: nextEnabled }).where(eq(plugins.id, p.id)).run();
-  // 内置插件的服务生命周期联动:airplay-renderer / sendspin-renderer 开关 → 启动/停止服务
-  // (开启才启动监听/mDNS;关闭时停全部会话 + 清 peer/player + 释放 socket,零常驻资源)。
-  if (p.id === "airplay-renderer" || p.name === "airplay-renderer") {
-    if (nextEnabled) startAirPlayService();
-    else void stopAirPlayService();
-  }
-  if (p.id === "sendspin-renderer" || p.name === "sendspin-renderer") {
-    if (nextEnabled) startSendspinService().catch((e: any) => actionLog.error("sendspin 服务启动失败", { err: e?.message || e }));
-    else void stopSendspinService();
-  }
   return c.json({ success: true });
 });
 // 删除插件(仅外置插件;内置核心插件不可删除)。删除目录 + 释放沙箱 + 反注册 + 删 DB 行。

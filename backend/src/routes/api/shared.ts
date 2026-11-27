@@ -116,7 +116,7 @@ import { getScrobblerPlugins } from "../../plugins/scrobblers.js";
 import {
   listMarketplace, collectRegistryGroups, marketplaceCacheState, installPlugin, listRegistries, addRegistry, removeRegistry,
 } from "../../plugins/registryCatalog.js";
-import { BUILTIN_PLUGINS } from "../../plugins/builtins.js";
+import { BUILTIN_RENDERER_IDS, BUILTIN_PLUGINS } from "../../plugins/builtins.js";
 import { pluginSandboxes } from "../../plugins/discovery.js";
 import { unregisterPlugin, firstEnabledByCapability, getEnabledByCapability, getPluginConfig, getPluginManifest, getPlugin } from "../../plugins/registry.js";
 import { registerBatchWorker, unregisterBatchWorker } from "../../services/plugin/batchPacer.js";
@@ -277,6 +277,9 @@ export { scanJobs, SCAN_JOB_TTL_MS, scanJobsSweep } from "../../services/source/
 export const BUILTIN_IDS = new Set(BUILTIN_PLUGINS.map((b) => b.manifest.id));
 
 export const isBuiltinRow = (r: any): boolean => BUILTIN_IDS.has(r?.id) || BUILTIN_IDS.has(r?.name);
+
+/** 内置渲染器 id(airplay / sendspin / dlna):一律不可停用(见 toggle 路由)。 */
+export { BUILTIN_RENDERER_IDS };
 // core 内置插件(同曲多源组 / 播放优选等行为插件):不参与状态开关启停,功能开关
 // 全部收在插件「配置」弹窗的 configSchema 里(开关按钮由 manifest 声明)。
 

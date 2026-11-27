@@ -100,6 +100,10 @@ export const BUILTIN_RENDERER_PLUGINS: BuiltinPlugin[] = [
   { manifest: sendspinRendererManifest, impl: sendspinRendererPlugin },
 ];
 
+/** 内置渲染器 id 集合(airplay / sendspin / dlna)。
+ *  用户裁决 2026-11-27:渲染器一律不可停用,toggle 路由按此集合幂等置 1。 */
+export const BUILTIN_RENDERER_IDS = new Set(BUILTIN_RENDERER_PLUGINS.map((b) => b.manifest.id));
+
 export const BUILTIN_ARTIST_PLUGINS: BuiltinPlugin[] = [
   { manifest: artistInfoManifest, impl: artistInfoPlugin },
 ];

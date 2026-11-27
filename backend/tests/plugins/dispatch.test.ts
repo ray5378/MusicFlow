@@ -19,7 +19,7 @@ import { registerPlugin } from "../../src/plugins/registry.js";
 import type { PluginManifest, LyricProviderPlugin, CoverProviderPlugin, RendererPlugin, ScrobblerPlugin } from "../../src/plugins/types.js";
 
 import { hasLyricProvider, hasCoverProvider, searchLyrics, searchCover } from "../../src/plugins/providers.js";
-import { getRendererPlugins, discoverRenderers, castToRenderer, controlRenderer } from "../../src/plugins/renderers.js";
+import { getRendererPlugins, discoverRenderers } from "../../src/plugins/renderers.js";
 import { getScrobblerPlugins, notifyScrobble, dedupeScrobbleDispatch, dedupePlayDispatch } from "../../src/plugins/scrobblers.js";
 import { getHealth } from "../../src/plugins/health.js";
 
@@ -134,19 +134,6 @@ describe("renderer plugins", () => {
     expect(d!.meta).toEqual({ kind: "test" });
   });
 
-  it("casts a song to a device", async () => {
-    const r = await castToRenderer("mock-renderer", "d1", "song9");
-    expect(r.mediaUri).toBe("http://x/song9");
-  });
-
-  it("controls a device when the plugin supports it", async () => {
-    const r = await controlRenderer("mock-renderer", "d1", "pause");
-    expect(r).toEqual({ ok: true });
-  });
-
-  it("throws when the renderer plugin is unknown", async () => {
-    await expect(castToRenderer("nope", "d1", "s")).rejects.toThrow();
-  });
 });
 
 describe("scrobbler plugins", () => {
