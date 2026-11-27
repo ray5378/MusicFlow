@@ -2,6 +2,20 @@
 
 本文件记录各版本的主要变更。版本号遵循语义化版本，仅在打 `vX.Y.Z` tag 时由 CI 构建并发布（产物：Docker 镜像）。
 
+## [4.15.14] - 2026-11-27
+
+### Change 基线版本：补齐测试覆盖率、播放链路守卫缺口与文档/采样方法论
+
+- **定位**：本版作为后续改动的基线锚点，仅含测试、守卫、文档改动，**无产品运行时代码变更**；镜像产物与 v4.15.13 功能完全一致，仅 APP_VERSION 更新为 4.15.14。240 无需热补丁。
+
+- **覆盖率测试**：新增 21 个模块单测（progressPrecision / stderrTail / ffmpegArgs / homeRecentPlaylists / sourcePlatforms / importTriggerHook / rendererHost / appConfig / notices / bootNotices / fakeRuntime / scheduleFields / smbStream / logSettings / sourceDeleteCore / selfhealExec / artistAliasSeed / lyricsMatch / isolationFlag / paths / nativeImporter）。全量 696 文件全绿，lines 90.84% → 91.29%（+169 行 / +0.45pp），19 个文件覆盖率改善。
+
+- **播放链路守卫**：审查 v4.15.9~13 播放/音源修复的静默契约，发现 v4.15.11 两处无守卫缺口（当时只改实现未配守卫）——泵收尾催轮询 `nudgePoll()`、曲末自适应阈值 `max(45s, 15% 时长)`。在 `check-playback-regression.mjs` 补 R7/R8 共 4 条断言（17 → 21 项），变异测试双向验证：阈值退回 20s / 删除 nudgePoll 调用均立即报红，还原后绿。全部 35 个 `check-*.mjs` 全绿。
+
+- **文档与采样**：新增文档库导航索引 `docs/README.md`（覆盖 70 篇，场景路由 + 分类总结）与脱敏常驻抓包脚本 `docs/examples/start_capture.example.sh`（无真实 IP/MAC/网卡名）；tcpdump 抓包正式纳入采样方法论，判据文档同步为「pcap 常驻但不进判据」；采样器日志已清空重启，561MB 抓包记录已清理。
+
+- **CI**：两笔提交（覆盖率 / 守卫）触发的 workflow 全部 success（含 ci 全量测试 + 各守卫 job）。
+
 ## [4.15.13] - 2026-11-27
 
 ### Feature 服务端日志统一重写：等级标志前置、统一分级、文案润色
