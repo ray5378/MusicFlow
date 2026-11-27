@@ -22,9 +22,8 @@ export const airplayRendererManifest: PluginManifest = {
   type: "renderer",
   description: "通过 AirPlay (RAOP / AirPlay 2) 协议将音乐投放到局域网内的 AirPlay 音箱、电视等设备",
   capabilities: ["renderer"],
-  // 默认开启(2026-10-21 用户拍板):AirPlay 是内建投屏主链路之一,开箱即用。
-  // 关闭仍可在插件管理页操作:停用后 discovery / 子进程 / 设备注册全部回收,
-  // 零常驻资源(与「默认关闭」时期的资源语义完全一致,只是初始值反过来)。
+  // 内置渲染器一律不可停用(2026-11-27 用户裁决):AirPlay 是内建投屏主链路之一,
+  // 服务随进程启动常驻;停机函数仅由进程停机路径使用,管理页开关不再联动。
   defaultEnabled: true,
   configSchema: [],
   // 插件侧 i18n 字典:默认文案即中文,故 zh 省略、只补 en。前端按当前界面语言取用。
@@ -64,7 +63,7 @@ Casts music to AirPlay speakers, TVs and other devices on the LAN as a renderer.
 - AP2 buffered mode (type 103 / PTP timing) is not implemented; such devices are used over AP1.
 
 ### Notes
-- **Enabled by default**: AirPlay is one of the built-in casting paths, ready out of the box. Disable it on the plugin page and discovery / child process / device registration are all torn down — zero resident resources;
+- **Always enabled**: built-in renderers cannot be disabled (2026-11-27). Discovery / child process / device registration stay resident with the server;
 - Devices must support AirPlay 1 (RAOP, RTSP + RSA); most active speakers and soundbars do, but individual implementations differ — if something misbehaves, disable or delete the device on the groups page to isolate it;
 - Tested devices are listed in the CHANGELOG; for AP2 it is worth running the latency calibration once, since decoder buffers differ between devices;
 - Audio is decoded by the server's ffmpeg and re-encoded, so the device never needs to support the source format.`,
@@ -103,7 +102,7 @@ Casts music to AirPlay speakers, TVs and other devices on the LAN as a renderer.
 - **不支持 AP2 buffered 模式**(type 103 / PTP 时基):只实现 realtime,这类设备按 AirPlay 1 使用。
 
 ### 说明
-- **默认开启**:AirPlay 是内建投屏主链路之一,开箱即用;在插件管理页停用后,发现 / 子进程 / 设备注册全部回收,零常驻资源;
+- **始终启用**:内置渲染器一律不可停用(2026-11-27 裁决);发现 / 子进程 / 设备注册随进程常驻;
 - 设备需支持 AirPlay 1 (RAOP,RTSP + RSA);常见的有源音箱 / 回音壁基本都支持,个别实现存在差异,遇异常可在群组页先禁用 / 删除设备排查;
 - 已测设备见 CHANGELOG;AP2 首次使用建议在群组页做一次延迟标定(各设备解码缓冲不一致);
 - 音频由服务器端 ffmpeg 解码后转码(无需设备支持音源格式)。`,

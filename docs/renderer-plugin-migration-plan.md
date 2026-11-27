@@ -36,7 +36,7 @@
 
 | 阶段 | 内容 | 状态 | 已完成条目 |
 |---|---|---|---|
-| **-1** | v4.15.15 前置清理（不可停用 + 死门面删除） | 🔄 代码已落盘 + 全量测试绿（3 轮复核 2 绿 1 偶发超时），待热补丁/发版 | 10 项 ✅ / 15（新增 -1o） |
+| **-1** | v4.15.15 前置清理（不可停用 + 死门面删除） | ✅ v4.15.15 已发版、240 部署、G1–G8 全绿、文案与 SPEC 已对齐 | 15 项 ✅ / 15 |
 | **0** | 契约扩容 + 同步门面（不动物理位置） | ⬜ 未开始 | 0 |
 | **1** | DLNA 试点（风险最低） | ⬜ 未开始 | 0 |
 | **2** | AirPlay | ⬜ 未开始 | 0 |
@@ -482,16 +482,16 @@ export interface RendererPlugin {
 - [x] `-1i` 全量守卫 37 个全绿 `（✅ 2026-11-27 21:17 · 证据：[ai] GUARDS total=37 failed=0）`
 - [x] `-1j` 全量 `npx vitest run` 全绿 `（✅ 2026-11-27 21:24 · 证据：[ai] Test Files 696 passed / Tests 9113 passed + 16 skipped (9129) / 0 failed，耗时 336s）`
   - 2026-11-27 复审：全量 3 轮，2 轮全绿（696 / 9113 passed + 16 skipped = 9129）；1 轮 1 例超时（`tests/rest/opensubsonic.test.ts` 的 `getLyricsBySongId 无歌词时返回空 structuredLyrics 且 ok`，并发下 >20s；单文件单跑 17.6s 通过）。判定为既有慢用例触顶，与本方案无关；✅ 保留。
-- [ ] `-1k` 构建 + 热补丁 240 + 真机 G1–G8 `（未开始；步骤见 §11.3，判据见 §11.4）`
-- [ ] `-1l` `SPEC.md` §1.5 重写 `（未开始；替换全文见 §11.1）`
-- [ ] `-1m` `CHANGELOG.md` v4.15.15 条目 `（未开始；文本见 §11.2）`
-- [ ] `-1n` push main + tag + CI 双绿 + digest/APP_VERSION 核对 `（未开始；须先用 240 真机确认）`
+ - [x] `-1k` 构建 + 热补丁 240 + 真机 G1–G8 `（✅ 2026-11-27 全绿：镜像 digest 054b3f2c…66c665、/ping 4.15.15+fd03e97、启动 ERROR=0；G1–G5 服务端实测（三渲染器 toggle 回弹 en=1、PUT 不改写、child PID 28/46/70 不变）；G6 用户听感确认通过；G7 DB/dist 旧门面 0 命中；G8 空库实例三渲染器默认 en=1，唯一 FATAL 为 JWT 自动生成，良性）`
+- [x] `-1l` `SPEC.md` §1.5 重写 `（✅ 2026-11-27：按 §11.1 全文替换；旧条款「可停用/默认关闭/零常驻」已零残留）`
+ - [x] `-1m` `CHANGELOG.md` v4.15.15 条目 `（✅ 2026-11-27：条目已随 fd03e971 提交，见 §11.2）`
+ - [x] `-1n` push main + tag + CI 双绿 + digest/APP_VERSION 核对 `（✅ 2026-11-27：main/tag 已推送，CI 12/12 全绿，镜像 ghcr 4.15.15，digest 054b3f2c…66c665；240 /ping 核对 4.15.15+fd03e97）`
 
 ---
 
-**-1o（2026-11-27 审核新增，待办）** 渲染器用户可见文案与「不可停用」对齐：
-- `services/plugin/renderers/sendspin.ts:216` 仍写「默认关闭…关闭时零常驻资源」，但 manifest 已 `defaultEnabled: true`；
-- `services/plugin/renderers/airplay.ts:26-27 / :106` 仍写「停用后…全部回收、零常驻资源」，但渲染器已不可停用。
+**-1o（2026-11-27 审核新增，✅ 已落地）** 渲染器用户可见文案与「不可停用」对齐：
+- `sendspin.ts` 中/英文「默认关闭 / Disabled by default」已改为「始终启用 / Always enabled」；
+- `airplay.ts` 注释与中/英文说明已改为「始终启用，随进程常驻」。
 验收：`grep -rn "停用后\|默认关闭\|零常驻" services/plugin/renderers/` 对 sendspin / airplay 零命中（dlna 的「大文件直通默认关闭」属另一语义，保留）。
 
 ### 阶段 0 — 前置（不动物理位置，不改任何播放入口）

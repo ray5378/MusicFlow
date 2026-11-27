@@ -142,7 +142,7 @@ Makes MusicFlow a **Sendspin Server** (port 38927) that Sendspin clients — Xbo
 4. Playback state and group volume are managed per client group.
 
 ### Notes
-- **Disabled by default**: the server holds a listening port + mDNS. Enable it in the plugin page;
+- **Always enabled**: built-in renderers cannot be disabled (2026-11-27). The server holds the listening port + mDNS broadcast;
 - Legacy (pre-encryption) clients such as ESPHome/sendspin-cpp are accepted by default (\`allow_legacy_clients\`, mirroring Music Assistant): they play as-is over cleartext, pairing is unavailable for them and LAN traffic can be intercepted;
 - Encrypted spec-compliant clients stream after pairing (pairing flows landing progressively).`,
       fields: {
@@ -213,7 +213,7 @@ Makes MusicFlow a **Sendspin Server** (port 38927) that Sendspin clients — Xbo
 4. 播放状态与组音量按客户端分组统一管理。
 
 ### 说明
-- **默认关闭**:服务端常驻占用监听端口与 mDNS,与 AirPlay 一致按需开启,关闭时零常驻资源;
+- **始终启用**:内置渲染器一律不可停用(2026-11-27 裁决);服务端常驻监听 38927 端口并做 mDNS 广播,无需按需开启;
 - 前加密时代客户端(如 ESPHome/sendspin-cpp)默认允许直连(\`allow_legacy_clients\`,对齐 Music Assistant):明文播放,配对不可用,局域网流量可被截获;
 - 合规加密客户端需配对后拉流(配对流程分批落地)。`,
 };

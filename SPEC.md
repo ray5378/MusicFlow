@@ -149,24 +149,28 @@
 
 - 新增协议播放器（Cast 等）若与既有协议可能同设备，必须同样登记互斥（按 host IP 匹配），禁止只增不互斥。
 
-### 1.5 AirPlay 插件开关契约（v1.13.42+）
+### 1.5 渲染器插件开关契约（v4.15.15 校正）
 
-> AirPlay（RAOP）渲染器是**可停用内置插件**（`airplay-renderer`），**默认关闭**。未开启时不启动任何服务，零常驻资源。
+> 历史注记：v1.13.42+ 曾规定「内置插件均可停用」，但 `routes/api/plugins.ts` 的
+> `PUT /v1/plugins/:id` 对内置行恒写 `enabled=1`；`PUT /v1/plugins/:id/toggle` 却未做
+> 内置判定，于是形成「保存配置掰回 1、点开关真停用」两套语义。v4.15.15 按用户裁决
+> 统一为「内置渲染器一律不可停用」。
 
-- **开关入口**：插件管理页（`/v1/plugins` 的 `optionalBuiltin: true` 行显示开关按钮）→ `PUT /v1/plugins/:id` toggle。
-
-- **默认关闭**：manifest `defaultEnabled: false`；存量库已启用行保留（不强制关闭）。
-
-- **开启时才启动**：`index.ts` 启动门控 `isAirPlayEnabled()` → 才 `startAirPlayService()` + 持久化 wire + 设备注册。
-
-- **关闭时零常驻**：`stopAirPlayService()`（airplay/control.ts）——停全部会话（RAOP TEARDOWN + ffmpeg kill）、清 volumeState/lastCast、移除全部 `airplay:*` peer（`removeAirPlayPeers`）、注销 QueueController player（`unregisterAirPlayDevices`）、停 mDNS（`stopAirPlayDiscovery`：browser.stop + bonjour.destroy + clearInterval）并清空设备内存列表。**关闭后无网络监听/无定时器/无会话/无 peer/无 player 注册**。
-  若走 fork 模式（`MUSICFLOW_AIRPLAY_FORK=1`），额外停掉 `airplaySupervisor` 的常驻子进程（心跳看门狗与退避重启一并停），不留孤儿进程。
-
-- **路由守卫**：`/v1/airplay/*` 全部端点挂 `use` 中间件，未启用返回 409（`CONFLICT`，"AirPlay 播放器已关闭"），防绕过。
-
-- **禁止**：未启用状态下任何代码路径调用 discovery/设备注册（mDNS 是唯一设备来源，关闭后设备列表为空，天然免疫）。
-
-- **内置插件均可停用**（v1.13.42+）：移除"内置不可停用"限制——`/v1/plugins` 的 toggle 对所有插件生效（内置插件仅不可删除/不可更新）。需要服务生命周期联动的内置插件（如 airplay-renderer → AirPlay 服务启停）在 toggle 端点特判 id 接线，禁止只改 DB 不联动。
+- **内置渲染器（`airplay-renderer` / `sendspin-renderer` / `dlna-renderer`）一律不可停用**：
+  - `PUT /v1/plugins/:id/toggle` 按 `BUILTIN_RENDERER_IDS`（`plugins/builtins.ts`，由
+    `BUILTIN_RENDERER_PLUGINS` 派生）判定：对三者**幂等写 `enabled=1`** 并返回
+    `{ success: true }`，**不联动任何服务启停**（管理页开关点击后回弹）。
+  - `PUT /v1/plugins/:id`（保存配置）对内置行同样恒写 `enabled=1`。
+  - 三者**均常驻**：由 `index.ts` 启动门控按 `enabled` 启动；不再承诺「停用后零常驻资源」。
+  - manifest `defaultEnabled` 一律 `true`（sendspin 于 v4.15.15 由 `false` 改为 `true`）。
+- **core 行为插件仍可停用**：`manifest.type === "core"`（同曲多源组 / 播放优选 / 导入命中门禁）
+  的状态开关不受本契约约束；总开关之外的功能子开关仍在插件「配置」弹窗。
+- **插件身份保留**：三者继续住在插件契约侧（manifest / 配置 / `/v1/plugins/renderers` 发现接口），
+  仅不可停用；播放器工厂由插件提供（见 `docs/renderer-plugin-migration-plan.md`）。
+- **停机逻辑保留但不可达**：`stopAirPlayService()` / `stopSendspinService()` 本体保留
+  （TEARDOWN / 清 peer / 注销 player / 停 mDNS），仅由进程停机路径使用；`/v1/airplay/*`
+  的 409 守卫保留为防御（`enabled` 恒 1 时不可达）。
+- **禁止**：未启用状态下任何代码路径调用 discovery / 设备注册（mDNS 仍是唯一设备来源）。
 
 ### 1.6 首页推荐展示与歌曲处理解耦契约（v1.13.42+，根治方案）
 
