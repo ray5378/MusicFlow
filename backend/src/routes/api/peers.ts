@@ -399,6 +399,9 @@ app.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
   // sendspin 源的队列键映射:泵播放时队列挂在**泵组名**下 —— 单设备=裸 clientId,
   // 用户组=`group:<gid>`(成员表含 `sendspin:<bareId>`)。直接查裸 id 会拿到空快照
   // ⇒ transferred 0 ⇒ 目标端空队列 ⇒ 流转后无声(240 实证,2026-10-24)。
+  // 但设备可能同时是某个组的成员,而这次是**单设备直播**:队列在裸 id 下、组键为空。
+  // 故先看裸 id 有没有内容,有就优先用裸 id,只有裸 id 为空才回落到组键
+  // (240 实证 2026-11-28:esp32 直播时 group:12a04c2c 快照 0 首 ⇒ 流转回 0)。
   let fromQueueKey = fromPeerId;
   if (parsePeerId(fromPeerId)?.kind === "sendspin") {
     const bare = fromPeerId.slice("sendspin:".length);
@@ -406,7 +409,11 @@ app.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
       const { getGroupManager } = await import("../../services/group/index.js");
       const memberKey = `sendspin:${bare}`;
       const host = getGroupManager().list().find((g) => (g.memberIds || []).includes(memberKey));
-      if (host) fromQueueKey = `group:${host.id}`;
+      if (host) {
+        const bareSnap = pm.getQueueSnapshot(fromPeerId);
+        const bareHasItems = !!bareSnap && Array.isArray(bareSnap.items) && bareSnap.items.length > 0;
+        if (!bareHasItems) fromQueueKey = `group:${host.id}`;
+      }
     } catch { /* 组管理器不可用:按裸 id 走旧行为 */ }
   }
   const srcSnap = pm.getQueueSnapshot(fromQueueKey);
