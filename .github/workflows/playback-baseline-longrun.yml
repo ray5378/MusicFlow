@@ -32,9 +32,12 @@ name: Playback Baseline Longrun
 # 另设 rotate-artifacts job：每轮结束调 GitHub API 删除更早 run 的同类 artifact，
 # 只保留本轮 —— upload-artifact 的 overwrite 只在同一 run 内生效，跨 run 靠它没用。
 #
-# 播放侧硬判据（bridge-servo 间隔 / bridge-start-seek / 曲末 endUs==base
-# 零间隙 / 灌静音 / fatal stall / 预取复活）由 playback_side_guard.py 统一判，
-# 短跑与本长跑共用同一脚本，仅样本量下限不同（short 20 / long 100 条 servo）。
+# 播放侧硬判据由 playback_side_guard.py 统一判，共 11 项：泵活性间隔、首投 seek
+# （按 会话×设备 判重）、flush 额度、自然接续零间隙+覆盖度、灌静音、fatal stall、
+# 预取/曲末捷径复活等。短跑与本长跑共用同一脚本，只差样本量下限
+# （short 20 / long 100 条 servo）；纯 sendspin 拓扑结构上无桥，servo 两项 SKIP。
+# 自然接续证据由「短曲从头自然播完」产生（严禁 seek 到曲尾：会重建会话/打空桥缓冲，
+# 制造假阳性），短曲按唯一 title=CI_SHORT_<n> 精确取，不按 id 差集猜。
 # 判定口径见 docs/播放基线-基准值与判读-20261126.md「长跑」一节。
 
 on:
@@ -173,7 +176,7 @@ jobs:
           files=""
           # 播放侧证据必留：长会话最容易在曲末/切歌边界出问题，
           # 只判 A 层趋势会漏掉「水位全绿但泵提前收工」的空洞。
-          for f in cap.json base.jsonl switch_log.jsonl sendspin_frames.jsonl resource.jsonl longrun.log playback_side.json logs/playback_side.log; do
+          for f in cap.json base.jsonl switch_log.jsonl sendspin_frames.jsonl resource.jsonl longrun.log playback_side.json logs/playback_side.log logs/short_phase_diag.log; do
             [ -f "$f" ] && files="$files $f"
           done
           if [ -n "$files" ]; then
