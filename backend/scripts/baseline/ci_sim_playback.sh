@@ -490,21 +490,26 @@ say "7b/8 自然曲末接续：补 ${SHORT_TRACKS} 首短曲从头放完（不 s
 for i in $(seq 1 "$SHORT_TRACKS"); do
   ffmpeg -hide_banner -loglevel error \
     -f lavfi -i "sine=frequency=$((900 + i * 60)):duration=$((13 + i))" \
-    -ar 48000 -ac 2 -c:a flac -y "$WORK/music/short_${i}.flac" >/dev/null
+    -ar 48000 -ac 2 -c:a flac -metadata title="CI_SHORT_${i}" \
+    -y "$WORK/music/short_${i}.flac" >/dev/null
 done
 SHORT_PHASE_START=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 api POST /sources/"$SRC"/scan >/dev/null || die "短曲扫描失败"
-# 库里此时只有「主队列 10 首」+「短曲」。用 id 差集取短曲，不依赖任何字段名/排序。
+# ⚠️ 不能按「库里 id - 主队列 id」差集取：媒体库原本就有大量其它歌曲，
+# 差集会抓到 186s 的长曲 —— 泵走 cursor-reached 而非真正 EOF，接续路径永远走不到。
+# 短曲生成时烧了唯一 title=CI_SHORT_<n>，按它精确匹配。
 SHORT_IDS=""
 for i in $(seq 1 40); do
   api GET '/songs?pageSize=200' > "$WORK/logs/songs2.json" 2>/dev/null || true
-  SHORT_IDS=$(python3 - "$WORK/logs/songs2.json" "${SONG_ARR[@]}" <<'PY' 2>/dev/null || true
+  SHORT_IDS=$(python3 - "$WORK/logs/songs2.json" <<'PY' 2>/dev/null || true
 import json,sys
-known=set(sys.argv[2:])
 try: d=json.load(open(sys.argv[1],encoding="utf-8"))
 except Exception: raise SystemExit
 rows=d if isinstance(d,list) else (d.get("songs") or d.get("items") or [])
-print(" ".join(str(x.get("id")) for x in rows if str(x.get("id")) not in known))
+ids=[str(x.get("id")) for x in rows
+     if str(x.get("title","")).startswith("CI_SHORT_")]
+ids.sort(key=lambda s: int("".join(c for c in s.split("_")[-1] if c.isdigit()) or 0))
+print(" ".join(ids))
 PY
 )
   N=$(echo "$SHORT_IDS" | wc -w | tr -d ' ')
@@ -515,7 +520,7 @@ read -r -a SHORT_ARR <<< "$SHORT_IDS"
 [ "${#SHORT_ARR[@]}" -ge "$SHORT_TRACKS" ] || die "短曲只扫到 ${#SHORT_ARR[@]} 首（需要 $SHORT_TRACKS）"
 SBODY=$(python3 -c '
 import json,sys
-print(json.dumps({"items":[{"songId":x,"title":"CI Short "+str(i+1),"mime":"audio/flac"}
+print(json.dumps({"items":[{"songId":x,"title":"CI_SHORT_"+str(i+1),"mime":"audio/flac"}
                           for i,x in enumerate(sys.argv[1:])],"startIndex":0}))
 ' "${SHORT_ARR[@]:0:$SHORT_TRACKS}")
 FIRST_SHORT=$(status_song)
