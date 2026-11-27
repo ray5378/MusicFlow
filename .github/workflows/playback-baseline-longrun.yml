@@ -2,11 +2,11 @@ name: Playback Baseline Longrun
 
 # 长跑：托管 runner 上跑 2 种拓扑的 3 小时版。
 #
-# 触发来源（两条，都非阻塞）：
-#   - nightly：每天 UTC 19:00（次日 03:00 CST），盯 main 上的日常回归
-#   - 每次发正式版（push v* tag）：盯这一版镜像在长会话下的表现
-# 两者都不参与 tag 发版门禁——失败不影响 Release、不动镜像。Playback Baseline
-# 的短跑才是门禁链路的一部分；长跑是发布后的追溯验证。
+# 触发来源：只有 nightly 定时（每天 UTC 19:00 / 次日 03:00 CST），盯 main 日常回归。
+# **不在发版时触发**（2026-11-27 去掉 push tags: ["v*"]）：长跑 3 小时挂在 tag 上
+# 必然拖慢发版链路、且 nightly 已覆盖 main 同代码；发版体检只跑短跑。
+# 手动 dispatch 仍保留用于按需排障，与定时一样不参与发版门禁——失败不影响
+# Release、不动镜像。Playback Baseline 的短跑才是门禁链路的一部分。
 #
 # 只补短跑抓不到的两类问题，不重复短跑已有的覆盖：
 #   1. **缓慢劣化** —— 前段健康、后段缓冲持续上涨 / 提前量整体搬移。
@@ -44,10 +44,7 @@ on:
   schedule:
     # 每天 UTC 19:00 = 次日 03:00 CST：避开真机白天播放，也错开发版高峰
     - cron: "0 19 * * *"
-  # 每次发正式版跑一轮。tag push 时 build.yml 可能还在推镜像，
-  # Resolve image 步骤会先等目标 tag 就绪再决定是否回退 latest。
-  push:
-    tags: ["v*"]
+  # 只在定时触发；不再随 v* tag 发版触发（见文件头注释）。
   workflow_dispatch:
     inputs:
       minutes:
@@ -63,13 +60,13 @@ on:
         default: "180"
         required: false
       image_tag:
-        description: "镜像 tag（默认 main；留空或 main 时 tag 触发自动用该版本号）"
+        description: "镜像 tag（默认 main；按需指定某个已发布版本做排障）"
         default: "main"
         required: false
 
-# 自动轮转：所有触发（nightly / tag / dispatch）共用一个组，新触发直接取消
-# 仍在跑的旧长跑，永远只保留最新那一轮。发版时会立刻接管凌晨未完的 nightly；
-# 被取消的那轮不上传证据包（它本就不参与门禁），旧 artifact 由 rotate job 清理。
+# 自动轮转：所有触发（nightly / dispatch）共用一个组，新触发直接取消
+# 仍在跑的旧长跑，永远只保留最新那一轮。被取消的那轮不上传证据包（它本就
+# 不参与门禁），旧 artifact 由 rotate job 清理。
 concurrency:
   group: playback-baseline-longrun
   cancel-in-progress: true
@@ -101,20 +98,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG_IN: ${{ inputs.image_tag || 'main' }}
-          REF_TYPE: ${{ github.ref_type }}
-          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           echo "${GH_TOKEN}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           REPO="ghcr.io/${GITHUB_REPOSITORY_OWNER}/musicflow"
-          # tag 触发且 dispatch 没显式指定镜像时，测这一版自己的镜像。
-          if [ "$REF_TYPE" = "tag" ] && [ "$TAG_IN" = "main" ]; then TAG="$REF_NAME"; else TAG="$TAG_IN"; fi
-          # GHCR 的镜像 tag 不带 v 前缀（v4.15.9 -> 4.15.9）
-          TAG="${TAG#v}"
+          # 定时跑 main；dispatch 可指定版本排障。GHCR 镜像 tag 不带 v 前缀
+          # （v4.15.9 -> 4.15.9），这里仍兼容带 v 的手工输入。
+          TAG="${TAG_IN#v}"
           IMAGE="${REPO}:${TAG}"
           echo "resolved tag=${TAG} (event=${{ github.event_name }})"
-          # 先等目标 tag 就绪（最多 10 分钟）。不能先 fallback：
-          # tag push 时 build.yml 正在推镜像，先 fallback 会永远测到 :latest。
+          # 先等目标 tag 就绪（最多 10 分钟）：nightly 若排在发版后不久，
+          # build.yml 可能仍在推镜像；先 fallback 会永远测到 :latest。
           for i in $(seq 1 24); do
             if docker manifest inspect "$IMAGE" >/dev/null 2>&1; then break; fi
             sleep 25
