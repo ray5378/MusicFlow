@@ -1,6 +1,6 @@
 # 渲染器插件化 · 完整任务文档（前置清理 v4.15.15 + 阶段 0–4 迁移）
 
-> 状态：**阶段 -1（v4.15.15 前置清理）代码已落盘、待发版；阶段 0 未开工**（2026-11-27 立项）。
+> 状态：**阶段 -1 已完成**（v4.15.15 发版 + 240 部署 + G1–G8 全绿）；**阶段 0 已落地**（契约扩容 + 同步门面 + 边界守卫，QueueController 零 diff）。
 > **执行纪律见 §0.0：每完成一项必须当场在本文件打勾并写证据，禁止事后批量补勾。**
 > 一句话目标：让 `airplay` / `sendspin` 真正「住在插件侧」，核心只按能力拿 `ProtocolPlayer` 工厂；
 > 该迁移**必须做到播放行为逐项等价**（第一铁律，见 §0.2），且 `airplay` / `sendspin` 均为「内置、不可停用、但走插件契约」的常驻渲染器（对齐 MA 的 `builtin: true` 语义）。
@@ -53,7 +53,7 @@
 | **2** | 环境核对（§2.6） | 仓库干净、`git rev-parse HEAD` 记录在案 | `git status --short` 只剩本次改动 |
 | **3** | 基线快照（§2.6.2） | 用例数（**-1 前 9136 / -1 后 9129，以实测为准**）/ 守卫 37 / M1–M7 实测值写入 §4.2 | 实测与 §4.2 不一致时以实测为准并改表 |
 | **4** | 完成阶段 -1 尾巴：全量测试 → SPEC §1.5 → CHANGELOG → 热补丁 240 → 真机 G1–G8 → 发版 v4.15.15 | tag + Release + digest 核对通过 | 真机 G1–G8 全过，`[ray]` 确认 |
-| **5** | 阶段 0：契约扩容 + 同步门面（不动 import 图） | `createPlayer?` + `createRendererPlayer` 落地，`QueueController` diff 为空 | `tsc` 0 错 + 37 守卫绿 + L5 diff 只含新增文件 |
+| **5** | ✅ 阶段 0：契约扩容 + 同步门面（不动 import 图） | `createPlayer?` + `createRendererPlayer` + B1–B7 守卫落地，`QueueController` diff 为空 | `tsc` 0 错 + 37 守卫绿 + 单测 365 passed |
 | **6** | 阶段 1：DLNA 试点 | `QueueController` 不再 import `createDlnaProtocolPlayer` | 定向测试绿 + HiVi 真机四项 + L5 diff 两类改动 |
 | **7** | 阶段 2：AirPlay | 同上（AirPlay） | 含已配对 AP2 与未配对回落 AP1 各一次 |
 | **8** | 阶段 3：Sendspin | 同上（Sendspin） | ESP32 真机 + 多房同步 + 群组桥回归 |
@@ -508,11 +508,11 @@ export interface RendererPlugin {
    *  对照 MA mass.get_provider(instance_id)：核心按能力查表，不 import 实现。 */
   export function createRendererPlayer(protocol: RendererProtocol, deviceId: string): ProtocolPlayer | null
   ```
-- 实现要点：`registry.getEnabledByCapability("renderer")`（同步）→ 逐个 `impl.createPlayer?.(deviceId)` → 非 null 即返回；全程**不得** `await`、不得缓存实例。
+- 实现要点：`registry.getEnabledByCapability("renderer")`（同步）→ 逐个 `impl.createPlayer?.(protocol, deviceId)` → 非 null 即返回；全程**不得** `await`、不得缓存实例。
 
 **0.3 守卫先行**
 - 新增 `backend/scripts/check-renderer-plugin-boundary.mjs`（规则 B1–B7，见 §4.2b），**首版以「白名单全量」上线**（只打印不退出非零），待阶段 1 起逐项收紧。
-- 登记进 `check-workflow-paths.mjs` 的脚本清单（否则元守卫报「孤儿脚本」）。
+- 实测（2026-11-27）：`check-workflow-paths.mjs` 按 `SCRIPT_DIRS`（`backend/scripts`）**自动扫描**，无需手工登记；B4 改为自检该目录仍在扫描范围。
 
 **0.4 文档**
 - `docs/PLUGIN_ARCHITECTURE.md` 契约章节补 `createPlayer`；
@@ -534,10 +534,10 @@ npx vitest run tests/plugins tests/player             # 定向
 ```
 
 **0.7 出口判据**
-- [ ] `tsc --noEmit` 0 错
-- [ ] 37 个既有守卫全绿，新增守卫可运行
-- [ ] `git diff` 仅含 `plugins/types.ts` / `services/pluginAccess.ts` / 新增守卫脚本 / 两份文档
-- [ ] `QueueController.ts` diff 为空（`git diff --stat backend/src/services/player/QueueController.ts` 无输出）
+- [x] `tsc --noEmit` 0 错 `（✅ 2026-11-27）`
+- [x] 37 个既有守卫全绿，新增守卫可运行 `（✅ 36 个 .mjs + check-builtins.mts 19/19；新守卫 PASS，白名单模式）`
+- [x] `git diff` 仅含 `plugins/types.ts` / `services/pluginAccess.ts` / 新增守卫脚本 / 文档 `（另含 tests/plugins/rendererFactory.test.ts，用户 2026-11-27 批准新增）`
+- [x] `QueueController.ts` diff 为空（`git diff --stat` 无输出）
 
 ---
 
@@ -789,7 +789,7 @@ git diff --unified=0 -- backend/src | grep -E '^[+-][^+-]' \
 | **B1** | 核心目录**不得引用**协议模块的**非类型导出**（工厂 / service 函数 / 常量）；`import type` 放行；`plugin/renderers/*` 不纳入扫描 | M3 |
 | **B2** | `services/player/QueueController.ts` 内**禁止出现** `createAirPlayPlayerForDevice` / `createSendspinProtocolPlayer` / `createDlnaProtocolPlayer` 标识符（含静态 import 行）。**动态 `await import(` 不匹配** | M1 · M2 |
 | **B3** | 声明了 `capabilities: ["renderer"]` 的内置插件**必须**实现 `createPlayer`（除显式声明的核心语义组插件） | 契约完整性 |
-| **B4** | 元守卫联动：新脚本路径须登记进 `check-workflow-paths.mjs` 的脚本清单，否则 CI 报「孤儿脚本」 | 元守卫一致性 |
+| **B4** | 元守卫联动：脚本位于 `backend/scripts`（`check-workflow-paths.mjs` 的 `SCRIPT_DIRS` 自动扫描）；守卫自检该目录仍在范围内 | 元守卫一致性 |
 | **B5** | manifest 字段：**本期不新增字段**，故 `check-builtins.mts` 不动。将来若引入 `allowDisable`，再同步其字段白名单 + `PLUGIN_DEV.md` §3 字段表 | 防「未知字段」误红 |
 | **B6** | **同步签名锁定**：`createPlayer` 声明中不得出现 `async` / `Promise`；`QueueController.ts` 不得对 `createRendererPlayer(...)` 的返回值 `await` | §0.2.2 陷阱 1 |
 | **B7** | **启用逻辑冻结（以阶段 0 打点为基线）**：`plugins.ts` 的 `BUILTIN_RENDERER_IDS` 判定、各 `isXxxEnabled()` 实现、三个 renderer manifest 的 `defaultEnabled` 值，在**阶段 0 之后**的 diff 中必须零改动（v4.15.15 的改动属于基线，不计入） | §7 第 7 条 |
@@ -1226,7 +1226,7 @@ git checkout -- backend/src backend/tests backend/scripts
 - [ ] 删除临时脚本（`patch_*.py`、`run_guards_all.sh` 等）不进仓库
 - [ ] 无遗留 `TODO/FIXME` 指向前置版
 - [ ] `git grep -n 'castToRenderer\|controlRenderer' backend/src` 只剩注释/文档字符串
-- [ ] 新增守卫已登记进 `check-workflow-paths.mjs`（B4）
+- [ ] 新增守卫位于 `backend/scripts`（被 `check-workflow-paths.mjs` 自动扫描，B4）
 
 ### 12.3 观察期（发版后 7 天）
 

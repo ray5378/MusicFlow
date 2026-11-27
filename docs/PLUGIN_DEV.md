@@ -299,6 +299,8 @@ first-match-wins（首个返回非空结果的胜出；抛错被记入健康追�
 | ---------- | -------------------------------------------------------------------------------------- |
 | `renderer` | `discover(): Promise<RendererDevice[]>` + `cast(deviceId, songId)` + 可选 `control(...)` |
 
+> **渲染器仍仅内置可用**：沙箱 `CAP_METHODS` 没有 `renderer` 行（见 §4.11），外置插件声明 `renderer` 不会暴露任何方法。播放器工厂 `createPlayer(protocol, deviceId)` 只对内建渲染器插件（airplay / dlna / sendspin）生效：必须**同步**返回、不得缓存实例、非本插件协议或设备返回 `null`；`cast` / `control` 保留为兼容契约，播放主链路不再使用。
+
 ### 4.8 `scrobbler`（播放上报）
 
 | capability  | impl 方法                                     |

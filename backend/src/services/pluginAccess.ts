@@ -7,6 +7,8 @@
 // 负责给出可读错误(通常是「该功能未启用/未安装插件」)。
 
 import { getEnabledByCapability, getPluginConfig, getPluginManifest } from "../plugins/registry.js";
+import type { ProtocolPlayer } from "./player/types.js";
+import type { RendererPlugin, RendererProtocol } from "../plugins/types.js";
 
 /** 每日推荐能力(dailyPlaylist):候选池/生成等参数化方法。 */
 export function dailyRecommendApi(): any {
@@ -160,4 +162,23 @@ export function playlistSyncApi(): any {
 /** 每日推荐歌单标识(TAG):从启用插件的 manifest.dailyTag 读,无则返回空串。 */
 export function dailyRecommendTag(): string {
   return getEnabledByCapability("dailyPlaylist")[0]?.manifest?.dailyTag || "";
+}
+
+/**
+ * 按 (protocol, deviceId) 向启用的 renderer 插件要一个播放器实例。
+ *
+ * 契约(阶段 0,见 docs/renderer-plugin-migration-plan.md §2.7a):
+ * - **同步**返回,不得 await;找不到返回 null;
+ * - 遍历顺序 = 注册顺序;插件必须自行校验协议与设备归属,不靠顺序兜底;
+ * - 每次调用新建实例,不缓存(播放器持有会话状态);
+ * - 插件抛错不吞(阶段 0 先暴露,便于发现归属判定缺陷)。
+ */
+export function createRendererPlayer(protocol: RendererProtocol, deviceId: string): ProtocolPlayer | null {
+  for (const { impl } of getEnabledByCapability("renderer")) {
+    const create = (impl as RendererPlugin | undefined)?.createPlayer;
+    if (typeof create !== "function") continue;
+    const player = create.call(impl, protocol, deviceId);
+    if (player) return player;
+  }
+  return null;
 }

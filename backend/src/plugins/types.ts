@@ -10,6 +10,7 @@
 // and talk to other plugins — all through the controlled surface.
 
 import type { PluginHost } from "./host.js";
+import type { ProtocolPlayer } from "../services/player/types.js";
 
 export type PluginType =
   | "source"      // online music source (search/stream/...)
@@ -509,6 +510,9 @@ export interface RendererDevice {
   meta?: Record<string, any>;
 }
 
+/** 渲染器协议标识(组播 group 不在此列:仍由核心 createGroupProtocolPlayer 直连)。 */
+export type RendererProtocol = "airplay" | "dlna" | "sendspin";
+
 /** Implemented by `renderer` plugins that declare "renderer". */
 export interface RendererPlugin {
   manifest: PluginManifest;
@@ -518,6 +522,12 @@ export interface RendererPlugin {
   cast(deviceId: string, songId: string): Promise<{ mediaUri: string }>;
   /** Optional transport control (play/pause/stop/seek/volume/next/prev). */
   control?(deviceId: string, action: string, payload?: any): Promise<any>;
+  /**
+   * 由插件包办播放器实例化(阶段 0 起;见 docs/renderer-plugin-migration-plan.md §2.7a)。
+   * 必须**同步**返回:禁止 async / Promise;非本插件协议或非本插件设备一律返回 null。
+   * 每次调用必须新建实例,禁止缓存(播放器持有会话状态)。
+   */
+  createPlayer?(protocol: RendererProtocol, deviceId: string): ProtocolPlayer | null;
 }
 
 /** Implemented by `scrobbler` plugins that declare "scrobbler". */

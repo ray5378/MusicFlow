@@ -347,7 +347,7 @@ Phase 0 + 1 全部完成；**Phase 2 全量插件化已收口（v1.5.0）**。�
 
 **P1 — 能力扩展 + KV + comm（§7.4.2）**
 
-- [x] **T36** `renderer` 插件化：`plugins/renderers.ts` 包裹 DLNA（`services/plugin/renderers/dlna.ts` 注册为 `renderer` 插件），核心只按能力遍历 `discoverRenderers/castToRenderer/controlRenderer`；Chromecast / AirPlay / Kodi 可由社区新增插件接入，核心零改动。
+- [x] **T36** `renderer` 插件化：`plugins/renderers.ts` 只负责枚举设备；DLNA / AirPlay / Sendspin 以 `renderer` 插件注册（`services/plugin/renderers/*`）。v4.15.15 起 `castToRenderer` / `controlRenderer` 已删除（投屏必须走 QueueController + ProtocolPlayer）；阶段 0 起插件通过同步工厂 `createPlayer(protocol, deviceId)` 提供播放器实例，核心经 `services/pluginAccess.ts` 的 `createRendererPlayer()` 获取，不 import 协议实现。
 
 - [x] **T37** `scrobbler` 插件化：`plugins/scrobblers.ts` 的 `notifyScrobble("play"|"scrobble", event)` 把播放事件分发给所有启用 `scrobbler` 插件（Last.fm / ListenBrainz 等）。
 
