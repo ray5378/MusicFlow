@@ -948,6 +948,11 @@ export class SendspinGroup {
    *  连续 2 拍仍无从投递 ⇒ 环时间线整体前移回可投范围 + 全体 BOUNDARY{seek}
    *  重锚(bridge-start-seek-deadlock),禁止无限空转。 */
   private bridgeDeadTicks = new Map<string, number>();
+  /** [2026-11-28 播中回组] 新桥首投封顶到水位目标(2s 内容),防止一次灌满 5s 视界。
+   *  真机事故(18:23):回组 backfill 1.5s + 首投 5.2s ⇒ 桥队列 5.25s、子进程 ring
+   *  超帽 dropOld=209、随后的 seek 重锚出现负 lead(-465ms)⇒ 该成员永久落后 2.5s。
+   *  值 = 封顶截止墙钟 ms;队列收敛到目标或超时即解除。 */
+  private bridgeJoinFillUntil = new Map<string, number>();
   /** [P0-C 自愈守卫]「设备积压 0 而父侧仍在投」的连续 tick 数(逐设备)。
    *  达到 BRIDGE_LATE_SELFHEAL_TICKS ⇒ 设备在把到达帧全判 late 丢弃(splice 型固件
    *  忽略换锚/时戳域错位),做一次受限重锚;此后受 BRIDGE_TRANSPORT_RECOVERY_GUARD_MS
@@ -1249,6 +1254,11 @@ export class SendspinGroup {
     this.ensureBridgePushTimer();
     if (n > 0) {
       this.server.log("info", `bridge-backfill group=${this.name} device=${deviceId} frames=${n} durUs=${totalUs}`);
+      // [2026-11-28 播中回组] 回组者不走「新会话首投 seek」:那条是起播对齐用的,
+      // 回组时会把游标回退到环头并让桥清缓冲(真机 stale 8 万帧 + 共享锚点负 lead),
+      // 由 backfill + 常规伺服接管即可;同时把首投封顶到 2s 水位目标。
+      this.bridgeStartSeekDone.set(deviceId, this.bridgeContentEpoch);
+      this.bridgeJoinFillUntil.set(deviceId, Date.now() + 15_000);
     }
     return n;
   }
@@ -1472,7 +1482,24 @@ export class SendspinGroup {
       const holdMs = (this.server as { bridgeBacklogMs?: Map<string, number> }).bridgeBacklogMs?.get(deviceId) ?? 0;
       const targetMs = Q_TARGET_MS;
       // 投递上沿：常量 8s，不随 backlog 伸缩（MA 桥喂 CLI 封顶）
-      const horizonFinal = now + BigInt(BRIDGE_FEED_CAP_US) + ahead;
+      let horizonFinal = now + BigInt(BRIDGE_FEED_CAP_US) + ahead;
+      // [2026-11-28 播中回组] 首投封顶:只补到水位目标(2s 内容),等队列收敛再恢复视界。
+      // 旧行为:新桥游标缺失 ⇒ due = 视界(5s) ⇒ 一次灌 5s,超设备/ring 容量。
+      {
+        const joinUntil = this.bridgeJoinFillUntil.get(deviceId);
+        if (joinUntil !== undefined) {
+          if (Date.now() < joinUntil) {
+            const joinCap = now + BigInt(Q_TARGET_MS * 1000) + ahead;
+            if (horizonFinal > joinCap) horizonFinal = joinCap;
+            // 队列收敛到目标区间即解除封顶(回组稳态),否则 15s 超时兜底解除。
+            if (holdMs >= Q_TARGET_MS && holdMs <= Q_TARGET_MS + 1000) {
+              this.bridgeJoinFillUntil.delete(deviceId);
+            }
+          } else {
+            this.bridgeJoinFillUntil.delete(deviceId);
+          }
+        }
+      }
       // 超前护栏与上沿同源（投递循环自身受 horizonFinal 约束，此值只作异常兜底）
       const ceil = horizonFinal + 1_000_000n;
       // 落后护栏：判据改为「游标真的落后墙钟」。旧判据 `cursor < floor`（floor =
