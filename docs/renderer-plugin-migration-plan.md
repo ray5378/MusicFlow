@@ -1255,6 +1255,28 @@ git checkout -- backend/src backend/tests backend/scripts
 
 > 观察期结束且全部通过 → 本文状态行改「已实施（vX.Y.Z）」，本任务闭环。
 
+## 12.4 真机验收结果（2026-11-28）
+
+环境：240 `musicflow` 容器；`base`/`status` 采样常驻，三路 pcap 环形抓包。
+测试纪律：**串行**——每个目标/用例前先停全部目标并等静默（群组互相包含，不能并行）。
+
+| 项 | 结果 |
+|---|---|
+| 5 目标各 5 首自然播放（hivi / ieast / esp32 / pureap / all） | 5–6 首完成，每目标 1 次切歌；per-target `playback_side_guard` 全 PASS |
+| 十条硬判据 | 按目标窗口全 PASS（esp32 的 servo 为拓扑结构性 SKIP，trackJoin WARN 不计失败） |
+| 整体拼接窗口 | rc=1 为跨目标主动停止/多次手动 stop 造成（servo.maxGap=116.9s、startSeek 12 vs 7 会话），非回归 |
+| DLNA 出流（新增第 11 条） | 4 首（local+web）全 PASS，TTFB 0.013–0.485s |
+| 流转落位（串行 settle 复测，热补丁后） | 4/4 PASS：hivi→ieast 7.8→7.9、ieast→esp32 9.5→9.879、esp32→group_pureap 9.698→11.8、group_pureap→hivi 11.9→14.5；速率 0.996–1.013 |
+| AirPlay 源流转 | 修复后 PASS（`hivi→ieast`、`ieast→esp32` 落位与速率均达标） |
+| AirPlay 冷启动补帧/重排 | v4.15.15 = 59649 帧 / 48.4 次每分；v4.15.16 = 58873 / 66.1，同量级，**预存现象**不判回归 |
+| 流转丢位置根因 | 桥播放时 RAOP `relTime` 恒 0；`/status` 有泵派生兜底，`readPeerPositionSeconds` 没有 → v4.15.17 修复 + 5 例单测 |
+| sendspin 源流转返回 0 | 设备单播时队列挂在裸 clientId，组键（group_all）快照为空，`transfer-from` 盲选组键 ⇒ `transferred:0`。修复：裸快照有内容优先裸键，仅空时回落组键（`66bc7305`），真机重验 `transferred:6` |
+
+结论：**插件化迁移 PASS**（十条硬判据 + DLNA 出流 + 五目标自然连播 + 4/4 流转落位）。
+两处真问题均为**预存缺陷**、非插件化引入：① AirPlay 桥源端位置读数缺失（v4.15.17 `1611d86b`）；
+② sendspin 源选错队列键（`66bc7305`）。240 当前=4.15.17 镜像 + `dist/routes/api/peers.js` 热补丁，
+重建镜像即带上 ②（已提交）。
+
 ## 附录 C 审核更正记录（2026-11-27）
 
 本次为独立审核（只读核对 230 源码、240 生产库插件表、tsc / 37 守卫 / 3 轮全量 vitest），更正如下：
