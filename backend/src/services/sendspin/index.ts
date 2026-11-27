@@ -98,6 +98,14 @@ export function getSendspinServer(): SendspinServer | null {
   return getServer();
 }
 
+/** 主进程侧「已激活过的 Sendspin clientId」台账。
+ *  fork 模式的 mirror.clients 由子进程快照**周期刷新**,激活瞬间可能尚未到达;
+ *  插件工厂的归属校验用它兜底,避免刚连上的客户端被误判为「非本插件设备」而跳过注册。 */
+const activatedClients = new Set<string>();
+export function isSendspinClientKnown(clientId: string): boolean {
+  return activatedClients.has(clientId) || !!getSendspinFront()?.clients.has(clientId);
+}
+
 /** 对每个就绪连接的客户端,注册为 QueueController 服务器权威播放器(幂等)。
  *  用启动期缓存的单例,不再动态 import(见 ensureControllers)。
  *  fork 模式下主进程侧的等价逻辑在 startSendspinService 的 supervisor hooks 里。 */
@@ -106,6 +114,7 @@ async function registerServerPlayer(srv: SendspinServer, conn: SendspinConnectio
   const pm = pmSingleton;
   if (!qc || !pm) return; // 服务未走完启动,直接忽略(播放器注册不受影响是旧语义,现启动必备)
   if (!conn.clientId) return; // activate 前不会有 clientId;防御
+  activatedClients.add(conn.clientId);
   // 显示名用客户端上报的 name(如 ESPHome 的 "Speaker Media Player"),无则回退 clientId。
   const displayName = conn.name || conn.clientId;
   // ESPHome 6053 桥接:IP 从 Sendspin 连接自动派生(见 server.ts normalizeRemoteHost),
@@ -305,6 +314,7 @@ export async function startSendspinInProcess(port?: number, hooks?: SendspinBoot
       // 与 DLNA / AirPlay 同口径 —— 断连不是「设备被删除」,真删只发生在显式意图路径
       // (用户禁用 / 删除、插件停用,见 sendspinSetDisabled / removeSendspinPeers)。
       if (!conn.clientId) return;
+      activatedClients.delete(conn.clientId);
       try {
         pmSingleton?.markSendspinUnavailable(conn.clientId, conn.name || conn.clientId);
       } catch { /* peer 层未就绪时忽略 */ }
@@ -402,6 +412,7 @@ export async function startSendspinService(port?: number): Promise<SendspinRunti
   await ensureControllers();
   sendspinSupervisor.setHooks({
     onActivated: (clientId, name, legacy) => {
+      activatedClients.add(clientId); // 必须先于注册:插件工厂归属校验读它
       try { qcSingleton?.registerSendspinDevice(clientId, name); } catch { /* ignore */ }
       try { pmSingleton?.registerSendspin(clientId, name, true, legacy); } catch { /* peer 未就绪忽略 */ }
       // 恢复持久音量(与 in-proc registerServerPlayer 尾部同构,见上)。
@@ -411,6 +422,7 @@ export async function startSendspinService(port?: number): Promise<SendspinRunti
     },
     // 与 in-proc 同口径:断连只置离线(行保留可见),不摘除 peer。
     onClosed: (clientId) => {
+      activatedClients.delete(clientId);
       try { pmSingleton?.markSendspinUnavailable(clientId); } catch { /* ignore */ }
     },
     onPlayFailed: (clientId, songId, message) => {

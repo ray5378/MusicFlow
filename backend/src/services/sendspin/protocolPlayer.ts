@@ -29,7 +29,6 @@ import {
   type SendspinGroupLike,
 } from "./playerCore.js";
 import { sendspinSupervisor } from "./supervisor.js";
-import { getPlayerController, getQueueController } from "../player/index.js";
 import { getGroupManager, splitMemberId } from "../group/index.js";
 import { createLogger } from "../../utils/logger.js";
 import type { BridgeSocketSpec } from "./bridgeAttach.js";
@@ -222,15 +221,20 @@ function emitMediaChanged(clientId: string, item: QueueItem): void {
  *  resetTracker(该同步调用所在的微任务),从而保住本首的 PLAYING。 */
 function schedulePlayingReport(playerId: string, durationSec: number): void {
   setTimeout(() => {
-    try {
-      getPlayerController().reportState({
-        playerId,
-        playbackState: PlaybackState.PLAYING,
-        position: 0,
-        duration: durationSec,
-        updatedAt: Date.now(),
-      });
-    } catch { /* 控制器未就绪时忽略 */ }
+    // player/index 一律动态导入(同 emitMediaChanged):protocolPlayer 现在是插件侧
+    // 静态依赖,若在此静态拉入 player/index,会在 builtins → 插件 → protocolPlayer →
+    // player/index → QueueController → source/online → builtins 处形成 ESM 初始化环。
+    void import("../player/index.js").then(({ getPlayerController }) => {
+      try {
+        getPlayerController().reportState({
+          playerId,
+          playbackState: PlaybackState.PLAYING,
+          position: 0,
+          duration: durationSec,
+          updatedAt: Date.now(),
+        });
+      } catch { /* 控制器未就绪时忽略 */ }
+    }).catch(() => {});
   }, 0);
 }
 
@@ -243,6 +247,8 @@ export async function coldStartResume(
   /** 桥路由:纯 AirPlay 桥组(无直连 sendspin 成员)续播时必须带,否则泵拒绝起播。 */
   bridge?: { sockets: BridgeSocketSpec[] },
 ): Promise<void> {
+  // player/index 动态导入,理由同 schedulePlayingReport(避免插件侧静态依赖成环)。
+  const { getQueueController } = await import("../player/index.js");
   const qc = getQueueController();
   const snap = qc.snapshot(clientId);
   const item = snap.currentIndex >= 0 ? snap.items[snap.currentIndex] : undefined;

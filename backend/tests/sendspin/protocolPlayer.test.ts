@@ -5,7 +5,18 @@
 //   - playMedia 设定组当前曲、pollState 反映 PLAYING + duration
 //   - setVolume/seek/stop 映射到组状态
 //   - unregisterSendspinDevices 注销全部 sendspin 播放器与队列
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+
+// 阶段 3:QueueController 经 createRendererPlayer("sendspin", id) 取播放器。
+// 本文件是「QueueController + 真 Sendspin ProtocolPlayer」集成测试,没有真实客户端连接,
+// 故把门面直接接到真工厂;插件归属闸门由 tests/plugins 与 boundary 守卫单独覆盖。
+vi.mock("../../src/services/pluginAccess.js", async () => {
+  const real = await import("../../src/services/sendspin/protocolPlayer.js");
+  return {
+    createRendererPlayer: (protocol: string, deviceId: string) =>
+      protocol === "sendspin" ? real.createSendspinProtocolPlayer(deviceId) : null,
+  };
+});
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";

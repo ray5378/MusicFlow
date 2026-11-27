@@ -18,6 +18,8 @@ import {
   castSendspin,
   controlSendspin,
 } from "../../../services/sendspin/control.js";
+import { isSendspinClientKnown } from "../../../services/sendspin/index.js";
+import { createSendspinProtocolPlayer } from "../../../services/sendspin/protocolPlayer.js";
 
 export const SENDSPIN_RENDERER_ID = "sendspin-renderer";
 
@@ -220,6 +222,16 @@ Makes MusicFlow a **Sendspin Server** (port 38927) that Sendspin clients — Xbo
 
 export const sendspinRendererPlugin: RendererPlugin = {
   manifest: sendspinRendererManifest,
+  /**
+   * 播放器工厂(阶段 3 起,见 renderer-plugin-migration-plan §2.7a):
+   * 必须同步返回;协议不匹配、或 clientId 不在 Sendspin 当前客户端名单中一律返回 null
+   * (归属校验读 sendspin/proxy 的同步客户视图,fork 与 in-proc 同源);每次新建,不缓存。
+   */
+  createPlayer(protocol, deviceId: string) {
+    if (protocol !== "sendspin") return null;
+    if (!isSendspinClientKnown(deviceId)) return null;
+    return createSendspinProtocolPlayer(deviceId);
+  },
   async discover() {
     return listSendspinPlayers();
   },

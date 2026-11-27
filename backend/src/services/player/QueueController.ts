@@ -12,7 +12,6 @@ import { UniversalPlayer } from "./UniversalPlayer.js";
 import { getPlayerController } from "./index.js";
 import { getEffectiveBaseUrl, clearCurrentMedia, getDevice, alignDeviceToPosition } from "../dlna/control.js";
 import { createRendererPlayer } from "../pluginAccess.js";
-import { createSendspinProtocolPlayer } from "../sendspin/protocolPlayer.js";
 import { getCachedPlayability } from "../source/online/streamFallback.js";
 import { getPreProbeScheduler } from "./preProbeScheduler.js";
 import { prefetchSong, prefetchUpcoming } from "../source/prefetchCache.js";
@@ -544,7 +543,9 @@ export class QueueController extends EventEmitter {
   registerSendspinDevice(clientId: string, name: string): void {
     if (this.players.has(clientId)) return;
     const up = new UniversalPlayer(`sendspin:${clientId}`, name);
-    up.attachProtocol(createSendspinProtocolPlayer(clientId));
+    const proto = createRendererPlayer("sendspin", clientId);
+    if (!proto) { log.debug("[QueueController] Sendspin 客户端无播放器工厂，跳过注册", { clientId }); return; }
+    up.attachProtocol(proto);
     this.registerPlayer(clientId, up, getPlayerController());
     log.info(`[QueueController] registered Sendspin client: ${clientId} (${name})`);
   }

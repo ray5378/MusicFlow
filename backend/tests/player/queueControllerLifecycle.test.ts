@@ -74,8 +74,11 @@ vi.mock("../../src/services/airplay/protocolPlayer.js", () => ({
 // 阶段 2:QueueController 经 createRendererPlayer("airplay", id) 取播放器。
 // 把门面接回本文件 airplay 假工厂,保持原有断言(注册 / 注销保留)。
 vi.mock("../../src/services/pluginAccess.js", () => ({
-  createRendererPlayer: (protocol: string, deviceId: string) =>
-    protocol === "airplay" ? mkProto(`airplay:${deviceId}`) : null,
+  createRendererPlayer: (protocol: string, deviceId: string) => {
+    if (protocol === "airplay") return mkProto(`airplay:${deviceId}`);
+    if (protocol === "sendspin") return mkProto(`sendspin:${deviceId}`);
+    return null;
+  },
 }));
 
 vi.mock("../../src/services/sendspin/protocolPlayer.js", () => ({
