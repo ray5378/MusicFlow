@@ -792,6 +792,33 @@ def main():
     c.check("泵冻结 6s 必须 FAIL（servo.maxGapMs）",
             "servo.maxGapMs" in ps_metrics(r_frozen), str(ps_metrics(r_frozen)))
 
+    # 日志节拍跳过一个（2s→4s）不是断流：实机/CI 都出现，必须 PASS。
+    lines_one_beat = ps_lines()
+    for i, line in enumerate(lines_one_beat):
+        if i == 12:
+            lines_one_beat[i] = line.replace(
+                "bridge-servo", "bridge-servo")  # 占位，下面用时间轴整体后移构造
+    # 直接构造：第 12 条相对第 11 条 +4s，其余恢复 2s 节奏
+    import datetime as _dt
+    def _shift(line, delta):
+        head, rest = line.split(" ", 1)
+        ts = _dt.datetime.strptime(head, "%Y-%m-%dT%H:%M:%S.%fZ")
+        return (ts + _dt.timedelta(seconds=delta)).strftime("%Y-%m-%dT%H:%M:%S.%fZ") + " " + rest
+    for i in range(12, len(lines_one_beat)):
+        lines_one_beat[i] = _shift(lines_one_beat[i], 2.0)
+    r_one_beat = psg.judge(lines_one_beat)
+    c.check("servo 跳过一个 2s 节拍（4s）不得误判",
+            "servo.maxGapMs" not in ps_metrics(r_one_beat), str(ps_metrics(r_one_beat)))
+
+    # 纯 sendspin 无桥的 drainFill 是结构性记录，不是灌静音回归。
+    ss_no_bridge = [ln for ln in ps_lines() if "bridge-servo" in ln]
+    ss_no_bridge.append(
+        "%s [sendspin] sendspin 曲末排空:桥续静音跳过 ev=bridge-drain-fill-skip "
+        "reason=no-bridge bridges=0 members=1" % _iso(1_795_700_081.0))
+    r_nobridge = psg.judge(ss_no_bridge, topo="sendspin")
+    c.check("纯 sendspin no-bridge drainFill 不得误判",
+            "audibleGap.count" not in ps_metrics(r_nobridge), str(ps_metrics(r_nobridge)))
+
     r_seek = psg.judge(ps_lines(seeks=[psg.COLD_START_REASON] * 4))
     c.check("切歌中 start-seek 洪水必须 FAIL（>1 次）",
             "startSeek.count" in ps_metrics(r_seek), str(ps_metrics(r_seek)))
@@ -874,7 +901,8 @@ def main():
     c.check("播放侧：接续证据不足判红", "trackJoin.coverage" in ps_metrics(r_cov),
             str(ps_metrics(r_cov)))
 
-    c.check("servo 3s 上限常量未被改软", psg.SERVO_GAP_MAX_MS == 3000,
+    # 5s = 容一个 2s 日志节拍；再放宽必须同时证明 6s 冻结仍判红（上一条反样本）。
+    c.check("servo 上限常量未被改软", psg.SERVO_GAP_MAX_MS == 5000,
             "got=%s" % psg.SERVO_GAP_MAX_MS)
     c.check("每会话首投 seek 上限常量未被改软", psg.COLD_START_SEEK_MAX == 1,
             "got=%s" % psg.COLD_START_SEEK_MAX)

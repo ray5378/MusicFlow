@@ -35,7 +35,10 @@ import sys
 
 # 真机实测口径（2026-11-26 23:06:36 CST 重启后 12 分钟）：
 # servo median=2.00s / max=2.25s，故 3s 是留出抖动的硬线。
-SERVO_GAP_MAX_MS = 3000
+# 泵 servo 每 2s 打一条。实测真机 8h（14 次）与 CI 模拟都出现「跳过一个节拍」=4.0~4.25s，
+# 前后 deliveredMs/backlogMs 稳定、bridge tick 正常 —— 是日志节拍缺失而非断流。
+# 阈值放到 5s：容忍一个节拍，6s 以上的真冻结仍判红（selftest 有反样本）。
+SERVO_GAP_MAX_MS = 5000
 # 首投 seek 的粒度是「每个会话 × 每台设备 1 次」，不是「每次运行 1 次」。
 # 真机自然曲末会复用桥会话（2h11m 只有 1 次），而 CI 模拟环境用 POST /next 切歌，
 # 每切一次就重建会话（epoch+1）—— 按总量判会把健康的 6 次切歌判成 6 次回归，
@@ -117,6 +120,10 @@ def judge(lines, mode="short", max_gap_ms=SERVO_GAP_MAX_MS,
         if "warm=false" in body:
             warm_cold += 1
         if DRAIN_FILL_MARKER in body and "covered" not in body:
+            # 纯 sendspin 组没有桥（bridges=0），「桥续静音跳过」结构上不适用：
+            # 它记录的是「无可续静音的桥」，不是「桥被灌了静音」。与 servo 一样豁免。
+            if topo == "sendspin" and "no-bridge" in body:
+                continue
             bad_fill.append((ep, body))
         # tick JSON 里是 "silenceChunks":3（带引号），日志文本里是 silenceChunks=3
         if re.search(r'silenceChunks"?\s*[:=]\s*[1-9]', body):
@@ -194,7 +201,7 @@ def judge(lines, mode="short", max_gap_ms=SERVO_GAP_MAX_MS,
         detail += " first=%s Δ=%dus" % (nonzero[0][1], nonzero[0][2])
     out.append(("PASS" if not nonzero else "FAIL", "trackJoin.zeroGap", detail))
     if min_joins > 0 and len(joins) < min_joins:
-        # CI 里有专门的「seek 到曲尾让它自然放完」阶段，必须真的产生接续证据；
+        # CI 里专门补了「短曲从头自然播完」阶段，必须真的产生接续证据；
         # 缺证据就判失败，否则零间隙判据会静默退化成一纸空文。
         out.append(("FAIL", "trackJoin.coverage",
                     "joins=%d < %d（要求至少 %d 次自然曲末接续证据）" %
