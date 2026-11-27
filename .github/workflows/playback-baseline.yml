@@ -143,6 +143,7 @@ jobs:
             ${{ runner.temp }}/mf-ci-sim-${{ matrix.topo }}/sendspin_frames.jsonl
             ${{ runner.temp }}/mf-ci-sim-${{ matrix.topo }}/playback_side.json
             ${{ runner.temp }}/mf-ci-sim-${{ matrix.topo }}/logs/playback_side.log
+            ${{ runner.temp }}/mf-ci-sim-${{ matrix.topo }}/logs/short_phase_diag.log
             /tmp/mf_sim_run.log
           if-no-files-found: warn
           retention-days: 30

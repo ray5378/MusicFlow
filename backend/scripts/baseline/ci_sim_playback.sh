@@ -492,6 +492,7 @@ for i in $(seq 1 "$SHORT_TRACKS"); do
     -f lavfi -i "sine=frequency=$((900 + i * 60)):duration=$((13 + i))" \
     -ar 48000 -ac 2 -c:a flac -y "$WORK/music/short_${i}.flac" >/dev/null
 done
+SHORT_PHASE_START=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 api POST /sources/"$SRC"/scan >/dev/null || die "短曲扫描失败"
 # 库里此时只有「主队列 10 首」+「短曲」。用 id 差集取短曲，不依赖任何字段名/排序。
 SHORT_IDS=""
@@ -529,6 +530,12 @@ if [ -n "$LAST_SHORT" ] && [ "$LAST_SHORT" != "$FIRST_SHORT" ]; then
 else
   echo "::warning::短曲队列未观察到推进（$FIRST_SHORT -> $LAST_SHORT）"
 fi
+# 诊断留痕：只圈短曲阶段，宽口径抓「队列表象推进但泵没接续」的证据。
+# 判据仍只读 playback_side.log，本文件不参与任何判定。
+docker logs -t "$CONTAINER" --since "$SHORT_PHASE_START" 2>&1 \
+  | grep -aE 'pump\]\[play|pushLoop 退出|流式窗口提前 EOF|曲末排空跳过|timeline anchored|continuity|playCurrent|display-hold|无可用音源|contentEnded' \
+  > "$WORK/logs/short_phase_diag.log" || true
+say "短曲阶段诊断日志 $(wc -l < "$WORK/logs/short_phase_diag.log" 2>/dev/null || echo 0) 行"
 
 say "8/8 汇总 + 分拓扑不变量判读"
 export MF_WATCH_DIR="$WORK" MF_SWITCH_LOG="$WORK/switch_log.jsonl" \
