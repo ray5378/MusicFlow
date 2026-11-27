@@ -37,10 +37,11 @@ SWITCH_COUNT=${MF_SWITCH_COUNT:-5}
 STEADY_SEC=${MF_STEADY_SEC:-90}
 SWITCH_INTERVAL=${MF_SWITCH_INTERVAL:-60}   # 5 次 = 300s，8 分钟采样仍留余量
 # 手动 next 切歌永远走不到「自然曲末」，而曲末接续（零间隙）正是 2026-11-26 血案
-# 的现场。切歌阶段结束后单独跑几轮「seek 到曲尾 → 让泵自然收尾」，让
-# `曲末排空跳过:接续下一首` 这条路径真的被覆盖到。
-JOIN_ITERS=${MF_JOIN_ITERS:-3}
-JOIN_GAP_SEC=${MF_JOIN_GAP_SEC:-6}
+# 的现场。切歌阶段结束后，往媒体库里补几首**短曲**并从头发起播放，让它们自然播完、
+# 走真正的 `曲末排空跳过:接续下一首` 路径。
+# ⚠️ 不能用「seek 到曲尾」代替：seek 会重建会话 + 打空桥缓冲，实测同一接续点会
+# 多出 1.3s 偏移（Δ≠0）——那是探针自己制造的假阳性，不是被测缺陷。
+SHORT_TRACKS=${MF_SHORT_TRACKS:-4}
 # 长跑（nightly）才有意义：短跑里容器 RSS/FD 还没稳定，采了也是噪声。
 RESOURCE_SAMPLE=0
 [ "$MINUTES" -ge 20 ] && RESOURCE_SAMPLE=1
@@ -133,16 +134,6 @@ m=d.get("media") or {}
 # CI 的 10 首测试音时长各不相同（46~55s），duration 变化同样是「真换曲」证据。
 print(m.get("songId") or m.get("id") or m.get("title") or d.get("duration") or "")
 ' 2>/dev/null || true
-}
-
-status_duration() {
-  api GET "/peers/group%3A${GID}/status" 2>/dev/null | python3 -c '
-import json,sys
-try: d=json.load(sys.stdin)
-except Exception: print(0); raise SystemExit
-try: print(int(float(d.get("duration") or 0)))
-except Exception: print(0)
-' 2>/dev/null || echo 0
 }
 
 frame_count() {
@@ -494,34 +485,49 @@ echo "采样 tick 行数=$TICKS  sendspin 帧行数=$(frame_count)"
 [ "$TICK_TOPO" != "sendspin" ] || [ "$(frame_count)" -ge 100 ] || die "sendspin 帧不足 100"
 
 # A 层采样已经收尾，这里再动播放位置不会污染 cap.json 的稳态/切歌窗口。
-say "7b/8 自然曲末接续 ${JOIN_ITERS} 轮（seek 到曲尾 -${JOIN_GAP_SEC}s，让泵自然收尾）"
-JOINED=0
-for k in $(seq 1 "$JOIN_ITERS"); do
-  DUR=$(status_duration)
-  if [ "${DUR:-0}" -lt $(( JOIN_GAP_SEC + 15 )) ]; then
-    echo "警告：第 $k 轮 duration=${DUR:-0}s 不足以 seek 到曲尾，跳过本轮"
-    continue
-  fi
-  before=$(status_song)
-  TARGET=$(( DUR - JOIN_GAP_SEC ))
-  if ! api POST "/peers/group%3A${GID}/seek" "{\"seconds\":${TARGET}}" >/dev/null; then
-    echo "警告：第 $k 轮 seek 到 ${TARGET}s 失败，跳过本轮"
-    continue
-  fi
-  # 曲尾 ${JOIN_GAP_SEC}s + 接续建锚 + 新曲起播，留 10s 余量
-  sleep $(( JOIN_GAP_SEC + 10 ))
-  after=$(status_song)
-  if [ -n "$after" ] && [ "$after" != "$before" ]; then
-    JOINED=$(( JOINED + 1 ))
-    echo "自然接续 $k: dur=${DUR}s seek->${TARGET}s $before -> $after OK"
-  else
-    echo "::warning::自然接续 $k 未换曲（$before -> $after），本轮零间隙判据拿不到证据"
-  fi
+say "7b/8 自然曲末接续：补 ${SHORT_TRACKS} 首短曲从头放完（不 seek，不扰动缓冲状态）"
+# 短曲在切歌阶段之后才落盘并扫描，避免混进主队列污染稳态/切歌窗口指标。
+for i in $(seq 1 "$SHORT_TRACKS"); do
+  ffmpeg -hide_banner -loglevel error \
+    -f lavfi -i "sine=frequency=$((900 + i * 60)):duration=$((13 + i))" \
+    -ar 48000 -ac 2 -c:a flac -y "$WORK/music/short_${i}.flac" >/dev/null
 done
-echo "自然接续成功 $JOINED / $JOIN_ITERS"
-if [ "$JOIN_ITERS" -gt 0 ] && [ "$JOINED" -eq 0 ]; then
-  docker logs "$CONTAINER" --since 10m 2>&1 | grep -aE '曲末排空跳过|接续承诺|timeline anchored' | tail -20 >&2 || true
-  die "自然曲末接续一次都没成功（seek 到曲尾后未换曲）"
+api POST /sources/"$SRC"/scan >/dev/null || die "短曲扫描失败"
+# 库里此时只有「主队列 10 首」+「短曲」。用 id 差集取短曲，不依赖任何字段名/排序。
+SHORT_IDS=""
+for i in $(seq 1 40); do
+  api GET '/songs?pageSize=200' > "$WORK/logs/songs2.json" 2>/dev/null || true
+  SHORT_IDS=$(python3 - "$WORK/logs/songs2.json" "${SONG_ARR[@]}" <<'PY' 2>/dev/null || true
+import json,sys
+known=set(sys.argv[2:])
+try: d=json.load(open(sys.argv[1],encoding="utf-8"))
+except Exception: raise SystemExit
+rows=d if isinstance(d,list) else (d.get("songs") or d.get("items") or [])
+print(" ".join(str(x.get("id")) for x in rows if str(x.get("id")) not in known))
+PY
+)
+  N=$(echo "$SHORT_IDS" | wc -w | tr -d ' ')
+  [ "${N:-0}" -ge "$SHORT_TRACKS" ] && break
+  sleep 2
+done
+read -r -a SHORT_ARR <<< "$SHORT_IDS"
+[ "${#SHORT_ARR[@]}" -ge "$SHORT_TRACKS" ] || die "短曲只扫到 ${#SHORT_ARR[@]} 首（需要 $SHORT_TRACKS）"
+SBODY=$(python3 -c '
+import json,sys
+print(json.dumps({"items":[{"songId":x,"title":"CI Short "+str(i+1),"mime":"audio/flac"}
+                          for i,x in enumerate(sys.argv[1:])],"startIndex":0}))
+' "${SHORT_ARR[@]:0:$SHORT_TRACKS}")
+FIRST_SHORT=$(status_song)
+api POST "/peers/group%3A${GID}/queue/play" "$SBODY" >/dev/null || die "短曲队列起播失败"
+SHORT_TOTAL=0
+for i in $(seq 1 "$SHORT_TRACKS"); do SHORT_TOTAL=$(( SHORT_TOTAL + 13 + i )); done
+# 整队放完 ≈ SHORT_TOTAL 秒，再留 15s 等最后一次接续落锚 + 日志落盘。
+sleep $(( SHORT_TOTAL + 15 ))
+LAST_SHORT=$(status_song)
+if [ -n "$LAST_SHORT" ] && [ "$LAST_SHORT" != "$FIRST_SHORT" ]; then
+  echo "短曲自然播放完成：$FIRST_SHORT -> $LAST_SHORT（约 ${SHORT_TOTAL}s）"
+else
+  echo "::warning::短曲队列未观察到推进（$FIRST_SHORT -> $LAST_SHORT）"
 fi
 
 say "8/8 汇总 + 分拓扑不变量判读"
@@ -557,9 +563,13 @@ docker logs -t "$CONTAINER" 2>&1 \
   | grep -aE 'bridge-servo|bridge-start-seek|bridge-flush|RAOP FLUSH|warm=false|bridge-drain-fill|silenceChunks|stall|曲末排空跳过|timeline anchored: base=|next-prefetch|bridge-prefetch|bridge-track-keep' \
   > "$WORK/logs/playback_side.log" || true
 say "播放侧硬判据（$SIDE_MODE，关键日志 $(wc -l < "$WORK/logs/playback_side.log" 2>/dev/null || echo 0) 行）"
-# 最少接续证据：3 轮里要求至少 2 轮真的接上（允许 1 轮因 seek 落点抖动没跑到曲尾）。
-SP_MIN_JOINS=$JOINED
-[ "$JOINED" -gt 2 ] && SP_MIN_JOINS=$(( JOINED - 1 ))
+# 最少接续证据：N 首短曲应产生 N-1 次自然接续；留 1 次余量（落锚偶发抖动），
+# 但不能为 0 —— 否则零间隙判据会静默退化成一纸空文。
+# 纯 sendspin 拓扑没有 AirPlay 桥，`曲末排空跳过` 走 no-bridge 分支、不产生接续锚点，
+# 该判据对它结构上不适用（等价真值是 A_ssFrame 帧间隔），故不设下限。
+SP_MIN_JOINS=$(( SHORT_TRACKS - 2 ))
+[ "$SP_MIN_JOINS" -lt 0 ] && SP_MIN_JOINS=0
+if [ "$TICK_TOPO" = "sendspin" ]; then SP_MIN_JOINS=0; fi
 python3 "$REPO/backend/scripts/baseline/playback_side_guard.py" \
   --input "$WORK/logs/playback_side.log" --mode "$SIDE_MODE" \
   --topo "$TICK_TOPO" --min-joins "$SP_MIN_JOINS" \
