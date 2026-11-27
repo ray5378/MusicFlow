@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // ==================== 播放链路 2026-11-14~16 修复回归守卫 ====================
 //
-// 钉住四个「静默退化体质」的播放修复——它们被改坏后不报错、不崩,只表现为
-// 「重投从头播 / 进度领先声音 / 进度冻住 / 推荐卡三端不一致」,真机才能发现:
+// 钉住八组「静默退化体质」的播放修复——它们被改坏后不报错、不崩,只表现为
+// 「重投从头播 / 进度领先声音 / 进度冻住 / 切歌空窗显示暂停 / 推荐卡三端不一致」,
+// 真机才能发现:
 //
 //   R1 组倍速重投保留起点(e9895a3f):组 playMedia 的 startMs 必须透传给
 //      三条扇出路径(sendspin 组泵 / DLNA 成员 / solo AirPlay),且组内不得再
@@ -24,6 +25,13 @@
 //      接线必须在(客户端/HA 卡片都以此端点为真源,路由被摘 = 三端集体回落)。
 //   R6 组装纯计算的门槛/快照校验字面量:随机位门槛 30、快照条数必须等于
 //      want(修「fixed 变少 ⇒ 补不满张数」的彻底修法)。
+//   R7 曲末收尾催轮询(v4.15.11):泵读 EOF 把 group.current 置空后,必须主动
+//      nudgePoll() 催一轮设备轮询(幂等、复用 poll→reportState→tracker 现成路径),
+//      否则队列 advance 只能干等 5s 轮询周期,/status 现场读泵拿到 STOPPED +
+//      冻结进度 + 空 media,用户看到「切歌瞬间暂停 2.8s」(240 实测)。
+//   R8 曲末自适应轮询阈值(v4.15.11):近曲末提速判据必须是 max(45s, 15% 时长),
+//      不得退回固定 20s —— 泵受背压生产超前消费约 30s + 元数据时长虚高几秒,
+//      固定 20s 这一档永远进不去 ⇒ EOF 后干等满 5s 才 advance,空窗复发。
 //
 // 零依赖 node 脚本(与 check-audio-default-flac.mjs 同款),挂 ci.yml 守卫 job。
 import { readFileSync } from "node:fs";
@@ -39,6 +47,8 @@ const DLNA_CONTROL = "backend/src/services/dlna/control.ts";
 const DB_INDEX = "backend/src/db/index.ts";
 const HOME_PRELOAD = "backend/src/routes/api/homePreload.ts";
 const HOME_SECTION = "backend/src/routes/api/homeRecommendSection.ts";
+const STREAM_ENGINE = "backend/src/services/sendspin/streamEngine.ts";
+const QUEUE_CONTROLLER = "backend/src/services/player/QueueController.ts";
 
 const failures = [];
 let checks = 0;
@@ -68,6 +78,10 @@ const dlnaLines = lines(dlna);
 const dbi = read(DB_INDEX);
 const hp = read(HOME_PRELOAD);
 const hs = read(HOME_SECTION);
+const se = read(STREAM_ENGINE);
+const seLines = lines(se);
+const qc = read(QUEUE_CONTROLLER);
+const qcLines = lines(qc);
 
 // ---------------------------------------------------------------------------
 console.log("R1 组倍速重投保留起点(group/protocolPlayer.ts)");
@@ -143,6 +157,33 @@ check("R6b 随机池按门槛过滤",
 check("R6c 快照采纳必须条数恰等 want(修「fixed 变少 ⇒ 补不满」)",
   hs.includes("frozenIds.length === want"),
   "条数校验丢了 ⇒ 配置变更后该补的张数补不满");
+
+// ---------------------------------------------------------------------------
+console.log("R7 曲末收尾催轮询(streamEngine.ts / QueueController.ts)");
+// ---------------------------------------------------------------------------
+// 泵读 EOF 置空 current 后 pollState 立刻报 IDLE;队列 advance 靠设备轮询推进。
+// 必须在同一收尾窗口主动催一轮,否则 /status 空窗 2.8s 显示 STOPPED + 冻结进度。
+const currentNullIdx = seLines.findIndex((l) => l.includes("this.group.current = null;"));
+const windowAfter = currentNullIdx >= 0 ? seLines.slice(currentNullIdx, currentNullIdx + 16) : [];
+check("R7a 泵置空 current 后同窗口催一轮 nudgePoll",
+  windowAfter.some((l) => l.includes("getQueueController().nudgePoll()")),
+  "current=null 后不催 ⇒ 队列 advance 干等 5s,切歌瞬间显示暂停(240 实测 2.8s 空窗)");
+check("R7b nudgePoll 走公开入口且幂等守卫在(QueueController.ts)",
+  qcLines.some((l) => l.includes("nudgePoll(): void {")) &&
+    qcLines.some((l) => l.includes("if (!tick || this.pollBusy) return;")),
+  "nudgePoll 被删/去掉幂等守卫 ⇒ 催轮询失效或轮询重入");
+
+// ---------------------------------------------------------------------------
+console.log("R8 曲末自适应轮询阈值(QueueController.ts)");
+// ---------------------------------------------------------------------------
+// 固定 20s 判据在「30s 背压 + 元数据时长虚高」下永远进不去 1s 轮询档,
+// 必须 max(45s, 15% 时长):45s 覆盖典型误差,超长曲按 15% 放宽。
+check("R8a 近曲末阈值 = max(45, nearDur * 0.15)",
+  qcLines.some((l) => l.includes("const nearEndMargin = Math.max(45, nearDur * 0.15);")),
+  "退回固定 20s ⇒ 1s 轮询档进不去,EOF 后干等满 5s 周期 advance,空窗复发");
+check("R8b 曲末提速判据用 nearEndMargin(非固定字面量)",
+  qcLines.some((l) => l.includes("nearDur - state.position <= nearEndMargin")),
+  "判据没引用 nearEndMargin ⇒ 阈值改了也不生效");
 
 // ---------------------------------------------------------------------------
 if (failures.length > 0) {
