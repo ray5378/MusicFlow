@@ -948,11 +948,6 @@ export class SendspinGroup {
    *  连续 2 拍仍无从投递 ⇒ 环时间线整体前移回可投范围 + 全体 BOUNDARY{seek}
    *  重锚(bridge-start-seek-deadlock),禁止无限空转。 */
   private bridgeDeadTicks = new Map<string, number>();
-  /** [2026-11-28 播中回组] 新桥首投封顶到水位目标(2s 内容),防止一次灌满 5s 视界。
-   *  真机事故(18:23):回组 backfill 1.5s + 首投 5.2s ⇒ 桥队列 5.25s、子进程 ring
-   *  超帽 dropOld=209、随后的 seek 重锚出现负 lead(-465ms)⇒ 该成员永久落后 2.5s。
-   *  值 = 封顶截止墙钟 ms;队列收敛到目标或超时即解除。 */
-  private bridgeJoinFillUntil = new Map<string, number>();
   /** [P0-C 自愈守卫]「设备积压 0 而父侧仍在投」的连续 tick 数(逐设备)。
    *  达到 BRIDGE_LATE_SELFHEAL_TICKS ⇒ 设备在把到达帧全判 late 丢弃(splice 型固件
    *  忽略换锚/时戳域错位),做一次受限重锚;此后受 BRIDGE_TRANSPORT_RECOVERY_GUARD_MS
@@ -1251,14 +1246,22 @@ export class SendspinGroup {
       last = e.tsUs;
     }
     if (last !== 0n) this.bridgeWatermarks.set(deviceId, last);
+    // [2026-11-28 播中回组·通用] 游标必须从**回填尾**续投,不能从 now 重新发现历史内容。
+    // 回填已把 [now+FLOOR, now+HORIZON](可听域)推给该桥;若游标仍落在 now(或环里
+    // 最早的当前代次帧),下一拍补投会把**更早、已在回填窗口之下**的一段再投一遍 ⇒
+    // 设备侧时间戳回跳 ⇒ 整队被判 late / D5 裁头。真机 18:48 回组实证:
+    // 回填 ts'[now+2.5s, now+4.0s] 之后又补投 ts'[now-0.5s, now+2.0s] ⇒
+    // droppedFrames 198570(≈4.5s)、realigned drop=74970(-1.7s)、可闻 1.7s 空洞。
+    // 无帧可回填(环空/断粮)时把游标放到同一窗口下沿 = 回填 0 帧、从下沿起投,
+    // 仍保证「每条桥的 ts' 单调递增」且首次投递量受视界自然约束(≈1.5s)。
+    // 与设备延迟补偿无关:这里只对齐内容位置,不引入任何设备相关常数。
+    this.bcCursor.set(deviceId, last !== 0n ? last : lo);
     this.ensureBridgePushTimer();
     if (n > 0) {
       this.server.log("info", `bridge-backfill group=${this.name} device=${deviceId} frames=${n} durUs=${totalUs}`);
-      // [2026-11-28 播中回组] 回组者不走「新会话首投 seek」:那条是起播对齐用的,
-      // 回组时会把游标回退到环头并让桥清缓冲(真机 stale 8 万帧 + 共享锚点负 lead),
-      // 由 backfill + 常规伺服接管即可;同时把首投封顶到 2s 水位目标。
+      // 回组者不走「新会话首投 seek」:那条是起播对齐用的,回组时会把游标回退到环头
+      // 并让桥清缓冲(真机 stale 8 万帧 + 共享锚点负 lead),由 backfill + 常规伺服接管。
       this.bridgeStartSeekDone.set(deviceId, this.bridgeContentEpoch);
-      this.bridgeJoinFillUntil.set(deviceId, Date.now() + 15_000);
     }
     return n;
   }
@@ -1479,27 +1482,9 @@ export class SendspinGroup {
       // 回落 ⇒ 阈值缩回 2.5s < 游标 ⇒ ahead 跳回 now ⇒ 相对 floor(now+2.3s) 又「落后」
       // 2.3s ⇒ behind 又推到 floor ⇒ **无限对撞**（真机 droppedFrames 1331 万、
       // silenceChunks 146、realigned 983 ⇒ 声音断续）。修法：阈值全部墙钟常量、互不回缩。
-      const holdMs = (this.server as { bridgeBacklogMs?: Map<string, number> }).bridgeBacklogMs?.get(deviceId) ?? 0;
       const targetMs = Q_TARGET_MS;
       // 投递上沿：常量 8s，不随 backlog 伸缩（MA 桥喂 CLI 封顶）
       let horizonFinal = now + BigInt(BRIDGE_FEED_CAP_US) + ahead;
-      // [2026-11-28 播中回组] 首投封顶:只补到水位目标(2s 内容),等队列收敛再恢复视界。
-      // 旧行为:新桥游标缺失 ⇒ due = 视界(5s) ⇒ 一次灌 5s,超设备/ring 容量。
-      {
-        const joinUntil = this.bridgeJoinFillUntil.get(deviceId);
-        if (joinUntil !== undefined) {
-          if (Date.now() < joinUntil) {
-            const joinCap = now + BigInt(Q_TARGET_MS * 1000) + ahead;
-            if (horizonFinal > joinCap) horizonFinal = joinCap;
-            // 队列收敛到目标区间即解除封顶(回组稳态),否则 15s 超时兜底解除。
-            if (holdMs >= Q_TARGET_MS && holdMs <= Q_TARGET_MS + 1000) {
-              this.bridgeJoinFillUntil.delete(deviceId);
-            }
-          } else {
-            this.bridgeJoinFillUntil.delete(deviceId);
-          }
-        }
-      }
       // 超前护栏与上沿同源（投递循环自身受 horizonFinal 约束，此值只作异常兜底）
       const ceil = horizonFinal + 1_000_000n;
       // 落后护栏：判据改为「游标真的落后墙钟」。旧判据 `cursor < floor`（floor =
