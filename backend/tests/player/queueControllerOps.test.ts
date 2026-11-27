@@ -86,6 +86,11 @@ vi.mock("../../src/services/dlna/control.js", () => ({
 // 测试把门面接回本文件 dlna/control 的假工厂,保持原有断言(注册 / 对齐 / 拒连)。
 vi.mock("../../src/services/pluginAccess.js", () => ({
   createRendererPlayer: (protocol: string, deviceId: string) => {
+    // 阶段 2:AirPlay 门面接回本文件 airplay/protocolPlayer 的假工厂。
+    if (protocol === "airplay") {
+      H.airplayUnifiedEntry.push(deviceId);
+      return mkProto(`airplay:${deviceId}`);
+    }
     if (protocol !== "dlna") return null;
     if (H.badDevices.has(deviceId)) throw new Error(`设备 ${deviceId} 拒连`);
     const o = mkProto(`dlna:${deviceId}`);

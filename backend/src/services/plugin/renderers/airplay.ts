@@ -10,7 +10,8 @@
 //
 // DLNA is untouched — this is a fully parallel subsystem.
 
-import { listAirPlayDevices } from "../../../services/airplay/control.js";
+import { listAirPlayDevices, hasAirPlayDevice } from "../../../services/airplay/control.js";
+import { createAirPlayPlayerForDevice } from "../../../services/airplay/protocolPlayer.js";
 import type { RendererPlugin, PluginManifest } from "../../../plugins/types.js";
 
 export const AIRPLAY_RENDERER_ID = "airplay-renderer";
@@ -110,6 +111,16 @@ Casts music to AirPlay speakers, TVs and other devices on the LAN as a renderer.
 
 export const airplayRendererPlugin: RendererPlugin = {
   manifest: airplayRendererManifest,
+  /**
+   * 播放器工厂(阶段 2 起,见 renderer-plugin-migration-plan §2.7a):
+   * 必须同步返回;协议不匹配、或设备不在 AirPlay 设备档案中一律返回 null
+   * (归属校验用 AirPlay 自身设备表,禁止盲透传);每次调用新建实例,不缓存。
+   */
+  createPlayer(protocol, deviceId: string) {
+    if (protocol !== "airplay") return null;
+    if (!hasAirPlayDevice(deviceId)) return null;
+    return createAirPlayPlayerForDevice(deviceId);
+  },
   async discover() {
     return listAirPlayDevices().map((d) => ({
       id: d.id,

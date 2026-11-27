@@ -55,7 +55,7 @@
 | **4** | 完成阶段 -1 尾巴：全量测试 → SPEC §1.5 → CHANGELOG → 热补丁 240 → 真机 G1–G8 → 发版 v4.15.15 | tag + Release + digest 核对通过 | 真机 G1–G8 全过，`[ray]` 确认 |
 | **5** | ✅ 阶段 0：契约扩容 + 同步门面（不动 import 图） | `createPlayer?` + `createRendererPlayer` + B1–B7 守卫落地，`QueueController` diff 为空 | `tsc` 0 错 + 37 守卫绿 + 单测 365 passed |
 | **6** | 🔄 阶段 1：DLNA 试点（代码完成，真机待部署） | `QueueController` 不再 import `createDlnaProtocolPlayer`（命中 0） | 定向 1385 用例绿 + 专项守卫 4 绿；HiVi 真机四项待部署 |
-| **7** | 阶段 2：AirPlay | 同上（AirPlay） | 含已配对 AP2 与未配对回落 AP1 各一次 |
+| **7** | 🔄 阶段 2：AirPlay（代码完成，真机待部署） | `QueueController` 不再 import `createAirPlayPlayerForDevice`（命中 0） | 定向 177 文件/2229 用例绿 + AirPlay/组守卫 8 绿；真机四组合待部署 |
 | **8** | 阶段 3：Sendspin | 同上（Sendspin） | ESP32 真机 + 多房同步 + 群组桥回归 |
 | **9** | 阶段 4：收口 | 边界守卫改硬拦截；M1/M3 达标；文档同步 | B1 命中即非零，且 38 守卫全绿 |
 | **10** | 全量验收（§4.1 五层 + §4.4 GWZ + §4.5 真机矩阵） | L1–L5 全过，五拓扑指标不退化 | 任一票否决命中即停 |
@@ -633,8 +633,8 @@ node scripts/check-airplay-playback-chain.mjs && node scripts/check-airplay-brid
 ```
 
 **2.5 出口判据**
-- [ ] `QueueController.ts` 内 `createAirPlayPlayerForDevice` 命中数 = **0**
-- [ ] `tests/airplay`(75 个测试文件) / `tests/group`(17 个测试文件) 全绿且用例数不降
+- [x] `QueueController.ts` 内 `createAirPlayPlayerForDevice` 命中数 = **0** `（✅ 2026-11-27：tsc 0 错；tests/airplay+group+player+plugins 177 文件/2229 用例全过；AirPlay/组守卫 8 条全绿；B2 仅剩 sendspin。真机四组合待部署）`
+- [x] `tests/airplay`(75 个测试文件) / `tests/group`(17 个测试文件) 全绿且用例数不降 `（✅ 随上条一并实测）`
 - [ ] 真机四组合各一次：**AP1 非桥**、**AP1 桥成员**、**AP2 已配对**、**AP2 未配对回落**
 - [ ] 群组（airplay+sendspin 混合）切歌 5 次：桥会话不断、`[airplay-bridge]` tick 连续、无 tick 断档
 - [ ] 五拓扑基线 `mixed` / `ap-only` / `ap1-only` / `ap2-only` 四项判据同改造前

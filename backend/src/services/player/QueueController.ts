@@ -12,7 +12,6 @@ import { UniversalPlayer } from "./UniversalPlayer.js";
 import { getPlayerController } from "./index.js";
 import { getEffectiveBaseUrl, clearCurrentMedia, getDevice, alignDeviceToPosition } from "../dlna/control.js";
 import { createRendererPlayer } from "../pluginAccess.js";
-import { createAirPlayPlayerForDevice } from "../airplay/protocolPlayer.js";
 import { createSendspinProtocolPlayer } from "../sendspin/protocolPlayer.js";
 import { getCachedPlayability } from "../source/online/streamFallback.js";
 import { getPreProbeScheduler } from "./preProbeScheduler.js";
@@ -517,7 +516,9 @@ export class QueueController extends EventEmitter {
     const up = new UniversalPlayer(`airplay:${deviceId}`, name);
     // D2：桥开关开 → 单机也走「单成员伪组」桥（PCM 唯一来源 = sendspin 组泵）；
     // `MUSICFLOW_AIRPLAY_BRIDGE=0` 时退回原直连实现（整体回滚开关）。
-    up.attachProtocol(createAirPlayPlayerForDevice(deviceId));
+    const proto = createRendererPlayer("airplay", deviceId);
+    if (!proto) { log.debug("[QueueController] AirPlay 设备无播放器工厂，跳过注册", { deviceId }); return; }
+    up.attachProtocol(proto);
     this.registerPlayer(deviceId, up, getPlayerController());
     log.info(`[QueueController] registered AirPlay device: ${deviceId} (${name})`);
   }
@@ -2848,7 +2849,8 @@ export class QueueController extends EventEmitter {
             throw new Error("桥路由未激活或 bridgePrepare 失败（D7：不回落直连）");
           }
         } else {
-          const p = createAirPlayPlayerForDevice(deviceId);
+          const p = createRendererPlayer("airplay", deviceId);
+          if (!p) throw new Error("AirPlay 播放器工厂未命中（设备不在插件设备表）");
           await p.playMedia(fullItem, baseUrl, startMs);
           if (playState === "PAUSED" || playState === "PAUSED_PLAYBACK") await p.pause();
         }
