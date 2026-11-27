@@ -1272,6 +1272,9 @@ git checkout -- backend/src backend/tests backend/scripts
 | 流转丢位置根因 | 桥播放时 RAOP `relTime` 恒 0；`/status` 有泵派生兜底，`readPeerPositionSeconds` 没有 → v4.15.17 修复 + 5 例单测 |
 | sendspin 源流转返回 0 | 设备单播时队列挂在裸 clientId，组键（group_all）快照为空，`transfer-from` 盲选组键 ⇒ `transferred:0`。修复：裸快照有内容优先裸键，仅空时回落组键（`66bc7305`），真机重验 `transferred:6` |
 
+| 正式发版 | `v4.15.18`（`77870ee3`）CI 全绿，镜像 `sha256:64f2d4f6…`；240 按 digest 部署，`/ping 4.15.18 / 77870ee`，热补丁退役 |
+| 长验（连续 3 首） | 两次自然曲末 `trackJoin.zeroGap=2/2`、`coverage PASS`；新代际 `insertedFrames/droppedFrames/silenceChunks=0`；曲间 36s `BUFFERING` 为 display-hold（旧曲尾 32.8s），非可听空洞 |
+
 结论：**插件化迁移 PASS**（十条硬判据 + DLNA 出流 + 五目标自然连播 + 4/4 流转落位）。
 两处真问题均为**预存缺陷**、非插件化引入：① AirPlay 桥源端位置读数缺失（v4.15.17 `1611d86b`）；
 ② sendspin 源选错队列键（`66bc7305`）。240 当前=4.15.17 镜像 + `dist/routes/api/peers.js` 热补丁，
