@@ -177,6 +177,14 @@ const WARM_JUDGE_WAIT_MS = 300;
  *  (240 真机:整段网络源歌曲),继续往下走只会拖垮事件循环,不会恢复播放。 */
 const STALL_SKIP_LIMIT = 3;
 
+/** 冷启动宽限:新 AirPlay 会话在 timing 心跳到达前会合法静音
+ *  (airplay-bridge: clock-stalled timingCount=0 ⇒ anchoring anyway),此间 tracker
+ *  报 PLAYING + pos=0 + 无 mediaUri,与"假在播/流已死"同形。240 真机 2026-11-28:
+ *  纯AP组→HiVi 流转在起播 1.2s 内被 stallCount 攒满 2 次 → stall-skip 切到下一首
+ *  从 0 播(采样 [47.8,0.2,2.2,4.2])。起播后 8s 内 stalled 只重置 tracker,
+ *  不计数、不重投、不切歌;8s 后仍按原有 15s/2 次逻辑兜底。 */
+const COLD_START_GRACE_MS = 8000;
+
 export class QueueController extends EventEmitter {
   private queues = new Map<string, QueueData>();
   private players = new Map<string, UniversalPlayer>();
@@ -216,6 +224,8 @@ export class QueueController extends EventEmitter {
    *  HA 卡片与客户端全部超时(用户观感 =「容器崩溃/连不上」)。
    *  达到上限即**停队列**(而不是把整圈走完),等源恢复或用户手动继续。 */
   private stallSkipStreak = new Map<string, number>();
+  /** 每设备最近一次 playCurrent 的起播时刻(冷启动宽限用)。 */
+  private playStartedAt = new Map<string, number>();
   /** 连续 cast **抛错**计数(key=裸 id),只在 cast 成功返回时清零。
    *  与 stallCounters 互补:后者按「同一首」计数,而 songId 一变就归 1 ——
    *  整队每首都投不出去时,它会在 all/shuffle 下随切歌不断重置 → 无界绕圈。
@@ -1167,6 +1177,13 @@ export class QueueController extends EventEmitter {
       // 判据与真机依据见 PlaybackTracker.FREEZE_TIMEOUT_MS。
       if (!q.isActive || q.ended) return;
       if (this.advancing.has(id)) return;
+      // 冷启动宽限(2026-11-28 240):新会话 timing 未就绪的合法静音不得计入卡死。
+      const startedAt = this.playStartedAt.get(id);
+      if (startedAt && Date.now() - startedAt < COLD_START_GRACE_MS) {
+        this.ctrls.get(id)?.resetTracker(playerId);
+        log.debug(`[QueueController][stalled] ${playerId}: 冷启动宽限 ${Math.round((Date.now() - startedAt) / 1000)}s<8s,不计数不切歌`);
+        return;
+      }
       // 链路本身就丢了(子进程僵死)→ 交给恢复路径,别在这里叠一次重投。
       if (this.linkLost.has(id)) return;
       // 暂停看门狗转停(见 pauseStopSettle.ts):设备被我们自己 stop 后位置冻结,
@@ -1243,6 +1260,15 @@ export class QueueController extends EventEmitter {
       if (withinPauseStopSettle(id)) {
         this.ctrls.get(id)?.resetTracker(playerId);
         log.warn(`[QueueController][stalled] ${playerId}: 暂停看门狗转停(非卡死) → 不重投不切歌`);
+        return;
+      }
+      // 冷启动宽限(2026-11-28 240):新会话 timing 未就绪的合法静音不得计入卡死。
+      // 240 实测:起播后 0.59s 即被判 stalled → stall-reinvest,再过 0.5s 攒满 2 次
+      // 放行切歌,目标从 0 重播下一首(采样 [47.8,0.2,2.2,4.2])。
+      const startedAt = this.playStartedAt.get(id);
+      if (startedAt && Date.now() - startedAt < COLD_START_GRACE_MS) {
+        this.ctrls.get(id)?.resetTracker(playerId);
+        log.debug(`[QueueController][stalled] ${playerId}: 冷启动宽限 ${Math.round((Date.now() - startedAt) / 1000)}s<8s,不计数不切歌`);
         return;
       }
       // 回归修复:乐观窗口 5s 未确认 PLAYING 会触发 stalled,但 HiVi 等真实设备的
@@ -1802,6 +1828,12 @@ export class QueueController extends EventEmitter {
     const player = this.players.get(deviceId);
     const ctrl = this.ctrls.get(deviceId);
     if (!q || !player || !ctrl) return;
+    // 冷启动宽限**只对 AirPlay 生效**:新 RAOP 会话在 timing 心跳到达前会合法静音
+    // (timingCount=0),与"假在播"同形;DLNA/sendspin 起播后没有这种沉默期,它们的
+    // 卡死是真卡死 —— 一并宽限会绕过「重投封顶/放行切歌」的保护。
+    // 组按成员判定(含 AirPlay 成员的组同样可能有桥冷启动的合法静音)。
+    if (this.needsColdStartGrace(deviceId)) this.playStartedAt.set(deviceId, Date.now());
+    else this.playStartedAt.delete(deviceId);
     log.info(`[QueueController][playCurrent] source=${source} dev=${deviceId} idx=${q.currentIndex} song=${q.items[q.currentIndex]?.songId ?? "-"}`);
 
     // ── 硬限制:**目标没有在线播放器,就不开始播放** ───────────────────────
@@ -2169,6 +2201,56 @@ export class QueueController extends EventEmitter {
    * 后续自动切歌一律走服务端 `shuffleOrder`（`pickNext`/`rebuildShuffle`），
    * 并通过 `snapshot().shuffleOrder` 下发，客户端镜像显示。
    */
+  /** 该播放端是否需要「冷启动宽限」(见 playCurrent 里的 playStartedAt)。
+   *  仅 AirPlay(单机或含 AirPlay 成员的组):其新会话 timing 未就绪时是合法静音。 */
+  private needsColdStartGrace(deviceId: string): boolean {
+    const up = this.players.get(deviceId);
+    if (!up) return false;
+    if (up.playerId.startsWith("airplay:")) return true;
+    if (up.playerId.startsWith("group:")) {
+      return (getGroupManager().get(deviceId)?.memberIds ?? []).some(m => m.startsWith("airplay:"));
+    }
+    return false;
+  }
+
+  /** 组起播互斥(P2):一个成员同时只能被一个组驱动。
+   *
+   *  起播目标组前,把「与目标组共享成员」的其他活跃组停掉;目标组各成员名下还活着
+   *  的单机队列也一并置停(组接管后它们不再被组驱动,留着会被 tracker / 预探测继续
+   *  推进,与组播形成两套现场 = 同组成员"双推")。
+   *
+   *  设备级互斥由 HTTP 层的 detachFromActiveGroups 负责;这里只解决「组 vs 组」。
+   *  停组走与 POST /peers/group:<id>/stop 相同的 fanOut(成员传输 stop + 拆桥)。
+   */
+  private async stopConflictingGroupsForStart(groupId: string): Promise<void> {
+    const gm = getGroupManager();
+    const target = gm.get(groupId);
+    if (!target) return; // 不是组 → 单设备路径各自处理
+    const bareOf = (m: string) => { const i = m.indexOf(":"); return i >= 0 ? m.slice(i + 1) : m; };
+    const targetMembers = new Set((target.memberIds ?? []).map(bareOf));
+    if (targetMembers.size === 0) return;
+    // 目标组当前不可播(成员全离线)⇒ 绝不能先停源组:playCurrent 会直接返回、
+    // 目标不会起播,源却已停 ⇒ 全军覆没。等成员回归后由 watchdog 再起。
+    if (!checkPlayTarget(groupId).playable) return;
+    for (const [qid, q] of [...this.queues]) {
+      if (qid === groupId || !q.isActive) continue;
+      const other = gm.get(qid);
+      if (other) {
+        const shares = (other.memberIds ?? []).some(m => targetMembers.has(bareOf(m)));
+        if (!shares) continue;
+      } else if (!targetMembers.has(qid)) {
+        continue;
+      }
+      this.stopPlayback(qid);
+      try {
+        await this.transport(qid, "stop");
+        log.info(`[QueueController][exclusive] 起播组 ${groupId}: 停掉冲突的 ${other ? "组" : "成员队列"} ${qid}`);
+      } catch (e: any) {
+        log.warn(`[QueueController][exclusive] 起播组 ${groupId}: 停 ${qid} 失败(忽略): ${e?.message || e}`);
+      }
+    }
+  }
+
   async playFrom(
     playerId: string,
     items: QueueItem[],
@@ -2184,6 +2266,8 @@ export class QueueController extends EventEmitter {
   ): Promise<number> {
     playerId = stripPlayerPrefix(playerId);
     this.clearDisplayHold(playerId);
+    // 组起播互斥:先停掉与本组共享成员的其他活跃组(避免两组同时出声)。
+    await this.stopConflictingGroupsForStart(playerId);
     const mode = this.queues.get(playerId)?.playMode ?? "shuffle";
     // 整列表播放 = 未给起点 / startIndex<=0（默认从第 1 首开始）。指定居中某首(>0)则尊重。
     const listStart = !(typeof startIndex === "number" && Number.isInteger(startIndex) && startIndex > 0);
@@ -2302,7 +2386,7 @@ export class QueueController extends EventEmitter {
   /** opts.skipDeviceStop(E3):只清服务端队列,不下发设备端 Stop。
    *  用于「桥刚接管同 host AirPlay」后卡片对源端 DLNA 的 reset —— 设备端 Stop 会
    *  让固件输入仲裁把通路顶回 DLNA(RTSP 活着、timing 照答,但音频不渲染,240 实证)。 */
-  clear(playerId: string, opts?: { skipDeviceStop?: boolean }): void {
+  clear(playerId: string, opts?: { skipDeviceStop?: boolean; skipMediaClear?: boolean }): void {
     playerId = stripPlayerPrefix(playerId);
     this.clearDisplayHold(playerId);
     // 清队列前把当前学习音频的最后位置落库(记录不依赖控制端是否还活着)。
@@ -2319,11 +2403,15 @@ export class QueueController extends EventEmitter {
     q.ownerUserId = undefined; // 队列清空 → 归属用户一并失效,避免下次队列串记录
     q.shuffleOrder = []; q.shufflePos = -1; q.shuffleLen = 0;
     // 清队列同时清掉设备端的媒体缓存,避免 status 返回上一首残留(组场景清各成员)。
-    const group = getGroupManager().get(playerId);
-    if (group) {
-      for (const d of group.memberIds) clearCurrentMedia(d);
-    } else {
-      clearCurrentMedia(playerId);
+    // skipMediaClear:流转源端已被目标接管时只清队列数据,不能把目标端正在显示的
+    // 媒体(同一成员)一并抹掉。
+    if (!opts?.skipMediaClear) {
+      const group = getGroupManager().get(playerId);
+      if (group) {
+        for (const d of group.memberIds) clearCurrentMedia(d);
+      } else {
+        clearCurrentMedia(playerId);
+      }
     }
     // 队列清空 → 预探测状态一并清掉。必须赶在发快照**之前**,
     // 否则下发的快照还带着已失效的 exhausted 提示。
@@ -2331,8 +2419,8 @@ export class QueueController extends EventEmitter {
     this.persist(playerId);
     this.emit("queue_changed", playerId, this.snapshot(playerId));
     // 媒体已清空:显式推送,让所有客户端(HA 卡片/Web)立即清掉封面/歌词/进度,
-    // 不必等下一轮 status 轮询自愈。
-    this.emit("media_changed", playerId, undefined);
+    // 不必等下一轮 status 轮询自愈。skipMediaClear 时不推(目标端仍在显示)。
+    if (!opts?.skipMediaClear) this.emit("media_changed", playerId, undefined);
     // 清队列同时取消该目标的定时暂停(队列都没了,timer 失效)。
     this.clearSleepTimer(playerId);
   }

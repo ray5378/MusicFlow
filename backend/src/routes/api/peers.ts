@@ -459,7 +459,28 @@ app.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
       + `pos=${srcPosEarly === null ? "-" : srcPosEarly.toFixed(2)} sameDevice=${sameDevice} `
       + `songId[start]=${items[start]?.songId ?? "-"} title[start]=${items[start]?.title ?? "-"}`,
   );
+  // 目标组是否**包含**源端设备(提前算:起播后源端会被目标组接管,晚读数不可信)。
+  const targetIsGroup = parsedTo.kind === "group";
+  let targetOwnsSource = false;
+  if (targetIsGroup && !fromQueueKey.startsWith("group:")) {
+    try {
+      const { getGroupManager } = await import("../../services/group/index.js");
+      const bareSrc = splitMemberId(fromPeerId)?.id ?? fromPeerId;
+      targetOwnsSource = (getGroupManager().get(parsedTo.id)?.memberIds ?? [])
+        .some(m => (splitMemberId(m)?.id ?? m) === bareSrc);
+    } catch { /* 组不可用:按「不接管」处理 */ }
+  }
   let landedPosition: number | null = null;
+  // 目标是否真的可起播(组=有在线成员)。不可播时 playFrom 会静默返回、目标不起播,
+  // 此时绝不能收尾源端 —— 否则「流转失败 + 源端也停了」= 完全无声。
+  let targetPlayable = true;
+  if (isCastPeer(parsedTo)) {
+    try {
+      const { checkPlayTarget } = await import("../../services/playTarget.js");
+      targetPlayable = checkPlayTarget(parsedTo.id).playable;
+    } catch { /* 判定不可用:按可播处理(与既有乐观放行一致) */ }
+    if (!targetPlayable) log.warn(`[transfer] 目标 ${toPeerId} 当前不可播(无在线成员),只搬运队列、不动源端`);
+  }
   if (isCastPeer(parsedTo)) {
     // ★ 冷启动预热(2026-11-10):落点歌的可播性裁决提前开跑,与后面的「脱离活跃组 /
     //   回流加成员 / 建会话 / 整曲预取」**并行** —— 判官随后直接命中预热结论,省掉
@@ -562,7 +583,10 @@ app.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
       //   抬高,读到 11.7s(用户其实只听到 3.08s),用它 seek 等于把超前落点钉死。
       //   此时只有起播前定格值可信。
       const borrowTouched = borrow.armed || borrow.reason === "window-too-shallow";
-      const late = askPosition ?? (borrowTouched ? null : await readPeerPositionSeconds(fromPeerId));
+      // 目标组接管源端时,源端在 playFrom 里已被停/改由组驱动 —— 晚读数是「接管后的
+      // 现场」,会把落点跳到别的时间轴(240 实测 +7.4s)。此时只信起播前的定格值。
+      const late = askPosition
+        ?? ((borrowTouched || targetOwnsSource) ? null : await readPeerPositionSeconds(fromPeerId));
       const pos = late !== null && late > 0 ? late : srcPosEarly;
       if (pos !== null && pos > 0 && await seekPeerToSeconds(toPeerId, pos)) landedPosition = pos;
     }
@@ -572,6 +596,11 @@ app.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
     const at = pos !== null && pos > 0 ? pos : undefined;
     if (at !== undefined) landedPosition = at;
     pm.localPlayFrom(toPeerId, c.get("user")!.id, items, start, at);
+    // 本机客户端(安卓/Windows):服务端只写队列 + 广播快照,真正的播放器在客户端
+    // 进程里 —— 必须再下发一次 play 才会起播。web 实例按既定语义不是被控端,跳过。
+    if (pm.get(toPeerId)?.platform !== "web") {
+      try { dispatchPeerCommand(toPeerId, "play"); } catch { /* 投递失败不挡流转 */ }
+    }
   }
 
   // 播放模式随队列流转(队列换了模式却留在原端会显得"没搬全")。
@@ -582,6 +611,25 @@ app.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
       if (isCastPeer(parsedTo)) getQueueManager().setPlayMode(parsedTo.id, srcMode as any);
       else pm.localSetPlayMode(toPeerId, srcMode as any);
     } catch { /* best-effort */ }
+  }
+
+  // ── 源端收尾(P0):流转是「搬走」不是「复制」 ─────────────────────────────
+  // 目标端已确认起播 ⇒ 源端必须停止。两种例外不停:
+  //  ① 目标组**包含**源端设备 —— 源端播放已由目标组接管,停它等于停目标;
+  //  ② 组→组且共享成员 —— playFrom 的起播互斥已在目标起播**之前**停了源组,
+  //     此刻再停会把目标组刚起播的共享成员连带打停。
+  {
+    const srcOwnerIsGroup = fromQueueKey.startsWith("group:");
+    const stoppedByExclusive =
+      srcOwnerIsGroup && targetIsGroup && await groupsShareMembers(fromQueueKey.slice(6), parsedTo.id);
+    if (targetPlayable) {
+      // V25：源端必须「停 + 清队列」——队列已经搬到目标端，源端不得保留副本。
+      // 目标已接管源端（目标组含源设备 / 组→组共享成员）时只清队列数据，
+      // 不再停传输/清媒体，否则会误伤刚起播的目标端。
+      await stopTransferSource(fromPeerId, fromQueueKey, {
+        queueOnly: targetOwnsSource || stoppedByExclusive,
+      });
+    }
   }
 
   return c.json({ success: true, transferred: items.length, startIndex: start, position: landedPosition });
@@ -915,6 +963,53 @@ app.post("/v1/peers/:peerId/pause", async (c) => {
   return c.json({ success: true });
 });
 
+
+/** 两个组是否共享至少一个成员(裸 id 比对)。流转收尾用它判断「源组是否已被
+ *  playFrom 的起播互斥提前停掉」——已停就不再重复停,避免连带打停目标组
+ *  刚起播的共享成员。 */
+async function groupsShareMembers(a: string, b: string): Promise<boolean> {
+  try {
+    const { getGroupManager } = await import("../../services/group/index.js");
+    const m = getGroupManager();
+    const bare = (x: string) => splitMemberId(x)?.id ?? x;
+    const setA = new Set((m.get(a)?.memberIds ?? []).map(bare));
+    return (m.get(b)?.memberIds ?? []).some(x => setA.has(bare(x)));
+  } catch { return false; }
+}
+
+/** 流转后源端收尾（V25）：**停 + 清队列**。
+ *  流转是「搬走」不是「复制」——队列已经落到目标端，源端不得再留一份。
+ *  opts.queueOnly：源端已被目标接管（目标组包含源端设备 / 组→组共享成员）。
+ *  此时只清队列数据（skipDeviceStop + skipMediaClear），不再停传输/清媒体，
+ *  否则会把刚起播的目标端一起打停或抹掉正在显示的媒体。 */
+async function stopTransferSource(
+  fromPeerId: string,
+  fromQueueKey: string,
+  opts: { queueOnly?: boolean } = {},
+): Promise<void> {
+  const parsed = parsePeerId(fromPeerId);
+  if (!parsed) return;
+  if (parsed.kind === "local") {
+    // 本机实例：localClear + 丢弃旧状态上报；非 Web 再补一条 stop 命令。
+    // Web 实例无法远程停播放器，但队列仍按流转语义清空（队列已在目标端）。
+    const isWeb = pm.get(fromPeerId)?.platform === "web";
+    if (isWeb) log.info(`[transfer] 源端是 Web 实例:清空服务端队列(无法远程停其播放器): ${fromPeerId}`);
+    await resetPeerPlayback(parsed, fromPeerId, { dispatchLocalStop: !isWeb });
+    log.info(`[transfer] 源端本机实例已停止并清空队列: ${fromPeerId}`);
+    return;
+  }
+  const isGroupQueue = fromQueueKey.startsWith("group:");
+  const ownerId = isGroupQueue ? fromQueueKey.slice(6) : parsed.id;
+  const ownerParsed = isGroupQueue ? { kind: "group", id: ownerId } : parsed;
+  if (opts.queueOnly) {
+    clearTransferSourceQueue(ownerId);
+    log.info(`[transfer] 源端队列已清空(源端已由目标接管,不停传输): ${ownerParsed.kind}:${ownerId}`);
+    return;
+  }
+  const err = await resetPeerPlayback(ownerParsed, ownerId, {});
+  log.info(`[transfer] 源端已停止并清空队列: ${ownerParsed.kind}:${ownerId}${err ? ` (停传输失败: ${err})` : ""}`);
+}
+
 app.post("/v1/peers/:peerId/stop", async (c) => {
   const peerId = decodePeerId(c);
   const parsed = parsePeerId(peerId);
@@ -944,6 +1039,54 @@ app.post("/v1/peers/:peerId/stop", async (c) => {
   return c.json({ success: true });
 });
 
+/** 停 + 清一个端的播放（= POST /peers/:id/reset 的内核）。
+ *  流转「搬走」与回收站「销毁」共用：cast 端停传输（与 /stop 同款分支与 E3 守卫）
+ *  后 clear；本机端 localClear + 丢弃状态上报（必要时先给客户端下 stop）。
+ *  返回传输层错误文案（供路由回执），无错误为 null。 */
+async function resetPeerPlayback(
+  parsed: { kind: string; id: string },
+  peerId: string,
+  opts: { dispatchLocalStop?: boolean } = {},
+): Promise<string | null> {
+  if (isCastPeer(parsed)) {
+    const suppressDlnaDevice =
+      parsed.kind === "dlna" && raopSuppressDlnaResetAfterBridge() && isRecentlyBridgeSettledDlnaPeer(parsed.id);
+    getQueueController().stopPlayback(parsed.id);
+    // AirPlay:清掉 /status 的「最近桥状态 ≤10s」缓存。停播后桥状态为 null,若继续
+    // 回吐缓存,客户端/流转矩阵会把源端误判成 PLAYING(实际 TEARDOWN 已完成)。
+    if (parsed.kind === "airplay") lastBridgePeerStatus.delete(parsed.id);
+    let transportError: string | null = null;
+    try {
+      if (suppressDlnaDevice) {
+        // exp4(E3):该 DLNA peer 刚被桥 cold-settle(桥接管同 host AirPlay)。设备端
+        // Stop 会让固件输入仲裁把通路顶回 DLNA —— RTSP 活着、timing 照答,但音频不
+        // 渲染(240 实证:泵 125/s、loss=0、全程无声)。开关打开时只做服务端复位。
+        log.info("[transfer] 源端 DLNA 重置跳过设备命令(桥占用, MF_BRIDGE_RAOP_SUPPRESS_DLNA_RESET_AFTER_BRIDGE)");
+      } else if (parsed.kind === "dlna") await stopDevice(parsed.id);
+      else await getQueueController().transport(parsed.id, "stop");
+    } catch (e: any) {
+      transportError = e?.message || String(e);
+      log.warn(`[reset] ${parsed.kind} ${parsed.id} 停传输失败(仍清队列): ${transportError}`);
+    }
+    getQueueController().clear(parsed.id, { skipDeviceStop: suppressDlnaDevice });
+    return transportError;
+  }
+  // local
+  if (opts.dispatchLocalStop) {
+    try { dispatchPeerCommand(peerId, "stop"); } catch { /* 投递失败不挡清队列 */ }
+  }
+  pm.localClear(peerId);
+  pm.clearLocalStatusReport(peerId);
+  return null;
+}
+
+/** 流转源端只清队列数据（不停传输、不清媒体显示）。
+ *  用于「源端已被目标接管」：目标组包含源端设备 / 组→组共享成员（起播互斥已提前
+ *  停源组）。此时再停/清媒体会误伤目标端。 */
+function clearTransferSourceQueue(id: string): void {
+  getQueueController().clear(id, { skipDeviceStop: true, skipMediaClear: true });
+}
+
 // 彻底重置一个播放端的播放状态(流转播放「搬走」/ 回收站「销毁」的源端收尾)。
 //
 // 与 DELETE /queue 的区别:那条只清队列实体,**运行态各留各的** ——
@@ -959,37 +1102,8 @@ app.post("/v1/peers/:peerId/reset", async (c) => {
   const peerId = decodePeerId(c);
   const parsed = parsePeerId(peerId);
   if (!parsed) return c.json(apiError(BusinessErrorCode.INVALID_PARAM, "errors.renderer.invalidPeerId"), 400);
-
-  if (isCastPeer(parsed)) {
-    // 先停传输(与 /stop 同款分支),再 clear —— clear 内部还会清 items / 游标 /
-    // isActive / ended / 洗牌序列 / 设备端 currentMedia / 预探测 / 定时暂停,
-    // 并广播 media_changed 让所有客户端立刻清掉封面与歌词,不必等下一轮轮询。
-    // 与 /stop 同口径:传输 stop 是 best-effort,队列**必须**清掉。
-    // 离线设备(播放器未注册)在这里曾经回 500 并跳过 clear,导致幽灵队列常驻。
-    const suppressDlnaDevice =
-      parsed.kind === "dlna" && raopSuppressDlnaResetAfterBridge() && isRecentlyBridgeSettledDlnaPeer(parsed.id);
-    getQueueController().stopPlayback(parsed.id);
-    let transportError: string | null = null;
-    try {
-      if (suppressDlnaDevice) {
-        // exp4(E3):该 DLNA peer 刚被桥 cold-settle(桥接管同 host AirPlay)。设备端
-        // Stop 会让固件输入仲裁把通路顶回 DLNA —— RTSP 活着、timing 照答,但音频不
-        // 渲染(240 实证:泵 125/s、loss=0、全程无声)。开关打开时只做服务端复位。
-        log.info("[transfer] 源端 DLNA 重置跳过设备命令(桥占用, MF_BRIDGE_RAOP_SUPPRESS_DLNA_RESET_AFTER_BRIDGE)");
-      } else if (parsed.kind === "dlna") await stopDevice(parsed.id);
-      else await getQueueController().transport(parsed.id, "stop");
-    } catch (e: any) {
-      transportError = e?.message || String(e);
-      log.warn(`[reset] ${parsed.kind} ${parsed.id} 停传输失败(仍清队列): ${transportError}`);
-    }
-    getQueueController().clear(parsed.id, { skipDeviceStop: suppressDlnaDevice });
-    return c.json({ success: true, ...(transportError ? { transportError } : {}) });
-  }
-
-  // local:清队列元数据 + 丢弃该端的状态上报(否则 /status 仍叠加旧 state / songId)。
-  pm.localClear(peerId);
-  pm.clearLocalStatusReport(peerId);
-  return c.json({ success: true });
+  const transportError = await resetPeerPlayback(parsed, peerId, { dispatchLocalStop: false });
+  return c.json({ success: true, ...(transportError ? { transportError } : {}) });
 });
 
 app.post("/v1/peers/:peerId/next", async (c) => {

@@ -739,6 +739,7 @@ export async function alignGroupMembers(groupId: string, added: string[], remove
   const kindOf = (m: string) => splitMemberId(m)?.kind ?? "dlna";
   const bareOf = (m: string) => splitMemberId(m)?.id ?? m;
   const dlnaAdded = added.filter(m => kindOf(m) === "dlna").map(bareOf);
+  const dlnaRemoved = removed.filter(m => kindOf(m) === "dlna").map(bareOf);
   const apAdded = added.filter(m => kindOf(m) === "airplay").map(bareOf);
   const apRemoved = removed.filter(m => kindOf(m) === "airplay").map(bareOf);
   const spinAdded = added.filter(m => kindOf(m) === "sendspin").map(bareOf);
@@ -788,6 +789,18 @@ export async function alignGroupMembers(groupId: string, added: string[], remove
       }
     } catch (e: any) {
       log.warn(`[group] ${groupId}: airplay 成员 ${deviceId} 摘除断开失败: ${e?.message || e}`);
+    }
+  }
+  for (const deviceId of dlnaRemoved) {
+    // DLNA 成员摘组:设备端是"各自拉流"(legacy 扇出)或"桥泵路由",两种都不会因为
+    // 从 memberIds 删掉而自动停 —— 不补这一刀,被摘成员会继续把组流播完(240 实证:
+    // 组摘成员后该设备仍 PLAYING)。与 apRemoved 同口径:摘除即断开。
+    try {
+      const { stopDevice: stopDlnaDevice } = await import("../../services/dlna/control.js");
+      await stopDlnaDevice(deviceId);
+      log.info(`[group] ${groupId}: 成员 ${deviceId} 已摘除,停其残留播放`);
+    } catch (e: any) {
+      log.warn(`[group] ${groupId}: 成员 ${deviceId} 摘除停播失败: ${e?.message || e}`);
     }
   }
   const sg = sendspinGroupName(groupId);

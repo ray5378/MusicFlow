@@ -753,6 +753,8 @@ git diff --unified=0 -- backend/src | grep -E '^[+-][^+-]' \
 | **M6** | 守卫脚本数 | 37 | **38**（新增边界守卫），全绿 |
 | **M7** | `tsc --noEmit` | 0 错 | **0 错** |
 
+> **判据变更（2026-11-28）**：流转验收新增 **V25「源端让出」**。原因：旧判据只查目标落点，240 实测 24/24 次流转后源端仍 `PLAYING`（组源与目标组同时出声）。流转语义是「搬走」不是「复制」，双播属 §4.7 第 3 条同类否决症状。判据与例外已同步 `docs/播放链路与队列流转权威文档-20261114.md` §7.2。**同日追加**：源端还必须**清空队列**（`/queue` 为空），否则只是「停」不是「搬全」。
+
 **M5 口径澄清（2026-11-27 实测更正）**
 
 早期文档写的「643 文件 / 9136 用例」来自源码文本计数（`find tests -name '*.test.ts'` + 正则数 `it(`/`test(`），**与运行时口径不同**（`.each` 展开、循环生成的用例、`src/**/*.test.ts` 旁置测试都不计入文本计数）。
@@ -1444,6 +1446,7 @@ git checkout -- backend/src backend/tests backend/scripts
 | V22 | 部署一致性 `[已踩]` | 热补丁后未固化校验 | 容器内代码 grep 标记命中 + `/ping` 版本/commit + 镜像 digest 记录 | 全部 |
 | V23 | 采样资产前置 `[已踩]` | 曾因采样服务/脚本失效导致整段数据缺失 | 采样服务存活、数据新鲜度 <10s、三路 pcap 在跑、组成员快照落盘 | 全部 |
 | V24 | API 路径正确性 `[已踩]` | 成员变更路径带 `group:` 前缀静默无效，曾致实验假通过 | 变更后**回读**组成员确认生效（不能只看 200） | 全部 |
+| V25 | 流转后源端「停 + 清队列」`[缺]` | 旧判据只看目标落点，未查源端；240 实测 24/24 次流转后源端仍 PLAYING（组源继续组播），且原队列仍留在源端（只是「停」不是「搬走」） | 每格同时读源端：① cast 源 `state∈{STOPPED,IDLE}` 且窗口内无新增 tick；组源各成员同样无新增 tick；本机源 `isActive=0` 且 local-status 非 PLAYING。② 源端 `/queue` 为空（`items=0`、`currentIndex=-1`、`isActive=false`；cast 同 `/reset`，本机 `localClear`）。例外：目标组包含源端设备 / 组→组共享成员——只清队列数据（`skipDeviceStop+skipMediaClear`），不停传输/不清媒体 | 全部 |
 
 ### 14.3 分层必跑回归（按改动面取最小集）
 
@@ -1452,7 +1455,7 @@ git checkout -- backend/src backend/tests backend/scripts
 | **L0 静态** | 每次提交 | `tsc --noEmit`=0；全量守卫（含 V17 负例）；相关单测 |
 | **L1 契约** | 改 `RendererPlugin` / `ProtocolPlayer` / manifest | V13、V14、V15、V04 |
 | **L2 单目标真机** | 改桥投递 / 回填 / 游标 / 锚点 | 单成员回组 + V07、V08、V09、V22、V23 |
-| **L3 矩阵真机** | 发版前 | 纯组×2 + 混合组×3（串行，V02/V03）+ 自然连播 5 首 + 流转 4 例 + V10 |
+| **L3 矩阵真机** | 发版前 | 纯组×2 + 混合组×3（串行，V02/V03）+ 自然连播 5 首 + 流转 4 例 + V10、V25 |
 | **L4 故障** | 放量前 / 涉及重连与多绑定 | V11、V12、V20 + 三路抓包比对 |
 
 ### 14.4 证据与判废规则
@@ -1490,12 +1493,16 @@ git checkout -- backend/src backend/tests backend/scripts
 | # | 检查项 | 命令（在 `H240` 上） | 判据 |
 |---|---|---|---|
 | 1 | 部署一致性 | `docker exec musicflow grep -c "<本次代码标记>" /app/backend/dist/...` + `curl -s 127.0.0.1:46400/ping` | 标记命中且 `/ping` 版本/commit 与 `H230` HEAD 一致（V22） |
-| 2 | 采样服务 | `docker ps \| grep -E 'mf-(base\|status\|watch\|test5)'` | 4 个全在 |
-| 3 | pcap | `docker ps \| grep -E 'mf-pcap-(ap\|ieast\|ss)'` | 3 路全在 |
+| 2 | 采样服务 | `docker ps \| grep -E 'mf-(base\|status\|watch\|test5)'` **或** `pgrep -af 'base_sampler\|mf_status_sampler\|watch.py\|test5'` | 4 个全在（容器或宿主进程） |
+| 3 | pcap | `docker ps \| grep -E 'mf-pcap-(ap\|ieast\|ss)'` **或** `pgrep -af 'tcpdump.*pcap_(ap\|ieast\|ss)'` | 3 路全在（容器或宿主进程） |
 | 4 | 数据新鲜度 | `tail -1 /root/mf_watch/status-*.jsonl` 的时间戳 | 与当前 UTC 差 < 10s（V23） |
 | 5 | 设备在线 | `curl /v1/peers` | 三个目标 `available=true` |
 | 6 | 组成员快照 | `curl /v1/groups` → `members-before.json` | 落盘成功，记录成员列表（V03） |
 | 7 | 串行锁 | `pgrep -af 'mf_joinleave\|single_rejoin\|mf_transfer'` | 无残留进程 |
+
+> **环境形态说明（2026-11-28）**：当前 240 的采样与 pcap 以**宿主进程**运行（`base_sampler.py` / `mf_status_sampler.py` / `watch.py` / `test5c.py`，三路 `tcpdump -w /tmp/pcap_{ap,ieast,ss}`），不是容器；第 2/3 项以 `pgrep` 为检查口径，**判据（4 个采样在、3 路 pcap 在）不变**。
+>
+> **第 1 项说明（2026-11-28）**：`APP_COMMIT` 在镜像构建期写入（`Dockerfile ARG`），热补丁不会更新它。因此「`/ping` commit == `H230` HEAD」只能用**同 commit 的镜像部署**满足；只热补丁时本条记 `BLOCKED`，不得以「dist 内 grep 到新符号」替代。
 
 任一失败 ⇒ 记 `BLOCKED`，**不得开跑**。
 
@@ -1515,6 +1522,7 @@ git checkout -- backend/src backend/tests backend/scripts
 | S10 | L0 | 守卫负例（必须先红后绿） | 见 15.2.6 | V17 |
 | S11 | L1/L2 | 生命周期钩子计数 + 健康字段 | 见 15.2.7 | V18/V19 |
 | S12 | L0/L3 | 部署一致性与回滚演练 | 见 15.2.8 | V22 + §9 |
+| S13 | L3 | 流转全方向 + 源端让出 | `mf_transfer_matrix.py`（设备↔设备、设备↔组、组↔组、客户端↔设备/组，串行） | 落点≈定格值 + 目标 PLAYING + 源端 STOPPED/非活跃（V25） |
 
 #### 15.2.1 S03 单成员回组（最快拿到音频证据）
 1. S00 通过；确认 `G_MIXED` 正在播（不是暂停）。
@@ -1558,6 +1566,18 @@ git checkout -- backend/src backend/tests backend/scripts
 1. `H230` 构建后热补丁 → `docker exec grep` 标记命中 + `/ping` 版本/commit 正确。
 2. 记录镜像 digest 与 compose 备份路径。
 3. 演练：用上一版 `dist` 热补丁回退 → `/ping` 恢复旧 commit → 再打到新版；全过程组播放不中断或可快速恢复。
+
+#### 15.2.9 S13 流转全方向（含客户端）
+
+1. S00 通过；`pgrep -af 'mf_transfer'` 为空；确认没有其它 case 在跑。
+2. 方向（每方向至少 1 次，串行）：设备↔设备、设备↔组、组↔组、客户端↔设备、客户端↔组、组→客户端、客户端↔客户端（有真实客户端在线时）。
+3. 每格判定：
+   - 落点：响应落点 ≈ 源端定格值，目标 `state=PLAYING` 且 pos 在窗口内；
+   - **源端让出（V25）**：cast 源 `state∈{STOPPED,IDLE}` 且 `T0..T1` 内无新增 tick；组源各成员无新增 tick；本机源 `isActive=0` 且 local-status 非 PLAYING；
+   - **源端队列清空（V25）**：源端 `/queue` items=0、currentIndex=-1、isActive=false（队列已搬到目标端，源端不得保留副本）；
+   - 例外按 V25：目标组包含源端设备 / 组→组共享成员。
+4. 证据：每格记录 `T0/T1` + 源端与目标的 tick 片段（cast）或 pcap 片段；**不得只用 `/status` 结论**（§14 硬规则）。本机源用队列 `isActive` + local-status 作为权威（无 tick 可抓）。
+5. 收尾：停掉所有测试队列；`/v1/groups` 回读成员未变（V24）。
 
 ### 15.3 采样与判定命令模板（`H240`）
 
@@ -1743,7 +1763,7 @@ docker logs -t --since "$T0" --until "$T1" musicflow 2>&1 \
 | 5.5c 真机断网回退 | ⏳ | 需 240 打开 `MF_RENDERER_MULTI_BINDING=1` 并配置 `renderer.bindings.*`；本轮开关保持关闭（默认值即生产行为） |
 | 5.5d / 5.5e 错误码与 API | ⏳ | 改 API 返回体属可观察行为变更，随 5.7/下一轮 |
 | V12 多协议混组路由 | ⏳ | 随 5.5c 真机一起验（airplay/sendspin 同组成员各自 tick 正常、无跨协议流） |
-| 真机 L2/L3 全套 | ⏳ | 提交后热补丁 240，按 §15.2 跑 S00 + S03/S04/S05 + 5 首自然连播（今日漫游 `pl-daily-roam`）+ 流转 4 例；结果记 §19 |
+| 真机 L2/L3 全套 | ⏳ | 提交后热补丁 240，按 §15.2 跑 S00 + S03/S04/S05 + 5 首自然连播（今日漫游 `pl-daily-roam`）+ 流转 4 例（S13 全方向，含 V25 源端让出）；结果记 §19 |
 
 ### 18.5 回滚
 
