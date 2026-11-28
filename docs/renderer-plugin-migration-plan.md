@@ -42,8 +42,10 @@
 | **2** | AirPlay | 🔄 代码完成，真机待部署 | 3 项 ✅ / 7 |
 | **3** | Sendspin | 🔄 代码完成，真机待部署 | 4 项 ✅ / 6 |
 | **4** | 收口（守卫硬拦截 + 文档） | 🔄 代码完成（硬拦截已上线），待全量验收 | 3 项 ✅ / 5 |
+| **5** | 接口通用化（协议去枚举/能力位/v2 契约/多绑定/外置 sidecar） | ⏳ 已立项（2026-11-28，未开工） | 0 项 ✅ / 8 |
 
 > 阶段 -1 的**明细台账见「阶段 -1」小节（-1a~-1o，15 条）**；§4.3 只保留 4 条宏观出口判据，便于一页看完整体节奏。
+> **验证项统一台账见 §14（V01–V24，含此前缺失项与判废规则）；任何一轮改动的验收都以此为准。**
 
 ### 0.0.3 全流程路线图（12 步，照此顺序执行）
 
@@ -1279,6 +1281,320 @@ git checkout -- backend/src backend/tests backend/scripts
 两处真问题均为**预存缺陷**、非插件化引入：① AirPlay 桥源端位置读数缺失（v4.15.17 `1611d86b`）；
 ② sendspin 源选错队列键（`66bc7305`）。240 当前=4.15.17 镜像 + `dist/routes/api/peers.js` 热补丁，
 重建镜像即带上 ②（已提交）。
+
+## 13. 阶段 5：接口通用化（对标 MA，2026-11-28 立项）
+
+> **性质**：新增一轮，不改阶段 -1~4 的既有结论。本期的收益是「内置解耦」（核心不再 import 协议目录），
+> 但**新增一个协议仍需改核心**。阶段 5 的目标是「接口通用」：**新增协议 / 新增外置播放器，不改核心代码，只加插件与声明。**
+>
+> **与 §0.2 的关系**：仍以「行为等价」为第一铁律；只有 §13.4 明确标注 breaking 的**插件侧契约**（v1→v2）允许改，
+> 核心可观察行为（起播时序、进度口径、hold/lead、日志）一律不变。
+
+### 13.1 MA 实测事实（2026-11-28，`/workspace/ma-ref` + `/workspace/ma-installed`）
+
+| # | 机制 | 位置 | 关键事实（可直接对照的形态） |
+|---|---|---|---|
+| M1 | 能力位 | `music_assistant_models/enums.py:506` `PlayerFeature` | 播放器能力是**开放集合**（PAUSE/SEEK/SET_MEMBERS/VOLUME_SET/PLAY_MEDIA/GAPLESS…），核心按能力判定，不按协议名分支；未知值降级为 `UNKNOWN` 而非报错 |
+| M2 | 播放入口 | `models/player.py:990` | `play_media(media: PlayerMedia)` —— **单一媒体描述符**，没有任何协议专属形参 |
+| M3 | 媒体描述 | `music_assistant_models/player.py:114` `PlayerMedia` | `uri/media_type/title/duration/stream_duration/source_id/queue_item_id/custom_data/elapsed…`；`custom_data` 明示「必须可序列化」 |
+| M4 | 分组 | `models/player.py:1124` `set_members(add[], remove[])` | 分组是**播放器能力**（`PlayerFeature.SET_MEMBERS`），不是核心私有逻辑；控制器只按能力位调用 |
+| M5 | 输出协议多路 | `music_assistant_models/player.py:28` `OutputProtocol` | 一台设备可有 native + 多协议输出：`output_protocol_id/protocol_domain/is_native/priority/available/derived_from`，核心按优先级+可用性选路 |
+| M6 | 协议关联 | `controllers/players/protocol_linking.py` | 把协议播放器「链接」到原生播放器，或包成 Universal Player；协议只是输出的一种 |
+| M7 | Provider 生命周期 | `models/player_provider.py:13-83` | `loaded_in_mass / on_player_enabled / on_player_disabled / discover_players / remove_player / players`；一个 provider 拥有 N 个 player |
+| M8 | Provider 打包 | `providers/airplay/manifest.json` | `type:"player"`、`domain`、`requirements:[pip]`、`builtin:false`、`multi_instance`、mDNS 清单 ⇒ **外置 provider 可独立分发** |
+| M9 | 动态配置 | `models/provider.py:72` | `get_config_entries()` 运行时下发配置项（provider 级；player 级同源） |
+| M10 | 健康/可用 | `models/player.py:544` + `available/needs_setup/setup_reason/poll` | 可用性与「待配置原因」是契约字段，不是日志 |
+
+### 13.2 差距矩阵（现状 → 目标）
+
+| 接口元素 | 本项目现状 | 目标形态（对齐 MA） | 兼容级别 |
+|---|---|---|---|
+| 协议标识 | `RendererProtocol = "airplay"\|"dlna"\|"sendspin"`（`plugins/types.ts:514`），`QueueController` 5 处传字面量（`:474/:518/:546/:2782/:2853`） | `protocol: string` + manifest `protocols[]` 声明；核心经**唯一解析点**读设备档案，不认协议名 | additive（类型放宽，运行时不变） |
+| 能力 | `ProtocolPlayer` 方法全必选，核心按协议分支 | `capabilities: Set<string>` 声明 + 可选运行时覆盖；调用可选操作前查能力位（M1） | additive（缺声明=按现状全支持） |
+| 播放入参 | `playMedia(item, baseUrl, startMs, bridge?, opts{manual,nextSongId,resolvedRowId,speed})`；`bridge.sockets`/`manual`/`nextSongId` 是协议私有语义 | `playMedia(item, ctx: PlayContext)`；协议私有提示进命名空间 `hints.*`（M2/M3） | **breaking（仅插件侧）** |
+| 生命周期 | 仅 `discover / createPlayer / cast(throw) / control?` | 可选 `init/unload/onDeviceEnabled/onDeviceDisabled/removePlayer`，默认 no-op（M7） | additive |
+| 健康 | `isAvailable?()` 一个布尔 | `getHealth(): {available, needsSetup, setupReason, lastError}`（M10） | additive |
+| 设备↔协议 | 设备单一 `protocol` 字段 + `createPlayer` first-match | 设备 `bindings[]`（`priority/available/derivedFrom`），核心选路（M5） | additive（默认由现有字段派生单条） |
+| 外置渲染器 | 沙箱 `CAP_METHODS` 无 `renderer`（`plugins/sandbox.ts:193`）⇒ 结构性不可用 | 二选一：(a) 明确「渲染器仅内置」；(b) `renderer-sidecar/v1` 远程契约（M8） | (a) 文档性；(b) additive 新版本 |
+| 配置 | 静态 `manifest.configSchema` | 可选 `getDeviceConfigSchema(protocol)` + `onConfigChanged`（M9） | additive |
+| 治理 | `scripts/check-renderer-plugin-boundary.mjs` **未被 CI 调用**（`ci.yml`/`package.json`/`check-workflow-paths` 均无引用） | CI 硬拦截 + 反例夹具 | 无行为变化 |
+
+**消费者与影响面**（改契约前必须同时对齐）：3 个内置渲染器插件、`QueueController` 5 个调用点、`/v1/peers/*` 与 `/v1/groups/*` 状态字段、前端设备/插件配置页、3 个守卫脚本（boundary / airplay-bridge / group-invariants）、`tests/player/*` 与 `tests/plugins/renderer*`。
+
+### 13.3 改造点（可独立交付，按此顺序）
+
+#### 5.0 边界守卫接入 CI（治理，零行为风险）
+- 现状：守卫脚本本身硬失败，但**没有任何自动化调用点**，"核心不直连协议目录"靠人工跑。
+- 改法：`ci.yml` 增加 `node backend/scripts/check-renderer-plugin-boundary.mjs`；并加一条反例单测（临时文件从核心 import `services/airplay` 必须失败）。
+- 出口判据：`- [ ] 5.0a` CI 步骤存在且失败时 red；`- [ ] 5.0b` 反例夹具能触发非零退出；`- [ ] 5.0c` 主干全绿。
+- 回滚：删 CI 步骤（纯增量）。
+
+#### 5.1 协议去枚举化（把"协议名"从核心赶出去）
+- 现状：`RendererProtocol` 是封闭联合；`QueueController` 用字面量向门面要工厂。
+- 改法：① `type RendererProtocol = string`，保留 `KNOWN_RENDERER_PROTOCOLS` 常量数组供诊断/测试；② manifest 增 `protocols?: string[]`（缺省由插件 id 推导，三内置插件零改动）；③ 核心新增唯一解析点 `resolveDeviceProtocol(deviceId)`（设备档案 → protocol 字符串），`QueueController` 5 处字面量全部替换；④ 门面只按 manifest `protocols` 初筛。
+- 出口判据：`- [ ] 5.1a` 新增一个 `fixture` 协议插件，核心**零改动**即可被发现/解析/起播（单测）；`- [ ] 5.1b` 核心源码中不再出现 `"airplay"|"dlna"|"sendspin"` 字面量（守卫新增规则）；`- [ ] 5.1c` tsc 0、全量 vitest 绿、三协议真机连播等价。
+- 风险：设备档案协议值非法 → 走 §13.5 的 `UNSUPPORTED_PROTOCOL`，不得静默落回任一插件。
+
+#### 5.2 能力位（核心不再按协议写分支）
+- 改法：定义 `RendererCapability = "play"|"pause"|"seek"|"volume"|"mute"|"next_previous"|"set_members"|"accurate_time"|"gapless"`（开放字符串集合，对齐 M1）；`RendererPlugin.capabilities?: RendererCapability[]` + 可选 `getCapabilities(deviceId)`；核心在**调用可选操作前**查能力位；`/v1/peers/:id/status` 暴露 `capabilities`。
+- 出口判据：`- [ ] 5.2a` 三协议「声明 vs 实测」矩阵一致（扩展现有 3 例单测为矩阵）；`- [ ] 5.2b` 未声明时行为与今天逐项等价（缺省全支持）；`- [ ] 5.2c` 前端只按能力位渲染按钮，不再按协议名判断。
+- 风险：声明与实际不符会造成「按钮可点但失败」→ 矩阵用例必须来自真机采样，不允许手填。
+
+#### 5.3 播放上下文 v2（消除私有逃生门）
+- 现状：`playMedia` 6 个参数，`bridge.sockets`、`opts.manual/nextSongId/resolvedRowId` 只有 sendspin/AirPlay 消费，新协议只能"忽略"。
+- 改法：`PLAYER_CONTRACT_VERSION = 2`，签名收敛为 `playMedia(item, ctx: PlayContext)`：`ctx = {baseUrl, startMs?, speed?, bridge?, flags:{manual?}, hints?: Record<string, unknown>}`；协议私有提示进命名空间（`hints.sendspin.nextSongId` 等），并把核心里的 sendspin 分支判断迁入插件；保留 v1 适配器 `adaptV1()` 一个 minor。
+- 出口判据：`- [ ] 5.3a` 三协议在 v2 下 §4 判据复跑全绿；`- [ ] 5.3b` 核心源码禁止出现 `hints.sendspin`/`hints.airplay` 字面量（新守卫规则）；`- [ ] 5.3c` v1 适配器用例通过；`- [ ] 5.3d` 240 五目标自然连播 + 加脱组矩阵无回退。
+- 风险：`hints` 变成垃圾桶 → 规则：hints 只能由**协议插件自己的**上游（组泵/队列）写入，核心不得读取。
+
+#### 5.4 生命周期与健康（provider 拥有 player）
+- 改法：`RendererPlugin` 增可选 `init/unload/onDeviceEnabled/onDeviceDisabled/removePlayer`；player 级可选 `getHealth()` 返回 `{available, needsSetup, setupReason, lastError}`；核心聚合进 `/v1/peers` 与插件健康页。默认 no-op（现状零变化）。
+- 出口判据：`- [ ] 5.4a` 未实现插件：五个钩子调用次数 = 0（spy 断言）；`- [ ] 5.4b` 实现插件：设备启用/停用/删除三条路径各触发一次；`- [ ] 5.4c` `needsSetup` 能解释"设备在但不出声"（真机拔网线复现）。
+- 风险：与既有 `startAirPlayService/stopSendspinService` 双触发 → 本阶段**只加钩子不搬服务**。
+
+#### 5.5 设备多协议绑定（一设备多出口，对齐 OutputProtocol）
+- 改法：设备档案增 `bindings?: [{protocol, priority, options?}]`，缺省由现有 `protocol` 派生单条 `{priority:100}`；核心解析顺序 = 可用性 → priority → 注册顺序；解析结果落一条 `renderer resolve` 日志。
+- 出口判据：`- [ ] 5.5a` 单协议设备行为逐项等价；`- [ ] 5.5b` 双协议 fixture 在首选不可用时回退（单测）；`- [ ] 5.5c` 真机一台设备（airplay+dlna 同机）断网回退可听。
+- 回滚：开关 `MF_RENDERER_MULTI_BINDING=0`（默认 0 起步，验完再翻 1）。
+
+#### 5.6 外置渲染器（需裁决：写死"仅内置"还是做 sidecar）
+- (a) **明确仅内置**：SPEC/`PLUGIN_DEV.md` 写死「渲染器插件仅内置、不可从市场安装」，市场页渲染器安装入口显式禁用；守卫断言 `CAP_METHODS` 不含 `renderer` 是有意为之。成本最低，消除"假通用"。
+- (b) **`renderer-sidecar/v1`**：子进程或 HTTP sidecar，核心侧 `RemoteProtocolPlayer implements ProtocolPlayer`。命令面 `bind/play/stop/pause/resume/seek/volume/poll/health`；音频面 `unix socket PCM push`（或 HTTP chunked）；事件面 `state/progress/error`；每条命令带 `request_id` 做幂等去重；能力表由 `bind` 返回。
+- 出口判据（若选 b）：`- [ ] 5.6a` 第三方 sidecar 示例跑通一台真机；`- [ ] 5.6b` 契约一致性测试（bind→play→seek→health）；`- [ ] 5.6c` 断线/半开/重启三类故障不产生僵尸会话；`- [ ] 5.6d` 内置三协议改走同一契约后行为等价（可后置一轮）。
+- 建议：**先做 (a)（本周）**，把 (b) 作为独立立项，不在本阶段预留空抽象。
+
+#### 5.7 设备级配置（插件自治）
+- 改法：可选 `getDeviceConfigSchema(protocol)`（核心落现有 settings 表，UI 动态渲染）+ `onConfigChanged(deviceId, cfg)`；未实现时零字段、零变化。
+- 出口判据：`- [ ] 5.7a` 未实现插件 UI 无新增字段；`- [ ] 5.7b` 实现插件配置落库并即时生效（无需重启）；`- [ ] 5.7c` 配置校验失败返回结构化错误（不写库）。
+
+### 13.4 插件契约版本与兼容矩阵
+
+| 元素 | v1（现网） | v2（阶段 5.3 起） | 兼容级别 | 迁移手段 |
+|---|---|---|---|---|
+| `createPlayer` | `(protocol: RendererProtocol, deviceId) => ProtocolPlayer\|null` | 不变（协议放宽为 string） | additive | 无感 |
+| 播放入口 | `playMedia(item, baseUrl, startMs?, bridge?, opts?)` | `playMedia(item, ctx: PlayContext)` | **breaking** | `adaptV1()` 垫片保留 1 个 minor |
+| 能力 | 无声明（全支持） | `capabilities[]` + `getCapabilities?()` | additive | 缺省全支持 |
+| 生命周期 | 无 | `init/unload/onDevice*/removePlayer` 可选 | additive | 默认 no-op |
+| 健康 | `isAvailable?()` | `getHealth()` 结构化 | additive | 未实现回落 `isAvailable` |
+| 配置 | 静态 `configSchema` | `getDeviceConfigSchema?()` | additive | 未实现走静态 |
+| 外置 | 不支持 | sidecar（未裁决） | additive | 新版本号，不混入 v2 |
+
+**演进规则**：v2 只增不删；删除 v1 必须先在 `RELEASE_POLICY` 通告一个 release，并有使用面遥测（插件数 / 调用点扫描）。**契约元素一旦发布即视为启动承诺**，语义变更只能新增字段/版本，不得复用旧字段。
+
+### 13.5 错误模型与可观测性
+
+- 统一错误对象：`RendererResolveError{ code, retryable, pluginId?, protocol, deviceId, requestId }`，`code ∈ {NO_BINDING, OFFLINE, PLUGIN_NOT_LOADED, UNSUPPORTED_PROTOCOL, PLUGIN_ERROR}`。
+- 分级语义：解析阶段拿到 `null` → 节流 warn + 跳过（可重试）；组播成员加入拿到 `null` → throw（不可静默）；播放中解析失败 → 统一错误码给 API（UI 区分"设备离线"与"协议未加载"）。
+- 日志（迁移期开关）：`renderer resolve protocol=... deviceId=... plugin=... binding=... ms=...`，失败附 `code`。
+- 出口判据：`- [ ] 5.5d` API 返回 machine code 且不破坏现有 message；`- [ ] 5.5e` 真机三类失败各有一条可定位日志。
+
+### 13.6 验收、开关与回滚
+
+- 开关：`MF_RENDERER_CONTRACT=v1|v2`（默认 v2，一版后删除）、`MF_RENDERER_MULTI_BINDING=0|1`（默认 0）。
+- 每步独立提交、独立可回滚；契约回退只需 `MF_RENDERER_CONTRACT=v1`，不必重建镜像（沿用热补丁流程）。
+- 阶段 5 出口 = 「tsc 0 + 全量守卫 + 全量 vitest + 240 五目标自然连播 + 纯/混合组加脱组矩阵 + 流转 4 例」全绿，且**新增协议 fixture 零核心改动**。
+
+### 13.7 明确不做
+
+- 不把队列/进度/hold 搬进插件（MA 同样由核心控制器集中管队列；搬走会破坏 §0.2）。
+- 不在本阶段重写协议实现本体（只做接口与归属）。
+- 不引入 `allowDisable`（渲染器一律常驻，结论未变）。
+- 不在 sidecar 落地前发布 `RemoteProtocolPlayer` 等空抽象（避免第二种"假通用"）。
+
+## 14. 验证项目全表（补齐此前缺失项，2026-11-28）
+
+> **用途**：阶段 5 及以后每一轮改动的**完整验证清单**。标记来源：`[缺]` = 此前流程未覆盖或口径错误；`[已踩]` = 已经踩过的坑。
+> **硬规则**：判定必须基于子进程 tick / 抓包等**实测数据**，不得只用 `/status` 的 `position`（用户 2026-11-27 明确要求）；
+> 指标缺失一律判 `INVALID`，不得判 `PASS`（fail-closed）。
+
+### 14.1 三层位置口径（最关键的一次认知纠正）
+
+| 层次 | 来源 | 正确用途 | 禁止用途 |
+|---|---|---|---|
+| **组位置** | 组队列时钟（`/v1/peers/group:*/status`） | 队列推进、曲目进度 | 纯桥组的"成员同步"基准（成员是会话时钟，基线即差 5.3s） |
+| **成员位置** | 成员 `/status`（会话时钟；回组新建会话后从 0 起算） | **成员两两之间**的同步比较 | 与组位置直接相减 |
+| **内容位置** | 子进程 tick：`firstCandVsNow/cursorVsNow`、backfill 帧 `ts`、`anchorUs` | 判定"是否在播同一段内容"、是否整队丢帧 | 不能替代成员位置做 UI 展示口径 |
+
+> 2026-11-28 实证：纯 AP 组基线（未做任何加/脱组）成员位置就比组位置差 **5.3s**；用组位置判定会得到假 FAIL。
+
+### 14.2 缺失项清单（V01–V24）
+
+| ID | 验证项 | 此前缺失 / 踩坑 | 判据（可执行） | 归属 |
+|---|---|---|---|---|
+| V01 | 位置口径分层 `[已踩]` | 用 group position 当同步基准 → 纯组假 FAIL | 同步结论只用「成员两两位置」或「内容位置」；用例里禁止 group−member 断言 | 全部 |
+| V02 | 双组覆盖 `[缺]` | 只在混合组做过，纯组未做 | 纯 AP 组（2 成员）与混合组（3 成员）**各自**逐成员 PASS | 5.0 |
+| V03 | 串行纪律 `[已踩]` | 设备同属多组，并行会互相抢占 | 同一时刻只跑一个 case；case 前后成员快照一致 | 全部 |
+| V04 | 判定脚本自检 `[已踩]` | `case_metrics` 恒 0（`--until` 用了空格格式）仍输出 PASS = 假通过 | 内置坏样本注入用例必须判 FAIL；`ticks=0` 或指标缺失 ⇒ `INVALID` | 5.0 |
+| V05 | 时间窗与时区 `[已踩]` | `docker logs --since/--until` 必须是 RFC3339 UTC；容器重启计数器归零 | 窗口对齐 case `t0/t1`；delta 为负时按"会话重建"解释并记入证据 | 全部 |
+| V06 | 日志抓取完整性 `[已踩]` | DEBUG `realigned` 会淹没 tick（tail 被挤空） | 只抓 `tick/有动作 realigned/ring-diag/selfheal/rebase/backfill`；tick 数 ≥ 窗口 ÷ 0.25s × 80% | 全部 |
+| V07 | 回组硬指标 `[缺]` | 只看位置，没看丢帧/静音/队列 | `droppedFrames` Δ≤5000、负漂移且 drop>0 次数=0、`silenceChunks` Δ=0、`inQueueMs` ∈[1500,3500]、`late` 不增、`dropOld` 不增、自愈/rebase=0 | 5.0 |
+| V08 | 整队丢弃检测 `[已踩]` | 修复前 198570 帧≈4.5s、`realigned -1.7s`，位置仍可能"看起来对" | backlog 骤降 + `late` 增量超阈值 ⇒ FAIL（**不看位置**） | 5.0 |
+| V09 | 成员补偿关系 `[缺]` | 未验证回组是否改变成员间补偿 | 回组前后 `deltaUs` 差保持（如 iEAST = HiVi − 0.5s），偏差 ≤200ms | 5.0 |
+| V10 | 曲末/切歌边界 `[缺]` | 回组后未跨越自然曲末 | 回组后至少一次自然曲末：`zeroGap`/`coverage` PASS；新代际 `inserted/dropped/silence=0` | 5.3 |
+| V11 | 离线/重启回组 `[缺]` | 未验证离线恢复、容器/子进程重启（gen=0）回组 | 三类会话重建首 5s 指标达标且无整队丢帧 | 5.4 |
+| V12 | 多协议混组路由 `[缺]` | 未校验回组后桥路由是否串协议 | airplay/sendspin 同组成员各自 tick 正常、无跨协议流 | 5.5 |
+| V13 | 新协议 fixture `[缺]` | 从未验证"新增协议核心零改动" | fixture 插件 + 核心 0 改动即可发现/解析/起播 | 5.1 |
+| V14 | 能力位矩阵 `[缺]` | 无能力声明，核心按协议写分支 | 「声明 vs 真机实测」逐项一致；未声明=全支持（与今天等价） | 5.2 |
+| V15 | v1 契约垫片 `[缺]` | 无历史实现回归样本 | 未改写的 v1 插件实现全部用例通过 | 5.3 |
+| V16 | 外置渲染器负例 `[缺]` | 市场"能装不能跑"，无任何断言 | 5.6(a)：安装入口显式禁用 + 守卫断言；5.6(b)：sidecar 断线/半开/重启三故障用例 | 5.6 |
+| V17 | 守卫负例 `[缺]` | 守卫脚本从未被验证"会失败" | 故意违规文件必须 red；修回后 green | 5.0 |
+| V18 | 生命周期钩子计数 `[缺]` | 无钩子，无法确认零副作用 | 未实现插件钩子调用 0 次；启用/停用/删除各触发 1 次 | 5.4 |
+| V19 | 健康/待配置 `[缺]` | 只有 `isAvailable`，解释不了"在线但不出声" | `needsSetup/setupReason` 能区分离线 / 未配置 / 未加载 | 5.4 |
+| V20 | 多协议绑定回退 `[缺]` | 未做过 | 首选不可用时回退可听；单协议设备行为等价 | 5.5 |
+| V21 | 设备级配置 `[缺]` | 只有静态 `configSchema` | 未实现=UI 零新增字段；实现=落库即时生效、校验失败不写库 | 5.7 |
+| V22 | 部署一致性 `[已踩]` | 热补丁后未固化校验 | 容器内代码 grep 标记命中 + `/ping` 版本/commit + 镜像 digest 记录 | 全部 |
+| V23 | 采样资产前置 `[已踩]` | 曾因采样服务/脚本失效导致整段数据缺失 | 采样服务存活、数据新鲜度 <10s、三路 pcap 在跑、组成员快照落盘 | 全部 |
+| V24 | API 路径正确性 `[已踩]` | 成员变更路径带 `group:` 前缀静默无效，曾致实验假通过 | 变更后**回读**组成员确认生效（不能只看 200） | 全部 |
+
+### 14.3 分层必跑回归（按改动面取最小集）
+
+| 层 | 触发条件 | 必跑项 |
+|---|---|---|
+| **L0 静态** | 每次提交 | `tsc --noEmit`=0；全量守卫（含 V17 负例）；相关单测 |
+| **L1 契约** | 改 `RendererPlugin` / `ProtocolPlayer` / manifest | V13、V14、V15、V04 |
+| **L2 单目标真机** | 改桥投递 / 回填 / 游标 / 锚点 | 单成员回组 + V07、V08、V09、V22、V23 |
+| **L3 矩阵真机** | 发版前 | 纯组×2 + 混合组×3（串行，V02/V03）+ 自然连播 5 首 + 流转 4 例 + V10 |
+| **L4 故障** | 放量前 / 涉及重连与多绑定 | V11、V12、V20 + 三路抓包比对 |
+
+### 14.4 证据与判废规则
+
+- 每项必须按 §0.0.1 的证据格式落行：`（✅ YYYY-MM-DD HH:MM · 证据：[ai] <命令/输出/采样文件>）`。
+- `INVALID ≠ PASS`：抓不到 tick、字段缺失、窗口不完整、脚本报 0 指标，一律判废重跑。
+- 计数器为负（会话重建）必须在证据里说明重建时刻，并改用**窗口内首个 tick** 作为基线。
+- 出现 FAIL 时先保回滚点（镜像 digest / 上一版 `dist`），再定位；不得为过关调低判据（§0.0.1 第 7 条）。
+
+
+
+## 15. 测试执行计划（可照抄，2026-11-28）
+
+> 与 §14 的关系：§14 定义「验什么」，本节定义「怎么跑、按什么顺序、数据怎么取、失败怎么处置」。
+> 纪律：同一时刻只跑一个 case（V03）；判定只认 tick / 抓包实测（V01）；指标缺失 = `INVALID`（V04）。
+
+### 15.0 变量与资产（当前实验环境取值，换环境先改此表）
+
+| 变量 | 取值 / 说明 |
+|---|---|
+| `H230` | 构建机；仓库 `/workspace/MusicFlow`（`main`），构建 `backend && npx tsc --noEmit && npm run build` |
+| `H240` | 播放器宿主机 `192.168.10.240:35320`（从 `H230` 用密钥 `-i /root/mykey/mykey` 跳入；**不写任何口令**） |
+| `C` | 容器名 `musicflow`；健康 `curl -s http://127.0.0.1:46400/ping` |
+| `G_MIXED` | 混合组（AirPlay + Sendspin）`group:12a04c2c-2128-4553-b092-ee90b650a3cb` |
+| `G_PURE` | 纯 AirPlay 组 `group:1da9fa75-f25d-4c28-a304-01fc4c3a8a1c` |
+| `DEV_HIVI` | `airplay:00226CFFA0C0`（成员补偿 0） |
+| `DEV_IEAST` | `airplay:00226CBB7334`（成员补偿 −500ms） |
+| `DEV_ESP32` | `sendspin:uS9L…`（全名见 `/v1/peers`；其位置读数天然落后 ≈2.05s，属既有基线） |
+| 脚本 | `mf_transfer_matrix.py`（login/api/read_pos/bootstrap/do_stop/do_transfer）、`mf_joinleave_matrix.py`（双组逐成员）、`single_rejoin.py`（单用例） |
+| 常驻采样 | `mf-base / mf-status / mf-watch / mf-test5`；三路 pcap `mf-pcap-ap|ieast|ss`；数据 `/root/mf_watch/` |
+| 写入目录 | 240 `/root/mf_watch/`（`joinleave_*.jsonl`、`status-*.jsonl`、`archive/<date>/`） |
+
+### 15.1 S00 执行前检查（门禁，7/7 才允许开跑）
+
+| # | 检查项 | 命令（在 `H240` 上） | 判据 |
+|---|---|---|---|
+| 1 | 部署一致性 | `docker exec musicflow grep -c "<本次代码标记>" /app/backend/dist/...` + `curl -s 127.0.0.1:46400/ping` | 标记命中且 `/ping` 版本/commit 与 `H230` HEAD 一致（V22） |
+| 2 | 采样服务 | `docker ps \| grep -E 'mf-(base\|status\|watch\|test5)'` | 4 个全在 |
+| 3 | pcap | `docker ps \| grep -E 'mf-pcap-(ap\|ieast\|ss)'` | 3 路全在 |
+| 4 | 数据新鲜度 | `tail -1 /root/mf_watch/status-*.jsonl` 的时间戳 | 与当前 UTC 差 < 10s（V23） |
+| 5 | 设备在线 | `curl /v1/peers` | 三个目标 `available=true` |
+| 6 | 组成员快照 | `curl /v1/groups` → `members-before.json` | 落盘成功，记录成员列表（V03） |
+| 7 | 串行锁 | `pgrep -af 'mf_joinleave\|single_rejoin\|mf_transfer'` | 无残留进程 |
+
+任一失败 ⇒ 记 `BLOCKED`，**不得开跑**。
+
+### 15.2 用例剧本（S01–S12，按此顺序；括号内为 §14 覆盖项）
+
+| ID | 层 | 目的 | 执行入口 | 主要判据 |
+|---|---|---|---|---|
+| S01 | L0 | 静态与单测基线 | `tsc --noEmit`；CI 守卫清单（含 `check-renderer-plugin-boundary.mjs`）；`npx vitest run tests/player tests/plugins tests/sendspin`；发版前再跑全量 | tsc=0 / 守卫全绿 / 0 fail（用例数以实测为准） |
+| S02 | L1 | 契约 fixture / 能力位 / v1 垫片 | 新增用例：`fixture` 协议插件、能力矩阵、`adaptV1()` | V13/V14/V15 |
+| S03 | L2 | 单成员回组（iEAST × 混合组） | `python3 -u /root/mf_watch/single_rejoin.py` | V07/V08/V09 |
+| S04 | L3 | 纯 AP 组逐成员加/脱组 | `python3 -u /root/mf_watch/mf_joinleave_matrix.py`（脚本内部串行） | V02/V07/V08 + 两两位置 |
+| S05 | L3 | 混合组逐成员加/脱组 | 同上 | 同上 |
+| S06 | L3 | 回组后跨自然曲末 | 回组后不干预，等自然曲末；抓 `trackJoin`/`coverage` | V10 |
+| S07 | L4 | 离线 / 容器重启 / 子进程重建后回组 | 见 15.2.3 | V11 |
+| S08 | L4 | 多协议混组路由 + 多绑定回退 | 见 15.2.4 | V12/V20 |
+| S09 | L1/L4 | 外置渲染器负例（或 sidecar 三故障） | 见 15.2.5 | V16 |
+| S10 | L0 | 守卫负例（必须先红后绿） | 见 15.2.6 | V17 |
+| S11 | L1/L2 | 生命周期钩子计数 + 健康字段 | 见 15.2.7 | V18/V19 |
+| S12 | L0/L3 | 部署一致性与回滚演练 | 见 15.2.8 | V22 + §9 |
+
+#### 15.2.1 S03 单成员回组（最快拿到音频证据）
+1. S00 通过；确认 `G_MIXED` 正在播（不是暂停）。
+2. 跑 `single_rejoin.py`：起播 → 采样基线 3 次 → 摘除 iEAST 5s → 回组 → 每 2s 采样 7 次，输出一份 `joinleave_*.jsonl`。
+3. 用 §15.3 的日志模板复核 tick（脚本指标必须非空；为空直接 `INVALID`）。
+4. 判定：`droppedFrames Δ≤5000`、负漂移 `drop>0` 次数=0、`silenceChunks Δ=0`、`inQueueMs∈[1500,3500]`、`late` 不增、`selfheal/rebase=0`，成员两两位置差 ≤ max(1.2s, 基线+0.5s)。
+
+#### 15.2.2 S04/S05 双组矩阵（必须串行）
+1. 前置：落盘 `members-before.json`；确认没有其它 case 在跑。
+2. 执行矩阵脚本；脚本逐组逐成员「起播→摘除→回组→采样」，**不要并行、不要手动操作 App**。
+3. 每个 case 结束立刻取该 case 的 `t0/t1` 抓 tick（§15.3），与 jsonl 里的指标互证。
+4. 收尾：还原成员关系，并 `curl /v1/groups` **回读**确认（V24）。
+5. 判定：纯组与混合组各自全部 PASS；任一组 FAIL 即停，不许继续跑下一组。
+
+#### 15.2.3 S07 故障回组（三类会话重建）
+| 子项 | 操作 | 判据 |
+|---|---|---|
+| S07a 离线恢复 | 摘除成员 → 设备离线 5s → 恢复 → 回组 | 回组首 5s 无整队丢帧，队列爬升到目标 |
+| S07b 容器重启 | `docker restart musicflow` → 等 `/ping` → 组起播 → 成员回组 | 同上；且旧会话计数器归零需在证据中注明 |
+| S07c 子进程重建 | 触发桥会话重建（切代际或重启桥进程）→ 回组 | 新会话 `gen=0` 时锚点/游标仍正确（backfill 尾起投） |
+
+#### 15.2.4 S08 多协议路由与回退
+1. 混合组内 airplay + sendspin 成员同时在线播放，各抓 10 个 tick：`dev`/`inQueueMs`/`deltaUs`/`last` 正常，且**无跨协议流**（airplay 桥不应收到 sendspin 的时间线，反之亦然）。
+2. 若 5.5 已实现：断开首选绑定协议（如拔网线/停服务），验证回退到次选且可听；恢复后不重复起播。
+
+#### 15.2.5 S09 外置渲染器负例
+- 5.6(a)：断言市场页 renderer 安装入口禁用；守卫断言 `CAP_METHODS` 不含 `renderer` 属**有意**；直接构造一个外置 renderer 包，必须得到明确的「不支持」错误而不是静默无设备。
+- 5.6(b)：sidecar 三条故障（断线、半开、进程重启）各跑一次，均不得留下僵尸会话或重复播放。
+
+#### 15.2.6 S10 守卫负例（证明守卫真的会失败）
+1. 在核心目录临时新增 `import ... from "../services/airplay/..."`。
+2. 跑 `node backend/scripts/check-renderer-plugin-boundary.mjs`，必须**非零退出**并指名文件。
+3. 删除临时文件，再跑必须绿。把两次输出都贴进证据。
+
+#### 15.2.7 S11 生命周期与健康
+- 未实现钩子的插件：五个钩子调用次数 = 0（spy 断言）。
+- 实现钩子的插件：设备启用 / 停用 / 删除各触发 1 次。
+- 真机拔网线：`needsSetup/setupReason` 能区分离线、未配置、未加载三种情况。
+
+#### 15.2.8 S12 部署一致性与回滚
+1. `H230` 构建后热补丁 → `docker exec grep` 标记命中 + `/ping` 版本/commit 正确。
+2. 记录镜像 digest 与 compose 备份路径。
+3. 演练：用上一版 `dist` 热补丁回退 → `/ping` 恢复旧 commit → 再打到新版；全过程组播放不中断或可快速恢复。
+
+### 15.3 采样与判定命令模板（`H240`）
+
+```bash
+# 1) 窗口边界（必须 RFC3339；空格格式会被 docker 静默拒绝）
+T0=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+# ... 执行 case ...
+T1=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+# 2) 抓桥侧关键行（只抓需要的，避免被 DEBUG realigned 淹没）
+docker logs -t --since "$T0" --until "$T1" musicflow 2>&1 \
+ | grep -a "$DEV" \
+ | grep -aE '"ev":"tick"|realigned: device=[^ ]+ drift=-?[0-9]+ frames .*drop=[1-9]|ring-diag|late-selfheal|pacing rebase|bridge-backfill|bridge-servo' \
+ | tail -600
+
+# 3) tick 完整性自检（不足 80% 直接判 INVALID）
+#    期望条数 ≈ (T1-T0)/0.25s × 0.8
+
+# 4) 取窗口内首/末 tick 的 droppedFrames / silenceChunks 计算 delta
+#    计数为负 ⇒ 会话重建，改用窗口内首 tick 为基线并在证据注明
+```
+
+- 判定脚本：`mf_joinleave_matrix.py` 的 `case_metrics` 必须返回非空且字段齐全；**先用坏样本验证它会判 FAIL**（V04），再用于真机。
+- 抓包：三路 pcap 与 tick 使用同一 `T0/T1`，用于复核「桥确实在发 PCM」而不只是状态正确。
+
+### 15.4 记录格式与判废
+
+- 通过：`（✅ 2026-11-28 03:11 · 证据：[ai] joinleave_20261128_030311.jsonl · pairMax=0.0 / inQ=2600 / dropΔ=0 / silenceΔ=0 / selfheal=0）`
+- 失败：`（❌ 2026-11-28 03:11 · 证据：[ai] <jsonl + tick 片段> · 处置：回滚到 <digest/dist>，已定位 <项>）`
+- 判废：`ticks=0`、字段缺失、窗口不完整、脚本指标为 0/None、抓包与 tick 时间窗不一致 —— 全部 `INVALID`，重跑而不是"通过"。
+
+### 15.5 串行、清理与回滚
+
+- **串行**：同一时刻只允许一个 case；`pgrep -af 'mf_joinleave|single_rejoin|mf_transfer'` 必须为空；运行期间禁止手动播放/切歌/改组。
+- **清理**：① 还原组成员并回读；② 停止本轮的临时采样（常驻服务不动）；③ 归档 `joinleave_*.jsonl` + tick 片段 + pcap 到 `/root/mf_watch/archive/<date>/`。
+- **回滚**：任一 L2+ FAIL → 先回退（上一版 `dist` 热补丁或 `MF_RENDERER_CONTRACT=v1`），再定位；**不得带着 FAIL 继续跑后续 case**。
+- **环境变更**（换设备/MAC/组 ID）⇒ 先更新 §15.0 变量表，再重跑 S00 门禁。
 
 ## 附录 C 审核更正记录（2026-11-27）
 
