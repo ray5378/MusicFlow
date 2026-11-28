@@ -531,6 +531,15 @@ app.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
           //    早读=唯一救命值(源端已被互斥停掉,晚读恒 0)。
           : (sameDevice ? srcPosEarly : null))
       : null;
+    // ★ 组目标:起播就带 startMs,不要「先 0 秒起播、再 seek」。
+    //   组起播后的 seek 会触发桥的 newgen-skip/re-anchor,240 抓包实测在起播瞬间
+    //   丢 0.45s 音频(HiVi/iEAST 同时出现 tsJump=1、gap>200ms=1),用户听到「断一下」。
+    //   带 startMs 起播由泵/桥直接按内容位置锚定,无二次换代。
+    //   兜底:落后 >3s 才补一次 seek(仍受 V25 校验)。
+    const groupStartPos =
+      !borrow.armed && parsedTo.kind === "group" && srcPosEarly !== null && srcPosEarly > 3
+        ? srcPosEarly
+        : null;
     // ★ AirPlay 目标 + 带起点:整曲预取**与建会话并行**(2026-11-10)。
     //   过去是「先 await 预取落地(上限 8s,实测 1427ms)再 cast」—— 这段串行白等在
     //   HTTP 关键路径上;而预取真正服务的对象是**建桥之后的回环拉流**:
@@ -557,7 +566,9 @@ app.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
     try {
       startedIdx = await getQueueManager().playFrom(
         parsedTo.id, items, start, getDlnaBaseUrl(c), undefined,
-        inCastPos !== null && inCastPos > 0 ? Math.round(inCastPos * 1000) : undefined,
+        inCastPos !== null && inCastPos > 0
+          ? Math.round(inCastPos * 1000)
+          : (groupStartPos !== null ? Math.round(groupStartPos * 1000) : undefined),
         c.get("user")?.id,
       );
     } catch (e: any) { return c.json(apiInternalError(e), 500); }
@@ -588,7 +599,39 @@ app.post("/v1/peers/:peerId/queue/transfer-from", async (c) => {
       const late = askPosition
         ?? ((borrowTouched || targetOwnsSource) ? null : await readPeerPositionSeconds(fromPeerId));
       const pos = late !== null && late > 0 ? late : srcPosEarly;
-      if (pos !== null && pos > 0 && await seekPeerToSeconds(toPeerId, pos)) landedPosition = pos;
+      if (pos !== null && pos > 0) {
+        if (groupStartPos !== null) {
+          // 起播已带 startMs：不再二次 seek（二次 seek 正是 0.45s 跳音的来源）。
+          // 读回确认真的落位；只有明显没落位（>3s）才补一次 seek 兜底。
+          await new Promise((r) => setTimeout(r, 700));
+          const back = await readPeerPositionSeconds(toPeerId);
+          if (back === null || Math.abs(back - pos) > 3) {
+            const ok2 = await seekPeerToSeconds(toPeerId, pos);
+            if (ok2) landedPosition = pos;
+            log.warn(`[transfer] 组目标 startMs 未落位,补 seek: expect=${pos.toFixed(2)} back=${back}`);
+          } else {
+            landedPosition = pos;
+          }
+        } else {
+        let ok = await seekPeerToSeconds(toPeerId, pos);
+        // 组目标（sendspin 领跑）偶发把 seek 丢在泵启动之前：刚起播时 transport('seek')
+        // 返回成功、但泵尚未消费，位置仍停在 0（240 实测 pure→mixed 方向间歇复现）。
+        // 读回校验 + 一次补 seek，把「声称对齐」变成「确认对齐」。
+        // 容差 3s：轮询 position 有 0.5~1s 滞后，不能把「已到 46」误判成失败。
+        if (ok && parsedTo.kind === "group") {
+          const back1 = await readPeerPositionSeconds(toPeerId);
+          if (back1 === null || Math.abs(back1 - pos) > 3) {
+            await new Promise((r) => setTimeout(r, 500));
+            const back2 = await readPeerPositionSeconds(toPeerId);
+            if (back2 === null || Math.abs(back2 - pos) > 3) {
+              ok = await seekPeerToSeconds(toPeerId, pos);
+              log.info(`[transfer] 组目标落点补 seek: expect=${pos.toFixed(2)} back=${back2}`);
+            }
+          }
+        }
+        if (ok) landedPosition = pos;
+        }
+      }
     }
   } else {
     // local 目标:起点必须**随起播**交出去(见 seekPeerToSeconds 上方注释)。
