@@ -421,10 +421,30 @@ export async function getOnlineAirplayIdsTolerant(groupId: string): Promise<stri
     online = strictOnline();
   }
   const now = Date.now();
+  // 2026-11-28 240 实测:HiVi 空闲 2h20m 后停止应答 mDNS(lastSeen 超窗)被剔除,
+  // 整场 5 首静默。对「有缓存 host」的超窗成员并行做一次只读 OPTIONS(1.2s),
+  // 应答即纳入;探测失败仍按原逻辑剔除,不拖慢起播。
+  const probeTargets = ids.filter((id) => {
+    if (online.includes(id)) return false;
+    if (isAirPlayDeviceDisabled(id)) return false;
+    if (isBridgeOwned(id) || hasActiveSession(id)) return false;
+    const dev = getAirPlayDevice(id);
+    return !!dev && !!dev.host && !!dev.port && now - dev.lastSeen >= AIRPLAY_STALE_TOLERANT_MS;
+  });
+  const probedAlive = new Set<string>();
+  if (probeTargets.length > 0) {
+    const { probeAirplayAlive } = await import("../airplay/raopProbe.js");
+    const results = await Promise.all(probeTargets.map(async (id) => [id, await probeAirplayAlive(id)] as const));
+    for (const [id, ok] of results) {
+      if (ok) probedAlive.add(id);
+    }
+    log.info(`[group][route] stale 探活 ${probeTargets.length} 台: ${results.map(([id, ok]) => `${id}=${ok ? "alive" : "dead"}`).join(" ")}`);
+  }
   return ids.filter((id) => {
     if (online.includes(id)) return true;
     if (isAirPlayDeviceDisabled(id)) return false;
     if (isBridgeOwned(id) || hasActiveSession(id)) return true; // F4 豁免
+    if (probedAlive.has(id)) return true;
     const dev = getAirPlayDevice(id);
     if (!dev) return false;
     return now - dev.lastSeen < AIRPLAY_STALE_TOLERANT_MS;

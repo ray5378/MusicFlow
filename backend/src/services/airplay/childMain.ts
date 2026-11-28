@@ -12,7 +12,7 @@
 import { ChildRpcHost } from "../rendererHost/childHost.js";
 import { AirplaySessionRuntime } from "./sessionRuntime.js";
 import { BridgeSessionManager, setBridgeStatsSink, setPaceBumpSink } from "./bridgeSession.js";
-import { raopTeardownProbe } from "./raop.js";
+import { raopOptionsProbe, raopTeardownProbe } from "./raop.js";
 import { cleanupStaleBridgeSockets } from "./bridgeChannel.js";
 import type {
   AirplayChildToParent,
@@ -232,6 +232,11 @@ export class AirplayChildController extends ChildRpcHost<AirplayChildToParent, A
           String(p?.deviceId ?? ""),
           String(p?.reason ?? "late-selfheal-light-restart"),
         );
+      }
+      case "raopOptionsProbe": {
+        // 组起播在线判定:只读 OPTIONS(绝不 TEARDOWN),应答即视为可达。
+        // 用于 lastSeen 超容错窗但设备只是"idle 期不应答 mDNS"的接收端。
+        return raopOptionsProbe(String(p.host), Number(p.port), Number(p.timeoutMs) > 0 ? Number(p.timeoutMs) : 1_200);
       }
       case "raopProbe": {
         // S1/S3:TEARDOWN 探测(S1 重试前置 / S3 boot clear-probe)。host/port 由

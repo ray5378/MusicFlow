@@ -72,6 +72,30 @@ export async function raopProbeDevice(deviceId: string, timeoutMs = 6_000): Prom
   }
 }
 
+/** 组起播在线判定用:只读 OPTIONS 探测(1.2s 默认)。绝不 TEARDOWN。
+ *  背景:HiVi/MUZO 空闲期停止应答 mDNS,lastSeen 超 10min 会被误判离线而整场静默;
+ *  有缓存 host 的设备在此做一次轻量探活,应答即纳入路由。 */
+export async function probeAirplayAlive(deviceId: string, timeoutMs = 1_200): Promise<boolean> {
+  const dev = getAirPlayDevice(deviceId);
+  if (!dev || !dev.host || !dev.port) return false;
+  if (isAirPlayForkMode() && !airplaySupervisor.isRunning()) {
+    try {
+      await ensureAirplayHost();
+    } catch {
+      return false;
+    }
+  }
+  if (!airplaySupervisor.isRunning()) return false;
+  try {
+    const r = await airplaySupervisor.rpc<{ reachable: boolean; status: number | null }>(
+      "raopOptionsProbe", { host: dev.host, port: dev.port, timeoutMs },
+    );
+    return !!r?.reachable;
+  } catch {
+    return false;
+  }
+}
+
 export interface BridgePrepareRetryDeps {
   /** 首次失败的错误消息(判据入口;非设备类失败时调用方应直接跳过本函数)。 */
   reason: string;
