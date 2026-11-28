@@ -1644,7 +1644,7 @@ docker logs -t --since "$T0" --until "$T1" musicflow 2>&1 \
 | S03 单成员回组（混合组 × iEAST） | ✅ PASS | 02:42:42Z–02:42:56Z：ticks=6，inQueueMs≤2550，dropΔ=0，silenceΔ=0，late 恒 7，selfheal=0，rebase=0，dropOld=0，realign drop=0；pairMax 目标-HiVi=0.0s、目标-ESP32 变化≈0.02s（基线 2.074s）；HiVi−iEAST deltaUs ≈ 0.49s（配置 −500ms） |
 | S04 纯 AP 组（HiVi / iEAST） | ✅ 2/2 PASS | HiVi：pairMax 0.0，inQ 2625，dropΔ 0；iEAST：pairMax 0.0，inQ 2700，dropΔ −79380（**会话重建**，非丢帧，按 §14.4 以窗口首 tick 为基线） |
 | S05 混合组（HiVi / iEAST） | ✅ 2/2 PASS | HiVi：pairMax 2.08s（阈值 2.595s），inQ 2675，dropΔ 0；iEAST：pairMax 2.119s，inQ 2675，dropΔ −67252（同上，会话重建） |
-| S05 混合组（ESP32） | ⚠️ INVALID | ticks=0：容器日志无 sendspin 泵的 `"ev":"tick"` 域（`sendspin-debug.log` 亦无），桥侧指标缺失 ⇒ 按 fail-closed 不得判 PASS；两两位置 2.062s（阈值 2.595s）仅作参考 |
+| S05 混合组（ESP32） | ✅ PASS（§17 补 tick 后） | 补 tick 前 ticks=0 ⇒ INVALID；补后 ticks>0、dropΔ=0、pairMax 2.089s（参考 2.599s），`inQ=null` 显式标注未知（详见 §17.4） |
 | V24 成员还原回读 | ✅ | 纯组 = [HiVi, iEAST]；混合组 6 成员含三目标，脚本 `restore` 后回读一致 |
 | V23 采样资产 | ✅ | 三路 pcap（ap/ieast/ss）在跑；`status-*.jsonl` 新鲜度 <10s；并行锁无残留进程 |
 
@@ -1653,14 +1653,56 @@ docker logs -t --since "$T0" --until "$T1" musicflow 2>&1 \
 | 项 | 状态 | 说明 |
 |---|---|---|
 | V04 判定脚本自检 | ❌→✅（已修） | `single_rejoin.py` 用 `ln.split("] ",1)[1]` 取 JSON，遇 `[INFO] [AirPlay] [airplay-bridge]` 多段前缀必然解析失败 ⇒ `ticks=0` 却仍输出 PASS（正是 V04 预警的假通过）。已改为按 `{"ev":"tick"` 定位；修复后同一窗口得 6 ticks，指标非空 |
-| sendspin tick 可观测性 | ⚠️ 缺口 | 当前版本只有 AirPlay 桥输出 `"ev":"tick"`；sendspin 泵无等价 tick 日志 ⇒ 其 V07/V08 结构性无法取证。建议后续在泵侧补同构 tick（独立于本方案） |
+| sendspin tick 可观测性 | ✅ 已补（提交 `21ab38ae`） | 泵侧补齐 `sendspin-pump` / `sendspin-direct` 两种 tick，见 §17；S05 ESP32 已由 INVALID 转为 PASS |
 | V13 新协议 fixture | ⏭ 后置 | 需新增 fixture 插件与假设备，价值主要在证明"零核心改动"，可随 5.5 一起做 |
 | V17 / S10 守卫负例 | ⏭ 后置 | 守卫本身已在阶段 4 实测过硬失败；CI 接入后建议补一个临时文件型反例测试 |
 | 5.4 / 5.5 / 5.7 | ⏭ 后置 | 分别依赖异步激活路径、设备-协议绑定模型/DB、设备级配置 UI；本轮不做空抽象（§13.7） |
 
 ### 16.5 回滚
 
-- 代码：`git revert 78f36b13`（纯类型放宽 + 增量文件，无运行时开关依赖）。
+- 代码：`git revert 78f36b13`（纯类型放宽 + 增量文件，无运行时开关依赖）；泵侧 tick 为独立提交 `21ab38ae`，可单独 revert（回退后 sendspin 用例回到 INVALID，不影响播放）。
 - 240：用 `240:/root/mf240_dist_check.tgz` 覆盖回 12 个旧文件并删除 `dist/services/player/{playContext,protocols}.js`，再 `docker restart musicflow`。
 - 契约：核心仍走 v1，`MF_RENDERER_CONTRACT` 开关本轮**未引入**（避免发布空开关）。
+
+## 17. 泵侧 tick 观测补齐（2026-11-28，提交 `21ab38ae`）
+
+### 17.1 为什么要补
+
+阶段 5 矩阵里只有 AirPlay 桥输出 `ev:"tick"`。混合组中的 **ESP32 直连 sendspin 成员不经桥**（`this.bridges` 只有 AirPlay 设备），因此没有任何桥侧 tick ⇒ S05/ESP32 只能判 INVALID。这是**观测缺口**，不是播放缺陷。
+
+### 17.2 补了什么（只加日志 / 只读计数，不改投递）
+
+| 来源 | 触发点 | `src` | 关键字段 |
+|---|---|---|---|
+| 桥组泵 | 组伺服循环，2s/设备节流 | `sendspin-pump` | `dev`(被桥接设备)、`gen`、`state`、`inQueueMs`+`inQueueKnown`、`feedAheadMs`、`horizonMs`、`tailMs`、`late`、`deliveredMs`、`cand`、`staleSkip`、`droppedFrames`、`realigned`、`silenceChunks` |
+| 直连成员 | `SendspinConnection.sendAudio`（唯一下发点），2s/连接节流 | `sendspin-direct` | `dev`(clientId)、`state`(设备自报 syncState/sink)、`inQueueMs:null`、`inQueueKnown:false`、`issuedAheadMs`、`queueFrames`/`queueBytes`、`droppedFrames`(`droppedByQueueCap`)、`deviceState`、`available`、`capacityBytes` |
+
+语义纪律（避免"缺信号被读成健康"）：
+
+- 直连成员的 `inQueueMs` **恒为 null**：设备 ACK 队列在泵侧不可见，绝不拿 `issuedAheadMs`（≈5.5s 喂料前瞻）冒充积压，否则 V07 的 [1500,3500] 判据会被系统性误判。
+- `droppedFrames` 只取真实计数器：桥组 = 跳过时间线折帧 + 既有统计；直连 = `droppedByQueueCap`（投递队列超上限 late-drop）。
+- 计数器按 `gen` 分代；`silenceChunks` 只在确有填洞片时累加。
+
+### 17.3 判定脚本同步修正（V04 自检）
+
+| 缺陷 | 修法 |
+|---|---|
+| 多段日志前缀导致 tick JSON 解析失败（`split("] ",1)`） | 按 `{"ev":"tick"` 定位（阶段 5 已修） |
+| `inQueueMs:null` 让 `max()` 抛 TypeError | 数值过滤后再聚合；新增 `inQueueKnown`，未知时**跳过** inQ 判据而非当成 0 |
+| 会话重建使计数器为负（-197285 等）被误判 | 按 `gen` 取**最后一代**的 first/last 再算 Δ；新增 `rebuilt` 标记（§14.4 口径） |
+| `ticks=0` 仍可能被判 PASS | PASS 前置条件加 `ticks > 0`（fail-closed） |
+| `silenceChunks` 缺失被当成 0 | 新增 `silenceKnown`；来源未上报时不做 `Δsilence==0` 硬判 |
+
+### 17.4 复测证据（240，热补丁 2 次：先桥组泵 tick、再直连 tick）
+
+| 用例 | 结果 | 关键指标 |
+|---|---|---|
+| S03 单成员回组（混合组 × iEAST） | ✅ PASS | ticks=13，inQ≤2650，dropΔ=0，silΔ=0，realign 3（Δ=0），selfheal/rebase=0 |
+| S04 纯 AP 组 | ✅ 2/2 PASS | pairMax 0.0；inQ 2700/2650；dropΔ 0；silΔ 0 |
+| S05 混合组 | ✅ 3/3 PASS | HiVi/iEAST 同上；**ESP32 ticks>0、dropΔ=0、pairMax 2.089s（参考 2.599s）**，`inQ=null` 显式标注未知 |
+
+### 17.5 仍未覆盖（显式缺口）
+
+- 直连 sendspin 的**设备侧 ACK 队列/缓冲深度**仍未上报（泵侧不可见）：V07 的 inQ 判据对直连成员只能跳过，用 `droppedFrames` + 位置两两差 + 设备自报 `state/available` 兜底。若后续需要严格 inQ，需要设备协议侧回传 buffer 水位（独立立项）。
+- 本轮为日志型观测，未加单测；回归由 240 真机矩阵保障（字段为只读，不参与判据）。
 
