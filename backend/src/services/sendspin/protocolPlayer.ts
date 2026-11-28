@@ -11,6 +11,7 @@
 // PlayerController 检测曲目切换),真正音频走内部推流,不依赖设备回连拉流。
 // castSession / QueueController / PlayerController 都是**主进程状态**,两种模式都留在本侧。
 import { PlaybackState, type PlayerState, type ProtocolPlayer, type QueueItem } from "../player/types.js";
+import { normalizePlayContext, type PlayContext, type PlayBridge, type PlayMediaOptions } from "../player/playContext.js";
 import { createCastSession, getEffectiveBaseUrl } from "../dlna/control.js";
 import { getPlaybackSpeed } from "../player/playbackSpeed.js";
 import { getServer } from "./runtime.js";
@@ -95,10 +96,13 @@ export function createSendspinGroupPlayer(
   const groupName = sendspinGroupName(userGroupId);
   return {
     playerId,
-    async playMedia(item: QueueItem, baseUrl: string, startMs = 0, bridge?: { sockets: BridgeSocketSpec[] }, opts?: { manual?: boolean; nextSongId?: string; resolvedRowId?: string; speed?: number }) {
+    async playMedia(item: QueueItem, baseUrlArg: string | PlayContext, startMsArg = 0, bridgeArg?: PlayBridge, optsArg?: PlayMediaOptions) {
+      // 契约 v1/v2 归一(阶段 5.3)。
+      const norm = normalizePlayContext(baseUrlArg, startMsArg, bridgeArg, optsArg);
+      const { baseUrl, startMs, opts } = norm;
       const members = await onlineSendspinMembers(userGroupId);
       // 调用方没带桥规格时用构造期登记的活跃路由(续播路径没有 bridge 参数)。
-      bridge = bridge ?? defaultBridge;
+      const bridge = (norm.bridge ?? defaultBridge) as { sockets: BridgeSocketSpec[] } | undefined;
       // v4.9.3 方向 A:纯 AirPlay 桥组(无直连 sendspin 成员)也起泵 —— 桥是唯一
       // 消费者;带 bridge 规格时空成员放行,不再抛「无在线 sendspin 成员」。
       if (members.length === 0 && !bridge) {
@@ -278,7 +282,9 @@ function createSendspinInprocPlayer(clientId: string): ProtocolPlayer {
   const playerId = `sendspin:${clientId}`;
   return {
     playerId,
-    async playMedia(item: QueueItem, baseUrl: string, startMs = 0, _bridge?: unknown, opts?: { manual?: boolean; nextSongId?: string; resolvedRowId?: string }) {
+    async playMedia(item: QueueItem, baseUrlArg: string | PlayContext, startMsArg = 0, _bridge?: PlayBridge, optsArg?: PlayMediaOptions) {
+      // 契约 v1/v2 归一(阶段 5.3)。
+      const { baseUrl, startMs, opts } = normalizePlayContext(baseUrlArg, startMsArg, _bridge, optsArg);
       const srv = getServer();
       if (!srv) throw new Error(`sendspin server not running: ${clientId}`);
       // mediaUri:token 流地址,仅供 track_changed 检测;音频走内部推流。
@@ -356,7 +362,9 @@ function createSendspinProxyPlayer(clientId: string): ProtocolPlayer {
     sendspinSupervisor.rpc("transport", { clientId, op, arg });
   return {
     playerId,
-    async playMedia(item: QueueItem, baseUrl: string, startMs = 0, _bridge?: unknown, opts?: { manual?: boolean; nextSongId?: string; resolvedRowId?: string }) {
+    async playMedia(item: QueueItem, baseUrlArg: string | PlayContext, startMsArg = 0, _bridge?: PlayBridge, optsArg?: PlayMediaOptions) {
+      // 契约 v1/v2 归一(阶段 5.3)。
+      const { baseUrl, startMs, opts } = normalizePlayContext(baseUrlArg, startMsArg, _bridge, optsArg);
       // castSession/token 是主进程状态(track_changed 检测用),必须留在本侧生成。
       const streamUrl = createCastSession(item.songId, clientId, baseUrl).streamUrl;
       emitMediaChanged(clientId, item);

@@ -177,6 +177,11 @@ jobs:
         run: cd backend && DATA_DIR=$(mktemp -d) npx tsx scripts/check-builtins.mts
       - name: 校验框架核心符合功能插件化规范(不越界)
         run: cd backend && npx tsx scripts/check-core.mts
+      # 渲染器插件化边界守卫(阶段 4 起硬拦截,阶段 5.0 接入 CI):核心不得直连协议目录、
+      # QueueController 不得出现协议工厂标识符、声明 renderer 的内置插件必须实现 createPlayer。
+      # 零依赖 node 脚本,从仓库根调用(脚本自行解析 ROOT)。
+      - name: 校验渲染器插件化边界(核心不直连协议实现)
+        run: node backend/scripts/check-renderer-plugin-boundary.mjs
 
   frontend-plugin-isolation:
     name: 前端插件隔离守卫(弹窗不得耦合核心功能)

@@ -19,6 +19,7 @@ import type { BridgeSocketSpec } from "../sendspin/bridgeAttach.js";
 import { getSendspinFront, sendspinGroupBridgeSync } from "../sendspin/index.js";
 import { sendspinGroupName } from "../sendspin/playerCore.js";
 import { PlaybackState, type PlayerState, type ProtocolPlayer, type QueueItem } from "../player/types.js";
+import { normalizePlayContext, type PlayContext, type PlayBridge, type PlayMediaOptions } from "../player/playContext.js";
 import { createLogger } from "../../utils/logger.js";
 import { randomBytes } from "node:crypto";
 import { toDecisecond } from "../../utils/progressPrecision.js";
@@ -692,11 +693,13 @@ export function createGroupProtocolPlayer(groupId: string): ProtocolPlayer {
     playerId,
     async playMedia(
       item: QueueItem,
-      baseUrl: string,
-      startMs = 0,
-      _bridge?: unknown,
-      opts?: { manual?: boolean; speed?: number; nextSongId?: string; resolvedRowId?: string },
+      baseUrlArg: string | PlayContext,
+      startMsArg = 0,
+      _bridge?: PlayBridge,
+      optsArg?: PlayMediaOptions,
     ) {
+      // 契约 v1/v2 归一(阶段 5.3);组内扇出仍走各协议 player 的 v1 位置参数。
+      const { baseUrl, startMs, opts } = normalizePlayContext(baseUrlArg, startMsArg, _bridge, optsArg);
       const dlnaOnline = getOnlineMemberIds(groupId);
       const apOnline = await getOnlineAirplayIdsTolerant(groupId);
       const spinOnline = getOnlineSendspinIds(groupId);

@@ -21,6 +21,7 @@ import { discoverDlnaDevices, fetchDeviceAtLocation, lastScanWasErrored, onSsdpE
 import { DISCOVERY_CACHE_TTL_MS } from "./scanPolicy.js";
 import { getEventManager } from "./eventing.js";
 import { PlaybackState, type ProtocolPlayer, type PlayerState, type QueueItem } from "../player/types.js";
+import { normalizePlayContext, type PlayContext, type PlayBridge, type PlayMediaOptions } from "../player/playContext.js";
 import { sqlite } from "../../db/index.js";
 import { getSetting, setSetting } from "../settings.js";
 import { getPlaybackSpeed, normalizePlaybackSpeed, contentToStreamSec, streamToContentSec } from "../player/playbackSpeed.js";
@@ -1899,7 +1900,9 @@ export function createDlnaProtocolPlayer(deviceId: string): ProtocolPlayer {
   const playerId = `dlna:${deviceId}`;
   return {
     playerId,
-    async playMedia(item: QueueItem, baseUrl: string, startMs = 0, _bridge?: unknown, opts?: { speed?: number }) {
+    async playMedia(item: QueueItem, baseUrlArg: string | PlayContext, startMsArg = 0, _bridge?: PlayBridge, optsArg?: PlayMediaOptions) {
+      // 契约 v1/v2 归一(阶段 5.3):字符串形态与 PlayContext 形态都落到同一份参数。
+      const { baseUrl, startMs, opts } = normalizePlayContext(baseUrlArg, startMsArg, _bridge, optsArg);
       // ★ 起播即落位:QueueController 传的是**毫秒**起点(流转 / 带进度起播),
       //   必须编进流 URL 的 timeOffset(秒),否则设备从 0 秒拉流 ——
       //   真机表现就是「从 AirPlay 流转回主卧后,歌从头开始 / 进度回到 0」。

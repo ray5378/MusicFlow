@@ -9,6 +9,7 @@
 import { getEnabledByCapability, getPluginConfig, getPluginManifest } from "../plugins/registry.js";
 import type { ProtocolPlayer } from "./player/types.js";
 import type { RendererPlugin, RendererProtocol } from "../plugins/types.js";
+import { manifestProtocols } from "./player/protocols.js";
 
 /** 每日推荐能力(dailyPlaylist):候选池/生成等参数化方法。 */
 export function dailyRecommendApi(): any {
@@ -174,7 +175,13 @@ export function dailyRecommendTag(): string {
  * - 插件抛错不吞(阶段 0 先暴露,便于发现归属判定缺陷)。
  */
 export function createRendererPlayer(protocol: RendererProtocol, deviceId: string): ProtocolPlayer | null {
-  for (const { impl } of getEnabledByCapability("renderer")) {
+  for (const registered of getEnabledByCapability("renderer")) {
+    const { impl } = registered;
+    // 阶段 5.1:插件在 manifest.protocols 里自述归属,门面只按声明初筛。
+    // 未声明(含旧插件/测试夹具)= 不过滤,保持既有「按注册顺序 + 插件自校验」行为。
+    const manifest = registered.manifest ?? (impl as RendererPlugin | undefined)?.manifest;
+    const declared = manifestProtocols(manifest);
+    if (declared && !declared.includes(protocol)) continue;
     const create = (impl as RendererPlugin | undefined)?.createPlayer;
     if (typeof create !== "function") continue;
     const player = create.call(impl, protocol, deviceId);

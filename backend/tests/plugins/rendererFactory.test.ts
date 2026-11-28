@@ -56,4 +56,30 @@ describe("createRendererPlayer(阶段 0 契约)", () => {
     const p = createRendererPlayer("dlna", "dlna-x");
     expect((p as any).protocol).toBe("dlna");
   });
+
+  // 阶段 5.1:manifest.protocols 是归属声明的初筛依据,声明不符者连 createPlayer 都不该进。
+  it("manifest.protocols 不含请求协议 → 跳过该插件(不调用 createPlayer)", () => {
+    const calls: string[] = [];
+    enabled.push({
+      manifest: { id: "dlna-renderer", protocols: ["dlna"] },
+      impl: {
+        createPlayer(protocol: string) {
+          calls.push(protocol);
+          return { protocol } as any;
+        },
+      },
+    });
+    expect(createRendererPlayer("airplay", "ap-1")).toBeNull();
+    expect(calls).toEqual([]);
+    expect((createRendererPlayer("dlna", "d-1") as any).protocol).toBe("dlna");
+    expect(calls).toEqual(["dlna"]);
+  });
+
+  it("未声明 manifest.protocols 的旧插件不过滤(保持旧行为)", () => {
+    enabled.push({
+      manifest: { id: "legacy-renderer" },
+      impl: { createPlayer: (protocol: string) => ({ protocol }) as any },
+    });
+    expect((createRendererPlayer("sendspin", "s-1") as any).protocol).toBe("sendspin");
+  });
 });

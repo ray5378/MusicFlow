@@ -129,6 +129,10 @@ export interface PluginManifest {
   type: PluginType;
   description?: string;
   capabilities: PluginCapability[];
+  /** Renderer plugins only: 本插件负责的协议标识(开放字符串)。缺省不过滤,保持旧行为。 */
+  protocols?: string[];
+  /** Renderer plugins only: 播放器能力位声明(开放集合)。缺省 = 按现状全支持。 */
+  playerCapabilities?: RendererCapability[];
   /** Source plugins only: supported platform slugs (netease, qq, ...). */
   platforms?: string[];
   /** Source plugins only: 平台 slug → 展示名 映射(核心展示层读取,不写死平台词典)。
@@ -510,8 +514,28 @@ export interface RendererDevice {
   meta?: Record<string, any>;
 }
 
-/** 渲染器协议标识(组播 group 不在此列:仍由核心 createGroupProtocolPlayer 直连)。 */
-export type RendererProtocol = "airplay" | "dlna" | "sendspin";
+/** 渲染器协议标识(组播 group 不在此列:仍由核心 createGroupProtocolPlayer 直连)。
+ *
+ *  阶段 5.1 起**开放为 string**:新增协议只加插件 + `manifest.protocols` 声明,
+ *  核心不再维护封闭联合。`KNOWN_RENDERER_PROTOCOLS` 仅供诊断/测试,不是白名单。 */
+export type RendererProtocol = string;
+
+/** 已知内置协议(诊断/测试用;不是白名单,第三方协议不受此限)。 */
+export const KNOWN_RENDERER_PROTOCOLS = ["airplay", "dlna", "sendspin"] as const;
+
+/** 渲染器**播放器**能力位(开放字符串集合,对齐 MA `PlayerFeature`)。
+ *  未声明 = 按现状全支持;核心应在调用可选操作前查能力位,不按协议名分支。 */
+export type RendererCapability =
+  | "play"
+  | "pause"
+  | "seek"
+  | "volume"
+  | "mute"
+  | "next_previous"
+  | "set_members"
+  | "accurate_time"
+  | "gapless"
+  | (string & {});
 
 /** Implemented by `renderer` plugins that declare "renderer". */
 export interface RendererPlugin {

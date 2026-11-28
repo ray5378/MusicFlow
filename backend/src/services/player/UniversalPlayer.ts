@@ -5,6 +5,7 @@
 //
 // 当前只接 DLNA 协议 player。未来加 Cast/AirPlay 时,在此层做协议选择。
 import { ProtocolPlayer, QueueItem, PlayerState, PlaybackState } from "./types.js";
+import type { PlayContext, PlayBridge, PlayMediaOptions } from "./playContext.js";
 
 export class UniversalPlayer {
   constructor(
@@ -25,10 +26,10 @@ export class UniversalPlayer {
 
   async playMedia(
     item: QueueItem,
-    baseUrl: string,
+    baseUrl: string | PlayContext,
     startMs?: number,
-    bridge?: { sockets: Array<{ deviceId: string; socketPath: string; token: string; protocol: string }> },
-    opts?: { manual?: boolean },
+    bridge?: PlayBridge,
+    opts?: PlayMediaOptions,
   ): Promise<{ mediaUri: string }> {
     if (!this.protocol) throw new Error(`UniversalPlayer ${this.playerId} 无协议 player`);
     // 起播落位(AirPlay 用):其余协议忽略该参数 = 与改动前完全一致。

@@ -58,6 +58,10 @@ vi.mock("../../src/services/sendspin/protocolPlayer.js", () => ({
 import { dlnaRendererPlugin } from "../../src/services/plugin/renderers/dlna.js";
 import { airplayRendererPlugin } from "../../src/services/plugin/renderers/airplay.js";
 import { sendspinRendererPlugin } from "../../src/services/plugin/renderers/sendspin.js";
+import {
+  DEFAULT_RENDERER_CAPABILITIES,
+  playerCapabilitiesOf,
+} from "../../src/services/player/protocols.js";
 
 describe("renderer createPlayer 归属闸门", () => {
   it("协议不匹配一律 null(不串协议)", () => {
@@ -90,5 +94,31 @@ describe("renderer createPlayer 归属闸门", () => {
     expect((airplayRendererPlugin.createPlayer!("airplay", "a1") as any).playerId).toBe("airplay:a1");
     expect((sendspinRendererPlugin.createPlayer!("sendspin", "s1") as any).playerId).toBe("sendspin:s1");
     expect(H.made).toEqual(["dlna:d1", "airplay:a1", "sendspin:s1"]);
+  });
+});
+
+// 阶段 5.1 / 5.2:协议归属与能力位是**插件自述**,核心只读声明,不认插件名。
+describe("manifest 归属声明(阶段 5.1/5.2)", () => {
+  it("三内置渲染器各自只声明自己那一种协议", () => {
+    expect(dlnaRendererPlugin.manifest.protocols).toEqual(["dlna"]);
+    expect(airplayRendererPlugin.manifest.protocols).toEqual(["airplay"]);
+    expect(sendspinRendererPlugin.manifest.protocols).toEqual(["sendspin"]);
+  });
+
+  it("声明的播放器能力位落在开放集合内且非空", () => {
+    for (const p of [dlnaRendererPlugin, airplayRendererPlugin, sendspinRendererPlugin]) {
+      const caps = p.manifest.playerCapabilities ?? [];
+      expect(caps.length).toBeGreaterThan(0);
+      for (const c of caps) expect(typeof c).toBe("string");
+    }
+  });
+
+  it("未声明 playerCapabilities → 缺省按现状全支持(不得收窄)", () => {
+    expect(playerCapabilitiesOf({})).toEqual([...DEFAULT_RENDERER_CAPABILITIES]);
+    expect(playerCapabilitiesOf(undefined)).toEqual([...DEFAULT_RENDERER_CAPABILITIES]);
+  });
+
+  it("声明了 playerCapabilities → 原样返回(不补默认)", () => {
+    expect(playerCapabilitiesOf({ playerCapabilities: ["play"] })).toEqual(["play"]);
   });
 });

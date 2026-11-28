@@ -10,6 +10,7 @@
 // /rest/airplay/stream/:token; the streaming core stays shared (serveCastStream).
 import { randomBytes } from "node:crypto";
 import { PlaybackState, type PlayerState, type ProtocolPlayer, type QueueItem } from "../player/types.js";
+import { normalizePlayContext, type PlayContext, type PlayBridge, type PlayMediaOptions } from "../player/playContext.js";
 import { createAirPlaySession } from "./session.js";
 import { bridgeSocketPath } from "./bridgeChannel.js";
 import { getPlaybackSpeed } from "../player/playbackSpeed.js";
@@ -38,7 +39,9 @@ export function createAirPlayProtocolPlayer(deviceId: string): ProtocolPlayer {
   const playerId = `airplay:${deviceId}`;
   return {
     playerId,
-    async playMedia(item: QueueItem, baseUrl: string, startMs = 0) {
+    async playMedia(item: QueueItem, baseUrlArg: string | PlayContext, startMsArg = 0) {
+      // 契约 v1/v2 归一(阶段 5.3);直连路径不消费 bridge/opts。
+      const { baseUrl, startMs } = normalizePlayContext(baseUrlArg, startMsArg);
       const streamUrl = createAirPlaySession(item.songId, deviceId, baseUrl).streamUrl;
       // ★ 起播即落位(流转/带进度起播):起点交给**这一次** ANNOUNCE/SETUP/RECORD,
       //   绝不再「先起播、再 seek」—— AirPlay 的 seek 是完整重建会话,连续两次建会话
@@ -132,11 +135,13 @@ export function createAirPlayBridgePlayer(deviceId: string): ProtocolPlayer {
     playerId,
     async playMedia(
       item: QueueItem,
-      baseUrl: string,
-      startMs = 0,
-      _bridge?: unknown,
-      opts?: { manual?: boolean; nextSongId?: string; resolvedRowId?: string; speed?: number },
+      baseUrlArg: string | PlayContext,
+      startMsArg = 0,
+      _bridge?: PlayBridge,
+      optsArg?: PlayMediaOptions,
     ) {
+      // 契约 v1/v2 归一(阶段 5.3)。
+      const { baseUrl, startMs, opts } = normalizePlayContext(baseUrlArg, startMsArg, _bridge, optsArg);
       const prev = soloBridgeRoutes.get(deviceId);
       // D6/P1:用户手动 next/prev ⇒ 给**已存在**的桥会话打 sticky 标记;
       // 真正的 1 次 FLUSH + ts 回拨由子进程在下一个 track boundary 执行。

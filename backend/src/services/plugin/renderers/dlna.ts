@@ -39,6 +39,9 @@ export const dlnaRendererManifest: PluginManifest = {
   type: "renderer",
   description: "通过 DLNA/UPnP 将音乐投屏到局域网内的音箱、电视等播放设备",
   capabilities: ["renderer"],
+  // 阶段 5.1/5.2:自述归属协议 + 播放器能力位(开放集合)。核心据此筛选/查能力,不认插件名。
+  protocols: ["dlna"],
+  playerCapabilities: ["play", "pause", "seek", "volume"],
   defaultEnabled: true,
   // 插件详情弹窗的配置表单完全由 configSchema 驱动(前端零改动)。
   // 2026-10-21:默认关闭「大文件直通」—— 网络源先整曲缓冲,完整性判官(试听/

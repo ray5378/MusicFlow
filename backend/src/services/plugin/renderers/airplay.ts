@@ -23,6 +23,9 @@ export const airplayRendererManifest: PluginManifest = {
   type: "renderer",
   description: "通过 AirPlay (RAOP / AirPlay 2) 协议将音乐投放到局域网内的 AirPlay 音箱、电视等设备",
   capabilities: ["renderer"],
+  // 阶段 5.1/5.2:自述归属协议 + 播放器能力位(开放集合)。核心据此筛选/查能力,不认插件名。
+  protocols: ["airplay"],
+  playerCapabilities: ["play", "pause", "seek", "volume"],
   // 内置渲染器一律不可停用(2026-11-27 用户裁决):AirPlay 是内建投屏主链路之一,
   // 服务随进程启动常驻;停机函数仅由进程停机路径使用,管理页开关不再联动。
   defaultEnabled: true,

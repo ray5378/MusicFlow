@@ -3,6 +3,7 @@
 // 注意 `PreProbeStatus` 是 **type-only import**（编译后擦除）—— 与
 // preProbeScheduler ↔ types 之间不构成运行时循环。
 import type { PreProbeStatus } from "./preProbeScheduler.js";
+import type { PlayContext, PlayBridge, PlayMediaOptions } from "./playContext.js";
 
 /** 播放状态机。对照 MA PlaybackState。 */
 export enum PlaybackState {
@@ -112,19 +113,16 @@ export interface ProtocolPlayer {
    *  只在 `songId` 一致时有效;其它协议实现忽略该字段。 */
   playMedia(
     item: QueueItem,
-    baseUrl: string,
+    /** v1:字符串 baseUrl(位置参数形态,现网调用方);v2:PlayContext(见 playContext.ts)。
+     *  两者都由各实现的 normalizePlayContext 归一,调用方用哪一版与实现无关。 */
+    baseUrl: string | PlayContext,
     startMs?: number,
-    bridge?: { sockets: Array<{ deviceId: string; socketPath: string; token: string; protocol: string }> },
-    opts?: {
-      manual?: boolean;
-      nextSongId?: string;
-      resolvedRowId?: string;
-      /** 倍速(2026-11-14;0.75~2)。缺省 = 各协议读自己的注册表:
-       *  DLNA/AirPlay 按设备 id、sendspin 单机按 clientId、用户组按 groupId。
-       *  组内 DLNA 成员由组 player 显式传入组倍速 —— 组内所有成员必须同速,
-       *  否则同一首歌在不同成员上是两种音高/时长(比不同步更难接受)。 */
-      speed?: number;
-    },
+    bridge?: PlayBridge,
+    /** opts 形状不变;`speed` 语义见 PlayMediaOptions —— 缺省 = 各协议读自己的注册表:
+     *  DLNA/AirPlay 按设备 id、sendspin 单机按 clientId、用户组按 groupId。
+     *  组内 DLNA 成员由组 player 显式传入组倍速 —— 组内所有成员必须同速,
+     *  否则同一首歌在不同成员上是两种音高/时长(比不同步更难接受)。 */
+    opts?: PlayMediaOptions,
   ): Promise<{ mediaUri: string }>;
   stop(): Promise<void>;
   pause(): Promise<void>;
