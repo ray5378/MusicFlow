@@ -1763,9 +1763,80 @@ docker logs -t --since "$T0" --until "$T1" musicflow 2>&1 \
 | 5.5c 真机断网回退 | ⏳ | 需 240 打开 `MF_RENDERER_MULTI_BINDING=1` 并配置 `renderer.bindings.*`；本轮开关保持关闭（默认值即生产行为） |
 | 5.5d / 5.5e 错误码与 API | ⏳ | 改 API 返回体属可观察行为变更，随 5.7/下一轮 |
 | V12 多协议混组路由 | ⏳ | 随 5.5c 真机一起验（airplay/sendspin 同组成员各自 tick 正常、无跨协议流） |
-| 真机 L2/L3 全套 | ⏳ | 提交后热补丁 240，按 §15.2 跑 S00 + S03/S04/S05 + 5 首自然连播（今日漫游 `pl-daily-roam`）+ 流转 4 例（S13 全方向，含 V25 源端让出）；结果记 §19 |
+| 真机 L2/L3 全套 | ⚠️ 部分 | 已在 240 跑 S00 + 流转 S13 全方向（含 V25 源端让出）+ 5 目标采样，结果见 **§19**；其中「5 首自然连播」因判定脚本计数口径缺陷**未取得权威证据**，留待播放空窗重跑（§19.4） |
 
 ### 18.5 回滚
 
 - 代码：删除 `bindings.ts` + revert QueueController 5 处即可（无 DB 迁移、无 manifest/契约变更）。
 - 生产行为：开关缺省关闭，等价于改动前；无需回滚开关。
+
+## 19. 真机 L2/L3 验收结果（2026-11-28，镜像 `c879877d`）
+
+> 对应 §18.4 最后一行。时间窗：2026-11-28 18:40–22:10（CST）。判定一律沿用 §14/§15 口径，**未下调任何阈值**；凡证据不足的直接标 ⚠️/INVALID，不用「出声即过」代替判据。
+
+### 19.1 S00 执行前检查（门禁）
+
+| 项 | 实测 | 结论 |
+|---|---|---|
+| 镜像与提交 | `docker inspect musicflow` → `musicflow:4.15.19-local.c879877`；`GET /ping` → `{"status":"ok","version":"4.15.19-local.c879877","commit":"c879877d"}` | ✅ 与仓库 HEAD `c879877d` 一致 |
+| 设备在线 | HiVi `airplay:00226CFFA0C0`（.30）/ iEAST `airplay:00226CBB7334`（.102）/ esp32 `sendspin:uS9Lg_…`（.246）均 available | ✅ |
+| 组成员 | 纯AP = `[iEAST, HiVi]`；全屋 = sendspin×2 + airplay(iEAST/GGMM/MUZO)，GGMM/MUZO 离线为历史状态 | ✅（纯AP 曾丢 HiVi，已按 API 恢复） |
+| 曲库自举 | `/v1/songs?pageSize=8` → 4–8 首（`library_items`） | ✅ |
+| 流媒体工具 | 240 `eno1-ovs` 抓包；`cliairplay v0.5.9` 正常 | ✅ |
+
+### 19.2 流转 S13 全方向 + V25 源端让出
+
+`/root/tr_subset.log`（18:55 起）6/6 PASS，源端均 `PLAYING→STOPPED`、落点误差 ≤0.3s、目标 `PLAYING` 且前进：
+
+| # | 方向 | 源端 | 落点 | 目标 |
+|---|---|---|---|---|
+| 1 | 全屋 → 纯AP | PLAYING→STOPPED @47.7 | 47.8 | PLAYING @48 |
+| 2 | 纯AP → 全屋 | PLAYING→STOPPED @47.8 | 47.8 | PLAYING @47.6 |
+| 3 | HiVi → 全屋 | PLAYING→STOPPED @47.8 | 48.1 | PLAYING @47.9 |
+| 4 | 全屋 → HiVi | PLAYING→STOPPED @47.8 | 47.8 | PLAYING @47.2 |
+| 5 | esp32 → iEAST | PLAYING→STOPPED @47.99 | 47.99 | PLAYING @47.4 |
+| 6 | iEAST → esp32 | PLAYING→STOPPED @47.8 | 47.8 | PLAYING @47.8 |
+
+- **V25（§18.4 要求）**：`/root/verify_src_queue.py` 对上述 6 方向逐格复查，源端 `queue n=0 / currentIndex=-1 / isActive=false` ⇒ 真正「停播 + 队列让出」。
+- 客户端方向 4/4（Web/移动端发起流转）在 18:xx 会话中复验为源端 STOPPED（会话终端证据，未落文件）；HiVi→全屋 另复跑 3/3 PASS。
+
+### 19.3 5 目标自然连播采样（每目标 1 轮，tick + 抓包）
+
+采样命令：`/root/run_player_matrix.py`（21:29 `player_matrix.log`）。窗口约 620s/目标。
+
+| 目标 | 判定 | 目标端 tick 指标 | 音频流（240→设备） | 备注 |
+|---|---|---|---|---|
+| solo:HiVi | ❌ FAIL | n=617，minInQ=**175**，maxLate=19，sil **24→28** | miss=0 zeroSec=0 tsJump=**1**/0.45s | 21:29 基线；切歌边界被 flush 掉 ~1.8s（已在 `c879877d` 修） |
+| solo:iEAST | ✅ PASS | n=617，minInQ=1400，maxLate=36，sil 0→0 | miss=0 zeroSec=0 tsJump=0 | — |
+| solo:esp32 | ✅ PASS | n=297（sendspin 直连无桥 tick） | TCP 8920/8928 泵流量连续，66.6MB/622s | `inQ/sil` 设备侧不可见，按 §17.5 跳过 |
+| group:纯AP | ✅ PASS | HiVi n=614/minInQ=1400/late=49/sil 0→0；iEAST n=599/1400/27/0→0 | 两成员均 miss=0 zeroSec=0 tsJump=0 | — |
+| group:全屋 | ✅ PASS | iEAST n=617/minInQ=1100/late=21/sil 0→0；esp32 n=295 | iEAST 音频流全 0；esp32 泵连续 | GGMM/MUZO 离线 |
+
+**HiVi 修复后复采（22:04，`solo_hivi_fixed.log`）**：`ticks=774`，`sil 0→0`，`minInQ=1390`，`maxLate=39`，`stale=[]`；主音频流 `RTP 240→.30 n=97428 dur=777.6s miss=0 zeroSec=0 tsJump=0`。**音频面全绿**，但脚本仍判 FAIL（仅因 `tracks=1`，见 19.4）⇒ 本轮**不记 PASS**。
+
+### 19.4 判定口径缺陷与真实缺口（重要，别把 19.3 当 5 首通过）
+
+本轮采样暴露的是**判定脚本**缺陷，不是播放缺陷：
+
+1. **切歌计数不可信**：`currentIndex` 在起播阶段出现 `0→1→2→3→4` 跳变（display-hold/预取），矩阵脚本据此 `changes>=4` 即认为「已播 5 首」，但实际窗口仅 ~620s ≈ 3–4 首。**「5 首自然连播」本轮未取得权威证据。**
+2. **无缝切歌时 `ev:"gen" reason="track"` 不再逐曲出现**（上游 `notifyBridgeGeneration(continuity=true)` 不发 BOUNDARY），因此 `solo_hivi_fixed` 的 `tracks=1` 是口径错误，不能当失败；正确计数应取 `display-hold` 的 `旧曲 … song=<id>` 或 sendspin `[pump][play] song=` 的去重数。
+3. **单次 STOPPED 早退**：21:39/21:49 两次 HiVi 重测的 `changes=2` 是边界瞬态被当成结束（已改为连续 3 次 STOPPED）。
+4. **反向流噪声**：pcap 汇总中 `设备→240` 的 RTCP（1–3 pkt/s，`zeroSec` 很大）不是音频；判据必须只看 `240→设备` 的音频 RTP（本轮 19.3 已是该口径）。
+
+修正后的脚本已沉淀为 `docs/examples/soak_judge.example.py`（提交 `1116c433`），但**尚未在 `c879877` 上重跑 5 首**。截至本文，240 上有用户活跃播放（全屋组 4129 首队列），为避免打断未做清场复测。
+
+### 19.5 连带出声
+
+非目标端抓包：HiVi/iEAST 仅 mDNS（~200–260 包/窗口），esp32 仅 TCP 8928 心跳；均无音频 RTP（≤3 pkt/s 或 0）。结论：**无连带出声**。
+
+### 19.6 全量回归（230）
+
+- `npx vitest run` → **701 文件 / 9143 passed / 16 skipped / 0 failed**（329.67s，2026-11-28 22:23 起）。
+- `tsc`/守卫沿用 §18.2（本轮仅改文档，未改代码）。
+
+### 19.7 结论与遗留
+
+- ✅ 流转语义（V25）全方向通过；切歌边界音频连续性在已采样窗口达标（4/5 目标 PASS，HiVi 修复后音频面达标）。
+- ⚠️ **5 首自然连播验收未完成**：计数口径 + 窗口长度 + HiVi 复测判定无效三因叠加。下一步用 `docs/examples/soak_judge.example.py` 在播放空窗按「`song=` 去重 ≥5、连续 3 次 STOPPED、只看 240→设备音频流」重跑 5 目标，结果补记 §19.8。
+- ⏳ 5.5c / 5.5d / 5.5e / V12 / 5.4 / 5.7 维持 §18.4 后置。
+
