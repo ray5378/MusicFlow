@@ -1762,7 +1762,10 @@ export class BridgeSession {
       reason === "seek" &&
       prevReason === "track" &&
       (generation >>> 0) === this.generation &&
-      Date.now() - prevAtMs <= 2000;
+      // 冷启动(独播)时泵的 initial-seek 要等 RAOP 握手,实测 4~6s 才到;
+      // 用户真实 seek 必然换代(240 实证:seek 边界 gen 变化),同代次只可能是
+      // 本曲起点声明,故放宽到 10s。
+      Date.now() - prevAtMs <= 10_000;
     // D8(2026-11-01):边界处置必须**组级统一**。各成员看到的 reason 可能不同
     // (A=stop / B=track),本地判定会让一台清队列、另一台保留 → 同代次内容起点不唯一
     // (cap6 实测分裂 2.7~2.95s 且跨换歌粘住)。规则:clear 优先(任一成员要清 ⇒ 全组清)。
