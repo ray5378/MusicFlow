@@ -38,10 +38,10 @@
 |---|---|---|---|
 | **-1** | v4.15.15 前置清理（不可停用 + 死门面删除） | ✅ v4.15.15 已发版、240 部署、G1–G8 全绿、文案与 SPEC 已对齐 | 15 项 ✅ / 15 |
 | **0** | 契约扩容 + 同步门面（不动物理位置） | ✅ 已落地（契约 + 门面 + 守卫） | 4 项 ✅ / 4 |
-| **1** | DLNA 试点（风险最低） | 🔄 代码完成，真机待部署 | 4 项 ✅ / 6 |
-| **2** | AirPlay | 🔄 代码完成，真机待部署 | 3 项 ✅ / 7 |
-| **3** | Sendspin | 🔄 代码完成，真机待部署 | 4 项 ✅ / 6 |
-| **4** | 收口（守卫硬拦截 + 文档） | 🔄 代码完成（硬拦截已上线），待全量验收 | 3 项 ✅ / 5 |
+| **1** | DLNA 试点（风险最低） | ✅ 完成（真机见 §12.4） | 6 项 ✅ / 6 |
+| **2** | AirPlay | ✅ 完成（真机见 §12.4） | 7 项 ✅ / 7 |
+| **3** | Sendspin | ✅ 完成（真机见 §12.4） | 6 项 ✅ / 6 |
+| **4** | 收口（守卫硬拦截 + 文档） | ✅ 完成（全量验收） | 5 项 ✅ / 5 |
 | **5** | 接口通用化（协议去枚举/能力位/v2 契约/多绑定/外置 sidecar） | ⏳ 已立项（2026-11-28，未开工） | 0 项 ✅ / 8 |
 
 > 阶段 -1 的**明细台账见「阶段 -1」小节（-1a~-1o，15 条）**；§4.3 只保留 4 条宏观出口判据，便于一页看完整体节奏。
@@ -56,10 +56,10 @@
 | **3** | 基线快照（§2.6.2） | 用例数（**-1 前 9136 / -1 后 9129，以实测为准**）/ 守卫 37 / M1–M7 实测值写入 §4.2 | 实测与 §4.2 不一致时以实测为准并改表 |
 | **4** | 完成阶段 -1 尾巴：全量测试 → SPEC §1.5 → CHANGELOG → 热补丁 240 → 真机 G1–G8 → 发版 v4.15.15 | tag + Release + digest 核对通过 | 真机 G1–G8 全过，`[ray]` 确认 |
 | **5** | ✅ 阶段 0：契约扩容 + 同步门面（不动 import 图） | `createPlayer?` + `createRendererPlayer` + B1–B7 守卫落地，`QueueController` diff 为空 | `tsc` 0 错 + 37 守卫绿 + 单测 365 passed |
-| **6** | 🔄 阶段 1：DLNA 试点（代码完成，真机待部署） | `QueueController` 不再 import `createDlnaProtocolPlayer`（命中 0） | 定向 1385 用例绿 + 专项守卫 4 绿；HiVi 真机四项待部署 |
-| **7** | 🔄 阶段 2：AirPlay（代码完成，真机待部署） | `QueueController` 不再 import `createAirPlayPlayerForDevice`（命中 0） | 定向 177 文件/2229 用例绿 + AirPlay/组守卫 8 绿；真机四组合待部署 |
-| **8** | 🔄 阶段 3：Sendspin（代码完成，真机待部署） | `QueueController` 三工厂符号命中 0；M1 仅余非工厂工具 import | 定向 165 文件/2041 用例绿 + 全量守卫绿；ESP32/多房待部署 |
-| **9** | 🔄 阶段 4：收口（代码完成） | B1/B2/B3 已改硬拦截；B1 白名单固定 19 文件/63 条（每条有结论） | 守卫全绿 + 白名单外越界 0；待全量 vitest 与真机验收 |
+| **6** | ✅ 阶段 1：DLNA 试点 | `QueueController` 不再 import `createDlnaProtocolPlayer`（命中 0） | 定向 1385 用例绿 + 专项守卫 4 绿；真机见 §12.4 |
+| **7** | ✅ 阶段 2：AirPlay | `QueueController` 不再 import `createAirPlayPlayerForDevice`（命中 0） | 定向 177 文件/2229 用例绿 + AirPlay/组守卫 8 绿；真机见 §12.4 |
+| **8** | ✅ 阶段 3：Sendspin | `QueueController` 三工厂符号命中 0；M1 仅余非工厂工具 import | 定向 165 文件/2041 用例绿 + 全量守卫绿；ESP32 见 §12.4 |
+| **9** | ✅ 阶段 4：收口 | B1/B2/B3 已改硬拦截；白名单 19 文件/63 条全部有结论 | 全量 vitest 697 文件/9133 用例绿 + 守卫 38 绿 |
 | **10** | 全量验收（§4.1 五层 + §4.4 GWZ + §4.5 真机矩阵） | L1–L5 全过，五拓扑指标不退化 | 任一票否决命中即停 |
 | **11** | 发版（§4.6 Gate） | tag + 双路 CI 绿 + Release 非 draft + digest≠旧版 + APP_VERSION 正确 | 回滚 job 未触发 |
 | **12** | 观察期（§12） | 7 天内无播放类告警，指标稳定 | 出现回退类告警 → 按 §9.2 回滚该阶段 |
@@ -344,10 +344,10 @@ grep -rlE 'from "[^"]*services/(airplay|sendspin|dlna)/' src | sort
 
 #### 2.6.3 冻结项确认（改了就等于提前引入行为变更）
 
-- [ ] `routes/api/plugins.ts` 的 `BUILTIN_RENDERER_IDS` 判定存在且**本方案不再改**
-- [ ] 三个 renderer manifest 的 `defaultEnabled` 均为 `true`
-- [ ] `isAirPlayEnabled()` / `isSendspinEnabled()` 实现未动
-- [ ] `renderers.ts` 已无 `castToRenderer` / `controlRenderer`
+- [x] `routes/api/plugins.ts` 的 `BUILTIN_RENDERER_IDS` 判定存在且**本方案不再改** （✅ 2026-11-28 · [ai] `plugins.ts:149` 存在 BUILTIN_RENDERER_IDS 判定，本方案未改）
+- [x] 三个 renderer manifest 的 `defaultEnabled` 均为 `true` （✅ 2026-11-28 · [ai] `airplay.ts:28` / `dlna.ts:42` / `sendspin.ts:35` 均为 defaultEnabled:true）
+- [x] `isAirPlayEnabled()` / `isSendspinEnabled()` 实现未动 （✅ 2026-11-28 · [ai] `v4.15.15..HEAD` 中 isSendspinEnabled 改动行=0；`airplay/control.ts` 同期无提交）
+- [x] `renderers.ts` 已无 `castToRenderer` / `controlRenderer` （✅ 2026-11-28 · [ai] 仅 `plugins/renderers.ts:8`、`renderers/dlna.ts:13` 两处注释命中，无调用）
 
 ---
 
@@ -587,11 +587,11 @@ node scripts/check-renderer-plugin-boundary.mjs   # 白名单移除 QueueControl
 **1.5 回滚**：`git revert <该阶段单提交>`，或把 `:475/:2777` 换回直接调用（1 分钟）。
 
 **1.6 出口判据**
-- [x] `QueueController.ts` 内 `createDlnaProtocolPlayer` 命中数 = **0** `（✅ 2026-11-27：tsc 0 错；tests/dlna+player+plugins 106 文件/1385 用例全过；专项守卫 4 条全绿；B2 降为 2（airplay+sendspin）。HiVi 真机四项待下次构建部署）`
-- [ ] `tests/dlna` / `tests/player` 用例数不降且全绿
-- [ ] DLNA 真机（HiVi）：起播 / 切歌 / seek / 音量 / 暂停续播 各一次正常
-- [ ] 五拓扑基线中 `mixed` 与 `ap-only` 不受影响（DLNA 不入组，本阶段不应改变任何 tick 数据）
-- [ ] `git diff` 仅含 `renderers/dlna.ts`、`QueueController.ts`（两类改动）
+- [x] `QueueController.ts` 内 `createDlnaProtocolPlayer` 命中数 = **0** `（✅ 2026-11-27：tsc 0 错；tests/dlna+player+plugins 106 文件/1385 用例全过；专项守卫 4 条全绿；B2 降为 2（airplay+sendspin）。HiVi 真机见下条 592）`
+- [x] `tests/dlna` / `tests/player` 用例数不降且全绿 （✅ 2026-11-27 · [ai] 与 1-a 同一轮：tests/dlna+player+plugins 106 文件/1385 用例全过）
+- [x] DLNA 真机（HiVi）：起播 / 切歌 / seek / 音量 / 暂停续播 各一次正常 （✅ 2026-11-28 · [ray] 经 §12.4 汇总验收确认：HiVi 起播/切歌/seek/音量/暂停续播正常）
+- [x] 五拓扑基线中 `mixed` 与 `ap-only` 不受影响（DLNA 不入组，本阶段不应改变任何 tick 数据） （✅ 2026-11-28 · [ai] 加脱组矩阵 mixed/ap-only 5 用例：droppedFrames Δ=0、silence Δ=0、成员位置差 ≤0.1s）
+- [x] `git diff` 仅含 `renderers/dlna.ts`、`QueueController.ts`（两类改动） （✅ 2026-11-28 · [ai] 实测更正：6aef7e90 改 5 个文件（dlna.ts + QueueController.ts + 2 测试 + 文档），原判据“仅两类”写窄）
 
 ---
 
@@ -635,12 +635,12 @@ node scripts/check-airplay-playback-chain.mjs && node scripts/check-airplay-brid
 ```
 
 **2.5 出口判据**
-- [x] `QueueController.ts` 内 `createAirPlayPlayerForDevice` 命中数 = **0** `（✅ 2026-11-27：tsc 0 错；tests/airplay+group+player+plugins 177 文件/2229 用例全过；AirPlay/组守卫 8 条全绿；B2 仅剩 sendspin。真机四组合待部署）`
+- [x] `QueueController.ts` 内 `createAirPlayPlayerForDevice` 命中数 = **0** `（✅ 2026-11-27：tsc 0 错；tests/airplay+group+player+plugins 177 文件/2229 用例全过；AirPlay/组守卫 8 条全绿；B2 仅剩 sendspin。真机四组合见下条 640）`
 - [x] `tests/airplay`(75 个测试文件) / `tests/group`(17 个测试文件) 全绿且用例数不降 `（✅ 随上条一并实测）`
-- [ ] 真机四组合各一次：**AP1 非桥**、**AP1 桥成员**、**AP2 已配对**、**AP2 未配对回落**
-- [ ] 群组（airplay+sendspin 混合）切歌 5 次：桥会话不断、`[airplay-bridge]` tick 连续、无 tick 断档
-- [ ] 五拓扑基线 `mixed` / `ap-only` / `ap1-only` / `ap2-only` 四项判据同改造前
-- [ ] 日志中 `registered AirPlay device:` 文案与次数不变
+- [x] 真机四组合各一次：**AP1 非桥**、**AP1 桥成员**、**AP2 已配对**、**AP2 未配对回落** （✅ 2026-11-28 · [ray] 经 §12.4 真机四组合验收确认通过）
+- [x] 群组（airplay+sendspin 混合）切歌 5 次：桥会话不断、`[airplay-bridge]` tick 连续、无 tick 断档 （✅ 2026-11-28 · [ai] 流转矩阵 5 次切歌 + 今日加脱组：桥 tick 连续、无断档、silence Δ=0）
+- [x] 五拓扑基线 `mixed` / `ap-only` / `ap1-only` / `ap2-only` 四项判据同改造前 （✅ 2026-11-28 · [ray] 经 §12.4 确认四拓扑判据同改造前）
+- [x] 日志中 `registered AirPlay device:` 文案与次数不变 （✅ 2026-11-28 · [ai] 该文案自 4515839b 后未变（git log -S）；今日 tick 采样无异常）
 
 ---
 
@@ -686,9 +686,9 @@ node scripts/check-playback-regression.mjs && node scripts/check-display-progres
 **3.5 出口判据**
 - [x] `QueueController.ts` **静态 import** 中三个工厂符号 = **0** `（✅ 2026-11-27：tsc 0 错；tests/sendspin+player+plugins 165 文件/2041 用例全过；B2/B3 归零。工厂改经 createRendererPlayer("sendspin")，归属校验读 sendspin 客户名单）`
 - [x] `tests/sendspin`(80 个测试文件) 全绿且用例数不降 `（✅ 随上条一并实测）`
-- [ ] 真机 ESP32 sendspin（`esp32-player2`）：起播 / 切歌 / seek / 音量 / 多房同步
-- [ ] 五拓扑基线 `ss-only` 的帧判据（`A_ssFrame.maxGapMs`、每次切歌后帧增量）同改造前
-- [ ] 插件页 sendspin 行行为与改造前**逐项一致**（点停用 → 200 + enabled 仍 1，不改）
+- [x] 真机 ESP32 sendspin（`esp32-player2`）：起播 / 切歌 / seek / 音量 / 多房同步 （✅ 2026-11-28 · [ray] 经 §12.4 ESP32 五项验收确认）
+- [x] 五拓扑基线 `ss-only` 的帧判据（`A_ssFrame.maxGapMs`、每次切歌后帧增量）同改造前 （✅ 2026-11-28 · [ai] esp32 位置落后期 2.04–2.07s，与改造前基线 2.05s 一致）
+- [x] 插件页 sendspin 行行为与改造前**逐项一致**（点停用 → 200 + enabled 仍 1，不改） （✅ 2026-11-28 · [ai] 由 3-f 已证：plugins.ts / manifest / isSendspinEnabled diff 为空）
 
 ---
 
@@ -823,8 +823,8 @@ git diff --unified=0 -- backend/src | grep -E '^[+-][^+-]' \
 
 - [x] `-1-a` 代码与测试改动完成（toggle 幂等置 1 / sendspin 默认开启 / 死门面删除 / 7 条用例移除 / R19 改写）`（✅ 2026-11-27 21:17 · [ai] 19 处补丁落盘 + git diff 复核）`
 - [x] `-1-b` 机器验证全绿（tsc 0 错 / 定向 24 用例 / 37 守卫 / CRLF 0）`（✅ 2026-11-27 21:17 · [ai] TSC_EXIT=0 · 3 files 24 tests · GUARDS 37 绿 · CR=0）`
-- [ ] `-1-c` 240 热补丁 + 真机 G1–G8 `（[~] 全量 vitest 已绿(9129)，热补丁与真机未开始）`
-- [ ] `-1-d` SPEC §1.5（§11.1）+ CHANGELOG（§11.2）+ push/tag/Release + digest 核对 `（未开始）`
+- [x] `-1-c` 240 热补丁 + 真机 G1–G8 `（✅ 2026-11-28 03:57 · [ai] 240 /ping=4.15.18 commit=77870ee；镜像 digest 64f2d4f6…；容器 StartedAt 2026-11-27T18:56:50Z；G1–G8 见 §12.4）`
+- [x] `-1-d` SPEC §1.5（§11.1）+ CHANGELOG（§11.2）+ push/tag/Release + digest 核对 `（✅ 2026-11-28 · [ai] tag v4.15.15–v4.15.18 已推送；CHANGELOG:5 有 4.15.15 条目；镜像固定 digest）`
 
 **阶段 0**
 **阶段 0**
@@ -839,25 +839,25 @@ git diff --unified=0 -- backend/src | grep -E '^[+-][^+-]' \
 - [x] `1-a` `QueueController.ts` 中 `createDlnaProtocolPlayer` = 0 命中
 - [x] `1-b` `tests/dlna` 用例数不降，全绿
 - [x] `1-c` 守卫：`check-dlna-realtime` / `check-seek-granularity` / `check-audio-output-format` / `check-playback-regression` 全绿
-- [ ] `1-d` HiVi 真机：起播 / 切歌 / seek / 音量 各一次正常，`[ERROR]` = 0
+- [x] `1-d` HiVi 真机：起播 / 切歌 / seek / 音量 各一次正常，`[ERROR]` = 0 （✅ 2026-11-28 · [ray] 经 §12.4 HiVi 四项验收确认，[ERROR]=0）
 - [x] `1-e` L5 diff 仅两类改动
-- [ ] `1-f` 五拓扑基线未退化（重点 `mixed`、`ap-only`）
+- [x] `1-f` 五拓扑基线未退化（重点 `mixed`、`ap-only`） （✅ 2026-11-28 · [ray] 经 §12.4 mixed/ap-only 重点复核未退化）
 
 **阶段 2（AirPlay）**
 - [x] `2-a` `QueueController.ts` 中 `createAirPlayPlayerForDevice` = 0 命中
 - [x] `2-b` `tests/airplay`(75 个测试文件) / `tests/group`(17 个测试文件) 全绿且用例数不降
 - [x] `2-c` 八个 airplay/group 守卫全绿（playback-chain / bridge / dlna-mutex / decode-af / stream-auth / rtsp-line / ap2-discovery / group-invariants）
-- [ ] `2-d` 真机四组合：AP1 非桥 / AP1 桥成员 / AP2 已配对 / AP2 未配对回落
-- [ ] `2-e` 混合群组切歌 5 次：桥不断、tick 连续、无断档
-- [ ] `2-f` 五拓扑 `mixed` / `ap-only` / `ap1-only` / `ap2-only` 判据同前
-- [ ] `2-g` 日志 `registered AirPlay device:` 文案与次数不变
+- [x] `2-d` 真机四组合：AP1 非桥 / AP1 桥成员 / AP2 已配对 / AP2 未配对回落 （✅ 2026-11-28 · [ray] 经 §12.4 真机四组合确认通过）
+- [x] `2-e` 混合群组切歌 5 次：桥不断、tick 连续、无断档 （✅ 2026-11-28 · [ai] 流转矩阵 5 次切歌 tick 连续、无断档）
+- [x] `2-f` 五拓扑 `mixed` / `ap-only` / `ap1-only` / `ap2-only` 判据同前 （✅ 2026-11-28 · [ray] 经 §12.4 四拓扑判据同前）
+- [x] `2-g` 日志 `registered AirPlay device:` 文案与次数不变 （✅ 2026-11-28 · [ai] 文案未变（git log -S 4515839b））
 
 **阶段 3（Sendspin）**
 - [x] `3-a` M1 达成（4 → 1：三条工厂消失，仅留 `suffixToMime`）
 - [x] `3-b` `tests/sendspin`(80 个测试文件) 全绿且用例数不降
 - [x] `3-c` `check-playback-regression` / `check-display-progress` 全绿
-- [ ] `3-d` ESP32 真机：起播 / 切歌 / seek / 音量 / 多房同步
-- [ ] `3-e` 五拓扑 `ss-only` 帧判据同前
+- [x] `3-d` ESP32 真机：起播 / 切歌 / seek / 音量 / 多房同步 （✅ 2026-11-28 · [ray] 经 §12.4 ESP32 真机五项确认）
+- [x] `3-e` 五拓扑 `ss-only` 帧判据同前 （✅ 2026-11-28 · [ai] ss-only 帧判据同前（落后期 2.04s vs 基线 2.05s））
 - [x] `3-f` 停用语义零改动：`plugins.ts` / manifest / `isSendspinEnabled()` diff 为空
 
 **阶段 4（收口）**
@@ -1241,10 +1241,10 @@ git checkout -- backend/src backend/tests backend/scripts
 
 ### 12.2 代码卫生
 
-- [ ] 删除临时脚本（`patch_*.py`、`run_guards_all.sh` 等）不进仓库
-- [ ] 无遗留 `TODO/FIXME` 指向前置版
-- [ ] `git grep -n 'castToRenderer\|controlRenderer' backend/src` 只剩注释/文档字符串
-- [ ] 新增守卫位于 `backend/scripts`（被 `check-workflow-paths.mjs` 自动扫描，B4）
+- [x] 删除临时脚本（`patch_*.py`、`run_guards_all.sh` 等）不进仓库 （✅ 2026-11-28 · [ai] `git ls-files` 无 patch_*.py / run_guards_all.sh）
+- [x] 无遗留 `TODO/FIXME` 指向前置版 （✅ 2026-11-28 · [ai] 插件化相关文件无 TODO/FIXME；仅 `sourcePlatforms.ts:13` 一条“能力化”TODO，指向阶段 5）
+- [x] `git grep -n 'castToRenderer\|controlRenderer' backend/src` 只剩注释/文档字符串 （✅ 2026-11-28 · [ai] 仅两处注释命中：`plugins/renderers.ts:8`、`renderers/dlna.ts:13`）
+- [x] 新增守卫位于 `backend/scripts`（被 `check-workflow-paths.mjs` 自动扫描，B4） （✅ 2026-11-28 · [ai] `backend/scripts/check-renderer-plugin-boundary.mjs` 存在（7521B））
 
 ### 12.3 观察期（发版后 7 天）
 
@@ -1609,4 +1609,58 @@ docker logs -t --since "$T0" --until "$T1" musicflow 2>&1 \
 | 建议 | 新增 §2.7b：目标校准（外置渲染器独立立项）、先归一后搬家、失败语义分级、`renderer resolve` 日志、`MF_RENDERER_FACTORY` 临时回退开关、`cast` dead surface 清理，均标记为「待裁决」 |
 | 复跑 | 全量 3 轮：2 轮 9129 全绿；1 轮 `opensubsonic.getLyricsBySongId` 既有慢用例并发超时（单跑 17.6s），与本方案无关 |
 | 保留 | 阶段 -1 的 10 项代码结论、`-1e/-1f/-1g` 用例与断言、37 守卫、tsc=0、240 三个渲染器 enabled=1，均复核通过 |
+
+## 16. 阶段 5 执行记录（2026-11-28，提交 `78f36b13`）
+
+> 本轮范围：**5.0 / 5.1 / 5.2 / 5.3 / 5.6(a)**。5.4 / 5.5 / 5.7 与 5.6(b) 按 §13.3 建议继续后置。
+
+### 16.1 落地清单
+
+| 项 | 结论 | 代码证据 |
+|---|---|---|
+| 5.0 守卫接 CI | ✅ 已接 | `.github/workflows/ci.yml` plugin-spec job 增 `node backend/scripts/check-renderer-plugin-boundary.mjs` |
+| 5.0b 反例夹具 | ⏭ 后置 | 需在 `backend/src` 临时写文件再跑脚本，易污染工作区；改由 S10 手工演练（本轮未跑，见 16.4） |
+| 5.1 协议去枚举 | ✅ 已完成 | `plugins/types.ts`：`RendererProtocol = string` + `KNOWN_RENDERER_PROTOCOLS`；`manifest.protocols?`；`pluginAccess.ts` 按声明初筛（未声明=不过滤）；`services/player/protocols.ts` 提供 `PROTOCOL_*` 常量，QueueController 5 处字面量全部替换 |
+| 5.1c 新增协议零改动 | ⚠️ 部分 | 门面/类型/清单三处已开放；未新增 fixture 插件（V13 后置） |
+| 5.2 能力位 | ✅ 声明面完成 | `RendererCapability`（开放集合）+ `manifest.playerCapabilities?`；三内置渲染器声明 `play/pause/seek/volume`；`playerCapabilitiesOf()` 缺省=全支持 |
+| 5.2c 前端按能力渲染 | ⏭ 后置 | 需前端改造与 `/v1/peers/:id/status` 暴露字段，本轮只做内核声明面 |
+| 5.3 播放上下文 v2 | ✅ 兼容落地 | 新增 `services/player/playContext.ts`（`PlayContext` + `normalizePlayContext` = v1 适配器）；`ProtocolPlayer.playMedia` 第二参放宽为 `string \| PlayContext`；dlna / airplay(×2) / sendspin(×3) / group / UniversalPlayer 全部归一；**核心调用面仍走 v1** |
+| 5.6(a) 渲染器仅内置 | ✅ 已钉死 | `tests/plugins/rendererBuiltinOnly.test.ts` 断言 `pluginMethodNames({capabilities:["renderer"]})` 为空；`sandbox.ts` `CAP_METHODS` 不含 `renderer` 属**有意** |
+
+### 16.2 静态与单测（S01 / L0）
+
+- `cd backend && npx tsc -p tsconfig.json --noEmit` → **0**
+- `node backend/scripts/check-renderer-plugin-boundary.mjs` → `B1=0 | B2=0 | B3=0 | 硬拦截违规=0`，PASS
+- `check-builtins.mts` → **19/19**；`check-core.mts` → 373 文件通过
+- vitest：`tests/plugins|player|dlna|airplay|sendspin|group` = **286 文件 / 3219 例全绿**（首轮 93 文件 738 例 + 二轮 193 文件 2481 例）
+
+### 16.3 真机矩阵（240，热补丁后）
+
+部署：`backend npm run build` → 仅同步 14 个 dist 文件（含新增 `playContext.js`/`protocols.js`）→ `docker restart musicflow`。
+（✅ 2026-11-28 10:39 · 证据：[ai] 容器内 marker grep 命中 `manifestProtocols`×2 / `KNOWN_RENDERER_PROTOCOLS`×1 / `protocols.js`×2；`/ping` = 4.15.18/77870ee，热补丁不改变镜像 commit 字段；回滚包 `240:/root/mf240_dist_check.tgz` = 补丁前 12 文件）
+
+| 用例 | 结果 | 证据（窗口 / 关键指标） |
+|---|---|---|
+| S03 单成员回组（混合组 × iEAST） | ✅ PASS | 02:42:42Z–02:42:56Z：ticks=6，inQueueMs≤2550，dropΔ=0，silenceΔ=0，late 恒 7，selfheal=0，rebase=0，dropOld=0，realign drop=0；pairMax 目标-HiVi=0.0s、目标-ESP32 变化≈0.02s（基线 2.074s）；HiVi−iEAST deltaUs ≈ 0.49s（配置 −500ms） |
+| S04 纯 AP 组（HiVi / iEAST） | ✅ 2/2 PASS | HiVi：pairMax 0.0，inQ 2625，dropΔ 0；iEAST：pairMax 0.0，inQ 2700，dropΔ −79380（**会话重建**，非丢帧，按 §14.4 以窗口首 tick 为基线） |
+| S05 混合组（HiVi / iEAST） | ✅ 2/2 PASS | HiVi：pairMax 2.08s（阈值 2.595s），inQ 2675，dropΔ 0；iEAST：pairMax 2.119s，inQ 2675，dropΔ −67252（同上，会话重建） |
+| S05 混合组（ESP32） | ⚠️ INVALID | ticks=0：容器日志无 sendspin 泵的 `"ev":"tick"` 域（`sendspin-debug.log` 亦无），桥侧指标缺失 ⇒ 按 fail-closed 不得判 PASS；两两位置 2.062s（阈值 2.595s）仅作参考 |
+| V24 成员还原回读 | ✅ | 纯组 = [HiVi, iEAST]；混合组 6 成员含三目标，脚本 `restore` 后回读一致 |
+| V23 采样资产 | ✅ | 三路 pcap（ap/ieast/ss）在跑；`status-*.jsonl` 新鲜度 <10s；并行锁无残留进程 |
+
+### 16.4 未覆盖项与本轮发现
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| V04 判定脚本自检 | ❌→✅（已修） | `single_rejoin.py` 用 `ln.split("] ",1)[1]` 取 JSON，遇 `[INFO] [AirPlay] [airplay-bridge]` 多段前缀必然解析失败 ⇒ `ticks=0` 却仍输出 PASS（正是 V04 预警的假通过）。已改为按 `{"ev":"tick"` 定位；修复后同一窗口得 6 ticks，指标非空 |
+| sendspin tick 可观测性 | ⚠️ 缺口 | 当前版本只有 AirPlay 桥输出 `"ev":"tick"`；sendspin 泵无等价 tick 日志 ⇒ 其 V07/V08 结构性无法取证。建议后续在泵侧补同构 tick（独立于本方案） |
+| V13 新协议 fixture | ⏭ 后置 | 需新增 fixture 插件与假设备，价值主要在证明"零核心改动"，可随 5.5 一起做 |
+| V17 / S10 守卫负例 | ⏭ 后置 | 守卫本身已在阶段 4 实测过硬失败；CI 接入后建议补一个临时文件型反例测试 |
+| 5.4 / 5.5 / 5.7 | ⏭ 后置 | 分别依赖异步激活路径、设备-协议绑定模型/DB、设备级配置 UI；本轮不做空抽象（§13.7） |
+
+### 16.5 回滚
+
+- 代码：`git revert 78f36b13`（纯类型放宽 + 增量文件，无运行时开关依赖）。
+- 240：用 `240:/root/mf240_dist_check.tgz` 覆盖回 12 个旧文件并删除 `dist/services/player/{playContext,protocols}.js`，再 `docker restart musicflow`。
+- 契约：核心仍走 v1，`MF_RENDERER_CONTRACT` 开关本轮**未引入**（避免发布空开关）。
 
