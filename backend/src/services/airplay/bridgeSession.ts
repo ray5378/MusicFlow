@@ -1732,9 +1732,14 @@ export class BridgeSession {
 
   /** 最近一次 onBoundary 的原因(track/seek/rehost/stop)。Fix G 用它判换代->显式重锚。 */
   private lastBoundaryReason: string | null = null;
+  /** 最近一次边界时刻(ms)。用于识别「track 之后紧随的同代次 seek」。 */
+  private lastBoundaryAtMs = 0;
   private onBoundary(generation: number, reason: string): void {
     if (this.closed) return;
+    const prevReason = this.lastBoundaryReason;
+    const prevAtMs = this.lastBoundaryAtMs;
     this.lastBoundaryReason = reason;
+    this.lastBoundaryAtMs = Date.now();
     log.info(`[airplay-bridge] ${JSON.stringify({ ev: "gen", dev: this.deviceId, gen: generation >>> 0, prevGen: this.generation, reason })}`);
     // sticky「手动」意图必须**先**消费(下面的 keepQueue 判据要用):手动 next 在泵侧
     // 是 stop→track 两步(playFrom = stop→play),也可能被标成 rehost —— 三种都必须认,
@@ -1748,11 +1753,21 @@ export class BridgeSession {
     // 0.41–1.26s)。只有会重启推流的边界(stop / seek / rehost / 手动)才清队列。
     // 回退:MF_BRIDGE_TRACK_KEEP_QUEUE=0 ⇒ 与改造前逐字节一致(恒清 + stale 统计)。
     const localKeep = reason === "track" && !manual && bridgeTrackKeepQueueEnabled();
+    // [S15 无缝切歌 2026-11-28] 换曲后泵会紧接着发一次**同代次** seek(
+    // `bridge-start-seek reason=new-session-first-delivery`,非用户 seek)。
+    // 旧逻辑把它当「换代重启」:再清锚点 + flush,并丢掉刚排进桥队列的新曲帧
+    // (240 实测 stale 128575 帧≈2.9s → 抓包 2.4s 静音,HiVi/iEAST 同时)。
+    // track 边界已经重锚过,这次同代 seek 只是新曲的起点声明 ⇒ 吸收掉。
+    const absorbInitialSeek =
+      reason === "seek" &&
+      prevReason === "track" &&
+      (generation >>> 0) === this.generation &&
+      Date.now() - prevAtMs <= 2000;
     // D8(2026-11-01):边界处置必须**组级统一**。各成员看到的 reason 可能不同
     // (A=stop / B=track),本地判定会让一台清队列、另一台保留 → 同代次内容起点不唯一
     // (cap6 实测分裂 2.7~2.95s 且跨换歌粘住)。规则:clear 优先(任一成员要清 ⇒ 全组清)。
     const groupKey = this.opts.groupKey;
-    let keepQueue = localKeep;
+    let keepQueue = localKeep || absorbInitialSeek;
     if (this.groupTimelineSync && groupKey && this.groupBoundaries) {
       this.groupBoundaries.publish(groupKey, generation >>> 0, !localKeep);
       if (localKeep && this.groupBoundaries.isClearRequired(groupKey, generation >>> 0)) {
@@ -1793,6 +1808,17 @@ export class BridgeSession {
       return;
     }
     if (!manual) this.manualFlushDone = false;
+    if (absorbInitialSeek) {
+      // 保留刚排入的新曲帧,不再二次重锚/flush(track 边界已完成重锚)。
+      log.info(`[airplay-bridge] ${JSON.stringify({
+        ev: "track-initial-seek-absorbed",
+        dev: this.deviceId,
+        gen: generation >>> 0,
+        keptFrames: queueFrames,
+        sinceTrackMs: Date.now() - prevAtMs,
+      })}`);
+      return;
+    }
     if (reason === "track" && !manual) {
       // [P0-B 2026-11-25 对齐 MA sendspin_bridge] **换代 track 边界必须重锚**。
       // 上游 `notifyBridgeGeneration(continuity=true)` 的分支根本不会给桥发 BOUNDARY
