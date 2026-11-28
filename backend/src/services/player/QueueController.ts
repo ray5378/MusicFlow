@@ -11,7 +11,7 @@ import { PlayMode, PlayerState, PlaybackState, QueueItem, QueueSnapshot } from "
 import { UniversalPlayer } from "./UniversalPlayer.js";
 import { getPlayerController } from "./index.js";
 import { getEffectiveBaseUrl, clearCurrentMedia, getDevice, alignDeviceToPosition } from "../dlna/control.js";
-import { createRendererPlayer } from "../pluginAccess.js";
+import { resolveRendererForDevice } from "./bindings.js";
 import { PROTOCOL_AIRPLAY, PROTOCOL_DLNA, PROTOCOL_SENDSPIN } from "./protocols.js";
 import { getCachedPlayability } from "../source/online/streamFallback.js";
 import { getPreProbeScheduler } from "./preProbeScheduler.js";
@@ -472,9 +472,11 @@ export class QueueController extends EventEmitter {
   registerDlnaDevice(deviceId: string, name: string): void {
     if (this.players.has(deviceId)) return;
     const up = new UniversalPlayer(`dlna:${deviceId}`, name);
-    const proto = createRendererPlayer(PROTOCOL_DLNA, deviceId);
-    if (!proto) { log.debug("[QueueController] DLNA 设备无播放器工厂，跳过注册", { deviceId }); return; }
-    up.attachProtocol(proto);
+    // 阶段 5.5:经绑定唯一解析点取播放器。开关关闭时 = 单条 {dlna, priority:100},
+    // 与改动前 `createRendererPlayer(PROTOCOL_DLNA, ...)` 逐项等价。
+    const resolved = resolveRendererForDevice(deviceId, PROTOCOL_DLNA);
+    if (!resolved) { log.debug("[QueueController] DLNA 设备无播放器工厂，跳过注册", { deviceId }); return; }
+    up.attachProtocol(resolved.player);
     this.registerPlayer(deviceId, up, getPlayerController());
     log.info(`[QueueController] registered DLNA device: ${deviceId} (${name})`);
   }
@@ -516,9 +518,9 @@ export class QueueController extends EventEmitter {
     const up = new UniversalPlayer(`airplay:${deviceId}`, name);
     // D2：桥开关开 → 单机也走「单成员伪组」桥（PCM 唯一来源 = sendspin 组泵）；
     // `MUSICFLOW_AIRPLAY_BRIDGE=0` 时退回原直连实现（整体回滚开关）。
-    const proto = createRendererPlayer(PROTOCOL_AIRPLAY, deviceId);
-    if (!proto) { log.debug("[QueueController] AirPlay 设备无播放器工厂，跳过注册", { deviceId }); return; }
-    up.attachProtocol(proto);
+    const resolved = resolveRendererForDevice(deviceId, PROTOCOL_AIRPLAY);
+    if (!resolved) { log.debug("[QueueController] AirPlay 设备无播放器工厂，跳过注册", { deviceId }); return; }
+    up.attachProtocol(resolved.player);
     this.registerPlayer(deviceId, up, getPlayerController());
     log.info(`[QueueController] registered AirPlay device: ${deviceId} (${name})`);
   }
@@ -544,9 +546,9 @@ export class QueueController extends EventEmitter {
   registerSendspinDevice(clientId: string, name: string): void {
     if (this.players.has(clientId)) return;
     const up = new UniversalPlayer(`sendspin:${clientId}`, name);
-    const proto = createRendererPlayer(PROTOCOL_SENDSPIN, clientId);
-    if (!proto) { log.debug("[QueueController] Sendspin 客户端无播放器工厂，跳过注册", { clientId }); return; }
-    up.attachProtocol(proto);
+    const resolved = resolveRendererForDevice(clientId, PROTOCOL_SENDSPIN);
+    if (!resolved) { log.debug("[QueueController] Sendspin 客户端无播放器工厂，跳过注册", { clientId }); return; }
+    up.attachProtocol(resolved.player);
     this.registerPlayer(clientId, up, getPlayerController());
     log.info(`[QueueController] registered Sendspin client: ${clientId} (${name})`);
   }
@@ -2780,7 +2782,7 @@ export class QueueController extends EventEmitter {
     }
     for (const deviceId of online) {
       try {
-        const p = createRendererPlayer(PROTOCOL_DLNA, deviceId);
+        const p = resolveRendererForDevice(deviceId, PROTOCOL_DLNA)?.player;
         if (!p) continue;
         await p.playMedia(fullItem, baseUrl);
         // cast 后立刻 seek 在部分渲染器(实测 HiVi)会静默失效,用校准 seek:
@@ -2851,7 +2853,7 @@ export class QueueController extends EventEmitter {
             throw new Error("桥路由未激活或 bridgePrepare 失败（D7：不回落直连）");
           }
         } else {
-          const p = createRendererPlayer(PROTOCOL_AIRPLAY, deviceId);
+          const p = resolveRendererForDevice(deviceId, PROTOCOL_AIRPLAY)?.player;
           if (!p) throw new Error("AirPlay 播放器工厂未命中（设备不在插件设备表）");
           await p.playMedia(fullItem, baseUrl, startMs);
           if (playState === "PAUSED" || playState === "PAUSED_PLAYBACK") await p.pause();

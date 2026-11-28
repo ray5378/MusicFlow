@@ -42,7 +42,7 @@
 | **2** | AirPlay | ✅ 完成（真机见 §12.4） | 7 项 ✅ / 7 |
 | **3** | Sendspin | ✅ 完成（真机见 §12.4） | 6 项 ✅ / 6 |
 | **4** | 收口（守卫硬拦截 + 文档） | ✅ 完成（全量验收） | 5 项 ✅ / 5 |
-| **5** | 接口通用化（协议去枚举/能力位/v2 契约/多绑定/外置 sidecar） | ⏳ 已立项（2026-11-28，未开工） | 0 项 ✅ / 8 |
+| **5** | 接口通用化（协议去枚举/能力位/v2 契约/多绑定/外置 sidecar） | ⏳ 进行中（5.0/5.1/5.2/5.3/5.6a + 5.5a/5.5b + V13 已完成；5.4/5.7/5.5c–e 后置） | 6 项 ✅ / 8 |
 
 > 阶段 -1 的**明细台账见「阶段 -1」小节（-1a~-1o，15 条）**；§4.3 只保留 4 条宏观出口判据，便于一页看完整体节奏。
 > **验证项统一台账见 §14（V01–V24，含此前缺失项与判废规则）；任何一轮改动的验收都以此为准。**
@@ -1332,7 +1332,7 @@ git checkout -- backend/src backend/tests backend/scripts
 #### 5.1 协议去枚举化（把"协议名"从核心赶出去）
 - 现状：`RendererProtocol` 是封闭联合；`QueueController` 用字面量向门面要工厂。
 - 改法：① `type RendererProtocol = string`，保留 `KNOWN_RENDERER_PROTOCOLS` 常量数组供诊断/测试；② manifest 增 `protocols?: string[]`（缺省由插件 id 推导，三内置插件零改动）；③ 核心新增唯一解析点 `resolveDeviceProtocol(deviceId)`（设备档案 → protocol 字符串），`QueueController` 5 处字面量全部替换；④ 门面只按 manifest `protocols` 初筛。
-- 出口判据：`- [ ] 5.1a` 新增一个 `fixture` 协议插件，核心**零改动**即可被发现/解析/起播（单测）；`- [ ] 5.1b` 核心源码中不再出现 `"airplay"|"dlna"|"sendspin"` 字面量（守卫新增规则）；`- [ ] 5.1c` tsc 0、全量 vitest 绿、三协议真机连播等价。
+- 出口判据：`- [x] 5.1a` 新增一个 `fixture` 协议插件，核心**零改动**即可被发现/解析/起播（单测）（✅ 2026-11-28 11:12 · 证据：[ai] `tests/plugins/fixtures/fixtureRendererPlugin.ts` + `tests/plugins/rendererBindings.test.ts` V13 用例；fixture 协议不在 `KNOWN_RENDERER_PROTOCOLS`，仅声明 `manifest.protocols` 即完成发现→解析→起播）；`- [ ] 5.1b` 核心源码中不再出现 `"airplay"|"dlna"|"sendspin"` 字面量（守卫新增规则）；`- [ ] 5.1c` tsc 0、全量 vitest 绿、三协议真机连播等价。
 - 风险：设备档案协议值非法 → 走 §13.5 的 `UNSUPPORTED_PROTOCOL`，不得静默落回任一插件。
 
 #### 5.2 能力位（核心不再按协议写分支）
@@ -1353,7 +1353,7 @@ git checkout -- backend/src backend/tests backend/scripts
 
 #### 5.5 设备多协议绑定（一设备多出口，对齐 OutputProtocol）
 - 改法：设备档案增 `bindings?: [{protocol, priority, options?}]`，缺省由现有 `protocol` 派生单条 `{priority:100}`；核心解析顺序 = 可用性 → priority → 注册顺序；解析结果落一条 `renderer resolve` 日志。
-- 出口判据：`- [ ] 5.5a` 单协议设备行为逐项等价；`- [ ] 5.5b` 双协议 fixture 在首选不可用时回退（单测）；`- [ ] 5.5c` 真机一台设备（airplay+dlna 同机）断网回退可听。
+- 出口判据：`- [x] 5.5a` 单协议设备行为逐项等价（✅ 2026-11-28 11:12 · 证据：[ai] 开关关闭时 `resolveDeviceBindings` 恒为 `[{protocol, priority:100}]`、DB 覆盖被忽略、单次同步调用/每次新建实例，见 `tests/plugins/rendererBindings.test.ts` 3 例）；`- [x] 5.5b` 双协议 fixture 在首选不可用时回退（单测）（✅ 2026-11-28 11:12 · 证据：[ai] 回退/首选可用/priority 优先级/绑定独立 deviceId/坏 JSON 回落 5 例，`MF_RENDERER_MULTI_BINDING=1` 下 `renderer resolve ... fallback=1` 日志命中）；`- [ ] 5.5c` 真机一台设备（airplay+dlna 同机）断网回退可听（⏳ 待 240 真机；本轮未翻开关）。
 - 回滚：开关 `MF_RENDERER_MULTI_BINDING=0`（默认 0 起步，验完再翻 1）。
 
 #### 5.6 外置渲染器（需裁决：写死"仅内置"还是做 sidecar）
@@ -1385,7 +1385,7 @@ git checkout -- backend/src backend/tests backend/scripts
 - 统一错误对象：`RendererResolveError{ code, retryable, pluginId?, protocol, deviceId, requestId }`，`code ∈ {NO_BINDING, OFFLINE, PLUGIN_NOT_LOADED, UNSUPPORTED_PROTOCOL, PLUGIN_ERROR}`。
 - 分级语义：解析阶段拿到 `null` → 节流 warn + 跳过（可重试）；组播成员加入拿到 `null` → throw（不可静默）；播放中解析失败 → 统一错误码给 API（UI 区分"设备离线"与"协议未加载"）。
 - 日志（迁移期开关）：`renderer resolve protocol=... deviceId=... plugin=... binding=... ms=...`，失败附 `code`。
-- 出口判据：`- [ ] 5.5d` API 返回 machine code 且不破坏现有 message；`- [ ] 5.5e` 真机三类失败各有一条可定位日志。
+- 出口判据：`- [ ] 5.5d` API 返回 machine code 且不破坏现有 message（⏳ 后置：需改 API 返回体，属可观察行为变更，随 5.7/下一轮单独做）；`- [ ] 5.5e` 真机三类失败各有一条可定位日志（⏳ 后置：依赖 5.5d 的错误码）。
 
 ### 13.6 验收、开关与回滚
 
@@ -1432,14 +1432,14 @@ git checkout -- backend/src backend/tests backend/scripts
 | V10 | 曲末/切歌边界 `[缺]` | 回组后未跨越自然曲末 | 回组后至少一次自然曲末：`zeroGap`/`coverage` PASS；新代际 `inserted/dropped/silence=0` | 5.3 |
 | V11 | 离线/重启回组 `[缺]` | 未验证离线恢复、容器/子进程重启（gen=0）回组 | 三类会话重建首 5s 指标达标且无整队丢帧 | 5.4 |
 | V12 | 多协议混组路由 `[缺]` | 未校验回组后桥路由是否串协议 | airplay/sendspin 同组成员各自 tick 正常、无跨协议流 | 5.5 |
-| V13 | 新协议 fixture `[缺]` | 从未验证"新增协议核心零改动" | fixture 插件 + 核心 0 改动即可发现/解析/起播 | 5.1 |
+| V13 | 新协议 fixture ✅ | 从未验证"新增协议核心零改动" | fixture 插件 + 核心 0 改动即可发现/解析/起播 | 5.1（✅ 2026-11-28 · `tests/plugins/rendererBindings.test.ts`） |
 | V14 | 能力位矩阵 `[缺]` | 无能力声明，核心按协议写分支 | 「声明 vs 真机实测」逐项一致；未声明=全支持（与今天等价） | 5.2 |
 | V15 | v1 契约垫片 `[缺]` | 无历史实现回归样本 | 未改写的 v1 插件实现全部用例通过 | 5.3 |
 | V16 | 外置渲染器负例 `[缺]` | 市场"能装不能跑"，无任何断言 | 5.6(a)：安装入口显式禁用 + 守卫断言；5.6(b)：sidecar 断线/半开/重启三故障用例 | 5.6 |
 | V17 | 守卫负例 `[缺]` | 守卫脚本从未被验证"会失败" | 故意违规文件必须 red；修回后 green | 5.0 |
 | V18 | 生命周期钩子计数 `[缺]` | 无钩子，无法确认零副作用 | 未实现插件钩子调用 0 次；启用/停用/删除各触发 1 次 | 5.4 |
 | V19 | 健康/待配置 `[缺]` | 只有 `isAvailable`，解释不了"在线但不出声" | `needsSetup/setupReason` 能区分离线 / 未配置 / 未加载 | 5.4 |
-| V20 | 多协议绑定回退 `[缺]` | 未做过 | 首选不可用时回退可听；单协议设备行为等价 | 5.5 |
+| V20 | 多协议绑定回退 ⚠️ 单测通过 | 未做过 | 首选不可用时回退可听；单协议设备行为等价 | 5.5（✅ 单测 2026-11-28；⏳ 真机断网回退随 5.5c） |
 | V21 | 设备级配置 `[缺]` | 只有静态 `configSchema` | 未实现=UI 零新增字段；实现=落库即时生效、校验失败不写库 | 5.7 |
 | V22 | 部署一致性 `[已踩]` | 热补丁后未固化校验 | 容器内代码 grep 标记命中 + `/ping` 版本/commit + 镜像 digest 记录 | 全部 |
 | V23 | 采样资产前置 `[已踩]` | 曾因采样服务/脚本失效导致整段数据缺失 | 采样服务存活、数据新鲜度 <10s、三路 pcap 在跑、组成员快照落盘 | 全部 |
@@ -1654,9 +1654,9 @@ docker logs -t --since "$T0" --until "$T1" musicflow 2>&1 \
 |---|---|---|
 | V04 判定脚本自检 | ❌→✅（已修） | `single_rejoin.py` 用 `ln.split("] ",1)[1]` 取 JSON，遇 `[INFO] [AirPlay] [airplay-bridge]` 多段前缀必然解析失败 ⇒ `ticks=0` 却仍输出 PASS（正是 V04 预警的假通过）。已改为按 `{"ev":"tick"` 定位；修复后同一窗口得 6 ticks，指标非空 |
 | sendspin tick 可观测性 | ✅ 已补（提交 `21ab38ae`） | 泵侧补齐 `sendspin-pump` / `sendspin-direct` 两种 tick，见 §17；S05 ESP32 已由 INVALID 转为 PASS |
-| V13 新协议 fixture | ⏭ 后置 | 需新增 fixture 插件与假设备，价值主要在证明"零核心改动"，可随 5.5 一起做 |
+| V13 新协议 fixture | ✅ 已完成（§18） | fixture 插件 + 假设备 + 单测；证明新增协议核心零改动（原计划随 5.5 一起做） |
 | V17 / S10 守卫负例 | ⏭ 后置 | 守卫本身已在阶段 4 实测过硬失败；CI 接入后建议补一个临时文件型反例测试 |
-| 5.4 / 5.5 / 5.7 | ⏭ 后置 | 分别依赖异步激活路径、设备-协议绑定模型/DB、设备级配置 UI；本轮不做空抽象（§13.7） |
+| 5.4 / 5.7 | ⏭ 后置 | 分别依赖异步激活路径、设备级配置 UI；本轮不做空抽象（§13.7）。5.5 已完成 a/b（§18），c–e 待真机与错误模型 |
 
 ### 16.5 回滚
 
@@ -1706,3 +1706,46 @@ docker logs -t --since "$T0" --until "$T1" musicflow 2>&1 \
 - 直连 sendspin 的**设备侧 ACK 队列/缓冲深度**仍未上报（泵侧不可见）：V07 的 inQ 判据对直连成员只能跳过，用 `droppedFrames` + 位置两两差 + 设备自报 `state/available` 兜底。若后续需要严格 inQ，需要设备协议侧回传 buffer 水位（独立立项）。
 - 本轮为日志型观测，未加单测；回归由 240 真机矩阵保障（字段为只读，不参与判据）。
 
+
+## 18. 后置项执行记录：5.5 设备-协议绑定 + V13 新协议 fixture（2026-11-28）
+
+> 本轮范围：**5.5a / 5.5b（单测）+ V13（fixture 单测）+ 5.1a 补齐**。5.5c–e 仍后置（见 18.4）。
+
+### 18.1 落地清单
+
+| 项 | 结论 | 代码证据 |
+|---|---|---|
+| 5.5 绑定模型 | ✅ 新增 | `backend/src/services/player/bindings.ts`：`DeviceBinding{protocol, priority?, deviceId?, options?}`；缺省 `[{protocol, priority:100}]`；覆盖存 `settings` 键 `renderer.bindings.<deviceId>`（JSON 数组） |
+| 5.5 唯一解析点 | ✅ 新增 | `resolveRendererForDevice(deviceId, protocol)`：候选 = 绑定（priority 升序）→ 可用性（插件 `createPlayer` 非 null）→ 插件注册顺序；回退落 `renderer resolve ... fallback=1` |
+| 5.5 核心接入 | ✅ 5 处 | QueueController `registerDlnaDevice:475` / `registerAirPlayDevice:521` / `registerSendspinDevice:549` / `rejoinMembers:2785` / `rejoinMembersAirplay:2856` |
+| 5.5 开关 | ✅ 缺省关 | `MF_RENDERER_MULTI_BINDING=1` 才读覆盖/允许回退；关闭时零覆盖、零新日志、`createRendererPlayer` 调用次数与顺序不变 |
+| V13 fixture | ✅ | `backend/tests/plugins/fixtures/fixtureRendererPlugin.ts`（`protocols:["fixture"]`，假设备 `fx-device-1`） |
+| V13 用例 | ✅ | `backend/tests/plugins/rendererBindings.test.ts`：发现→解析→起播全链路；断言 `fixture` 不在 `KNOWN_RENDERER_PROTOCOLS`（证明不是白名单放行） |
+
+### 18.2 静态与单测（S01/S02 · L0–L1）
+
+- `npx tsc --noEmit` → **0**
+- 守卫：`check-renderer-plugin-boundary.mjs` → `B1=0 | B2=0 | B3=0 | 硬拦截违规=0` PASS；`check-core.mts` → 374 文件 PASS；`check-builtins.mts` → 19/19；`check-renderer-host.mjs` / `check-log-format.mjs`(20/20) / `check-workflow-paths.mjs` 全绿
+- 定向：`tests/plugins/rendererBindings.test.ts` 10 例 + `rendererFactory.test.ts` 6 例 = 16/16
+- `tests/player tests/plugins` = **88 文件 / 1079 例全绿**
+- 全量：`npx vitest run` → **701 文件 / 9143 passed / 16 skipped / 0 failed**（316s）
+
+> 首轮全量出现 1 例 `tests/airplay/bridgePhase5.qa.test.ts > 恢复段 sendAt 落后 >2s` 失败（expected 0 got 1）。该用例按真实时钟判定，单文件连跑 3/3 通过；本轮 diff 未触碰 airplay 桥，判为时序 flake。按「全套必须通过」要求，全量已复跑为 0 failed。
+
+### 18.3 V13 结论
+
+新增协议 **只需**「加插件实现 + `manifest.protocols` 声明」：核心的发现（registry 按能力）、解析（`createRendererPlayer` 按声明初筛）、起播（`UniversalPlayer` 转发 `ProtocolPlayer.playMedia`）三处均无协议名分支。fixture 用例即为回归守卫。
+
+### 18.4 未覆盖（显式缺口）
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| 5.5c 真机断网回退 | ⏳ | 需 240 打开 `MF_RENDERER_MULTI_BINDING=1` 并配置 `renderer.bindings.*`；本轮开关保持关闭（默认值即生产行为） |
+| 5.5d / 5.5e 错误码与 API | ⏳ | 改 API 返回体属可观察行为变更，随 5.7/下一轮 |
+| V12 多协议混组路由 | ⏳ | 随 5.5c 真机一起验（airplay/sendspin 同组成员各自 tick 正常、无跨协议流） |
+| 真机 L2/L3 全套 | ⏳ | 提交后热补丁 240，按 §15.2 跑 S00 + S03/S04/S05 + 5 首自然连播（今日漫游 `pl-daily-roam`）+ 流转 4 例；结果记 §19 |
+
+### 18.5 回滚
+
+- 代码：删除 `bindings.ts` + revert QueueController 5 处即可（无 DB 迁移、无 manifest/契约变更）。
+- 生产行为：开关缺省关闭，等价于改动前；无需回滚开关。
