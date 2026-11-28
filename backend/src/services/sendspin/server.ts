@@ -923,6 +923,13 @@ export class SendspinGroup {
   /** bridge-window 诊断日志的最后输出时刻(µs)。**仅日志节流用,不参与任何判据**;
    *  缺失 = 还没打过。 */
   private bridgeDiagLogAt = new Map<string, bigint>();
+  /** 泵侧 tick 观测(2026-11-28,阶段 5 观测补齐):逐设备累计
+   *  「未投达设备的帧 / 重锚次数 / 填洞静音片数」。
+   *  **纯观测**:不参与任何投递判据,也不改变投递行为;用于 240 真机矩阵 V07/V08
+   *  给直连 sendspin 设备取证(此前只有 AirPlay 桥输出 ev:"tick")。 */
+  private bridgeLostFrames = new Map<string, number>();
+  private bridgeReanchors = new Map<string, number>();
+  private bridgeSilenceChunks = new Map<string, number>();
   /** 桥内容代次:notifyBridgeGeneration 递增;ring 帧经 pushFrame 打上 ep 戳,
    *  投递时只投当前代次 —— 旧代次帧即使 ts 落在新窗口内也不可信(中途 seek/
    *  rehost 时旧 cursor 可达 now+10s,仅重置水位挡不住)。 */
@@ -1510,7 +1517,13 @@ export class SendspinGroup {
         const dirTag = sourceReady ? "stale" : "starved";
         this.server.log("warn", `bridge-cursor-jump dev=${deviceId} dir=${dirTag} lagMs=${Math.round(Number(staleLagUs) / 1000)} fromMs=${Math.round(Number(cursor - now) / 1000)} toMs=0 reanchor=${reanchor} sourceReady=${sourceReady}`);
         cursor = now;
+        // 观测(不改行为):跳过的时间线 = 本设备**未投达**的内容 ⇒ 折帧计入 droppedFrames。
+        this.bridgeLostFrames.set(
+          deviceId,
+          (this.bridgeLostFrames.get(deviceId) ?? 0) + Math.round(Number(staleLagUs) / BRIDGE_GEN_LOSS_FRAME_US),
+        );
         if (reanchor) {
+          this.bridgeReanchors.set(deviceId, (this.bridgeReanchors.get(deviceId) ?? 0) + 1);
           try {
             handle.sendBoundary("seek");
           } catch { /* 单设备重锚失败不连累组 */ }
@@ -1599,6 +1612,7 @@ export class SendspinGroup {
           if (pushed > 0) {
             cursor = fillEnd;
             this.bcCursor.set(deviceId, cursor);
+            this.bridgeSilenceChunks.set(deviceId, (this.bridgeSilenceChunks.get(deviceId) ?? 0) + pushed);
             this.bridgeDeadTicks.delete(deviceId);
             // [关键] 填洞 = 本拍确有内容推出, 必须置 candCount 让下面的死锁判据不再命中;
             // 否则 candCount 仍 0 ⇒ 填洞当拍就累 deadTicks, 下一拍(洞只剩一帧不满足填洞门)
@@ -1697,6 +1711,7 @@ export class SendspinGroup {
                 "warn",
                 `bridge-late-selfheal-light-restart dev=${deviceId} level=${level === 0 ? `shiftMs=${lateMs}>10s 门,跳过 retime` : "retime 未奏效"} (二级:桥清管线+flush 重锚,不拆 socket)`,
               );
+              this.bridgeReanchors.set(deviceId, (this.bridgeReanchors.get(deviceId) ?? 0) + 1);
               try {
                 handle.sendBoundary("seek");
               } catch { /* 单设备重锚失败不连累组 */ }
@@ -1736,6 +1751,7 @@ export class SendspinGroup {
           // [P0]按**代次**记账(值=epoch):会话级只发一次的旧语义在「同一 session
           // 内重播同一首」时会让重播跳过对齐;按代次后每个新代次重新对齐一次。
           this.bridgeStartSeekDone.set(deviceId, epoch);
+          this.bridgeReanchors.set(deviceId, (this.bridgeReanchors.get(deviceId) ?? 0) + 1);
           try {
             handle.sendBoundary("seek");
             // [2026-11-25 11:10 起播内容起点对齐] 只发 seek 不够：seek 重锚的是
@@ -1778,6 +1794,35 @@ export class SendspinGroup {
                 `oldEp=${staleSkip} ringFrames=${ring.length} group=${this.name}`,
             );
           }
+          // [阶段 5 观测补齐 2026-11-28] 泵侧 tick:与 AirPlay bridge 的 ev:"tick" 同构,
+          // 让**直连 sendspin 设备**也能被真机矩阵(V07/V08)按同一套字段取证 ——
+          // 此前这类设备完全没有 tick 域,只能判 INVALID。
+          // 只读日志、不改投递;`inQueueKnown=false` 表示该设备不经 AirPlay 桥(无积压
+          // 上报),用于把「无数据」与「积压 0」区分开,避免缺信号被误读成健康。
+          const backlogMap = (this.server as { bridgeBacklogMs?: Map<string, number> }).bridgeBacklogMs;
+          const inQueueKnown = backlogMap?.has(deviceId) ?? false;
+          this.server.log(
+            "info",
+            `sendspin-pump ${JSON.stringify({
+              ev: "tick",
+              src: "sendspin-pump",
+              dev: deviceId,
+              gen: String(epoch),
+              state: this.current ? "live" : "idle",
+              inQueueMs: inQueueKnown ? Math.round(backlogMs) : null,
+              inQueueKnown,
+              feedAheadMs: Math.round(Number(cursor - now) / 1000),
+              horizonMs: Math.round(Number(horizonFinal - now) / 1000),
+              tailMs: Math.round(Number(tailUs - now) / 1000),
+              late: (this.server as { bridgeLateTotal?: Map<string, number> }).bridgeLateTotal?.get(deviceId) ?? 0,
+              deliveredMs: Math.round(Number(deliveredUs) / 1000),
+              cand: candCount,
+              staleSkip,
+              droppedFrames: this.bridgeLostFrames.get(deviceId) ?? 0,
+              realigned: this.bridgeReanchors.get(deviceId) ?? 0,
+              silenceChunks: this.bridgeSilenceChunks.get(deviceId) ?? 0,
+            })}`,
+          );
         }
       }
     }
@@ -3329,6 +3374,8 @@ export class SendspinConnection {
   /** 队列超上限时丢弃的最旧帧数（对齐 MA late-drop，必须可观测）。 */
   droppedByQueueCap = 0;
   private audioGateLogAt = 0;
+  /** 直连成员 tick 节流时刻(ms)。**仅日志**,不参与任何判据(见 emitDirectTick)。 */
+  private directTickAt = 0;
   /** 投递闸「首次启用」日志去重（每连接只打一条，确认闸真的开了）。 */
   private audioGateLogged = false;
 
@@ -4225,6 +4272,7 @@ export class SendspinConnection {
    *  不传时视为同一值（无补偿成员）。 */
   sendAudio(tsUs: bigint, codecData: Uint8Array, baseTsUs?: bigint, durUs = BRIDGE_GEN_LOSS_FRAME_US): void {
     if (this.ws.readyState !== WebSocket.OPEN) return;
+    this.emitDirectTick();
     if (!this.audioGateOn()) {
       this._sendAudioNow(tsUs, codecData);
       return;
@@ -4258,6 +4306,43 @@ export class SendspinConnection {
     }
     this.pumpMemberQueue();
     if (this.audioQueue.length > 0) this.ensureAudioTimer();
+  }
+
+  /** 直连成员 tick(2026-11-28,阶段 5 观测补齐;2s 节流,**只读日志**)。
+   *
+   *  为什么需要:混合组里 AirPlay 设备经桥投递、泵侧 tick 已覆盖;但**直连 sendspin
+   *  成员不经 `this.bridges`**,此前完全没有 tick 域 ⇒ 真机矩阵对它只能判 INVALID。
+   *  这里在唯一的下发点(`sendAudio`)按同一 `ev:"tick"` 形状补一行。
+   *
+   *  ⚠️ 字段语义与 AirPlay 桥 tick **不完全等价**,故用 `src` 区分:
+   *   - `inQueueMs` 恒 null 且 `inQueueKnown=false`:设备侧 ACK 队列在泵侧不可见,
+   *     不能拿"已发前沿"冒充积压(否则会把 ~5s 的喂料前瞻误读成设备缓冲);
+   *   - `issuedAheadMs` = 已下发内容前沿相对墙钟的超前量(给料前瞻,真实可测);
+   *   - `droppedFrames` = `droppedByQueueCap`(投递队列超上限 late-drop,真实丢帧);
+   *   - `deviceState`/`available` = 设备在 `client/state` 里自报的状态。 */
+  private emitDirectTick(): void {
+    const now = Date.now();
+    if (now - this.directTickAt < 2000) return;
+    this.directTickAt = now;
+    const issuedAheadMs = Math.max(0, Math.round((Number(this.issuedFrontUs) - now * 1000) / 1000));
+    this.server.log(
+      "info",
+      `sendspin-direct ${JSON.stringify({
+        ev: "tick",
+        src: "sendspin-direct",
+        dev: this.clientId ?? this.id,
+        state: this.sinkHealth === "stalled" ? "stalled" : (this.clientSyncState ?? "live"),
+        inQueueMs: null,
+        inQueueKnown: false,
+        issuedAheadMs,
+        queueFrames: this.audioQueue.length,
+        queueBytes: this.audioQueueBytes,
+        droppedFrames: this.droppedByQueueCap,
+        deviceState: this.clientSyncState,
+        available: this.clientAvailable,
+        capacityBytes: this.bufferCapacityBytes,
+      })}`,
+    );
   }
 
   /** 投递闸是否启用。**只在组内有桥时启用**：
